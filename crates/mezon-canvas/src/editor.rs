@@ -2980,23 +2980,23 @@ fn open_canvas_link(url: &str, cx: &mut App) {
     }
 }
 
-const CANVAS_BLOCK_DROPDOWN_GAP: Pixels = px(0.);
+const CANVAS_FLOATING_GAP: Pixels = px(4.);
 
 struct CanvasFormatToolbar {
     bar: AnyElement,
-    dropdown: Option<AnyElement>,
+    floating: Option<AnyElement>,
 }
 
 impl CanvasFormatToolbar {
     fn new(bar: impl IntoElement) -> Self {
         Self {
             bar: bar.into_any_element(),
-            dropdown: None,
+            floating: None,
         }
     }
 
-    fn with_dropdown(mut self, dropdown: impl IntoElement) -> Self {
-        self.dropdown = Some(dropdown.into_any_element());
+    fn with_floating(mut self, floating: impl IntoElement) -> Self {
+        self.floating = Some(floating.into_any_element());
         self
     }
 }
@@ -3010,7 +3010,7 @@ impl IntoElement for CanvasFormatToolbar {
 }
 
 struct CanvasFormatToolbarLayout {
-    dropdown_id: Option<LayoutId>,
+    floating_id: Option<LayoutId>,
 }
 
 impl Element for CanvasFormatToolbar {
@@ -3033,8 +3033,8 @@ impl Element for CanvasFormatToolbar {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let bar_id = self.bar.request_layout(window, cx);
-        let dropdown_id = self.dropdown.as_mut().map(|dropdown| {
-            let menu_id = dropdown.request_layout(window, cx);
+        let floating_id = self.floating.as_mut().map(|floating| {
+            let panel_id = floating.request_layout(window, cx);
             window.request_layout(
                 Style {
                     position: Position::Absolute,
@@ -3046,28 +3046,20 @@ impl Element for CanvasFormatToolbar {
                     },
                     ..Style::default()
                 },
-                [menu_id],
+                [panel_id],
                 cx,
             )
         });
 
         let mut child_ids = smallvec::SmallVec::<[LayoutId; 2]>::new();
         child_ids.push(bar_id);
-        if let Some(dropdown_id) = dropdown_id {
-            child_ids.push(dropdown_id);
+        if let Some(floating_id) = floating_id {
+            child_ids.push(floating_id);
         }
 
-        let layout_id = window.request_layout(
-            Style {
-                position: Position::Relative,
-                display: Display::Block,
-                ..Style::default()
-            },
-            child_ids,
-            cx,
-        );
+        let layout_id = window.request_layout(Style::default(), child_ids, cx);
 
-        (layout_id, CanvasFormatToolbarLayout { dropdown_id })
+        (layout_id, CanvasFormatToolbarLayout { floating_id })
     }
 
     fn prepaint(
@@ -3081,37 +3073,54 @@ impl Element for CanvasFormatToolbar {
     ) {
         self.bar.prepaint(window, cx);
 
-        let Some(dropdown_id) = layout.dropdown_id else {
+        let Some(floating_id) = layout.floating_id else {
             return;
         };
-        let Some(dropdown) = self.dropdown.as_mut() else {
+        let Some(floating) = self.floating.as_mut() else {
             return;
         };
 
-        let menu_bounds = window.layout_bounds(dropdown_id);
-        let menu_size = menu_bounds.size;
+        let panel_bounds = window.layout_bounds(floating_id);
+        let panel_size = panel_bounds.size;
         let client_inset = window.client_inset().unwrap_or(px(0.));
-        let viewport_bottom = window.viewport_size().height - client_inset;
-        let space_below = viewport_bottom - bounds.bottom();
-        let flip_up = space_below < menu_size.height + CANVAS_BLOCK_DROPDOWN_GAP;
+        let limits = Bounds {
+            origin: Point::default(),
+            size: window.viewport_size(),
+        };
+        let space_below = limits.bottom() - client_inset - bounds.bottom();
+        let flip_up = space_below < panel_size.height + CANVAS_FLOATING_GAP;
 
         let attach = if flip_up {
-            point(bounds.left(), bounds.top() - CANVAS_BLOCK_DROPDOWN_GAP)
+            point(bounds.left(), bounds.top() - CANVAS_FLOATING_GAP)
         } else {
-            point(bounds.left(), bounds.bottom() + CANVAS_BLOCK_DROPDOWN_GAP)
+            point(bounds.left(), bounds.bottom() + CANVAS_FLOATING_GAP)
         };
         let anchor = if flip_up {
             Anchor::BottomLeft
         } else {
             Anchor::TopLeft
         };
-        let desired = Bounds::from_anchor_and_size(anchor, attach, menu_size);
+        let mut desired = Bounds::from_anchor_and_size(anchor, attach, panel_size);
+
+        if desired.right() > limits.right() - client_inset {
+            desired.origin.x -= desired.right() - (limits.right() - client_inset);
+        }
+        if desired.left() < limits.left() + client_inset {
+            desired.origin.x = limits.left() + client_inset;
+        }
+        if desired.bottom() > limits.bottom() - client_inset {
+            desired.origin.y -= desired.bottom() - (limits.bottom() - client_inset);
+        }
+        if desired.top() < limits.top() + client_inset {
+            desired.origin.y = limits.top() + client_inset;
+        }
+
         let offset = point(
-            (desired.origin.x - menu_bounds.origin.x).round(),
-            (desired.origin.y - menu_bounds.origin.y).round(),
+            (desired.origin.x - panel_bounds.origin.x).round(),
+            (desired.origin.y - panel_bounds.origin.y).round(),
         );
         window.with_element_offset(offset, |window| {
-            dropdown.prepaint(window, cx);
+            floating.prepaint(window, cx);
         });
     }
 
@@ -3126,8 +3135,8 @@ impl Element for CanvasFormatToolbar {
         cx: &mut App,
     ) {
         self.bar.paint(window, cx);
-        if let Some(dropdown) = self.dropdown.as_mut() {
-            dropdown.paint(window, cx);
+        if let Some(floating) = self.floating.as_mut() {
+            floating.paint(window, cx);
         }
     }
 }
@@ -3164,52 +3173,54 @@ fn render_bubble_menu(
     let cancel_label = mezon_i18n::t(&locale, "canvas.toolbar.cancel");
     let apply_label = mezon_i18n::t(&locale, "canvas.toolbar.apply");
 
-    let link_popover = v_flex()
-        .w(px(280.))
-        .p(px(12.))
-        .rounded(px(10.))
-        .bg(menu_bg)
-        .border_1()
-        .border_color(border)
-        .shadow_lg()
-        .gap_2()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(Input::new(&link_input).w_full().min_w(px(0.)).text_sm())
-        .child(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("canvas-link-cancel")
-                        .label(cancel_label)
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_: &ClickEvent, window, cx| {
-                                editor.update(cx, |this, cx| {
-                                    this.cancel_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("canvas-link-apply")
-                        .label(apply_label)
-                        .primary()
-                        .with_size(Size::Small)
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_: &ClickEvent, window, cx| {
-                                editor.update(cx, |this, cx| {
-                                    this.apply_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                ),
-        );
+    let link_popover = link_menu_open.then(|| {
+        v_flex()
+            .w(px(280.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .bg(menu_bg)
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .gap_2()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(Input::new(&link_input).w_full().min_w(px(0.)).text_sm())
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("canvas-link-cancel")
+                            .label(cancel_label)
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_: &ClickEvent, window, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.cancel_link_menu(window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("canvas-link-apply")
+                            .label(apply_label)
+                            .primary()
+                            .with_size(Size::Small)
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_: &ClickEvent, window, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.apply_link_menu(window, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+    });
 
     let block_dropdown_panel = block_menu_open.then(|| {
         v_flex()
@@ -3323,37 +3334,24 @@ fn render_bubble_menu(
         .child(div().w(px(1.)).h(px(24.)).mx(px(4.)).bg(border))
         .child(
             div()
-                .relative()
-                .child(
-                    div()
-                        .id("canvas-bubble-link")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .tooltip(TooltipView::text(add_link_tooltip))
-                        .when(link_menu_open, |el| el.bg(cx.theme().bg_tertiary))
-                        .text_sm()
-                        .text_color(icon_color)
-                        .child("Link")
-                        .on_mouse_down(MouseButton::Left, {
-                            let editor = editor.clone();
-                            move |_, window, cx| {
-                                cx.stop_propagation();
-                                editor.update(cx, |this, cx| {
-                                    this.open_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                )
-                .when(link_menu_open, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .top(px(40.))
-                            .left(px(-115.))
-                            .child(link_popover),
-                    )
+                .id("canvas-bubble-link")
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .tooltip(TooltipView::text(add_link_tooltip))
+                .when(link_menu_open, |el| el.bg(cx.theme().bg_tertiary))
+                .text_sm()
+                .text_color(icon_color)
+                .child("Link")
+                .on_mouse_down(MouseButton::Left, {
+                    let editor = editor.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |this, cx| {
+                            this.open_link_menu(window, cx);
+                        });
+                    }
                 }),
         )
         .when(has_link, |el| {
@@ -3385,7 +3383,9 @@ fn render_bubble_menu(
 
     let mut toolbar = CanvasFormatToolbar::new(format_bar);
     if let Some(panel) = block_dropdown_panel {
-        toolbar = toolbar.with_dropdown(panel);
+        toolbar = toolbar.with_floating(panel);
+    } else if let Some(panel) = link_popover {
+        toolbar = toolbar.with_floating(panel);
     }
     toolbar
 }
