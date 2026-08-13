@@ -1157,6 +1157,20 @@ impl MessagesStore {
         })
     }
 
+    /// A send from a detached window has no row to show where the user is
+    /// looking, so follow it back to the live tail instead of leaving the send
+    /// invisible. This must run on the ack, not on the send: the newest page
+    /// only contains the message once the server has stored it, and the ack is
+    /// also what moves the recorded tail onto the id we need to land on. A burst
+    /// of sends supersedes itself through `fetch_generation`, so the last ack
+    /// wins and the buffer converges on a tail that owns every sent row.
+    fn follow_send_to_present(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if self.active_channel_id != Some(channel_id) || !self.tail_detached(channel_id) {
+            return;
+        }
+        self.jump_to_present(cx);
+    }
+
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.
@@ -5825,21 +5839,24 @@ impl MessagesStore {
             return;
         };
         let old_len = channel.messages.len();
-        let pushed = if let Some(idx) = channel.messages.position(temp_id) {
-            let temp = channel
-                .messages
-                .get_by_id(temp_id)
-                .expect("temp row must exist at position")
-                .clone();
-            let confirmed = merge_sparse_sender(&temp, confirmed);
-            channel.messages.replace_at_and_regroup(idx, confirmed);
-            false
-        } else if !tail_detached && !channel.messages.contains_id(confirmed.id) {
-            channel.messages.push_sorted(confirmed);
-            true
-        } else {
-            false
-        };
+        let (pushed, dropped_by_detached_tail) =
+            if let Some(idx) = channel.messages.position(temp_id) {
+                let temp = channel
+                    .messages
+                    .get_by_id(temp_id)
+                    .expect("temp row must exist at position")
+                    .clone();
+                let confirmed = merge_sparse_sender(&temp, confirmed);
+                channel.messages.replace_at_and_regroup(idx, confirmed);
+                (false, false)
+            } else if tail_detached {
+                (false, true)
+            } else if !channel.messages.contains_id(confirmed.id) {
+                channel.messages.push_sorted(confirmed);
+                (true, false)
+            } else {
+                (false, false)
+            };
         self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
             return;
@@ -5851,6 +5868,9 @@ impl MessagesStore {
                 message_id: Some(confirmed_id),
             });
             cx.notify();
+        }
+        if dropped_by_detached_tail {
+            self.follow_send_to_present(channel_id, cx);
         }
     }
 
@@ -10235,6 +10255,7 @@ mod tests {
             let temp_id = MessageId::next_optimistic();
 
             store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
                 store.set_channel(
                     channel,
                     vec![
@@ -10279,6 +10300,64 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sending_from_a_jump_window_follows_the_send_back_to_the_present(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(3));
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+                assert!(store.tail_detached(channel));
+
+                let temp_id = MessageId::next_optimistic();
+                let generation = store.fetch_generation;
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(501), "re", "42", "Me", 900),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "the ack must not seal the gap by landing on the detached window"
+                );
+                assert!(
+                    !store.is_viewing_older(channel),
+                    "the ack must not leave the viewport parked on the detached window"
+                );
+                assert!(
+                    store.loading && store.fetch_generation != generation,
+                    "the ack refetches the live tail so the sent row becomes reachable"
+                );
+                assert_eq!(
+                    store.last_message_by_channel.get(&channel).copied(),
+                    Some(MessageId(501)),
+                    "the refetch has to chase the id the send just created"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn sending_at_the_channel_tail_still_shows_the_optimistic_row(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -10294,6 +10373,7 @@ mod tests {
             let temp_id = MessageId::next_optimistic();
 
             store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
                 store.set_channel(
                     channel,
                     vec![Message::new(MessageId(10), "hi", "5", "Bob", 100)],
