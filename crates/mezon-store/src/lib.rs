@@ -77,8 +77,8 @@ pub use account::*;
 pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
 pub use audio::{
-    AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
-    MicPcmFormat,
+    AudioDeviceInfo, AudioStore, DeviceSnapshot, MicCaptureFactory, MicCaptureHandle,
+    MicPcmCaptureFactory, MicPcmFormat,
 };
 pub use audit_log::{
     ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditActionOption, AuditLogEntry, AuditLogQuery,

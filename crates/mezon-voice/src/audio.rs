@@ -346,6 +346,12 @@ enum AudioCmd {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceResetKind {
+    Input,
+    Output,
+}
+
 pub struct AudioIo {
     ctrl_tx: flume::Sender<AudioCmd>,
     audio_stopped_rx: flume::Receiver<()>,
@@ -354,6 +360,7 @@ pub struct AudioIo {
     pub mic_rx: flume::Receiver<Vec<i16>>,
     pub input_format_rx: flume::Receiver<AudioFormat>,
     pub output_format_rx: flume::Receiver<AudioFormat>,
+    pub device_reset_rx: flume::Receiver<DeviceResetKind>,
     pub mixer: Arc<PlaybackMixer>,
     ns_enabled: Arc<AtomicBool>,
     ns_level: Arc<AtomicU32>,
@@ -390,6 +397,7 @@ impl AudioIo {
         let (out_fmt_tx, out_fmt_rx) = flume::bounded::<Result<AudioFormat, String>>(1);
         let (in_fmt_tx, in_fmt_rx) = flume::unbounded::<AudioFormat>();
         let (out_change_tx, out_change_rx) = flume::unbounded::<AudioFormat>();
+        let (device_reset_tx, device_reset_rx) = flume::unbounded::<DeviceResetKind>();
         let (audio_stopped_tx, audio_stopped_rx) = flume::bounded::<()>(1);
         let (apm_stopped_tx, apm_stopped_rx) = flume::bounded::<()>(1);
         let ns_enabled = Arc::new(AtomicBool::new(false));
@@ -433,6 +441,9 @@ impl AudioIo {
                 );
                 let (mut out_stream, mut out_fmt) = match prepared {
                     Ok((stream, fmt, opened_id)) => {
+                        if current_output_id.is_some() && opened_id.is_none() {
+                            let _ = device_reset_tx.send(DeviceResetKind::Output);
+                        }
                         current_output_id = opened_id;
                         (stream, fmt)
                     }
@@ -451,6 +462,7 @@ impl AudioIo {
                 let mut last_rebuild: Option<Instant> = None;
                 let mut last_in_rebuild: Option<Instant> = None;
                 let mut output_absent_streak: u32 = 0;
+                let mut input_absent_streak: u32 = 0;
                 let mut current_in_fmt: Option<AudioFormat> = None;
                 let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
                 let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
@@ -538,7 +550,10 @@ impl AudioIo {
                                     }
                                     Err(e) => {
                                         input_healthy = false;
-                                        tracing::warn!("voice mic stream build failed: {e}")
+                                        tracing::warn!("voice mic stream build failed: {e}");
+                                        if !in_rebuild_pending.swap(true, Ordering::Relaxed) {
+                                            let _ = rebuild_tx.send(AudioCmd::RebuildInput);
+                                        }
                                     }
                                 }
                             }
@@ -556,6 +571,7 @@ impl AudioIo {
                                 continue;
                             }
                             current_input_id = device_id;
+                            input_absent_streak = 0;
                             input_stall_recovery.reset(&input_heartbeat);
                             if !capture_started {
                                 continue;
@@ -659,19 +675,31 @@ impl AudioIo {
                             last_in_rebuild = Some(Instant::now());
                             request_macos_microphone_permission();
                             let new_alive = Arc::new(AtomicBool::new(true));
-                            match build_input(
+                            let rebuild = rebuild_input_stream(
                                 &host,
                                 current_input_id.as_deref(),
-                                capture_tx.clone(),
-                                out_latency_ms.clone(),
-                                input_heartbeat.clone(),
-                                InputErrorHook {
+                                input_absent_streak,
+                                &capture_tx,
+                                &out_latency_ms,
+                                &input_heartbeat,
+                                &InputErrorHook {
                                     ctrl_tx: rebuild_tx.clone(),
                                     rebuild_pending: in_rebuild_pending.clone(),
                                     stream_alive: new_alive.clone(),
                                 },
-                            ) {
-                                Ok((stream, in_fmt)) => {
+                            );
+                            in_rebuild_pending.store(false, Ordering::Relaxed);
+                            match rebuild {
+                                InputRebuild::Installed {
+                                    stream,
+                                    fmt,
+                                    active_id,
+                                } => {
+                                    if current_input_id.is_some() && active_id.is_none() {
+                                        let _ = device_reset_tx.send(DeviceResetKind::Input);
+                                    }
+                                    input_absent_streak = 0;
+                                    current_input_id = active_id;
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
                                     if let Some(old) = in_stream.take() {
@@ -683,28 +711,33 @@ impl AudioIo {
                                     in_stream = Some(stream);
                                     input_healthy = true;
                                     tracing::info!(
-                                        "voice mic stream recovered after stream error: {}Hz/{}ch",
-                                        in_fmt.sample_rate,
-                                        in_fmt.channels,
+                                        "voice mic stream recovered: {}Hz/{}ch",
+                                        fmt.sample_rate,
+                                        fmt.channels,
                                     );
                                     let changed = match current_in_fmt {
                                         Some(f) => {
-                                            f.sample_rate != in_fmt.sample_rate
-                                                || f.channels != in_fmt.channels
+                                            f.sample_rate != fmt.sample_rate
+                                                || f.channels != fmt.channels
                                         }
                                         None => true,
                                     };
-                                    current_in_fmt = Some(in_fmt);
+                                    current_in_fmt = Some(fmt);
                                     if changed {
-                                        let _ = in_fmt_tx.send(in_fmt);
+                                        let _ = in_fmt_tx.send(fmt);
                                     }
                                 }
-                                Err(e) => {
+                                InputRebuild::KeepRetrying { absent_streak } => {
+                                    input_absent_streak = absent_streak;
                                     input_healthy = false;
-                                    tracing::warn!("voice mic stream recovery failed: {e}");
+                                    if absent_streak > 0
+                                        && absent_streak < INPUT_DISCONNECT_CONFIRM
+                                        && !in_rebuild_pending.swap(true, Ordering::Relaxed)
+                                    {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildInput);
+                                    }
                                 }
                             }
-                            in_rebuild_pending.store(false, Ordering::Relaxed);
                         }
                         AudioCmd::RebuildOutput => {
                             if !rebuild_pending.load(Ordering::Relaxed) {
@@ -738,6 +771,9 @@ impl AudioIo {
                                     fmt,
                                     active_id,
                                 } => {
+                                    if current_output_id.is_some() && active_id.is_none() {
+                                        let _ = device_reset_tx.send(DeviceResetKind::Output);
+                                    }
                                     output_absent_streak = 0;
                                     current_output_id = active_id;
                                     out_alive.store(false, Ordering::Relaxed);
@@ -805,6 +841,7 @@ impl AudioIo {
             mic_rx,
             input_format_rx: in_fmt_rx,
             output_format_rx: out_change_rx,
+            device_reset_rx,
             mixer,
             ns_enabled,
             ns_level,
@@ -879,6 +916,7 @@ const MAX_AUDIO_STALL_RECOVERIES: u32 = 3;
 const INITIAL_OUTPUT_OPEN_ATTEMPTS: u32 = 3;
 const INITIAL_OUTPUT_RETRY_INTERVAL: Duration = Duration::from_millis(300);
 const OUTPUT_DISCONNECT_CONFIRM: u32 = 2;
+const INPUT_DISCONNECT_CONFIRM: u32 = 2;
 const AUDIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REVERSE_DRAIN_PER_CAPTURE: usize = 8;
 
@@ -1218,6 +1256,85 @@ fn build_input(
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let device = select_input(host, id)?;
     open_input(&device, capture_tx, out_latency_ms, heartbeat, err_hook)
+}
+
+enum InputRebuild {
+    Installed {
+        stream: cpal::Stream,
+        fmt: AudioFormat,
+        active_id: Option<String>,
+    },
+    KeepRetrying {
+        absent_streak: u32,
+    },
+}
+
+fn input_device_absent(host: &cpal::Host, id: &str) -> bool {
+    match host.input_devices() {
+        Ok(mut devices) => {
+            !devices.any(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+        }
+        Err(_) => false,
+    }
+}
+
+fn rebuild_input_stream(
+    host: &cpal::Host,
+    desired_id: Option<&str>,
+    absent_streak: u32,
+    capture_tx: &flume::Sender<CaptureChunk>,
+    out_latency_ms: &Arc<AtomicU32>,
+    heartbeat: &CallbackHeartbeat,
+    err_hook: &InputErrorHook,
+) -> InputRebuild {
+    match build_input(
+        host,
+        desired_id,
+        capture_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            return InputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: desired_id.map(str::to_string),
+            };
+        }
+        Err(e) => tracing::warn!("voice mic recovery open failed: {e}"),
+    }
+    let Some(id) = desired_id else {
+        return InputRebuild::KeepRetrying { absent_streak: 0 };
+    };
+    if !input_device_absent(host, id) {
+        return InputRebuild::KeepRetrying { absent_streak: 0 };
+    }
+    let absent_streak = absent_streak + 1;
+    if absent_streak < INPUT_DISCONNECT_CONFIRM {
+        return InputRebuild::KeepRetrying { absent_streak };
+    }
+    match build_input(
+        host,
+        None,
+        capture_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            tracing::warn!("preferred voice mic device disconnected; switched to system default");
+            InputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: None,
+            }
+        }
+        Err(e) => {
+            tracing::warn!("voice mic fallback to system default failed: {e}");
+            InputRebuild::KeepRetrying { absent_streak }
+        }
+    }
 }
 
 fn open_input(
