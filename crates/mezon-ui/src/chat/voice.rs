@@ -3344,6 +3344,10 @@ fn device_list_panel(
     let voice = voice.clone();
     let hover_bg = theme.bg_hover;
     let text_color = theme.text_primary;
+    let active_present = entries
+        .iter()
+        .any(|(id, _)| id.as_deref() == active_id.as_deref());
+    let effective_active = if active_present { active_id } else { None };
     div()
         .id(SharedString::from(format!(
             "voice-device-list-{}",
@@ -3362,7 +3366,7 @@ fn device_list_panel(
         .border_color(theme.border)
         .shadow_lg()
         .children(entries.into_iter().map(move |(id, name)| {
-            let selected = id.as_deref() == active_id.as_deref();
+            let selected = id.as_deref() == effective_active.as_deref();
             let slug = id.as_deref().unwrap_or("default").to_string();
             let radio = device_radio(theme, selected);
             let voice = voice.clone();
