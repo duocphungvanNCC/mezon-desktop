@@ -1846,11 +1846,25 @@ impl Render for ChatLayout {
             .relative()
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.surfaces.primary.ramp())
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div()
+                                    .w(px(72.0))
+                                    .h_full()
+                                    .bg(theme.surface_for(theme.bg_tertiary)),
+                            )
+                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                    )
                     .child(
                         div()
                             .flex()
