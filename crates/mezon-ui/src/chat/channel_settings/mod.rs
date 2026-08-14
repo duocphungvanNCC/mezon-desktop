@@ -11,7 +11,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
+    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, can_delete_channel,
 };
 
 use crate::app::shell::Shell;
@@ -436,7 +436,8 @@ impl ChannelSettingScreen {
         } else {
             mezon_i18n::t(locale, "channelSetting.fields.channelDelete.delete")
         };
-        let can_delete_channel = !ctx.is_thread && !ctx.is_welcome_channel;
+        let can_delete_channel =
+            !ctx.is_thread && can_delete_channel(self.clan_id, self.channel_id, cx);
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         let delete_locale = locale.to_string();

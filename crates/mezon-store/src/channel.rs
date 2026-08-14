@@ -3518,9 +3518,11 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let child_ids = self.child_thread_ids(clan_id, parent_channel_id);
-        crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
-            store.remove_threads_of_parent(&parent_channel_id.to_string(), cx);
-        });
+        if let Some(threads) = crate::threads::ThreadsStore::try_global(cx) {
+            threads.update(cx, |store, cx| {
+                store.remove_threads_of_parent(&parent_channel_id.to_string(), cx);
+            });
+        }
         if child_ids.is_empty() {
             return;
         }
@@ -3553,8 +3555,9 @@ impl ChannelList {
         }
         if removed_any {
             self.invalidate_channel_index(clan_id);
-            cx.notify();
         }
+        self.sync_clan_after_read(clan_id, 0, cx);
+        cx.notify();
     }
 
     pub fn apply_self_removed_from_channel(

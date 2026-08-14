@@ -447,6 +447,7 @@ impl ThreadsStore {
             changed |= results.len() != results_before;
         }
         if self.list_channel_id.as_deref() == Some(parent_id) {
+            self.list_channel_id = None;
             self.loaded_channel = None;
             self.search_results = None;
             self.search_query.clear();
@@ -1720,6 +1721,8 @@ mod tests {
                 assert_eq!(store.threads.len(), 2);
                 assert!(!store.threads.iter().any(|t| t.channel_id == "9"));
 
+                store.list_channel_id = Some("1".into());
+                store.loaded_channel = Some("1".into());
                 store.on_realtime_event(
                     &RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
                         clan_id: 1,
@@ -1731,6 +1734,8 @@ mod tests {
                 );
                 assert_eq!(store.threads.len(), 1);
                 assert_eq!(store.threads[0].channel_id, "20");
+                assert!(store.list_channel_id.is_none());
+                assert!(store.loaded_channel.is_none());
             });
         });
     }

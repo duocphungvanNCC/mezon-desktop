@@ -73,14 +73,10 @@ pub fn navigate_after_channel_removed(cx: &mut App, clan_id: ClanId, removed_id:
         return;
     }
 
-    ChannelList::global(cx).update(cx, |list, cx| {
-        list.clear_compose_draft(removed_id, cx);
-    });
-
     let target = fallback_channel_after_delete(cx, clan_id, removed_id);
     match target {
         Some(channel_id) => open_clan_channel(cx, clan_id, channel_id),
-        None => router::navigate(cx, Route::Chat),
+        None => router::replace(cx, Route::Chat),
     }
 }
 
@@ -100,19 +96,15 @@ fn fallback_channel_after_delete(
     let remembered = channels
         .remembered_channel(clan_id)
         .filter(|id| *id != removed_id && channels.channel_in_clan(clan_id, *id));
-    pick_fallback_channel_after_delete(removed_id, welcome, default_text, remembered)
+    pick_fallback_channel_after_delete(welcome, default_text, remembered)
 }
 
 fn pick_fallback_channel_after_delete(
-    removed_id: ChannelId,
     welcome: Option<ChannelId>,
     default_text: Option<ChannelId>,
     remembered: Option<ChannelId>,
 ) -> Option<ChannelId> {
-    welcome
-        .filter(|id| *id != removed_id)
-        .or(default_text.filter(|id| *id != removed_id))
-        .or(remembered.filter(|id| *id != removed_id))
+    welcome.or(default_text).or(remembered)
 }
 
 fn open_clan_channel(cx: &mut App, clan_id: ClanId, channel_id: ChannelId) {
@@ -144,7 +136,6 @@ mod tests {
     fn fallback_prefers_welcome_then_default_then_remembered() {
         assert_eq!(
             pick_fallback_channel_after_delete(
-                ChannelId(1),
                 Some(ChannelId(10)),
                 Some(ChannelId(2)),
                 Some(ChannelId(3)),
@@ -152,26 +143,13 @@ mod tests {
             Some(ChannelId(10))
         );
         assert_eq!(
-            pick_fallback_channel_after_delete(
-                ChannelId(1),
-                Some(ChannelId(1)),
-                Some(ChannelId(2)),
-                Some(ChannelId(3)),
-            ),
+            pick_fallback_channel_after_delete(None, Some(ChannelId(2)), Some(ChannelId(3)),),
             Some(ChannelId(2))
         );
         assert_eq!(
-            pick_fallback_channel_after_delete(
-                ChannelId(1),
-                None,
-                Some(ChannelId(1)),
-                Some(ChannelId(3)),
-            ),
+            pick_fallback_channel_after_delete(None, None, Some(ChannelId(3)),),
             Some(ChannelId(3))
         );
-        assert_eq!(
-            pick_fallback_channel_after_delete(ChannelId(1), None, None, Some(ChannelId(1)),),
-            None
-        );
+        assert_eq!(pick_fallback_channel_after_delete(None, None, None), None);
     }
 }

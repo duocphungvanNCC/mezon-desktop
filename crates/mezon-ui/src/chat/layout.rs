@@ -1218,53 +1218,8 @@ impl ChatLayout {
             Route::Channel {
                 clan_id,
                 channel_id,
-            } => {
-                enum DeletedRedirect {
-                    Thread { parent: ChannelId },
-                    Channel { id: ChannelId },
-                }
-                let redirect = {
-                    let list = self.channel_list.read(cx);
-                    if !list.is_clan_cache_loaded(clan_id) {
-                        return;
-                    }
-                    if list.channel_in_clan(clan_id, channel_id) {
-                        return;
-                    }
-                    if list.is_resolving_channel_detail(channel_id) {
-                        return;
-                    }
-                    if !list.is_locally_deleted(channel_id) {
-                        return;
-                    }
-                    match list.deleted_channel_parent(channel_id) {
-                        Some(parent)
-                            if parent != channel_id && list.channel_in_clan(clan_id, parent) =>
-                        {
-                            Some(DeletedRedirect::Thread { parent })
-                        }
-                        Some(parent) if parent != channel_id && list.is_locally_deleted(parent) => {
-                            Some(DeletedRedirect::Channel { id: parent })
-                        }
-                        _ => Some(DeletedRedirect::Channel { id: channel_id }),
-                    }
-                };
-                match redirect {
-                    Some(DeletedRedirect::Thread { parent }) => {
-                        crate::channel_navigation::navigate_after_thread_removed(
-                            cx, clan_id, channel_id, parent,
-                        );
-                    }
-                    Some(DeletedRedirect::Channel { id }) => {
-                        crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, id);
-                    }
-                    None => return,
-                }
-                self.focused_channel_id = None;
-                self.dismiss_threads_popover(cx);
-                self.dismiss_topic_panel(cx);
             }
-            Route::ChannelSettings {
+            | Route::ChannelSettings {
                 clan_id,
                 channel_id,
                 ..
@@ -1296,24 +1251,23 @@ impl ChatLayout {
                         Some(parent)
                             if parent != channel_id && list.channel_in_clan(clan_id, parent) =>
                         {
-                            Some(DeletedRedirect::Thread { parent })
+                            DeletedRedirect::Thread { parent }
                         }
                         Some(parent) if parent != channel_id && list.is_locally_deleted(parent) => {
-                            Some(DeletedRedirect::Channel { id: parent })
+                            DeletedRedirect::Channel { id: parent }
                         }
-                        _ => Some(DeletedRedirect::Channel { id: channel_id }),
+                        _ => DeletedRedirect::Channel { id: channel_id },
                     }
                 };
                 match redirect {
-                    Some(DeletedRedirect::Thread { parent }) => {
+                    DeletedRedirect::Thread { parent } => {
                         crate::channel_navigation::navigate_after_thread_removed(
                             cx, clan_id, channel_id, parent,
                         );
                     }
-                    Some(DeletedRedirect::Channel { id }) => {
+                    DeletedRedirect::Channel { id } => {
                         crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, id);
                     }
-                    None => return,
                 }
                 self.focused_channel_id = None;
                 self.dismiss_threads_popover(cx);

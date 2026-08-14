@@ -101,6 +101,9 @@ impl Render for ConfirmDeleteChannelModal {
                 }
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
+            .on_action(cx.listener(|this, _: &::menu::Confirm, _window, cx| {
+                this.delete(cx);
+            }))
             .w(px(440.))
             .overflow_hidden()
             .rounded_lg()
