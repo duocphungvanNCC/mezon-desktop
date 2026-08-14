@@ -8,7 +8,7 @@ use gpui::{
     div, img, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, LoadDirection, Settings,
+    ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
     filename_matches_query,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -35,8 +35,9 @@ const LIST_PAD_X: f32 = 16.;
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct FileRowVm {
+    id: i64,
     url: SharedString,
     filename: SharedString,
     shared_by: SharedString,
@@ -65,6 +66,7 @@ impl FileRowVm {
         );
         let filetype = doc.filetype.to_ascii_lowercase();
         Self {
+            id: doc.id,
             url: doc.url.clone().into(),
             filename: doc.filename.clone().into(),
             shared_by: shared_by.into(),
@@ -181,14 +183,22 @@ impl FilesPopoverPanel {
                     return;
                 };
                 this.update(cx, |this, cx| {
+                    let store = FilesStore::global(cx);
+                    let can_page = {
+                        let store = store.read(cx);
+                        store.has_more_before(channel) && !store.is_loading(channel)
+                    };
+                    if !can_page {
+                        return;
+                    }
                     if !user_scrolled {
                         if this.viewport_autofill_remaining == 0 {
                             return;
                         }
                         this.viewport_autofill_remaining -= 1;
                     }
-                    FilesStore::global(cx).update(cx, |store, cx| {
-                        store.fetch_page(clan, channel, LoadDirection::Before, cx);
+                    store.update(cx, |store, cx| {
+                        store.fetch_page(clan, channel, cx);
                     });
                 });
             });
@@ -546,7 +556,8 @@ fn render_body(
                 .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
         } else if fetch_error && !has_documents {
-            render_error_body(&locale, &theme, clan_id, channel_id).into_any_element()
+            render_error_body(&locale, &theme, clan_id, channel_id, panel.clone())
+                .into_any_element()
         } else {
             render_empty_body(&locale, &theme).into_any_element()
         }
@@ -554,7 +565,7 @@ fn render_body(
         let rows_for_list = rows.clone();
         let theme_for_list = theme.clone();
         let locale_for_list = locale.clone();
-        let panel_for_list = panel;
+        let panel_for_list = panel.clone();
         let playing_for_list = playing_audio_url;
         div()
             .size_full()
@@ -566,7 +577,13 @@ fn render_body(
                     div()
                         .px(px(LIST_PAD_X))
                         .pt(px(8.))
-                        .child(render_retry_banner(&locale, &theme, clan_id, channel_id)),
+                        .child(render_retry_banner(
+                            &locale,
+                            &theme,
+                            clan_id,
+                            channel_id,
+                            panel.clone(),
+                        )),
                 )
             })
             .child(
@@ -669,11 +686,26 @@ fn render_empty_body(locale: &str, theme: &Theme) -> impl IntoElement {
         )
 }
 
+fn request_files_refresh(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
+    cx: &mut App,
+) {
+    let _ = panel.update(cx, |this, _| {
+        this.viewport_autofill_remaining = MAX_VIEWPORT_AUTOFILL_PAGES;
+    });
+    FilesStore::global(cx).update(cx, |store, cx| {
+        store.refresh(clan_id, channel_id, cx);
+    });
+}
+
 fn render_error_body(
     locale: &str,
     theme: &Theme,
     clan_id: ClanId,
     channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     v_flex()
@@ -694,9 +726,7 @@ fn render_error_body(
                 .ghost()
                 .with_size(Size::Small)
                 .on_click(move |_: &ClickEvent, _window, cx| {
-                    FilesStore::global(cx).update(cx, |store, cx| {
-                        store.refresh(clan_id, channel_id, cx);
-                    });
+                    request_files_refresh(clan_id, channel_id, panel.clone(), cx);
                 }),
         )
 }
@@ -706,6 +736,7 @@ fn render_retry_banner(
     theme: &Theme,
     clan_id: ClanId,
     channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     h_flex()
@@ -729,9 +760,7 @@ fn render_retry_banner(
                 .ghost()
                 .with_size(Size::XSmall)
                 .on_click(move |_: &ClickEvent, _window, cx| {
-                    FilesStore::global(cx).update(cx, |store, cx| {
-                        store.refresh(clan_id, channel_id, cx);
-                    });
+                    request_files_refresh(clan_id, channel_id, panel.clone(), cx);
                 }),
         )
 }
@@ -964,7 +993,7 @@ fn file_audio_thumb(
 fn file_rows_common_prefix(old: &[FileRowVm], new: &[FileRowVm]) -> usize {
     old.iter()
         .zip(new.iter())
-        .take_while(|(a, b)| a == b)
+        .take_while(|(a, b)| a.id == b.id)
         .count()
 }
 

@@ -6,9 +6,7 @@ use mezon_client::AppApi;
 use mezon_client::transport::ApiChannelAttachment;
 
 use crate::KeyedCache;
-use crate::gallery::{
-    LoadDirection, initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
-};
+use crate::gallery::{initial_page_has_more, next_page_has_more, resolve_attachment_uploader};
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 
 pub const FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
@@ -176,7 +174,7 @@ impl FilesStore {
             None => true,
         };
         if needs_fetch {
-            self.fetch(clan_id, channel_id, LoadDirection::Before, true, cx);
+            self.fetch(clan_id, channel_id, true, cx);
         } else {
             self.by_channel.touch(&channel_id);
         }
@@ -190,29 +188,17 @@ impl FilesStore {
         {
             return;
         }
-        self.fetch(clan_id, channel_id, LoadDirection::Before, true, cx);
+        self.fetch(clan_id, channel_id, true, cx);
     }
 
-    pub fn fetch_page(
-        &mut self,
-        clan_id: ClanId,
-        channel_id: ChannelId,
-        direction: LoadDirection,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn fetch_page(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
         let Some(channel) = self.by_channel.get(&channel_id) else {
             return;
         };
-        if channel.is_loading {
+        if channel.is_loading || !channel.has_more_before {
             return;
         }
-        if matches!(direction, LoadDirection::Before) && !channel.has_more_before {
-            return;
-        }
-        if matches!(direction, LoadDirection::After) {
-            return;
-        }
-        self.fetch(clan_id, channel_id, direction, false, cx);
+        self.fetch(clan_id, channel_id, false, cx);
     }
 
     pub fn clear_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -260,26 +246,31 @@ impl FilesStore {
         &mut self,
         clan_id: ClanId,
         channel_id: ChannelId,
-        _direction: LoadDirection,
         reset: bool,
         cx: &mut Context<Self>,
     ) {
         let mut before = 0u32;
         if !reset {
-            let channel = self.by_channel.get(&channel_id);
-            if let Some(oldest) = channel.and_then(|c| c.documents.last()) {
-                before = oldest.create_time_seconds;
-            }
+            let Some(oldest) = self
+                .by_channel
+                .get(&channel_id)
+                .and_then(|c| c.documents.last())
+            else {
+                return;
+            };
+            let Some(cursor) = oldest.create_time_seconds.checked_add(1) else {
+                let entry = self.ensure_channel(channel_id);
+                entry.has_more_before = false;
+                cx.emit(FilesEvent::Changed(channel_id));
+                cx.notify();
+                return;
+            };
+            before = cursor;
         }
 
         let entry = self.ensure_channel(channel_id);
         entry.is_loading = true;
         entry.fetch_error = false;
-        if reset {
-            entry.documents.clear();
-            entry.ids.clear();
-            entry.has_more_before = true;
-        }
         cx.emit(FilesEvent::Changed(channel_id));
         cx.notify();
 
@@ -371,13 +362,44 @@ impl FilesStore {
     }
 }
 
+fn document_desc_cmp(a: &ChannelDocument, b: &ChannelDocument) -> std::cmp::Ordering {
+    a.create_time_seconds
+        .cmp(&b.create_time_seconds)
+        .reverse()
+        .then_with(|| a.id.cmp(&b.id).reverse())
+}
+
 fn sort_desc_in_place(items: &mut [ChannelDocument]) {
-    items.sort_by(|a, b| {
-        a.create_time_seconds
-            .cmp(&b.create_time_seconds)
-            .reverse()
-            .then_with(|| a.id.cmp(&b.id).reverse())
-    });
+    items.sort_by(document_desc_cmp);
+}
+
+fn merge_two_desc_sorted(
+    left: Vec<ChannelDocument>,
+    right: Vec<ChannelDocument>,
+) -> Vec<ChannelDocument> {
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(l), Some(r)) => {
+                if document_desc_cmp(l, r) == std::cmp::Ordering::Greater {
+                    merged.push(right.next().unwrap());
+                } else {
+                    merged.push(left.next().unwrap());
+                }
+            }
+            (Some(_), None) => {
+                merged.extend(left);
+                break;
+            }
+            (None, _) => {
+                merged.extend(right);
+                break;
+            }
+        }
+    }
+    merged
 }
 
 fn merge_documents(
@@ -390,16 +412,25 @@ fn merge_documents(
         existing.clear();
         ids.clear();
     }
+    let mut new_items = Vec::new();
     let mut added = 0usize;
     for doc in incoming {
         if ids.insert(doc.id) {
-            existing.push(doc);
+            new_items.push(doc);
             added += 1;
         }
     }
-    if added > 0 {
-        sort_desc_in_place(existing);
+    if reset {
+        sort_desc_in_place(&mut new_items);
+        *existing = new_items;
+        return added;
     }
+    if added == 0 {
+        return 0;
+    }
+    sort_desc_in_place(&mut new_items);
+    let taken = std::mem::take(existing);
+    *existing = merge_two_desc_sorted(taken, new_items);
     added
 }
 
@@ -568,6 +599,18 @@ mod tests {
         assert_eq!(added, 1);
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].id, 1);
+    }
+
+    #[test]
+    fn merge_documents_keeps_desc_order_without_full_resort_of_head() {
+        let mut existing = vec![doc(3, 30), doc(2, 20)];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|d| d.id).collect();
+        let added = merge_documents(&mut existing, &mut ids, vec![doc(1, 10), doc(0, 5)], false);
+        assert_eq!(added, 2);
+        assert_eq!(
+            existing.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![3, 2, 1, 0]
+        );
     }
 
     #[test]
