@@ -6645,6 +6645,12 @@ fn has_more_bottom_for(last_message_id: Option<MessageId>, messages: &MessageLis
 /// (`FIRST_MESSAGE`, which we map to `MessageCode::Indicator`); once it is the
 /// oldest loaded row there is nothing older to fetch. An empty buffer has
 /// nothing more to load.
+fn has_more_from_oldest(messages: &[Message]) -> bool {
+    messages
+        .first()
+        .is_some_and(|m| m.code != MessageCode::Indicator)
+}
+
 fn is_older_message_id(candidate: Option<MessageId>, reference: Option<MessageId>) -> bool {
     match (candidate, reference) {
         (Some(candidate), Some(reference)) => candidate < reference,
@@ -6670,12 +6676,6 @@ fn topic_reached_top(
     let scanned_to_window_edge =
         message_id_sequence_gap(store_oldest, batch_oldest) >= TOPIC_FULL_PAGE_LEN as i64;
     batch_len < TOPIC_FULL_PAGE_LEN && !scanned_to_window_edge
-}
-
-fn has_more_from_oldest(messages: &[Message]) -> bool {
-    messages
-        .first()
-        .is_some_and(|m| m.code != MessageCode::Indicator)
 }
 
 pub(crate) fn prepare_messages(
