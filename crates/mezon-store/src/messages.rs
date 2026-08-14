@@ -68,6 +68,7 @@ use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
+const MAX_PENDING_BELOW: usize = 500;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 const TYPING_THROTTLE: Duration = Duration::from_millis(1000);
@@ -107,6 +108,9 @@ pub struct TopicAppend {
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
+    /// A live message landed below the loaded window while the reader was away
+    /// from the tail. No row exists for it, but the scroll-down button counts it.
+    UnreadBelowChanged,
     /// A send failed with no row to mark (the channel's first page had not landed,
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
@@ -557,6 +561,10 @@ pub struct MessagesStore {
     last_read_message_by_channel: HashMap<ChannelId, MessageId>,
     /// User scrolled away from the bottom (React `isViewingOlderMessagesByChannelId`).
     viewing_older_by_channel: HashMap<ChannelId, bool>,
+    /// Live messages for the open channel that arrived while its tail was not
+    /// visible, so they never entered the buffer. They still count as unread
+    /// under the scroll-down button until the reader gets back to the bottom.
+    pending_below_by_channel: HashMap<ChannelId, Vec<MessageId>>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
     /// Topic bucket currently shown in the discussion side panel, if any. Lets
@@ -940,6 +948,7 @@ impl MessagesStore {
         self.last_message_by_channel.clear();
         self.last_read_message_by_channel.clear();
         self.viewing_older_by_channel.clear();
+        self.pending_below_by_channel.clear();
         self.active_channel_id = None;
         self.active_clan_id = None;
         self.active_topic_id = None;
@@ -1001,6 +1010,7 @@ impl MessagesStore {
             last_message_by_channel: HashMap::new(),
             last_read_message_by_channel: HashMap::new(),
             viewing_older_by_channel: HashMap::new(),
+            pending_below_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
             active_topic_id: None,
@@ -1251,6 +1261,49 @@ impl MessagesStore {
         }
     }
 
+    fn note_pending_below(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        own: bool,
+    ) -> bool {
+        if own || message_id.is_optimistic() || self.active_channel_id != Some(storage_id) {
+            return false;
+        }
+        let pending = self.pending_below_by_channel.entry(storage_id).or_default();
+        if pending.contains(&message_id) {
+            return false;
+        }
+        if pending.len() >= MAX_PENDING_BELOW {
+            pending.remove(0);
+        }
+        pending.push(message_id);
+        true
+    }
+
+    /// Unread messages that sit below the loaded buffer: they arrived while the
+    /// reader was away from the tail, so the scroll-down button has to count
+    /// them even though no row exists for them yet.
+    pub fn pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
+        let Some(channel_id) = self.active_channel_id else {
+            return 0;
+        };
+        let Some(pending) = self.pending_below_by_channel.get(&channel_id) else {
+            return 0;
+        };
+        let Some(channel) = self.cache.get(&channel_id) else {
+            return pending.len() as u32;
+        };
+        pending
+            .iter()
+            .filter(|id| {
+                let counted_by_the_viewport = counted_from.is_some_and(|seen| **id > seen)
+                    && channel.messages.contains_id(**id);
+                !counted_by_the_viewport
+            })
+            .count() as u32
+    }
+
     fn is_viewing_older(&self, storage_id: ChannelId) -> bool {
         self.viewing_older_by_channel
             .get(&storage_id)
@@ -1302,6 +1355,7 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        self.pending_below_by_channel.remove(&channel_id);
         if !should_write_last_seen(
             self.known_last_seen_id(channel_id, cx),
             self.last_message_by_channel.get(&channel_id).copied(),
@@ -4905,6 +4959,7 @@ impl MessagesStore {
         self.is_dm = is_dm;
         self.mode = mode;
         self.viewing_older_by_channel.insert(channel_id, false);
+        self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
         if self.reply_target.take().is_some() {
@@ -5116,7 +5171,11 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
+                let own = viewer_id.is_some_and(|uid| uid.get() == m.sender_id);
                 if self.is_viewing_older(storage_id) {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -5127,6 +5186,9 @@ impl MessagesStore {
                     )
                 });
                 if !tail_loaded {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -10740,6 +10802,78 @@ mod tests {
                 assert!(
                     store.tail_detached(channel),
                     "the messages between the jump window and the reply stay loadable"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_live_message_below_the_viewport_counts_toward_the_scroll_down_badge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+
+                store.handle_event(
+                    &RealtimeEvent::ChannelMessage(mezon_proto::api::ChannelMessage {
+                        clan_id: 3,
+                        channel_id: 7,
+                        message_id: 501,
+                        sender_id: 42,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "a live message must not be sewn onto a window detached from the tail"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "but it is unread, so the scroll-down button has to count it"
+                );
+
+                store.note_pending_below(channel, MessageId(502), true);
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "the reader's own message is not unread"
+                );
+
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(501), "hi", "42", "Bob", 900)],
+                );
+                assert_eq!(
+                    store.pending_below_count(Some(MessageId(500))),
+                    0,
+                    "once the row is loaded and the viewport counts it, it is not counted twice"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "while the viewport counts nothing the badge keeps carrying it"
                 );
             });
         });

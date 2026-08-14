@@ -1689,6 +1689,9 @@ impl ChannelMessages {
                         });
                     }));
                 }
+                MessagesEvent::UnreadBelowChanged => {
+                    this.refresh_derived_state(cx);
+                }
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
@@ -3068,7 +3071,8 @@ impl ChannelMessages {
                 .iter()
                 .rev()
                 .map(|message| message.id),
-        );
+        )
+        .saturating_add(store.read(cx).pending_below_count(self.last_seen_at_bottom));
         if welcome == self.welcome
             && onboarding == self.onboarding
             && unread == self.cached_unread_boundary
@@ -3160,11 +3164,12 @@ impl ChannelMessages {
             });
         }
         if matches!(decision, ResetScroll::ToBottom) {
-            if let Some(last) = store
-                .read(cx)
-                .viewport_messages()
-                .last()
-                .filter(|m| !m.id.is_optimistic())
+            if !store.read(cx).has_more_bottom()
+                && let Some(last) = store
+                    .read(cx)
+                    .viewport_messages()
+                    .last()
+                    .filter(|m| !m.id.is_optimistic())
             {
                 self.last_seen_at_bottom = Some(last.id);
             }
@@ -3538,11 +3543,12 @@ impl ChannelMessages {
                 store.set_viewing_older(channel_id, false);
             });
         }
-        if let Some(last) = store_entity
-            .read(cx)
-            .viewport_messages()
-            .last()
-            .filter(|m| !m.id.is_optimistic())
+        if !store_entity.read(cx).has_more_bottom()
+            && let Some(last) = store_entity
+                .read(cx)
+                .viewport_messages()
+                .last()
+                .filter(|m| !m.id.is_optimistic())
         {
             self.last_seen_at_bottom = Some(last.id);
         }
