@@ -127,9 +127,8 @@ pub use emoji::{
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
 pub use files::{
-    ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
-    FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
-    short_file_type_label_for,
+    ChannelDocument, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_QUERY, FilesEvent, FilesStore,
+    filename_matches_query, is_document, short_file_type_label, short_file_type_label_for,
 };
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
