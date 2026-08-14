@@ -8,7 +8,7 @@ use gpui::{
     div, img, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
+    ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, LoadDirection, Settings,
     filename_matches_query,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -26,6 +26,8 @@ const POPOVER_WIDTH: f32 = 540.;
 const HEADER_HEIGHT: f32 = 48.;
 const MIN_POPOVER_HEIGHT: f32 = 400.;
 const LIST_OVERDRAW: f32 = 200.;
+const LOAD_MORE_THRESHOLD: usize = 3;
+const MAX_VIEWPORT_AUTOFILL_PAGES: u8 = 3;
 const MAX_VH: f32 = 0.8;
 const SEARCH_WIDTH: f32 = 224.;
 const SEARCH_DEBOUNCE_MS: u64 = 200;
@@ -33,7 +35,7 @@ const LIST_PAD_X: f32 = 16.;
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct FileRowVm {
     url: SharedString,
     filename: SharedString,
@@ -83,6 +85,7 @@ pub struct FilesPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     rows: Rc<Vec<FileRowVm>>,
+    viewport_autofill_remaining: u8,
     audio_url: Option<SharedString>,
     audio_player: Option<mezon_audio::AudioPlayer>,
     audio_ready: bool,
@@ -147,6 +150,7 @@ impl FilesPopoverPanel {
             list_state,
             focus_handle,
             rows: Rc::new(Vec::new()),
+            viewport_autofill_remaining: MAX_VIEWPORT_AUTOFILL_PAGES,
             audio_url: None,
             audio_player: None,
             audio_ready: false,
@@ -156,8 +160,38 @@ impl FilesPopoverPanel {
             _debounce_task: Task::ready(()),
             _subs: subs,
         };
+        this.install_scroll_handler(cx);
         this.refresh_rows(cx);
         this
+    }
+
+    fn install_scroll_handler(&self, cx: &mut Context<Self>) {
+        let weak = cx.weak_entity();
+        let clan = self.clan_id;
+        let channel = self.channel_id;
+        self.list_state
+            .set_scroll_handler(move |event, _window, cx| {
+                let near_bottom =
+                    event.visible_range.end + LOAD_MORE_THRESHOLD >= event.count && event.count > 0;
+                if !near_bottom {
+                    return;
+                }
+                let user_scrolled = event.visible_range.start > 0;
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                this.update(cx, |this, cx| {
+                    if !user_scrolled {
+                        if this.viewport_autofill_remaining == 0 {
+                            return;
+                        }
+                        this.viewport_autofill_remaining -= 1;
+                    }
+                    FilesStore::global(cx).update(cx, |store, cx| {
+                        store.fetch_page(clan, channel, LoadDirection::Before, cx);
+                    });
+                });
+            });
     }
 
     fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
@@ -173,14 +207,17 @@ impl FilesPopoverPanel {
     }
 
     fn refresh_rows(&mut self, cx: &mut Context<Self>) {
-        self.rows = Rc::new(Self::compute_rows(
-            self.channel_id,
-            &self.settings,
-            &self.debounced_query,
-            cx,
-        ));
-        if self.list_state.item_count() != self.rows.len() {
-            self.list_state.reset(self.rows.len());
+        let new_rows =
+            Self::compute_rows(self.channel_id, &self.settings, &self.debounced_query, cx);
+        let old_count = self.rows.len();
+        let new_count = new_rows.len();
+        let prefix = file_rows_common_prefix(&self.rows, &new_rows);
+        self.rows = Rc::new(new_rows);
+        if old_count == 0 || prefix == 0 {
+            self.list_state.reset(new_count);
+        } else if prefix < old_count || new_count != old_count {
+            self.list_state
+                .splice(prefix..old_count, new_count.saturating_sub(prefix));
         }
         cx.notify();
     }
@@ -922,6 +959,13 @@ fn file_audio_thumb(
                 ),
         )
         .into_any_element()
+}
+
+fn file_rows_common_prefix(old: &[FileRowVm], new: &[FileRowVm]) -> usize {
+    old.iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
 }
 
 fn format_file_time(create_time: i64, locale: &str) -> String {

@@ -6049,6 +6049,7 @@ dependencies = [
  "ui",
  "unicode-normalization",
  "unicode-segmentation",
+ "windows 0.61.3",
  "zed-scap",
 ]
 
