@@ -119,9 +119,9 @@ pub use direct::{
     dm_counts_toward_unread_badge,
 };
 pub use emoji::{
-    EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
-    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonErrorKind, MAX_EMOJI_BYTES,
-    MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, classify_emoticon_error, generate_snowflake_id,
+    EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
+    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, generate_snowflake_id,
     is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
     validate_emoji_create_shortname, validate_emoticon_file,
 };
