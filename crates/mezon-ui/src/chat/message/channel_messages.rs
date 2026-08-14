@@ -1689,6 +1689,9 @@ impl ChannelMessages {
                         });
                     }));
                 }
+                MessagesEvent::UnreadBelowChanged => {
+                    this.refresh_derived_state(cx);
+                }
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
@@ -3018,7 +3021,8 @@ impl ChannelMessages {
                 .iter()
                 .rev()
                 .map(|message| message.id),
-        );
+        )
+        .saturating_add(store.read(cx).pending_below_count(self.last_seen_at_bottom));
         if welcome == self.welcome
             && onboarding == self.onboarding
             && unread == self.cached_unread_boundary
