@@ -22,9 +22,20 @@ pub use mezon_voice::{
 };
 
 use crate::AppConfig;
+use crate::Settings;
+use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
+use crate::direct::DirectMessageStore;
+use crate::gifts::{
+    FLOWER_ANIMATION_TTL, FlowerParticle, GiveFlowerDeny, VOICE_INTERACTIVE_GIVE_FLOWER,
+    build_flower_transfer, can_give_flower, flower_effect_key, flower_event_from_payload,
+    flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
+    serialize_flower_interactive_params,
+};
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::users_by_user::UsersByUserStore;
+use crate::wallet::{WalletEvent, WalletStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -181,11 +192,13 @@ pub struct VoiceStore {
     join_voice_sound_loading: bool,
     join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
+    last_flower_send: Option<Instant>,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
     sound_preview: Option<SoundPreview>,
     displayed_reactions: Vec<DisplayedReaction>,
+    displayed_flowers: Vec<DisplayedFlower>,
     reaction_seq: u64,
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
@@ -249,6 +262,18 @@ pub struct DisplayedReaction {
     pub left: f32,
     pub drift: f32,
     pub duration: Duration,
+    _remove_timer: Task<()>,
+}
+
+pub struct DisplayedFlower {
+    pub key: String,
+    pub giver_id: String,
+    pub receiver_id: String,
+    pub giver_name: String,
+    pub receiver_name: String,
+    pub timestamp: i64,
+    pub particles: Vec<FlowerParticle>,
+    pub started_at: Instant,
     _remove_timer: Task<()>,
 }
 
@@ -358,11 +383,13 @@ impl VoiceStore {
             join_voice_sound_loading: false,
             join_sound_baseline_set: false,
             last_reaction_send: None,
+            last_flower_send: None,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
             sound_preview: None,
             displayed_reactions: Vec::new(),
+            displayed_flowers: Vec::new(),
             reaction_seq: 0,
             last_emoji_at: None,
             session: None,
@@ -707,6 +734,11 @@ impl VoiceStore {
             dispatch.on(RealtimeKind::VoiceReaction, &entity, |this, event, cx| {
                 this.handle_voice_reaction(event, cx)
             });
+            dispatch.on(
+                RealtimeKind::VoiceInteractive,
+                &entity,
+                |this, event, cx| this.handle_voice_interactive(event, cx),
+            );
         });
     }
 
@@ -1009,6 +1041,139 @@ impl VoiceStore {
 
     pub fn displayed_reactions(&self) -> &[DisplayedReaction] {
         &self.displayed_reactions
+    }
+
+    pub fn displayed_flowers(&self) -> &[DisplayedFlower] {
+        &self.displayed_flowers
+    }
+
+    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::VoiceInteractive(msg) = event else {
+            return;
+        };
+        let Some((channel_id, clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        let (Ok(joined_channel), Ok(joined_clan)) =
+            (channel_id.parse::<i64>(), clan_id.parse::<i64>())
+        else {
+            return;
+        };
+        let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
+            msg.event_type,
+            msg.user_id,
+            msg.voice_channel_id,
+            msg.clan_id,
+            &msg.params,
+            joined_channel,
+            joined_clan,
+        ) else {
+            return;
+        };
+        self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
+    }
+
+    fn show_flower_effect(
+        &mut self,
+        giver_id: String,
+        receiver_id: String,
+        timestamp: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let key = flower_effect_key(&giver_id, &receiver_id, timestamp);
+        if self
+            .displayed_flowers
+            .iter()
+            .any(|flower| flower.key == key)
+        {
+            return;
+        }
+        self.displayed_flowers.clear();
+        let giver_name = self.resolve_flower_name(&giver_id, cx);
+        let receiver_name = self.resolve_flower_name(&receiver_id, cx);
+        let expire_key = key.clone();
+        let remove_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLOWER_ANIMATION_TTL).await;
+            this.update(cx, |this, cx| {
+                this.displayed_flowers
+                    .retain(|flower| flower.key != expire_key);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.displayed_flowers.push(DisplayedFlower {
+            key,
+            giver_id,
+            receiver_id,
+            giver_name,
+            receiver_name,
+            timestamp,
+            particles: flower_particles(timestamp.unsigned_abs()),
+            started_at: Instant::now(),
+            _remove_timer: remove_timer,
+        });
+        cx.notify();
+    }
+
+    fn resolve_flower_name(&self, user_id: &str, cx: &App) -> String {
+        let clan_id = self
+            .connection
+            .connected_channel()
+            .and_then(|(_, clan)| clan.parse::<i64>().ok())
+            .map(ClanId);
+        let uid = user_id.parse::<i64>().ok().map(UserId);
+        if let (Some(clan_id), Some(uid)) = (clan_id, uid)
+            && let Some(store) = ClanMembersStore::try_global(cx)
+            && let Some(member) = store.read(cx).member(clan_id, uid)
+        {
+            let name = member.name();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        if let Some(uid) = uid
+            && let Some(store) = UsersByUserStore::try_global(cx)
+            && let Some(user) = store.read(cx).user(uid)
+        {
+            if !user.display_name.is_empty() {
+                return user.display_name.clone();
+            }
+            if !user.username.is_empty() {
+                return user.username.clone();
+            }
+        }
+        if let Some(uid) = uid
+            && let Some(account) = AccountStore::try_global(cx)
+        {
+            let account = account.read(cx);
+            if account
+                .account
+                .as_ref()
+                .is_some_and(|me| me.user_id == uid.get())
+            {
+                if let Some(clan_id) = clan_id
+                    && let Some(profile) = account.clan_profile.as_ref()
+                    && profile.clan_id == clan_id
+                    && !profile.nick_name.is_empty()
+                {
+                    return profile.nick_name.clone();
+                }
+                if let Some(me) = account.account.as_ref() {
+                    if !me.display_name.is_empty() {
+                        return me.display_name.clone();
+                    }
+                    if !me.username.is_empty() {
+                        return me.username.clone();
+                    }
+                }
+            }
+        }
+        self.participants
+            .iter()
+            .find(|p| p.identity == user_id)
+            .map(|p| p.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| user_id.to_string())
     }
 
     fn handle_emoji_reaction(
@@ -1444,6 +1609,172 @@ impl VoiceStore {
     pub fn request_kick(&mut self, identity: String, name: String, cx: &mut Context<Self>) {
         self.pending_kick = Some((identity, name));
         cx.notify();
+    }
+
+    pub fn give_flower(&mut self, identity: String, cx: &mut Context<Self>) {
+        self.close_participant_menu(cx);
+        let Some(local_id) = self.local_user_id() else {
+            return;
+        };
+        let Some((channel_id, clan_id)) = self
+            .connection
+            .connected_channel()
+            .map(|(channel, clan)| (channel.to_string(), clan.to_string()))
+        else {
+            return;
+        };
+        let receiver_name = self
+            .participants
+            .iter()
+            .find(|p| p.identity == identity)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| identity.clone());
+        let Ok(receiver_id) = identity.parse::<UserId>() else {
+            return;
+        };
+        let Ok(giver_i64) = local_id.parse::<i64>() else {
+            return;
+        };
+        let Ok(channel_i64) = channel_id.parse::<i64>() else {
+            return;
+        };
+        let Ok(clan_i64) = clan_id.parse::<i64>() else {
+            return;
+        };
+
+        let wallet = WalletStore::try_global(cx);
+        let wallet_available = wallet
+            .as_ref()
+            .map(|store| store.read(cx).is_available())
+            .unwrap_or(false);
+        let pending = wallet
+            .as_ref()
+            .map(|store| store.read(cx).pending_give_flower())
+            .unwrap_or(false);
+        let balance = wallet
+            .as_ref()
+            .and_then(|store| store.read(cx).balance().map(str::to_string));
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_default();
+
+        match can_give_flower(
+            identity == local_id,
+            wallet_available,
+            pending,
+            self.last_flower_send,
+            Instant::now(),
+            balance.as_deref(),
+        ) {
+            Err(
+                GiveFlowerDeny::SelfTarget
+                | GiveFlowerDeny::Pending
+                | GiveFlowerDeny::WalletUnavailable,
+            ) => return,
+            Err(GiveFlowerDeny::RateLimited) => {
+                if let Some(wallet) = wallet {
+                    let message =
+                        mezon_i18n::t(&locale, "channelVoice.giveFlowerRateLimited").to_string();
+                    wallet.update(cx, |_wallet, cx| {
+                        cx.emit(WalletEvent::SendFailed { message });
+                    });
+                }
+                return;
+            }
+            Err(GiveFlowerDeny::Insufficient) => {
+                if let Some(wallet) = wallet {
+                    let message =
+                        mezon_i18n::t(&locale, "channelVoice.giveFlowerInsufficient").to_string();
+                    wallet.update(cx, |_wallet, cx| {
+                        cx.emit(WalletEvent::SendFailed { message });
+                    });
+                }
+                return;
+            }
+            Ok(()) => {}
+        }
+
+        let Some(wallet) = wallet else {
+            return;
+        };
+        let sender_username = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .map(|account| account.username.clone())
+            .unwrap_or_default();
+        let timestamp = mezon_client::server_now_secs() as i64 * 1000;
+        let params = serialize_flower_interactive_params(&identity, timestamp);
+        let request = build_flower_transfer(
+            local_id.clone(),
+            sender_username,
+            identity.clone(),
+            clan_id,
+            channel_id,
+        );
+        let card_text = format!(
+            "{} {}₫ | {}",
+            mezon_i18n::t(&locale, "token.tokensSent"),
+            format_flower_amount(flower_price()),
+            mezon_i18n::t(&locale, "token.giveFlowerAction"),
+        );
+        let flower_generation = wallet.read(cx).reset_generation();
+        self.last_flower_send = Some(Instant::now());
+        wallet.update(cx, |store, _| store.set_pending_give_flower(true));
+        let task = wallet.update(cx, |store, cx| store.send_transaction(request, cx));
+        let wallet_weak = wallet.downgrade();
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            wallet_weak
+                .update(cx, |_store, cx| match &result {
+                    Ok(_) => cx.emit(WalletEvent::FlowerSent),
+                    Err(message) if is_uncertain_transfer_error(message) => {
+                        cx.emit(WalletEvent::FlowerUncertain);
+                    }
+                    Err(message) => cx.emit(WalletEvent::SendFailed {
+                        message: message.clone(),
+                    }),
+                })
+                .ok();
+            if result.is_ok() {
+                this.update(cx, |this, cx| {
+                    let current_generation = wallet_weak
+                        .upgrade()
+                        .map(|store| store.read(cx).reset_generation());
+                    if current_generation != Some(flower_generation) {
+                        return;
+                    }
+                    let card = DirectMessageStore::global(cx).update(cx, |store, cx| {
+                        store.create_dm_and_send_token_card(
+                            receiver_id,
+                            receiver_name,
+                            card_text,
+                            cx,
+                        )
+                    });
+                    card.detach();
+                    this.show_flower_effect(local_id, identity, timestamp, cx);
+                })
+                .ok();
+                if let Err(error) = api
+                    .write_voice_interactive(
+                        clan_i64,
+                        channel_i64,
+                        giver_i64,
+                        VOICE_INTERACTIVE_GIVE_FLOWER,
+                        params,
+                    )
+                    .await
+                {
+                    tracing::warn!("write_voice_interactive failed: {error}");
+                }
+            }
+            wallet_weak
+                .update(cx, |store, _| store.set_pending_give_flower(false))
+                .ok();
+        })
+        .detach();
     }
 
     pub fn cancel_kick(&mut self, cx: &mut Context<Self>) {
@@ -2302,7 +2633,9 @@ impl VoiceStore {
         self.join_voice_sound_loading = false;
         self.join_sound_baseline_set = false;
         self.displayed_reactions.clear();
+        self.displayed_flowers.clear();
         self.last_emoji_at = None;
+        self.last_flower_send = None;
         self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;

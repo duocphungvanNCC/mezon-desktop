@@ -137,6 +137,8 @@ pub enum WalletEvent {
     TransactionSent { tx_hash: String },
     TokenReceived { amount: i64, sender_id: String },
     CoffeeSent,
+    FlowerSent,
+    FlowerUncertain,
     SendFailed { message: String },
     EnableFailed { message: String },
 }
@@ -167,6 +169,7 @@ pub struct WalletStore {
     failed_id_token_exp: Option<u64>,
     is_enabled: bool,
     pending_give_coffee: bool,
+    pending_give_flower: bool,
     enabled_user: Option<String>,
     enabling_user: Option<String>,
     auth_user: Option<String>,
@@ -174,6 +177,7 @@ pub struct WalletStore {
     balance_refreshing: bool,
     balance_freshness: Freshness,
     reset_generation: u64,
+    enable_generation: u64,
     enable_task: Option<Task<()>>,
     bank_player: Option<AudioPlayer>,
     bank_sound_loading: bool,
@@ -201,6 +205,7 @@ impl WalletStore {
                 failed_id_token_exp: None,
                 is_enabled: false,
                 pending_give_coffee: false,
+                pending_give_flower: false,
                 enabled_user: None,
                 enabling_user: None,
                 auth_user: None,
@@ -208,6 +213,7 @@ impl WalletStore {
                 balance_refreshing: false,
                 balance_freshness: Freshness::new(),
                 reset_generation: 0,
+                enable_generation: 0,
                 enable_task: None,
                 bank_player: None,
                 bank_sound_loading: false,
@@ -254,6 +260,14 @@ impl WalletStore {
 
     pub fn set_pending_give_coffee(&mut self, pending: bool) {
         self.pending_give_coffee = pending;
+    }
+
+    pub fn pending_give_flower(&self) -> bool {
+        self.pending_give_flower
+    }
+
+    pub fn set_pending_give_flower(&mut self, pending: bool) {
+        self.pending_give_flower = pending;
     }
 
     pub fn give_coffee_amount() -> i64 {
@@ -402,7 +416,7 @@ impl WalletStore {
         if !force && self.is_enabled && self.enabled_user.as_deref() == Some(user_id.as_str()) {
             return;
         }
-        if self.enabling_user.as_deref() == Some(user_id.as_str()) {
+        if !force && self.enabling_user.as_deref() == Some(user_id.as_str()) {
             return;
         }
         let id_token_exp = mezon_client::jwt_expires_at(&jwt);
@@ -424,6 +438,12 @@ impl WalletStore {
             return;
         }
         let Some(clients) = self.clients.clone() else {
+            tracing::error!("wallet: enable skipped, mmn/zk clients are not configured");
+            if force {
+                cx.emit(WalletEvent::EnableFailed {
+                    message: "Wallet is not configured".to_string(),
+                });
+            }
             return;
         };
         let switching_user = self
@@ -435,6 +455,8 @@ impl WalletStore {
             self.reset(cx);
         }
         let generation = self.reset_generation;
+        self.enable_generation = self.enable_generation.wrapping_add(1);
+        let enable_generation = self.enable_generation;
         let report_failure = force;
         self.enabling_user = Some(user_id.clone());
         self.enable_task = Some(cx.spawn(async move |this, cx| {
@@ -474,11 +496,13 @@ impl WalletStore {
                 ),
             };
             this.update(cx, |this, cx| {
+                if this.reset_generation != generation
+                    || this.enable_generation != enable_generation
+                {
+                    return;
+                }
                 if this.enabling_user.as_deref() == Some(user_id.as_str()) {
                     this.enabling_user = None;
-                }
-                if this.reset_generation != generation {
-                    return;
                 }
                 let (Some(ephemeral), Some(zk_proofs)) = (ephemeral, zk_proofs) else {
                     this.failed_id_token_exp = id_token_exp;
@@ -927,6 +951,7 @@ impl WalletStore {
             return;
         }
         self.reset_generation += 1;
+        self.enable_generation = self.enable_generation.wrapping_add(1);
         self.enable_task = None;
         self.enabling_user = None;
         self.wallet = None;
@@ -936,6 +961,7 @@ impl WalletStore {
         self.failed_id_token_exp = None;
         self.is_enabled = false;
         self.pending_give_coffee = false;
+        self.pending_give_flower = false;
         self.enabled_user = None;
         self.auth_user = None;
         self.balance_user = None;

@@ -27,6 +27,7 @@ pub mod files;
 pub mod friend;
 pub mod gallery;
 pub mod gif;
+pub mod gifts;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
@@ -137,6 +138,15 @@ pub use gallery::{
     initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
+pub use gifts::{
+    FLOWER_ANIMATION_TTL, FLOWER_GIFT_TYPE, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT,
+    FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerInteractiveParams, FlowerParticle,
+    FlowerParticlePose, GiveFlowerDeny, VOICE_INTERACTIVE_GIVE_FLOWER, build_flower_transfer,
+    can_afford, can_give_flower, flower_effect_key, flower_event_from_payload,
+    flower_particle_pose, flower_particles, flower_price, format_flower_amount,
+    is_uncertain_transfer_error, parse_flower_interactive_params,
+    serialize_flower_interactive_params,
+};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
@@ -204,12 +214,13 @@ pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
-    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
+    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
+    NetworkQuality, PickedScreen, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
+    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore,
+    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, screen_tile_id, system_screen_share_pick, upload_sound_file,
+    validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,

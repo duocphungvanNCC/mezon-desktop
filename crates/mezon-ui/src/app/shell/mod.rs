@@ -839,12 +839,15 @@ impl Shell {
         } else {
             message
         };
-        let view = cx.new(|cx| WalletNotAvailableModal {
-            focus_handle: cx.focus_handle(),
-            title,
-            description: mezon_i18n::t(locale, "message.wallet.descNotAvailable").into(),
-            enable_label: mezon_i18n::t(locale, "message.wallet.enableWallet").into(),
-            cancel_label: mezon_i18n::t(locale, "message.wallet.cancel").into(),
+        let view = cx.new(|cx| {
+            WalletNotAvailableModal::new(
+                cx.focus_handle(),
+                title,
+                mezon_i18n::t(locale, "message.wallet.descNotAvailable").into(),
+                mezon_i18n::t(locale, "message.wallet.enableWallet").into(),
+                mezon_i18n::t(locale, "message.wallet.cancel").into(),
+                cx,
+            )
         });
         let previous_focus = window.focused(cx);
         if let Some(current) = self.modal.take() {
@@ -900,33 +903,29 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
-    pub fn close_modal(&mut self, cx: &mut Context<Self>) {
-        if self.modal.take().is_some() {
-            self.modal_underlay = None;
-            self.command_palette_open = false;
-            self.modal_fullscreen = false;
-            cx.notify();
+    pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus_handle = self.close_modal(cx);
+        if let Some(focus_handle) = focus_handle {
+            window.focus(&focus_handle, cx);
         }
     }
 
-    pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal.take().is_none() {
-            return;
-        }
-        if let Some((underlay, fullscreen, command_palette_open, focus_handle)) =
+    pub fn close_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+        self.modal.take()?;
+        let focus = if let Some((underlay, fullscreen, command_palette_open, focus_handle)) =
             self.modal_underlay.take()
         {
             self.modal = Some(underlay);
             self.modal_fullscreen = fullscreen;
             self.command_palette_open = command_palette_open;
-            if let Some(focus_handle) = focus_handle {
-                window.focus(&focus_handle, cx);
-            }
+            focus_handle
         } else {
             self.command_palette_open = false;
             self.modal_fullscreen = false;
-        }
+            None
+        };
         cx.notify();
+        focus
     }
 
     pub fn has_modal(&self) -> bool {
