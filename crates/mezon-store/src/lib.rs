@@ -68,6 +68,7 @@ pub use mezon_client::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
 };
+pub use mezon_proto::api::{OnboardingAnswer, OnboardingContent, OnboardingItem};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;

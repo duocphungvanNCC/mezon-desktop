@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiClanDesc;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
-use mezon_proto::api::{SystemMessage, SystemMessageRequest, UpdateClanDescRequest};
+use mezon_proto::api::{
+    OnboardingContent, OnboardingItem, SystemMessage, SystemMessageRequest, UpdateClanDescRequest,
+};
 
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -1034,6 +1036,92 @@ impl ClanList {
                 .find(|desc| desc.clan_id == id)
                 .map(CommunityInfo::from)
                 .ok_or_else(|| "clan not found".into())
+        })
+    }
+
+    pub fn fetch_onboarding(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<OnboardingItem>, String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.list_onboarding(clan_id.get(), 100, 1)
+                .await
+                .map(|response| response.list_onboarding)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn create_onboarding_items(
+        &self,
+        clan_id: ClanId,
+        contents: Vec<OnboardingContent>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<OnboardingItem>, String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.create_onboarding(clan_id.get(), contents)
+                .await
+                .map(|response| response.list_onboarding)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn update_onboarding_item(
+        &self,
+        clan_id: ClanId,
+        id: i64,
+        content: OnboardingContent,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.update_onboarding(id, clan_id.get(), content)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn delete_onboarding_item(
+        &self,
+        clan_id: ClanId,
+        id: i64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.delete_onboarding(id, clan_id.get())
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn set_onboarding_enabled(
+        &mut self,
+        clan_id: ClanId,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(clan) = self.clans.iter().find(|clan| clan.id == clan_id).cloned() else {
+            return cx.spawn(async move |_, _| Err("clan not found".into()));
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let request = community_update_request(clan_id, &clan, |request| {
+                request.is_onboarding = Some(enabled);
+            });
+            api.update_clan_desc(request)
+                .await
+                .map_err(|error| error.to_string())?;
+            this.update(cx, |this, cx| {
+                if let Some(clan) = this.clans.iter_mut().find(|clan| clan.id == clan_id) {
+                    clan.is_onboarding = enabled;
+                }
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
     }
 
