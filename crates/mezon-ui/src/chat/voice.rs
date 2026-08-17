@@ -1316,6 +1316,8 @@ fn flower_burst_colors(theme: &Theme) -> [Hsla; FLOWER_PALETTE_SIZE as usize] {
     ]
 }
 
+const FLOWER_SPRITE_PX: f32 = 48.0;
+
 const FLOWER_SPRITES: [&str; FLOWER_SPRITE_COUNT as usize] = [
     "icons/flower-rose-line.svg",
     "icons/flower-peony.svg",
@@ -1332,6 +1334,14 @@ const FLOWER_SPRITES: [&str; FLOWER_SPRITE_COUNT as usize] = [
     "icons/flower-ring.svg",
     "icons/flower-bud.svg",
 ];
+
+fn flower_sprite(index: u8) -> SharedString {
+    static SPRITES: std::sync::OnceLock<[SharedString; FLOWER_SPRITE_COUNT as usize]> =
+        std::sync::OnceLock::new();
+    let sprites =
+        SPRITES.get_or_init(|| std::array::from_fn(|i| SharedString::from(FLOWER_SPRITES[i])));
+    sprites[index as usize % sprites.len()].clone()
+}
 
 fn paint_flower_burst(
     bounds: Bounds<Pixels>,
@@ -1353,35 +1363,53 @@ fn paint_flower_burst(
             continue;
         }
         let position = point(origin.x + px(pose.x * unit), origin.y + px(pose.y * unit));
+        let visual = particle.size * pose.scale;
+        if visual < 1.0 {
+            continue;
+        }
+        let radius = px(visual * 0.5);
+        if position.x + radius < bounds.origin.x
+            || position.y + radius < bounds.origin.y
+            || position.x - radius > bounds.origin.x + bounds.size.width
+            || position.y - radius > bounds.origin.y + bounds.size.height
+        {
+            continue;
+        }
         let slot = (particle.palette as usize) % colors.len();
         let color = colors[slot].opacity(pose.opacity);
-        let size = (particle.size * pose.scale).round().max(1.0);
-        let icon =
-            SharedString::from(FLOWER_SPRITES[particle.sprite as usize % FLOWER_SPRITES.len()]);
-        paint_flower_sprite(window, position, size, pose.spin, color, &icon, cx);
+        paint_flower_sprite(
+            window,
+            position,
+            visual / FLOWER_SPRITE_PX,
+            pose.spin,
+            color,
+            &flower_sprite(particle.sprite),
+            cx,
+        );
     }
 }
 
 fn paint_flower_sprite(
     window: &mut Window,
     origin: gpui::Point<Pixels>,
-    size_px: f32,
+    instance_scale: f32,
     spin: f32,
     color: Hsla,
     icon: &SharedString,
     cx: &App,
 ) {
-    let half = px(size_px * 0.5);
+    let half = px(FLOWER_SPRITE_PX * 0.5);
     let bounds = Bounds {
         origin: point(origin.x - half, origin.y - half),
-        size: gpui::size(px(size_px), px(size_px)),
+        size: gpui::size(px(FLOWER_SPRITE_PX), px(FLOWER_SPRITE_PX)),
     };
-    let scale = window.scale_factor();
+    let window_scale = window.scale_factor();
     let center = bounds.center();
     let transform = TransformationMatrix::unit()
-        .translate(center.scale(scale))
+        .translate(center.scale(window_scale))
         .rotate(radians(spin))
-        .translate(center.scale(-scale));
+        .scale(gpui::size(instance_scale, instance_scale))
+        .translate(center.scale(-window_scale));
     let _ = window.paint_svg(bounds, icon.clone(), None, transform, color, cx);
 }
 
