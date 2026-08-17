@@ -291,15 +291,12 @@ impl OnboardingSettingPage {
             page: Page::Main,
             questions: Vec::new(),
             question_list: ListState::new(0, ListAlignment::Top, px(120.0))
-                .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
             missions: Vec::new(),
             mission_list: ListState::new(0, ListAlignment::Top, px(100.0))
-                .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
             resources: Vec::new(),
             resource_list: ListState::new(0, ListAlignment::Top, px(100.0))
-                .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
             original_ids: Vec::new(),
             dirty: false,
@@ -336,7 +333,7 @@ impl OnboardingSettingPage {
 
     fn list_can_consume_scroll(state: &ListState, delta_y: gpui::Pixels) -> bool {
         if delta_y < px(0.0) {
-            !matches!(state.is_scrolled_to_end(), Some(true))
+            matches!(state.is_scrolled_to_end(), Some(false))
         } else if delta_y > px(0.0) {
             let offset = state.logical_scroll_top();
             offset.item_ix > 0 || offset.offset_in_item > px(0.0)
@@ -670,7 +667,6 @@ impl OnboardingSettingPage {
                     .map(|answer| OnboardingAnswer {
                         title: answer.title.clone(),
                         description: answer.description.clone(),
-                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
@@ -1392,12 +1388,12 @@ impl OnboardingSettingPage {
                     .on_click(move |_, _, cx| {
                         let _ = save.update(cx, |this, cx| {
                             this.sync_question_titles(cx);
-                            if let Some(item) = this.questions.get_mut(index) {
-                                if !item.title.is_empty() {
-                                    item.expanded = false;
-                                    this.dirty = true;
-                                    this.question_list.remeasure_items(index..index + 1);
-                                }
+                            if let Some(item) = this.questions.get_mut(index)
+                                && !item.title.is_empty()
+                            {
+                                item.expanded = false;
+                                this.dirty = true;
+                                this.question_list.remeasure_items(index..index + 1);
                             }
                             cx.notify();
                         });
@@ -1870,7 +1866,7 @@ impl OnboardingSettingPage {
                 rest.split_once("</strong>")
                     .map(|(emphasized, _)| (prefix, emphasized))
             })
-            .unwrap_or((value.as_ref(), ""));
+            .unwrap_or((value, ""));
         h_flex()
             .flex_wrap()
             .text_color(theme.text_secondary)
@@ -2411,19 +2407,15 @@ impl OnboardingSettingPage {
             }
             Some(Editor::Mission {
                 index: Some(index), ..
-            }) => {
-                if index < self.missions.len() {
-                    self.missions.remove(index);
-                    removed = true;
-                }
+            }) if index < self.missions.len() => {
+                self.missions.remove(index);
+                removed = true;
             }
             Some(Editor::Resource {
                 index: Some(index), ..
-            }) => {
-                if index < self.resources.len() {
-                    self.resources.remove(index);
-                    removed = true;
-                }
+            }) if index < self.resources.len() => {
+                self.resources.remove(index);
+                removed = true;
             }
             _ => {}
         }

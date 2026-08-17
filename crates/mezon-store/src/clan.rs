@@ -95,7 +95,6 @@ impl From<OnboardingContent> for api::OnboardingContent {
             content: content.content,
             image_url: content.image_url,
             answers: content.answers.into_iter().map(Into::into).collect(),
-            ..Default::default()
         }
     }
 }
