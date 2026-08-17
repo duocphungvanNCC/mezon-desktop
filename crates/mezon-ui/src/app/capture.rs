@@ -859,6 +859,114 @@ pub fn open_message_image_viewer(
     Ok(serde_json::json!({ "ok": true, "url": opened }))
 }
 
+pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let settings = mezon_store::Settings::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("settings are not available"))?;
+    let (input, output, camera) = {
+        let settings = settings.read(cx);
+        (
+            settings.input_device_id.clone(),
+            settings.output_device_id.clone(),
+            settings.camera_device_id.clone(),
+        )
+    };
+    let handle = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .ok_or_else(|| anyhow::anyhow!("no window is open"))?;
+    handle
+        .update(cx, |_, window, cx| {
+            voice.update(cx, |store, cx| {
+                store.join(
+                    channel_id.to_string(),
+                    clan_id.to_string(),
+                    String::new(),
+                    input,
+                    output,
+                    camera,
+                    window,
+                    cx,
+                );
+            });
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+pub fn leave_voice(cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let handle = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .ok_or_else(|| anyhow::anyhow!("no window is open"))?;
+    handle
+        .update(cx, |_, window, cx| {
+            voice.update(cx, |store, cx| store.leave(window, cx));
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+pub fn recording_state(cx: &mut App) -> Value {
+    let Some(voice) = mezon_store::VoiceStore::try_global(cx) else {
+        return serde_json::json!({ "state": "unavailable" });
+    };
+    let store = voice.read(cx);
+    let state = match store.recording_state() {
+        mezon_store::RecordingState::Idle => "idle",
+        mezon_store::RecordingState::Starting => "starting",
+        mezon_store::RecordingState::Recording => "recording",
+        mezon_store::RecordingState::Stopping => "stopping",
+    };
+    serde_json::json!({
+        "state": state,
+        "elapsed_seconds": store.recording_elapsed().as_secs_f64(),
+        "video_stalled": store.recording_stalled(),
+        "can_record": store.can_record(),
+        "in_call": store.connection().active_channel_id().is_some(),
+    })
+}
+
+pub fn start_recording(path: Option<String>, cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let window_id = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    crate::chat::record_window::record_window_id(window)
+                })
+                .ok()
+                .flatten()
+        });
+    voice.update(cx, |store, cx| {
+        let target = match path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => store.suggested_recording_path(),
+        };
+        store
+            .start_recording_at(target.clone(), window_id, cx)
+            .map(|()| serde_json::json!({ "ok": true, "path": target.to_string_lossy() }))
+            .map_err(|error| anyhow::anyhow!(error))
+    })
+}
+
+pub fn stop_recording(cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    voice.update(cx, |store, cx| {
+        store
+            .request_stop_recording(cx)
+            .map(|()| serde_json::json!({ "ok": true }))
+            .map_err(|error| anyhow::anyhow!(error))
+    })
+}
+
 pub fn go_back(cx: &mut App) -> anyhow::Result<()> {
     crate::router::Router::global(cx).update(cx, |router, _| router.go_back());
     Ok(())

@@ -32,6 +32,55 @@ pub struct RootView {
     connecting_since: Option<Instant>,
     network_online: bool,
     _splash_delay: Option<Task<()>>,
+    _recording_toasts: Option<gpui::Subscription>,
+}
+
+fn surface_recording_toast(
+    _root: &mut RootView,
+    _voice: gpui::Entity<mezon_store::VoiceStore>,
+    event: &mezon_store::VoiceStoreEvent,
+    cx: &mut Context<RootView>,
+) {
+    let locale_for_event = mezon_store::Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+    let toast = match event {
+        mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Info,
+                    mezon_i18n::t(&locale_for_event, "channelVoice.recordingVideoUnavailable")
+                        .to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
+    };
+    let locale = mezon_store::Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+    let (kind, message) = match toast {
+        mezon_store::RecordingToast::Saved(path) => (
+            crate::components::primitives::ToastKind::Success,
+            format!(
+                "{} {}",
+                mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+        mezon_store::RecordingToast::Failed(error) => (
+            crate::components::primitives::ToastKind::Error,
+            format!(
+                "{}: {error}",
+                mezon_i18n::t(&locale, "channelVoice.recordingFailed")
+            ),
+        ),
+    };
+    crate::app::shell::Shell::global(cx).update(cx, |shell, cx| shell.toast(kind, message, cx));
 }
 
 fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
@@ -54,6 +103,9 @@ impl RootView {
         // views so any of them can surface a toast/modal via `Shell::global`.
         let shell = crate::app::shell::Shell::init(cx);
         cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+
+        let recording_toasts = mezon_store::VoiceStore::try_global(cx)
+            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {
@@ -221,6 +273,7 @@ impl RootView {
             connecting_since,
             network_online,
             _splash_delay: splash_delay,
+            _recording_toasts: recording_toasts,
         }
     }
 
