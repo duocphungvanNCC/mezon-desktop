@@ -50,6 +50,24 @@ pub enum McpCommand {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
     },
+    JoinVoice {
+        channel_id: i64,
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    LeaveVoice {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetRecordingState {
+        reply: oneshot::Sender<Value>,
+    },
+    StartRecording {
+        path: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    StopRecording {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     GetScrollState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
