@@ -3186,6 +3186,8 @@
   "message.wallet.cancel": "Cancelar",
   "message.wallet.descNotAvailable": "Para concluir a transação, você precisa ativar sua carteira.",
   "message.wallet.enableWallet": "Ativar Carteira",
+  "message.wallet.enabled": "Carteira ativada",
+  "message.wallet.enabling": "Ativando…",
   "message.wallet.notAvailable": "Carteira indisponível",
   "messageBox.ephemeralMessage": "Mensagem efêmera para {{username}}...",
   "messageBox.mentionCategories.commands": "COMANDOS",

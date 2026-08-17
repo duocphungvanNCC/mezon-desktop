@@ -6,7 +6,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Subscription, Task, Window};
+use gpui::{
+    App, AppContext, Context, Entity, Global, RenderImage, SharedString, Subscription, Task, Window,
+};
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, RealtimeEvent};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
@@ -27,7 +29,7 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_ANIMATION_TTL, FlowerParticle, GiveFlowerDeny, VOICE_INTERACTIVE_GIVE_FLOWER,
+    FLOWER_ANIMATION_TTL, FlowerParticle, GiveFlowerDeny, VoiceInteractiveEventType,
     build_flower_transfer, can_give_flower, flower_effect_key, flower_event_from_payload,
     flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
     serialize_flower_interactive_params,
@@ -68,6 +70,7 @@ const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
+static GIVE_FLOWER_SOUND: &[u8] = include_bytes!("../assets/audio/give-flower.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
     if token.starts_with("raising-up:") {
@@ -190,6 +193,8 @@ pub struct VoiceStore {
     raising_hand_sound_loading: bool,
     join_voice_player: Option<AudioPlayer>,
     join_voice_sound_loading: bool,
+    give_flower_player: Option<AudioPlayer>,
+    give_flower_sound_loading: bool,
     join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
     last_flower_send: Option<Instant>,
@@ -272,8 +277,9 @@ pub struct DisplayedFlower {
     pub giver_name: String,
     pub receiver_name: String,
     pub timestamp: i64,
-    pub particles: Vec<FlowerParticle>,
+    pub particles: Arc<Vec<FlowerParticle>>,
     pub started_at: Instant,
+    pub label: SharedString,
     _remove_timer: Task<()>,
 }
 
@@ -381,6 +387,8 @@ impl VoiceStore {
             raising_hand_sound_loading: false,
             join_voice_player: None,
             join_voice_sound_loading: false,
+            give_flower_player: None,
+            give_flower_sound_loading: false,
             join_sound_baseline_set: false,
             last_reaction_send: None,
             last_flower_send: None,
@@ -878,6 +886,37 @@ impl VoiceStore {
         .detach();
     }
 
+    fn play_flower_sound(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = &self.give_flower_player {
+            player.play();
+            return;
+        }
+        if self.give_flower_sound_loading {
+            return;
+        }
+        self.give_flower_sound_loading = true;
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(GIVE_FLOWER_SOUND.to_vec()) })
+                .await;
+            this.update(cx, |this, _| {
+                this.give_flower_sound_loading = false;
+                let Ok(pcm) = decoded else {
+                    return;
+                };
+                let Ok(player) = AudioPlayer::new() else {
+                    return;
+                };
+                player.set_data(pcm);
+                player.play();
+                this.give_flower_player = Some(player);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn play_join_sound(&mut self, cx: &mut Context<Self>) {
         if let Some(player) = &self.join_voice_player {
             player.play();
@@ -1091,6 +1130,14 @@ impl VoiceStore {
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_default();
+        let label = SharedString::from(
+            mezon_i18n::t(&locale, "channelVoice.giveFlowerGiven")
+                .replace("{{giver}}", &giver_name)
+                .replace("{{receiver}}", &receiver_name),
+        );
         let expire_key = key.clone();
         let remove_timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FLOWER_ANIMATION_TTL).await;
@@ -1108,10 +1155,12 @@ impl VoiceStore {
             giver_name,
             receiver_name,
             timestamp,
-            particles: flower_particles(timestamp.unsigned_abs()),
+            particles: Arc::new(flower_particles(timestamp.unsigned_abs())),
             started_at: Instant::now(),
+            label,
             _remove_timer: remove_timer,
         });
+        self.play_flower_sound(cx);
         cx.notify();
     }
 
@@ -1762,7 +1811,7 @@ impl VoiceStore {
                         clan_i64,
                         channel_i64,
                         giver_i64,
-                        VOICE_INTERACTIVE_GIVE_FLOWER,
+                        VoiceInteractiveEventType::Gift as i32,
                         params,
                     )
                     .await
@@ -2631,6 +2680,8 @@ impl VoiceStore {
         self.raising_hand_sound_loading = false;
         self.join_voice_player = None;
         self.join_voice_sound_loading = false;
+        self.give_flower_player = None;
+        self.give_flower_sound_loading = false;
         self.join_sound_baseline_set = false;
         self.displayed_reactions.clear();
         self.displayed_flowers.clear();

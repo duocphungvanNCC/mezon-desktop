@@ -3186,6 +3186,8 @@
   "message.wallet.cancel": "Abbrechen",
   "message.wallet.descNotAvailable": "Um die Transaktion abzuschließen, musst du dein Wallet aktivieren.",
   "message.wallet.enableWallet": "Wallet aktivieren",
+  "message.wallet.enabled": "Wallet aktiviert",
+  "message.wallet.enabling": "Wird aktiviert…",
   "message.wallet.notAvailable": "Wallet nicht verfügbar",
   "messageBox.ephemeralMessage": "Temporäre Nachricht für {{username}}...",
   "messageBox.mentionCategories.commands": "BEFEHLE",

@@ -845,6 +845,8 @@ impl Shell {
                 title,
                 mezon_i18n::t(locale, "message.wallet.descNotAvailable").into(),
                 mezon_i18n::t(locale, "message.wallet.enableWallet").into(),
+                mezon_i18n::t(locale, "message.wallet.enabling").into(),
+                mezon_i18n::t(locale, "message.wallet.enabled").into(),
                 mezon_i18n::t(locale, "message.wallet.cancel").into(),
                 cx,
             )
@@ -925,6 +927,14 @@ impl Shell {
             None
         };
         cx.notify();
+        if let Some(focus_handle) = focus.clone()
+            && let Some(window_handle) =
+                crate::app::main_window::handle(cx).or_else(|| cx.active_window())
+        {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                window.focus(&focus_handle, cx);
+            });
+        }
         focus
     }
 

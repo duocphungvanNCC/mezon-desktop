@@ -3186,6 +3186,8 @@
   "message.wallet.cancel": "Annulla",
   "message.wallet.descNotAvailable": "Per completare la transazione, devi attivare il tuo portafoglio.",
   "message.wallet.enableWallet": "Attiva Portafoglio",
+  "message.wallet.enabled": "Portafoglio attivato",
+  "message.wallet.enabling": "Attivazione…",
   "message.wallet.notAvailable": "Portafoglio non disponibile",
   "messageBox.ephemeralMessage": "Messaggio temporaneo per {{username}}...",
   "messageBox.mentionCategories.commands": "COMANDI",

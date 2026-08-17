@@ -3308,6 +3308,8 @@
   "message.wallet.cancel": "Hủy",
   "message.wallet.descNotAvailable": "Để hoàn tất giao dịch, bạn cần kích hoạt ví của mình.",
   "message.wallet.enableWallet": "Kích hoạt Ví",
+  "message.wallet.enabled": "Đã kích hoạt ví",
+  "message.wallet.enabling": "Đang kích hoạt…",
   "message.wallet.notAvailable": "Ví không khả dụng",
   "messageBox.ephemeralMessage": "Tin nhắn tạm thời cho {{username}}...",
   "messageBox.mentionCategories.commands": "LỆNH",

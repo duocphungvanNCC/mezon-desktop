@@ -7,9 +7,31 @@ use crate::wallet::SendTokenRequest;
 
 pub const FLOWER_PRICE: i64 = 50_000;
 pub const FLOWER_GIFT_TYPE: &str = "flower";
-pub const VOICE_INTERACTIVE_GIVE_FLOWER: i32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum VoiceInteractiveEventType {
+    Gift = 1,
+    Recording = 2,
+    AppKahoot = 10,
+    AppBlackboard = 11,
+    AppSlido = 12,
+}
+
+impl VoiceInteractiveEventType {
+    pub fn from_i32(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Gift),
+            2 => Some(Self::Recording),
+            10 => Some(Self::AppKahoot),
+            11 => Some(Self::AppBlackboard),
+            12 => Some(Self::AppSlido),
+            _ => None,
+        }
+    }
+}
 pub const FLOWER_RATE_LIMIT: Duration = Duration::from_secs(1);
-pub const FLOWER_ANIMATION_TTL: Duration = Duration::from_secs(6);
+pub const FLOWER_ANIMATION_TTL: Duration = Duration::from_secs(7);
 pub const FLOWER_PARTICLE_COUNT: usize = 128;
 pub const FLOWER_PALETTE_SIZE: u8 = 14;
 pub const FLOWER_SPRITE_COUNT: u8 = 14;
@@ -142,6 +164,10 @@ pub fn format_flower_amount(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
+pub fn flower_menu_blocked(pending: bool, balance: Option<&str>) -> bool {
+    pending || balance.is_some_and(|value| !can_afford(value, flower_price()))
+}
+
 pub fn can_afford(balance: &str, price: i64) -> bool {
     let Ok(scaled) = scale_amount_to_decimals(&price.to_string(), DECIMALS) else {
         return false;
@@ -240,7 +266,7 @@ pub fn flower_event_from_payload(
     joined_channel_id: i64,
     joined_clan_id: i64,
 ) -> Option<(String, String, i64, String)> {
-    if event_type != VOICE_INTERACTIVE_GIVE_FLOWER {
+    if VoiceInteractiveEventType::from_i32(event_type) != Some(VoiceInteractiveEventType::Gift) {
         return None;
     }
     if voice_channel_id != joined_channel_id || clan_id != joined_clan_id {
@@ -267,9 +293,9 @@ mod tests {
     use super::{
         FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT, FLOWER_PRICE,
         FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerParticle, GiveFlowerDeny,
-        VOICE_INTERACTIVE_GIVE_FLOWER, build_flower_transfer, can_afford, can_give_flower,
-        flower_effect_key, flower_event_from_payload, flower_particle_pose, flower_particles,
-        flower_price, format_flower_amount, is_uncertain_transfer_error,
+        VoiceInteractiveEventType, build_flower_transfer, can_afford, can_give_flower,
+        flower_effect_key, flower_event_from_payload, flower_menu_blocked, flower_particle_pose,
+        flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
         parse_flower_interactive_params, serialize_flower_interactive_params,
     };
     use mmn_client::{DECIMALS, TRANSFER_TYPE_TRANSFER_TOKEN, scale_amount_to_decimals};
@@ -346,6 +372,10 @@ mod tests {
             can_give_flower(false, true, false, None, now, None),
             Err(GiveFlowerDeny::Insufficient)
         );
+        assert!(!flower_menu_blocked(false, None));
+        assert!(flower_menu_blocked(true, None));
+        assert!(flower_menu_blocked(false, Some("0")));
+        assert!(!flower_menu_blocked(false, Some(&enough)));
         assert_eq!(
             can_give_flower(false, true, false, None, now, Some(&enough)),
             Ok(())
@@ -394,18 +424,71 @@ mod tests {
     #[test]
     fn flower_event_from_payload_filters_channel_and_type() {
         let params = serialize_flower_interactive_params("20", 99);
-        let applied =
-            flower_event_from_payload(VOICE_INTERACTIVE_GIVE_FLOWER, 10, 2, 1, &params, 2, 1)
-                .expect("apply");
+        let applied = flower_event_from_payload(
+            VoiceInteractiveEventType::Gift as i32,
+            10,
+            2,
+            1,
+            &params,
+            2,
+            1,
+        )
+        .expect("apply");
         assert_eq!(applied.0, "10");
         assert_eq!(applied.1, "20");
         assert_eq!(applied.2, 99);
         assert_eq!(applied.3, flower_effect_key("10", "20", 99));
         assert!(
-            flower_event_from_payload(VOICE_INTERACTIVE_GIVE_FLOWER, 10, 2, 1, &params, 3, 1)
-                .is_none()
+            flower_event_from_payload(
+                VoiceInteractiveEventType::Gift as i32,
+                10,
+                2,
+                1,
+                &params,
+                3,
+                1
+            )
+            .is_none()
         );
         assert!(flower_event_from_payload(0, 10, 2, 1, &params, 2, 1).is_none());
+        assert!(
+            flower_event_from_payload(
+                VoiceInteractiveEventType::Recording as i32,
+                10,
+                2,
+                1,
+                &params,
+                2,
+                1
+            )
+            .is_none()
+        );
+        assert!(
+            flower_event_from_payload(
+                VoiceInteractiveEventType::AppKahoot as i32,
+                10,
+                2,
+                1,
+                &params,
+                2,
+                1
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn voice_interactive_event_type_matches_js_enum() {
+        assert_eq!(VoiceInteractiveEventType::Gift as i32, 1);
+        assert_eq!(VoiceInteractiveEventType::Recording as i32, 2);
+        assert_eq!(VoiceInteractiveEventType::AppKahoot as i32, 10);
+        assert_eq!(VoiceInteractiveEventType::AppBlackboard as i32, 11);
+        assert_eq!(VoiceInteractiveEventType::AppSlido as i32, 12);
+        assert_eq!(
+            VoiceInteractiveEventType::from_i32(1),
+            Some(VoiceInteractiveEventType::Gift)
+        );
+        assert_eq!(VoiceInteractiveEventType::from_i32(3), None);
     }
 
     #[test]
@@ -415,7 +498,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), FLOWER_PARTICLE_COUNT);
         assert_eq!(FLOWER_PARTICLE_COUNT, 128);
-        assert_eq!(FLOWER_ANIMATION_TTL.as_secs(), 6);
+        assert_eq!(FLOWER_ANIMATION_TTL.as_secs(), 7);
         let sprites = first
             .iter()
             .map(|particle| particle.sprite)
@@ -467,11 +550,12 @@ mod tests {
             delay: 0.0,
             palette: 0,
         };
-        let start = flower_particle_pose(&particle, 0.0, 6.0);
-        let early = flower_particle_pose(&particle, 0.08, 6.0);
-        let after_burst = flower_particle_pose(&particle, 0.45, 6.0);
-        let mid = flower_particle_pose(&particle, 2.5, 6.0);
-        let late = flower_particle_pose(&particle, 5.6, 6.0);
+        let ttl = FLOWER_ANIMATION_TTL.as_secs_f32();
+        let start = flower_particle_pose(&particle, 0.0, ttl);
+        let early = flower_particle_pose(&particle, 0.08, ttl);
+        let after_burst = flower_particle_pose(&particle, 0.45, ttl);
+        let mid = flower_particle_pose(&particle, 2.5, ttl);
+        let late = flower_particle_pose(&particle, ttl - 0.4, ttl);
         assert!(start.opacity < 0.15);
         assert!(early.x > start.x);
         assert!(mid.x > early.x);

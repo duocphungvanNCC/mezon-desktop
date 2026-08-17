@@ -17,6 +17,8 @@ pub(super) struct WalletNotAvailableModal {
     pub(super) title: SharedString,
     pub(super) description: SharedString,
     pub(super) enable_label: SharedString,
+    pub(super) enabling_label: SharedString,
+    pub(super) enabled_message: SharedString,
     pub(super) cancel_label: SharedString,
     enabling: bool,
     _wallet_sub: Subscription,
@@ -28,6 +30,8 @@ impl WalletNotAvailableModal {
         title: SharedString,
         description: SharedString,
         enable_label: SharedString,
+        enabling_label: SharedString,
+        enabled_message: SharedString,
         cancel_label: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -35,8 +39,9 @@ impl WalletNotAvailableModal {
         let wallet_sub = cx.subscribe(&wallet, |this, _, event, cx| match event {
             WalletEvent::Enabled => {
                 this.enabling = false;
+                let enabled_message = this.enabled_message.clone();
                 Shell::global(cx).update(cx, |shell, cx| {
-                    shell.success("Wallet enabled", cx);
+                    shell.success(enabled_message, cx);
                     shell.close_modal(cx);
                 });
             }
@@ -53,6 +58,8 @@ impl WalletNotAvailableModal {
             title,
             description,
             enable_label,
+            enabling_label,
+            enabled_message,
             cancel_label,
             enabling: false,
             _wallet_sub: wallet_sub,
@@ -144,7 +151,7 @@ impl Render for WalletNotAvailableModal {
                             .text_color(white())
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .child(if enabling {
-                                SharedString::from("Enabling…")
+                                self.enabling_label.clone()
                             } else {
                                 self.enable_label.clone()
                             })

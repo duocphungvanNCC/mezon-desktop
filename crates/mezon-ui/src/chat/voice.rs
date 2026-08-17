@@ -13,8 +13,8 @@ use mezon_store::{
     DeviceMenuKind, DisplayedFlower, DisplayedReaction, FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE,
     FLOWER_SPRITE_COUNT, FlowerParticle, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
     PermissionStore, Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember,
-    VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, can_afford, flower_particle_pose,
-    flower_price,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
+    flower_particle_pose,
 };
 
 use crate::ChatLayout;
@@ -1232,18 +1232,14 @@ fn reactions_overlay(
     )
 }
 
-fn flower_burst(flower: &DisplayedFlower, theme: &Theme, locale: &str) -> AnyElement {
-    let label = SharedString::from(
-        mezon_i18n::t(locale, "channelVoice.giveFlowerGiven")
-            .replace("{{giver}}", &flower.giver_name)
-            .replace("{{receiver}}", &flower.receiver_name),
-    );
-    let id = flower.timestamp.unsigned_abs();
+fn flower_burst(flower: &DisplayedFlower, theme: &Theme) -> AnyElement {
+    let label = flower.label.clone();
     let duration = FLOWER_ANIMATION_TTL;
     let particles = flower.particles.clone();
     let ttl = duration.as_secs_f32();
     let colors = flower_burst_colors(theme);
     let started_at = flower.started_at;
+    let delta = (started_at.elapsed().as_secs_f32() / ttl).clamp(0.0, 1.0);
 
     div()
         .absolute()
@@ -1261,7 +1257,7 @@ fn flower_burst(flower: &DisplayedFlower, theme: &Theme, locale: &str) -> AnyEle
                         bounds,
                         started_at.elapsed().as_secs_f32(),
                         ttl,
-                        &particles,
+                        particles.as_slice(),
                         &colors,
                         window,
                         cx,
@@ -1275,12 +1271,13 @@ fn flower_burst(flower: &DisplayedFlower, theme: &Theme, locale: &str) -> AnyEle
         .child(
             div()
                 .absolute()
-                .bottom(relative(0.15))
+                .bottom(relative(0.15 + delta))
                 .left_0()
                 .right_0()
                 .flex()
                 .justify_center()
                 .px_4()
+                .opacity(reaction_opacity(delta))
                 .child(
                     div()
                         .px_3()
@@ -1295,14 +1292,6 @@ fn flower_burst(flower: &DisplayedFlower, theme: &Theme, locale: &str) -> AnyEle
                         .text_color(theme.tokens.text_tooltip_app)
                         .text_center()
                         .child(label),
-                )
-                .with_animation(
-                    ("voice-flower-label", id),
-                    Animation::new(duration),
-                    move |el, delta| {
-                        el.bottom(relative(0.15 + delta))
-                            .opacity(reaction_opacity(delta))
-                    },
                 ),
         )
         .into_any_element()
@@ -1396,7 +1385,7 @@ fn paint_flower_sprite(
     let _ = window.paint_svg(bounds, icon.clone(), None, transform, color, cx);
 }
 
-fn flowers_overlay(store: &VoiceStore, theme: &Theme, locale: &str) -> Option<AnyElement> {
+fn flowers_overlay(store: &VoiceStore, theme: &Theme) -> Option<AnyElement> {
     let flowers = store.displayed_flowers();
     if flowers.is_empty() {
         return None;
@@ -1406,11 +1395,7 @@ fn flowers_overlay(store: &VoiceStore, theme: &Theme, locale: &str) -> Option<An
             .absolute()
             .inset_0()
             .overflow_hidden()
-            .children(
-                flowers
-                    .iter()
-                    .map(|flower| flower_burst(flower, theme, locale)),
-            )
+            .children(flowers.iter().map(|flower| flower_burst(flower, theme)))
             .into_any_element(),
     )
 }
@@ -1552,7 +1537,7 @@ fn render_in_call(
     let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
     let reactions = reactions_overlay(voice.read(cx), emoji_cache);
     let theme = cx.theme();
-    let flowers = flowers_overlay(voice.read(cx), theme, locale);
+    let flowers = flowers_overlay(voice.read(cx), theme);
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
             SharedString::from(mezon_i18n::t(locale, "channelVoice.connecting").to_string()),
@@ -2613,9 +2598,7 @@ fn participant_menu_trigger(
 fn flower_menu_disabled(cx: &App) -> bool {
     WalletStore::try_global(cx).is_some_and(|wallet| {
         let wallet = wallet.read(cx);
-        wallet.is_available()
-            && (wallet.pending_give_flower()
-                || !can_afford(wallet.balance().unwrap_or(""), flower_price()))
+        wallet.is_available() && flower_menu_blocked(wallet.pending_give_flower(), wallet.balance())
     })
 }
 

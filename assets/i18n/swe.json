@@ -3186,6 +3186,8 @@
   "message.wallet.cancel": "Avbryt",
   "message.wallet.descNotAvailable": "För att fullfölja transaktion behöver du aktivera din plånbok.",
   "message.wallet.enableWallet": "Aktivera Plånbok",
+  "message.wallet.enabled": "Plånbok aktiverad",
+  "message.wallet.enabling": "Aktiverar…",
   "message.wallet.notAvailable": "Plånbok inte tillgänglig",
   "messageBox.ephemeralMessage": "Tillfälligt meddelande till {{username}}...",
   "messageBox.mentionCategories.commands": "KOMMANDON",

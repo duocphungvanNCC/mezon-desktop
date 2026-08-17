@@ -3193,6 +3193,8 @@
   "message.wallet.cancel": "Отменить",
   "message.wallet.descNotAvailable": "Для завершения перевода необходимо активировать кошелёк.",
   "message.wallet.enableWallet": "Активировать кошелёк",
+  "message.wallet.enabled": "Кошелёк активирован",
+  "message.wallet.enabling": "Активация…",
   "message.wallet.notAvailable": "Кошелёк недоступен",
   "messageBox.ephemeralMessage": "Временное сообщение для {{username}}...",
   "messageBox.mentionCategories.commands": "Команды",

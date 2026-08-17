@@ -3196,6 +3196,8 @@
   "message.wallet.cancel": "Cancelar",
   "message.wallet.descNotAvailable": "Para completar una transacción de transferencia, necesitas activar tu billetera.",
   "message.wallet.enableWallet": "Activar Billetera",
+  "message.wallet.enabled": "Billetera activada",
+  "message.wallet.enabling": "Activando…",
   "message.wallet.notAvailable": "Billetera no disponible",
   "messageBox.addReaction": "Añadir reacción:",
   "messageBox.ephemeralMessage": "Mensaje efímero para {{username}}...",

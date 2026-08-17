@@ -3186,6 +3186,8 @@
   "message.wallet.cancel": "キャンセル",
   "message.wallet.descNotAvailable": "トランザクションを完了するには、ウォレットを有効化する必要があります。",
   "message.wallet.enableWallet": "ウォレットを有効化",
+  "message.wallet.enabled": "ウォレットを有効化しました",
+  "message.wallet.enabling": "有効化中…",
   "message.wallet.notAvailable": "ウォレットが利用できません",
   "messageBox.ephemeralMessage": "{{username}}への一時的メッセージ...",
   "messageBox.mentionCategories.commands": "コマンド",

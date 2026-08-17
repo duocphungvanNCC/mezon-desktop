@@ -3320,6 +3320,8 @@
   "message.wallet.cancel": "Cancel",
   "message.wallet.descNotAvailable": "To complete a transfer transaction, you need enable your wallet.",
   "message.wallet.enableWallet": "Enable Wallet",
+  "message.wallet.enabled": "Wallet enabled",
+  "message.wallet.enabling": "Enabling…",
   "message.wallet.notAvailable": "Wallet not available",
   "messageBox.ephemeralMessage": "Ephemeral message to {{username}}...",
   "messageBox.mentionCategories.commands": "COMMANDS",

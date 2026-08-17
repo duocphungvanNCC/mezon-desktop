@@ -496,9 +496,15 @@ impl WalletStore {
                 ),
             };
             this.update(cx, |this, cx| {
-                if this.reset_generation != generation
-                    || this.enable_generation != enable_generation
-                {
+                if this.reset_generation != generation {
+                    if report_failure {
+                        cx.emit(WalletEvent::EnableFailed {
+                            message: "Wallet enable was cancelled".to_string(),
+                        });
+                    }
+                    return;
+                }
+                if this.enable_generation != enable_generation {
                     return;
                 }
                 if this.enabling_user.as_deref() == Some(user_id.as_str()) {
