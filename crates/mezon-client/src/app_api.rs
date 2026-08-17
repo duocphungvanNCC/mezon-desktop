@@ -28,6 +28,19 @@ pub fn sanitize_upload_filename(name: &str) -> String {
         .collect()
 }
 
+pub fn upload_attachment_type(filetype: &str) -> &'static str {
+    let lower = filetype.to_ascii_lowercase();
+    if lower.contains("image") {
+        "image"
+    } else if lower.contains("video") {
+        "video"
+    } else if lower.contains("audio") {
+        "audio"
+    } else {
+        "doc"
+    }
+}
+
 fn clamp_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -1709,6 +1722,7 @@ impl AppApi {
             thumbnail,
         } = file;
         let upload_name = sanitize_upload_filename(&filename);
+        let upload_type = upload_attachment_type(&filetype);
         let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
@@ -1722,7 +1736,7 @@ impl AppApi {
                 .transport
                 .multipart_upload_attachment_file_start(mezon_proto::api::UploadAttachmentRequest {
                     filename: upload_name.clone(),
-                    filetype: filetype.clone(),
+                    filetype: upload_type.to_string(),
                     size,
                     width,
                     height,
@@ -1744,14 +1758,14 @@ impl AppApi {
                     part_urls: started.urls,
                     ranges,
                     path,
-                    content_type: filetype.clone(),
+                    content_type: filetype,
                     filename: started.filename,
                 },
             )
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&upload_name, &filetype, size, width, height)
+                .upload_attachment_file(&upload_name, upload_type, size, width, height)
                 .await?;
             let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
             (
@@ -1767,7 +1781,7 @@ impl AppApi {
                 filename,
                 size,
                 url,
-                filetype,
+                filetype: upload_type.to_string(),
                 width,
                 height,
                 thumbnail: thumbnail_url,
@@ -2222,15 +2236,16 @@ impl AppApi {
             (0, 0)
         };
 
+        let upload_type = upload_attachment_type(&filetype);
         let url = self
-            .upload_bytes(&upload_name, &filetype, size, width, height, data)
+            .upload_bytes(&upload_name, upload_type, size, width, height, data)
             .await?;
 
         Ok(mezon_proto::api::MessageAttachment {
             filename,
             size,
             url,
-            filetype,
+            filetype: upload_type.to_string(),
             width,
             height,
             thumbnail: String::new(),
@@ -2760,7 +2775,24 @@ impl AppApi {
 mod tests {
     use super::{
         MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges, sanitize_upload_filename,
+        upload_attachment_type,
     };
+
+    #[test]
+    fn everything_that_is_not_media_uploads_as_a_doc() {
+        assert_eq!(upload_attachment_type("image/png"), "image");
+        assert_eq!(upload_attachment_type("video/mp4"), "video");
+        assert_eq!(upload_attachment_type("audio/webm"), "audio");
+        assert_eq!(upload_attachment_type("application/pdf"), "doc");
+        assert_eq!(upload_attachment_type("text/csv"), "doc");
+        assert_eq!(upload_attachment_type(""), "doc");
+        assert_eq!(
+            upload_attachment_type(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            "doc"
+        );
+    }
 
     #[test]
     fn upload_filename_folds_every_non_ascii_char() {
