@@ -35,8 +35,10 @@ use livekit::webrtc::video_frame::I420Buffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::{Condvar, Mutex};
 
-pub use audio::AudioFormat;
-pub use camera::{CameraDeviceInfo, enumerate_cameras};
+pub use audio::{AudioFormat, AudioIo, DeviceResetKind, PlaybackMixer};
+pub use camera::{
+    CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
+};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use stream_playback::StreamAudioOutput;
@@ -52,11 +54,10 @@ pub use screen_targets::{
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
-pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into};
+pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key};
 
-use crate::camera::CameraController;
 use crate::screen::ScreenStopper;
-use crate::video::{local_camera_key, local_screen_key, track_frame_key};
+use crate::video::{local_screen_key, track_frame_key};
 
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;

@@ -276,6 +276,30 @@ impl AudioPlayer {
         }
     }
 
+    pub fn play_looping(&self) {
+        if let Some(data) = self.data.borrow().as_ref() {
+            if self.player.empty() {
+                match data {
+                    Playable::Pcm(data) => self.player.append(
+                        SharedSamplesSource {
+                            samples: Arc::clone(&data.samples),
+                            position: 0,
+                            channels: data.channels,
+                            sample_rate: data.sample_rate,
+                            duration: data.duration,
+                        }
+                        .repeat_infinite(),
+                    ),
+                    Playable::Stream(stream) => {
+                        self.player.append(PcmStreamSource::new(Arc::clone(stream)))
+                    }
+                }
+            }
+            self.started.set(true);
+            self.player.play();
+        }
+    }
+
     pub fn pause(&self) {
         self.player.pause();
     }

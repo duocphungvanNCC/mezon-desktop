@@ -6,8 +6,8 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, InVoiceInfo, PinnedMessagesStore, Settings,
-    StreamStore, ThreadsStore,
+    CallPeer, CallStore, ChannelId, DirectKind, DirectMessageStore, InVoiceInfo,
+    PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
@@ -258,6 +258,8 @@ impl ChannelHeader {
             ("hdr-files", IconName::FileIcon),
         ];
         let dm_actions: &[(&str, IconName)] = &[
+            ("hdr-call", IconName::IconPhoneDM),
+            ("hdr-video-call", IconName::IconMeetDM),
             ("hdr-members", IconName::MemberList),
             ("hdr-pin", IconName::PinRight),
         ];
@@ -620,6 +622,35 @@ impl ChannelHeader {
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
+            if id == "hdr-call" || id == "hdr-video-call" {
+                let video = id == "hdr-video-call";
+                let tooltip = if video {
+                    "Start video call"
+                } else {
+                    "Start voice call"
+                };
+                let button = div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(bg_hover))
+                    .tooltip(Tooltip::text(tooltip))
+                    .occlude()
+                    .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
+                    .on_click(move |_, _, cx| {
+                        if let Some(peer) = current_dm_call_peer(cx) {
+                            CallStore::global(cx)
+                                .update(cx, |store, cx| store.start_call(peer, video, cx));
+                        }
+                    });
+                buttons.push(button.into_any_element());
+                continue;
+            }
             if id == "hdr-timeline" {
                 if !timeline_action {
                     continue;
@@ -901,6 +932,27 @@ pub struct ChatHeader {
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
     _group_members_observe: Subscription,
+}
+
+fn current_dm_call_peer(cx: &App) -> Option<CallPeer> {
+    let crate::router::Route::DirectMessage { direct_id, .. } =
+        crate::router::Router::global(cx).read(cx).route()
+    else {
+        return None;
+    };
+    let store = DirectMessageStore::try_global(cx)?;
+    let store = store.read(cx);
+    let dm = store.find(direct_id)?;
+    if dm.kind != DirectKind::Dm {
+        return None;
+    }
+    let peer_user_id = dm.peer_user_id?;
+    Some(CallPeer {
+        user_id: peer_user_id.get(),
+        channel_id: dm.id.get(),
+        name: dm.label.clone(),
+        avatar: (!dm.avatar.is_empty()).then(|| dm.avatar.clone()),
+    })
 }
 
 impl ChatHeader {
