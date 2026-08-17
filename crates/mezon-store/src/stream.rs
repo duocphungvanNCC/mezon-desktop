@@ -183,11 +183,10 @@ impl StreamStore {
         if !self.show_chat {
             return;
         }
-        let viewing_session = matches!(
-            active,
-            Some((ChannelType::Stream, channel_id)) if self.is_session_channel(channel_id)
-        );
-        if viewing_session && (self.is_joined() || self.is_joining()) {
+        let Some((ChannelType::Stream, channel_id)) = active else {
+            return;
+        };
+        if self.is_session_channel(channel_id) && (self.is_joined() || self.is_joining()) {
             return;
         }
         self.show_chat = false;
