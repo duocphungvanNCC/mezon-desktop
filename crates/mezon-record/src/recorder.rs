@@ -19,6 +19,7 @@ const REMOTE_STALL: Duration = Duration::from_millis(120);
 const VIDEO_STALL: Duration = Duration::from_millis(750);
 const WORKER_IDLE_POLL: Duration = Duration::from_millis(5);
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
+const SINK_LOCK_WAIT: Duration = Duration::from_millis(20);
 
 pub struct RecorderConfig {
     pub path: PathBuf,
@@ -29,6 +30,7 @@ pub struct RecorderConfig {
 pub struct RecordStats {
     pub elapsed: Duration,
     pub dropped_audio_chunks: u64,
+    pub dropped_video_frames: u64,
     pub video_frames: u64,
     pub video_stalled: bool,
 }
@@ -45,6 +47,7 @@ struct Shared {
     audio_frames: AtomicU64,
     video_frames: AtomicU64,
     dropped: AtomicU64,
+    dropped_video: AtomicU64,
     last_video_ns: AtomicU64,
     failed: AtomicBool,
     stop: AtomicBool,
@@ -102,7 +105,10 @@ impl VideoTap {
             return;
         }
 
-        let mut guard = self.shared.sink.lock();
+        let Some(mut guard) = self.shared.sink.try_lock_for(SINK_LOCK_WAIT) else {
+            self.shared.dropped_video.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
         let Some(sink) = guard.as_mut() else {
             return;
         };
@@ -127,7 +133,6 @@ pub struct Recorder {
     tx: flume::Sender<AudioChunk>,
     worker: Option<JoinHandle<()>>,
     video: Option<VideoConfig>,
-    started: Instant,
     min_video_gap: Duration,
 }
 
@@ -146,6 +151,7 @@ impl Recorder {
             audio_frames: AtomicU64::new(0),
             video_frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            dropped_video: AtomicU64::new(0),
             last_video_ns: AtomicU64::new(0),
             failed: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -165,7 +171,6 @@ impl Recorder {
             tx,
             worker: Some(worker),
             video: config.video,
-            started: Instant::now(),
             min_video_gap: Duration::from_secs_f64(0.9 / fps as f64),
         })
     }
@@ -175,10 +180,6 @@ impl Recorder {
             tx: self.tx.clone(),
             shared: self.shared.clone(),
         }
-    }
-
-    pub fn video_config(&self) -> Option<VideoConfig> {
-        self.video
     }
 
     pub fn video_tap(&self) -> VideoTap {
@@ -196,20 +197,20 @@ impl Recorder {
     pub fn stats(&self) -> RecordStats {
         let pts = self.shared.audio_pts();
         let last = Duration::from_nanos(self.shared.last_video_ns.load(Ordering::Relaxed));
+        let frames = self.shared.video_frames.load(Ordering::Relaxed);
         RecordStats {
             elapsed: pts,
             dropped_audio_chunks: self.shared.dropped.load(Ordering::Relaxed),
-            video_frames: self.shared.video_frames.load(Ordering::Relaxed),
-            video_stalled: self.video.is_some() && pts.saturating_sub(last) > VIDEO_STALL,
+            dropped_video_frames: self.shared.dropped_video.load(Ordering::Relaxed),
+            video_frames: frames,
+            video_stalled: self.video.is_some()
+                && frames > 0
+                && pts.saturating_sub(last) > VIDEO_STALL,
         }
     }
 
     pub fn failed(&self) -> bool {
         self.shared.failed.load(Ordering::Relaxed)
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
     }
 
     pub fn finish(mut self) -> Result<PathBuf, RecordError> {
@@ -223,11 +224,23 @@ impl Recorder {
         };
         sink.finish()?;
         let part = part_path(&self.path);
-        std::fs::rename(&part, &self.path).map_err(|error| {
-            tracing::error!("could not rename the finished recording: {error}");
-            RecordError::Finish
-        })?;
-        Ok(self.path.clone())
+        if std::fs::rename(&part, &self.path).is_ok() {
+            return Ok(self.path.clone());
+        }
+        match std::fs::copy(&part, &self.path) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&part);
+                Ok(self.path.clone())
+            }
+            Err(error) => {
+                tracing::error!(
+                    "could not move the finished recording to {}: {error}; it stays at {}",
+                    self.path.display(),
+                    part.display()
+                );
+                Ok(part)
+            }
+        }
     }
 }
 

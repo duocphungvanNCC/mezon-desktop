@@ -11,11 +11,14 @@ use crate::sink::{
 };
 
 pub fn is_supported() -> bool {
-    ensure_init().is_ok()
-        && has_element("audioconvert")
-        && has_element("opusenc")
-        && ((has_element("vp8enc") && has_element("webmmux"))
-            || (has_element("x264enc") && has_element("matroskamux")))
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        ensure_init().is_ok()
+            && has_element("audioconvert")
+            && has_element("opusenc")
+            && ((has_element("vp8enc") && has_element("webmmux"))
+                || (has_element("x264enc") && has_element("matroskamux")))
+    })
 }
 
 const EOS_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(10);
@@ -34,11 +37,14 @@ fn ensure_init() -> Result<(), RecordError> {
 }
 
 pub fn file_extension() -> &'static str {
-    if ensure_init().is_ok() && has_element("vp8enc") && has_element("webmmux") {
-        "webm"
-    } else {
-        "mkv"
-    }
+    static EXTENSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    EXTENSION.get_or_init(|| {
+        if ensure_init().is_ok() && has_element("vp8enc") && has_element("webmmux") {
+            "webm"
+        } else {
+            "mkv"
+        }
+    })
 }
 
 pub struct LinuxSink {

@@ -45,7 +45,6 @@ const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
 const REACTION_THROTTLE: Duration = Duration::from_millis(150);
 const RECORDING_TICK_INTERVAL: Duration = Duration::from_secs(1);
-const RECORDING_FLAG_PREFIX: &str = "rec-on:";
 const SOUND_REACTION_VOLUME: f32 = 0.3;
 const SOUND_REACTION_TAIL: Duration = Duration::from_millis(300);
 const SOUND_REACTION_THROTTLE: Duration = Duration::from_millis(500);
@@ -212,6 +211,7 @@ pub struct VoiceStore {
     recording_elapsed: Duration,
     recording_stalled: bool,
     _recording_tick: Option<Task<()>>,
+    _recording_start: Option<Task<()>>,
     _events_task: Option<Task<()>>,
     _reconnect_watch_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
@@ -416,6 +416,7 @@ impl VoiceStore {
             recording_elapsed: Duration::ZERO,
             recording_stalled: false,
             _recording_tick: None,
+            _recording_start: None,
             _events_task: None,
             _reconnect_watch_task: None,
             _link_copied_reset: None,
@@ -762,9 +763,6 @@ impl VoiceStore {
         };
         if let Some(sound_url) = token.strip_prefix("sound:") {
             self.handle_sound_reaction(msg.sender_id.to_string(), sound_url.to_string(), cx);
-            return;
-        }
-        if token.starts_with(RECORDING_FLAG_PREFIX) {
             return;
         }
         let Some(raise) = parse_raise_token(token) else {
@@ -2350,25 +2348,39 @@ impl VoiceStore {
         let window = window_id.map(mezon_voice::RecordWindow::Id).or_else(|| {
             mezon_voice::wayland_record_portal().then_some(mezon_voice::RecordWindow::Portal)
         });
-        match session.start_recording(path, window) {
-            Ok(()) => {
-                self.recording = RecordingState::Recording;
-                self.recording_elapsed = Duration::ZERO;
-                self.recording_stalled = false;
-                self.start_recording_tick(cx);
+        let starter = session.record_starter();
+        let generation = self.session_generation;
+        self.recording = RecordingState::Starting;
+        cx.notify();
+
+        self._recording_start = Some(cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { starter.start(path, window) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_generation != generation {
+                    return;
+                }
+                match started {
+                    Ok(()) => {
+                        this.recording = RecordingState::Recording;
+                        this.recording_elapsed = Duration::ZERO;
+                        this.recording_stalled = false;
+                        this.start_recording_tick(cx);
+                    }
+                    Err(error) => {
+                        tracing::error!("could not start the call recording: {error}");
+                        this.recording = RecordingState::Idle;
+                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
+                            error,
+                        )));
+                    }
+                }
                 cx.notify();
-                Ok(())
-            }
-            Err(error) => {
-                tracing::error!("could not start the call recording: {error}");
-                self.recording = RecordingState::Idle;
-                cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
-                    error.clone(),
-                )));
-                cx.notify();
-                Err(error)
-            }
-        }
+            });
+        }));
+        Ok(())
     }
 
     pub fn request_stop_recording(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -2383,20 +2395,22 @@ impl VoiceStore {
         if self.recording != RecordingState::Idle || self.session.is_none() {
             return;
         }
-        let directory = dirs::download_dir()
-            .or_else(dirs::home_dir)
+        let default_path = self.suggested_recording_path();
+        let directory = default_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let suggested = format!(
-            "mezon-call-{}.{}",
-            chrono::Local::now().format("%Y%m%d-%H%M%S"),
-            mezon_voice::record_file_extension()
-        );
+        let suggested = default_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
         let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
 
         self.recording = RecordingState::Starting;
+        let generation = self.session_generation;
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
+        self._recording_start = Some(cx.spawn(async move |this, cx| {
             let path = match receiver.await {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) => {
@@ -2423,11 +2437,14 @@ impl VoiceStore {
                 }
             };
             let _ = this.update(cx, |this, cx| {
+                if this.session_generation != generation {
+                    tracing::info!("dropping a save dialog that outlived its call");
+                    return;
+                }
                 this.recording = RecordingState::Idle;
                 let _ = this.start_recording_at(path, window_id, cx);
             });
-        })
-        .detach();
+        }));
     }
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
@@ -2844,16 +2861,6 @@ mod tests {
         assert_eq!(parse_raise_token("sound:https://x.mp3"), None);
         assert_eq!(parse_raise_token(":smile:"), None);
         assert_eq!(parse_raise_token(""), None);
-    }
-
-    #[test]
-    fn a_recording_flag_token_is_not_a_raise_or_an_emoji() {
-        use super::RECORDING_FLAG_PREFIX;
-
-        assert_eq!(parse_raise_token("rec-on:123"), None);
-        assert!("rec-on:123".starts_with(RECORDING_FLAG_PREFIX));
-        assert!(!"raising-up:123".starts_with(RECORDING_FLAG_PREFIX));
-        assert!(!"sound:https://x/y.mp3".starts_with(RECORDING_FLAG_PREFIX));
     }
 
     #[test]

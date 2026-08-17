@@ -29,8 +29,6 @@ pub enum PixelData<'a> {
         uv: &'a [u8],
         uv_stride: usize,
     },
-    #[cfg(target_os = "macos")]
-    CvPixelBuffer(*mut std::ffi::c_void),
 }
 
 #[derive(Debug, Clone, Copy)]

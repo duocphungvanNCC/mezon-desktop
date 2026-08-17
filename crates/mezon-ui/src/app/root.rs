@@ -36,21 +36,18 @@ pub struct RootView {
 }
 
 fn surface_recording_toast(
-    _root: &mut RootView,
+    root: &mut RootView,
     _voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
     cx: &mut Context<RootView>,
 ) {
-    let locale_for_event = mezon_store::Settings::try_global(cx)
-        .map(|settings| settings.read(cx).language.clone())
-        .unwrap_or_else(|| "en".to_string());
+    let locale = root.cached_locale.clone();
     let toast = match event {
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
                     crate::components::primitives::ToastKind::Info,
-                    mezon_i18n::t(&locale_for_event, "channelVoice.recordingVideoUnavailable")
-                        .to_string(),
+                    mezon_i18n::t(&locale, "channelVoice.recordingVideoUnavailable").to_string(),
                     cx,
                 )
             });
@@ -58,9 +55,6 @@ fn surface_recording_toast(
         }
         mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
     };
-    let locale = mezon_store::Settings::try_global(cx)
-        .map(|settings| settings.read(cx).language.clone())
-        .unwrap_or_else(|| "en".to_string());
     let (kind, message) = match toast {
         mezon_store::RecordingToast::Saved(path) => (
             crate::components::primitives::ToastKind::Success,

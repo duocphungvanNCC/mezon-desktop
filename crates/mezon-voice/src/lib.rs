@@ -41,7 +41,9 @@ pub use camera::{CameraDeviceInfo, enumerate_cameras};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
-pub use record::{RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordWindow};
+pub use record::{
+    RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordWindow,
+};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -151,7 +153,7 @@ pub struct VoiceSession {
     frame_store: Arc<VideoFrameStore>,
     screen_full_res: Arc<AtomicBool>,
     record_taps: record::RecordTaps,
-    record: Arc<parking_lot::Mutex<Option<record::RecordSession>>>,
+    record: Arc<parking_lot::RwLock<Option<record::RecordSession>>>,
 }
 
 impl VoiceSession {
@@ -203,49 +205,32 @@ impl VoiceSession {
             frame_store,
             screen_full_res,
             record_taps,
-            record: Arc::new(parking_lot::Mutex::new(None)),
+            record: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
-    pub fn start_recording(
-        &self,
-        path: std::path::PathBuf,
-        window: Option<record::RecordWindow>,
-    ) -> Result<(), String> {
-        let mut slot = self.record.lock();
-        if slot.is_some() {
-            return Err("a recording is already running".into());
-        }
-        *slot = Some(record::RecordSession::start(
-            path,
-            self.record_taps.clone(),
-            window,
-        )?);
-        Ok(())
+    pub fn record_starter(&self) -> record::RecordStarter {
+        record::RecordStarter::new(self.record_taps.clone(), self.record.clone())
     }
 
     pub fn take_recording(&self) -> Option<record::RecordSession> {
-        self.record.lock().take()
-    }
-
-    pub fn is_recording(&self) -> bool {
-        self.record.lock().is_some()
+        self.record.write().take()
     }
 
     pub fn recording_stats(&self) -> Option<mezon_record::RecordStats> {
-        self.record.lock().as_ref().map(|session| session.stats())
+        self.record.read().as_ref().map(|session| session.stats())
     }
 
     pub fn recording_video_unavailable(&self) -> bool {
         self.record
-            .lock()
+            .read()
             .as_ref()
             .is_some_and(|session| session.video_unavailable())
     }
 
     pub fn recording_failed(&self) -> bool {
         self.record
-            .lock()
+            .read()
             .as_ref()
             .is_some_and(|session| session.failed())
     }

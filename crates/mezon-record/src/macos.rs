@@ -211,6 +211,26 @@ fn cm_time_from_duration(pts: Duration) -> CmTime {
     }
 }
 
+struct AutoreleasePool(*mut Object);
+
+impl AutoreleasePool {
+    fn new() -> Self {
+        let pool: *mut Object = unsafe {
+            let pool: *mut Object = msg_send![class!(NSAutoreleasePool), alloc];
+            msg_send![pool, init]
+        };
+        Self(pool)
+    }
+}
+
+impl Drop for AutoreleasePool {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let _: () = unsafe { msg_send![self.0, drain] };
+        }
+    }
+}
+
 struct AudioFormatDescription(*mut c_void);
 
 impl Drop for AudioFormatDescription {
@@ -444,8 +464,6 @@ impl MacSink {
         frame: &VideoFrameRef<'_>,
     ) -> Option<(*mut c_void, bool)> {
         match frame.data {
-            PixelData::CvPixelBuffer(buffer) if !buffer.is_null() => Some((buffer, false)),
-            PixelData::CvPixelBuffer(_) => None,
             PixelData::Nv12 {
                 y,
                 y_stride,
@@ -560,6 +578,7 @@ unsafe fn copy_plane(
 
 impl RecordSink for MacSink {
     fn push_audio(&mut self, pcm: &[i16], pts: Duration) -> Result<(), RecordError> {
+        let _pool = AutoreleasePool::new();
         if self.writer_failed() {
             return Err(RecordError::Encode);
         }
@@ -623,6 +642,7 @@ impl RecordSink for MacSink {
     }
 
     fn push_video(&mut self, frame: VideoFrameRef<'_>, pts: Duration) -> Result<(), RecordError> {
+        let _pool = AutoreleasePool::new();
         if self.video.is_none() || self.video_input.is_none() || self.adaptor.is_none() {
             return Ok(());
         }
@@ -669,6 +689,7 @@ impl RecordSink for MacSink {
     }
 
     fn finish(self: Box<Self>) -> Result<(), RecordError> {
+        let _pool = AutoreleasePool::new();
         unsafe {
             if let Some(input) = &self.video_input {
                 let _: () = msg_send![**input, markAsFinished];
