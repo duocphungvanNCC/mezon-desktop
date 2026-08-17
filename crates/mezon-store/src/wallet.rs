@@ -14,12 +14,20 @@ use mmn_client::{
 use mezon_client::Session;
 
 use crate::AuthState;
+use crate::Settings;
 use crate::cache::Freshness;
 use crate::config::{AppConfig, INDEXER_CHAIN_ID};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::wallet_persist::{self, PersistedWalletState};
 
 const GIVE_COFFEE_AMOUNT: i64 = 10_000;
+
+fn wallet_message(cx: &App, key: &'static str) -> String {
+    let locale = Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default();
+    mezon_i18n::t(&locale, key).to_string()
+}
 
 fn id_token_valid_for(jwt: &str) -> Option<i64> {
     mezon_client::jwt_expires_at(jwt).map(|exp| exp as i64 - mezon_client::server_now_secs() as i64)
@@ -441,7 +449,7 @@ impl WalletStore {
             tracing::error!("wallet: enable skipped, mmn/zk clients are not configured");
             if force {
                 cx.emit(WalletEvent::EnableFailed {
-                    message: "Wallet is not configured".to_string(),
+                    message: wallet_message(cx, "message.wallet.notConfigured"),
                 });
             }
             return;
@@ -499,7 +507,7 @@ impl WalletStore {
                 if this.reset_generation != generation {
                     if report_failure {
                         cx.emit(WalletEvent::EnableFailed {
-                            message: "Wallet enable was cancelled".to_string(),
+                            message: wallet_message(cx, "message.wallet.enableCancelled"),
                         });
                     }
                     return;

@@ -906,13 +906,12 @@ impl Shell {
     }
 
     pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus_handle = self.close_modal(cx);
-        if let Some(focus_handle) = focus_handle {
+        if let Some(focus_handle) = self.pop_modal(cx) {
             window.focus(&focus_handle, cx);
         }
     }
 
-    pub fn close_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+    fn pop_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
         self.modal.take()?;
         let focus = if let Some((underlay, fullscreen, command_palette_open, focus_handle)) =
             self.modal_underlay.take()
@@ -927,14 +926,18 @@ impl Shell {
             None
         };
         cx.notify();
-        if let Some(focus_handle) = focus.clone()
-            && let Some(window_handle) =
-                crate::app::main_window::handle(cx).or_else(|| cx.active_window())
-        {
-            let _ = cx.update_window(window_handle, |_, window, cx| {
-                window.focus(&focus_handle, cx);
-            });
-        }
+        focus
+    }
+
+    pub fn close_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+        let focus = self
+            .modal_underlay
+            .take()
+            .and_then(|(_, _, _, focus_handle)| focus_handle);
+        self.modal.take();
+        self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        cx.notify();
         focus
     }
 

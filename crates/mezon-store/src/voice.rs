@@ -29,10 +29,10 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_ANIMATION_TTL, FlowerParticle, GiveFlowerDeny, VoiceInteractiveEventType,
-    build_flower_transfer, can_give_flower, flower_effect_key, flower_event_from_payload,
-    flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
-    serialize_flower_interactive_params,
+    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny,
+    VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
+    flower_event_from_payload, flower_particles, flower_price, format_flower_amount,
+    is_uncertain_transfer_error, serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -198,6 +198,7 @@ pub struct VoiceStore {
     join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
     last_flower_send: Option<Instant>,
+    last_flower_effect_at: Option<Instant>,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
@@ -392,6 +393,7 @@ impl VoiceStore {
             join_sound_baseline_set: false,
             last_reaction_send: None,
             last_flower_send: None,
+            last_flower_effect_at: None,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
@@ -1090,22 +1092,18 @@ impl VoiceStore {
         let RealtimeEvent::VoiceInteractive(msg) = event else {
             return;
         };
-        let Some((channel_id, clan_id)) = self.connection.connected_channel() else {
+        let Some((channel_id, _)) = self.connection.connected_channel() else {
             return;
         };
-        let (Ok(joined_channel), Ok(joined_clan)) =
-            (channel_id.parse::<i64>(), clan_id.parse::<i64>())
-        else {
+        let Ok(joined_channel) = channel_id.parse::<i64>() else {
             return;
         };
         let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
             msg.event_type,
             msg.user_id,
             msg.voice_channel_id,
-            msg.clan_id,
             &msg.params,
             joined_channel,
-            joined_clan,
         ) else {
             return;
         };
@@ -1127,6 +1125,14 @@ impl VoiceStore {
         {
             return;
         }
+        let now = Instant::now();
+        if self
+            .last_flower_effect_at
+            .is_some_and(|last| now.duration_since(last) < FLOWER_RATE_LIMIT)
+        {
+            return;
+        }
+        self.last_flower_effect_at = Some(now);
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
@@ -1754,6 +1760,7 @@ impl VoiceStore {
             .unwrap_or_default();
         let timestamp = mezon_client::server_now_secs() as i64 * 1000;
         let params = serialize_flower_interactive_params(&identity, timestamp);
+        let gift_channel = channel_id.clone();
         let request = build_flower_transfer(
             local_id.clone(),
             sender_username,
@@ -1803,7 +1810,13 @@ impl VoiceStore {
                         )
                     });
                     card.detach();
-                    this.show_flower_effect(local_id, identity, timestamp, cx);
+                    let still_in_room = this
+                        .connection
+                        .connected_channel()
+                        .is_some_and(|(channel, _)| channel == gift_channel);
+                    if still_in_room {
+                        this.show_flower_effect(local_id, identity, timestamp, cx);
+                    }
                 })
                 .ok();
                 if let Err(error) = api
@@ -2687,6 +2700,7 @@ impl VoiceStore {
         self.displayed_flowers.clear();
         self.last_emoji_at = None;
         self.last_flower_send = None;
+        self.last_flower_effect_at = None;
         self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;

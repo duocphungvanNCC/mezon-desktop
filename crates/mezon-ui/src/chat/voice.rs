@@ -1355,7 +1355,7 @@ fn paint_flower_burst(
         let position = point(origin.x + px(pose.x * unit), origin.y + px(pose.y * unit));
         let slot = (particle.palette as usize) % colors.len();
         let color = colors[slot].opacity(pose.opacity);
-        let size = particle.size * pose.scale;
+        let size = (particle.size * pose.scale).round().max(1.0);
         let icon =
             SharedString::from(FLOWER_SPRITES[particle.sprite as usize % FLOWER_SPRITES.len()]);
         paint_flower_sprite(window, position, size, pose.spin, color, &icon, cx);

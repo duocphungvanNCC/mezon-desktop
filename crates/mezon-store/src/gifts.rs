@@ -196,8 +196,9 @@ pub fn can_give_flower(
         return Err(GiveFlowerDeny::RateLimited);
     }
     match balance {
+        None => Ok(()),
         Some(value) if can_afford(value, flower_price()) => Ok(()),
-        _ => Err(GiveFlowerDeny::Insufficient),
+        Some(_) => Err(GiveFlowerDeny::Insufficient),
     }
 }
 
@@ -261,15 +262,13 @@ pub fn flower_event_from_payload(
     event_type: i32,
     giver_id: i64,
     voice_channel_id: i64,
-    clan_id: i64,
     params: &str,
     joined_channel_id: i64,
-    joined_clan_id: i64,
 ) -> Option<(String, String, i64, String)> {
     if VoiceInteractiveEventType::from_i32(event_type) != Some(VoiceInteractiveEventType::Gift) {
         return None;
     }
-    if voice_channel_id != joined_channel_id || clan_id != joined_clan_id {
+    if voice_channel_id != joined_channel_id {
         return None;
     }
     let parsed = parse_flower_interactive_params(params)?;
@@ -368,10 +367,7 @@ mod tests {
             can_give_flower(false, true, false, None, now, Some("0")),
             Err(GiveFlowerDeny::Insufficient)
         );
-        assert_eq!(
-            can_give_flower(false, true, false, None, now, None),
-            Err(GiveFlowerDeny::Insufficient)
-        );
+        assert_eq!(can_give_flower(false, true, false, None, now, None), Ok(()));
         assert!(!flower_menu_blocked(false, None));
         assert!(flower_menu_blocked(true, None));
         assert!(flower_menu_blocked(false, Some("0")));
@@ -424,42 +420,25 @@ mod tests {
     #[test]
     fn flower_event_from_payload_filters_channel_and_type() {
         let params = serialize_flower_interactive_params("20", 99);
-        let applied = flower_event_from_payload(
-            VoiceInteractiveEventType::Gift as i32,
-            10,
-            2,
-            1,
-            &params,
-            2,
-            1,
-        )
-        .expect("apply");
+        let applied =
+            flower_event_from_payload(VoiceInteractiveEventType::Gift as i32, 10, 2, &params, 2)
+                .expect("apply");
         assert_eq!(applied.0, "10");
         assert_eq!(applied.1, "20");
         assert_eq!(applied.2, 99);
         assert_eq!(applied.3, flower_effect_key("10", "20", 99));
         assert!(
-            flower_event_from_payload(
-                VoiceInteractiveEventType::Gift as i32,
-                10,
-                2,
-                1,
-                &params,
-                3,
-                1
-            )
-            .is_none()
+            flower_event_from_payload(VoiceInteractiveEventType::Gift as i32, 10, 2, &params, 3,)
+                .is_none()
         );
-        assert!(flower_event_from_payload(0, 10, 2, 1, &params, 2, 1).is_none());
+        assert!(flower_event_from_payload(0, 10, 2, &params, 2).is_none());
         assert!(
             flower_event_from_payload(
                 VoiceInteractiveEventType::Recording as i32,
                 10,
                 2,
-                1,
                 &params,
                 2,
-                1
             )
             .is_none()
         );
@@ -468,10 +447,8 @@ mod tests {
                 VoiceInteractiveEventType::AppKahoot as i32,
                 10,
                 2,
-                1,
                 &params,
                 2,
-                1
             )
             .is_none()
         );
