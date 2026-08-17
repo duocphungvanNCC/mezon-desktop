@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, Entity, Focusable, FontWeight, InteractiveElement, PathPromptOptions,
-    SharedString, StatefulInteractiveElement, Task, Window, deferred, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb,
+    App, Context, Entity, Focusable, FontWeight, InteractiveElement, ListAlignment, ListState,
+    PathPromptOptions, SharedString, StatefulInteractiveElement, Task, Window, deferred, div, img,
+    linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
 };
 use mezon_store::{
     ChannelList, ClanId, ClanList, ClanMembersStore, OnboardingAnswer, OnboardingContent,
@@ -16,6 +16,7 @@ use crate::components::primitives::{
     UnsavedChangesBar, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::theme::theme_is_light;
 
 use super::onboarding_modal;
 
@@ -96,17 +97,24 @@ pub struct OnboardingSettingPage {
     settings: Entity<Settings>,
     enabled: bool,
     loading: bool,
+    load_error: Option<String>,
     saving: bool,
     setup_open: bool,
     page: Page,
     questions: Vec<QuestionDraft>,
+    question_list: ListState,
     missions: Vec<MissionDraft>,
+    mission_list: ListState,
     resources: Vec<ResourceDraft>,
+    resource_list: ListState,
     original_ids: Vec<i64>,
     dirty: bool,
     channels_expanded: bool,
     editor: Option<Editor>,
-    _task: Option<Task<()>>,
+    editor_generation: u64,
+    _fetch_task: Option<Task<()>>,
+    _mutation_task: Option<Task<()>>,
+    _upload_task: Option<Task<()>>,
 }
 
 impl OnboardingSettingPage {
@@ -277,24 +285,40 @@ impl OnboardingSettingPage {
             settings,
             enabled,
             loading: true,
+            load_error: None,
             saving: false,
             setup_open: false,
             page: Page::Main,
             questions: Vec::new(),
+            question_list: ListState::new(0, ListAlignment::Top, px(120.0))
+                .smooth_line_scroll()
+                .suppress_hover_while_scrolling(),
             missions: Vec::new(),
+            mission_list: ListState::new(0, ListAlignment::Top, px(100.0))
+                .smooth_line_scroll()
+                .suppress_hover_while_scrolling(),
             resources: Vec::new(),
+            resource_list: ListState::new(0, ListAlignment::Top, px(100.0))
+                .smooth_line_scroll()
+                .suppress_hover_while_scrolling(),
             original_ids: Vec::new(),
             dirty: false,
             channels_expanded: false,
             editor: None,
-            _task: None,
+            editor_generation: 0,
+            _fetch_task: None,
+            _mutation_task: None,
+            _upload_task: None,
         };
         this.fetch(cx);
         this
     }
 
     pub fn release(&mut self) {
-        self._task.take();
+        self._fetch_task.take();
+        self._mutation_task.take();
+        self._upload_task.take();
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = None;
     }
 
@@ -303,26 +327,43 @@ impl OnboardingSettingPage {
     }
 
     pub fn should_show_save_bar(&self) -> bool {
-        self.enabled && self.dirty && !self.setup_open && !self.saving
+        self.enabled && self.dirty && !self.setup_open && self.editor.is_none() && !self.saving
     }
 
     fn locale(&self, cx: &App) -> String {
         self.settings.read(cx).language.clone()
     }
 
+    fn list_can_consume_scroll(state: &ListState, delta_y: gpui::Pixels) -> bool {
+        if delta_y < px(0.0) {
+            !matches!(state.is_scrolled_to_end(), Some(true))
+        } else if delta_y > px(0.0) {
+            let offset = state.logical_scroll_top();
+            offset.item_ix > 0 || offset.offset_in_item > px(0.0)
+        } else {
+            false
+        }
+    }
+
     fn fetch(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
+        self.load_error = None;
+        self.editor_generation = self.editor_generation.wrapping_add(1);
+        self.editor = None;
         let clan_id = self.clan_id;
         let task = self
             .clan_list
             .update(cx, |store, cx| store.fetch_onboarding(clan_id, cx));
-        self._task = Some(cx.spawn(async move |this, cx| {
+        self._fetch_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
                     Ok(items) => this.apply_items(items),
-                    Err(error) => tracing::error!("fetch onboarding failed: {error}"),
+                    Err(error) => {
+                        tracing::error!("fetch onboarding failed: {error}");
+                        this.load_error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -370,15 +411,17 @@ impl OnboardingSettingPage {
                 _ => {}
             }
         }
+        self.question_list.reset(self.questions.len());
+        self.mission_list.reset(self.missions.len());
+        self.resource_list.reset(self.resources.len());
         self.dirty = false;
     }
 
-    fn ensure_question_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn ensure_question_input(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let locale = self.locale(cx);
-        for question in &mut self.questions {
-            if question.title_input.is_some() {
-                continue;
-            }
+        if let Some(question) = self.questions.get_mut(index)
+            && question.title_input.is_none()
+        {
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(mezon_i18n::t(
@@ -414,13 +457,17 @@ impl OnboardingSettingPage {
                 .height(px(46.0))
         });
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
+        let question_index = self.questions.len();
         self.questions.push(QuestionDraft {
             id: None,
             title: String::new(),
             answers: Vec::new(),
-            expanded: false,
+            expanded: true,
             title_input: Some(input),
         });
+        self.question_list.splice(question_index..question_index, 1);
+        self.question_list.scroll_to_end();
+        self.dirty = true;
         cx.notify();
     }
 
@@ -431,8 +478,11 @@ impl OnboardingSettingPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(question_draft) = self.questions.get(question) else {
+            return;
+        };
         let locale = self.locale(cx);
-        let existing = answer.and_then(|index| self.questions[question].answers.get(index));
+        let existing = answer.and_then(|index| question_draft.answers.get(index));
         let title = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(mezon_i18n::t(
@@ -459,6 +509,7 @@ impl OnboardingSettingPage {
         }
         cx.observe(&title, |_, _, cx| cx.notify()).detach();
         cx.observe(&description, |_, _, cx| cx.notify()).detach();
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = Some(Editor::Answer {
             question,
             answer,
@@ -497,6 +548,7 @@ impl OnboardingSettingPage {
             .first()
             .map(|(id, _)| *id)
             .unwrap_or(0);
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = Some(Editor::Mission {
             index,
             title,
@@ -545,6 +597,7 @@ impl OnboardingSettingPage {
         }
         cx.observe(&title, |_, _, cx| cx.notify()).detach();
         cx.observe(&description, |_, _, cx| cx.notify()).detach();
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = Some(Editor::Resource {
             index,
             title,
@@ -567,18 +620,29 @@ impl OnboardingSettingPage {
     }
 
     fn cancel_setup(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
         self.setup_open = false;
         self.page = Page::Main;
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = None;
         self.fetch(cx);
     }
 
     fn reset_changes(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         self.editor = None;
         self.fetch(cx);
     }
 
     fn save_all(&mut self, enable_after: bool, cx: &mut Context<Self>) {
+        if self.loading || self.load_error.is_some() || self.saving {
+            return;
+        }
         self.sync_question_titles(cx);
         if self
             .questions
@@ -691,7 +755,7 @@ impl OnboardingSettingPage {
             })
         });
         let locale = self.locale(cx);
-        self._task = Some(cx.spawn(async move |this, cx| {
+        self._mutation_task = Some(cx.spawn(async move |this, cx| {
             let mut result = Ok(());
             if let Some(task) = create_task {
                 result = task.await.map(|_| ());
@@ -737,7 +801,10 @@ impl OnboardingSettingPage {
                         });
                         this.fetch(cx);
                     }
-                    Err(error) => Shell::global(cx).update(cx, |shell, cx| shell.error(error, cx)),
+                    Err(error) => {
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(error, cx));
+                        this.fetch(cx);
+                    }
                 }
                 cx.notify();
             });
@@ -751,7 +818,7 @@ impl OnboardingSettingPage {
         let task = self.clan_list.update(cx, |store, cx| {
             store.set_onboarding_enabled(clan_id, false, cx)
         });
-        self._task = Some(cx.spawn(async move |this, cx| {
+        self._mutation_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.saving = false;
@@ -764,9 +831,14 @@ impl OnboardingSettingPage {
         }));
     }
 
-    fn button(label: impl Into<SharedString>, primary: bool, _theme: &Theme) -> Button {
+    fn button(
+        id: impl Into<gpui::ElementId>,
+        label: impl Into<SharedString>,
+        primary: bool,
+        _theme: &Theme,
+    ) -> Button {
         let label = label.into();
-        Button::new(label.clone())
+        Button::new(id)
             .label(label)
             .with_size(Size::Medium)
             .with_variant(if primary {
@@ -936,17 +1008,41 @@ impl OnboardingSettingPage {
         &mut self,
         theme: &Theme,
         locale: &str,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        self.ensure_question_inputs(window, cx);
         let back = cx.entity().downgrade();
         let expand_channels = cx.entity().downgrade();
         let add = cx.entity().downgrade();
-        let mut list = v_flex().gap_2();
-        for index in 0..self.questions.len() {
-            list = list.child(self.render_question(index, theme, locale, window, cx));
+        if self.question_list.item_count() != self.questions.len() {
+            self.question_list.reset(self.questions.len());
         }
+        let entity = cx.entity();
+        let list_theme = theme.clone();
+        let list_locale = SharedString::from(locale.to_string());
+        let list_state = self.question_list.clone();
+        let scroll_state = list_state.clone();
+        let question_list_height = if self.questions.iter().any(|question| question.expanded) {
+            360.0
+        } else {
+            (self.questions.len() as f32 * 104.0).min(360.0)
+        };
+        let question_rows = div()
+            .w_full()
+            .h(px(question_list_height))
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta_y = event.delta.pixel_delta(window.line_height()).y;
+                if Self::list_can_consume_scroll(&scroll_state, delta_y) {
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                list(list_state, move |index, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.render_question(index, &list_theme, &list_locale, cx)
+                    })
+                })
+                .size_full(),
+            );
         v_flex()
             .gap_5()
             .child(
@@ -986,6 +1082,7 @@ impl OnboardingSettingPage {
                     .bg(theme.bg_secondary)
                     .child(
                         h_flex()
+                            .id("onboarding-unassigned-channels-trigger")
                             .p_3()
                             .justify_between()
                             .cursor_pointer()
@@ -1024,7 +1121,13 @@ impl OnboardingSettingPage {
                                                 )
                                             }),
                                     ),
-                            ),
+                            )
+                            .on_click(move |_, _, cx| {
+                                let _ = expand_channels.update(cx, |this, cx| {
+                                    this.channels_expanded = !this.channels_expanded;
+                                    cx.notify();
+                                });
+                            }),
                     )
                     .when(self.channels_expanded, |el| {
                         el.child(
@@ -1045,12 +1148,6 @@ impl OnboardingSettingPage {
                                     ),
                                 )),
                         )
-                    })
-                    .on_click(move |_, _, cx| {
-                        let _ = expand_channels.update(cx, |this, cx| {
-                            this.channels_expanded = !this.channels_expanded;
-                            cx.notify();
-                        });
                     }),
             )
             .child(
@@ -1065,7 +1162,7 @@ impl OnboardingSettingPage {
                         "onBoardingClan.questionsPage.preJoinQuestions.description",
                     ))),
             )
-            .child(list)
+            .when(!self.questions.is_empty(), |page| page.child(question_rows))
             .child(
                 div()
                     .id("onboarding-add-question")
@@ -1105,7 +1202,6 @@ impl OnboardingSettingPage {
         index: usize,
         theme: &Theme,
         locale: &str,
-        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let question = &self.questions[index];
@@ -1119,6 +1215,7 @@ impl OnboardingSettingPage {
         let save = cx.entity().downgrade();
         let add_answer = cx.entity().downgrade();
         let mut card = v_flex()
+            .w_full()
             .gap_3()
             .p_4()
             .rounded(px(8.0))
@@ -1160,9 +1257,9 @@ impl OnboardingSettingPage {
                                     )
                                     .on_click(move |_, _, cx| {
                                         let _ = remove.update(cx, |this, cx| {
-                                            let was_persisted = this.questions[index].id.is_some();
-                                            this.questions.remove(index);
-                                            if was_persisted {
+                                            if index < this.questions.len() {
+                                                this.questions.remove(index);
+                                                this.question_list.splice(index..index + 1, 0);
                                                 this.dirty = true;
                                             }
                                             cx.notify();
@@ -1187,11 +1284,13 @@ impl OnboardingSettingPage {
                                                 )
                                             }),
                                     )
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         let _ = toggle.update(cx, |this, cx| {
+                                            this.ensure_question_input(index, window, cx);
                                             if let Some(item) = this.questions.get_mut(index) {
                                                 item.expanded = !item.expanded;
                                             }
+                                            this.question_list.remeasure_items(index..index + 1);
                                             cx.notify();
                                         });
                                     }),
@@ -1284,6 +1383,7 @@ impl OnboardingSettingPage {
             card = card.child(answers).child(
                 h_flex().justify_end().child(
                     Self::button(
+                        format!("onboarding-question-save-{index}"),
                         mezon_i18n::t(locale, "onBoardingClan.buttons.save"),
                         true,
                         theme,
@@ -1296,6 +1396,7 @@ impl OnboardingSettingPage {
                                 if !item.title.is_empty() {
                                     item.expanded = false;
                                     this.dirty = true;
+                                    this.question_list.remeasure_items(index..index + 1);
                                 }
                             }
                             cx.notify();
@@ -1315,7 +1416,7 @@ impl OnboardingSettingPage {
     }
 
     fn render_guide(
-        &self,
+        &mut self,
         theme: &Theme,
         locale: &str,
         cx: &mut Context<Self>,
@@ -1324,41 +1425,84 @@ impl OnboardingSettingPage {
         let add_mission = cx.entity().downgrade();
         let add_resource = cx.entity().downgrade();
         let (owner_name, owner_avatar) = self.owner_display(cx);
-        let mut missions = v_flex().gap_2();
-        for (index, mission) in self.missions.iter().enumerate() {
-            let edit = cx.entity().downgrade();
-            let channel = self
-                .public_channels(cx)
-                .into_iter()
-                .find(|(id, _)| *id == mission.channel_id)
-                .map(|(_, name)| name)
-                .unwrap_or_default();
-            missions = missions.child(div().id(("edit-mission", index)).child(self.guide_item(
-                format!("mission-row-{index}"),
-                mission.title.clone(),
-                format!(
-                    "{} #{}",
-                    self.task_label(mission.task_type, locale),
-                    channel
-                ),
-                Some(IconName::Hashtag),
-                Some((edit, index, false)),
-                theme,
-            )));
+        let public_channels = self.public_channels(cx);
+        if self.mission_list.item_count() != self.missions.len() {
+            self.mission_list.reset(self.missions.len());
         }
-        let mut resources = v_flex().gap_2();
-        for (index, resource) in self.resources.iter().enumerate() {
-            let edit = cx.entity().downgrade();
-            resources = resources.child(div().id(("edit-resource", index)).child(self.guide_item(
-                format!("resource-row-{index}"),
-                resource.title.clone(),
-                resource.description.clone(),
-                Some(IconName::RuleIcon),
-                Some((edit, index, true)),
-                theme,
-            )));
+        if self.resource_list.item_count() != self.resources.len() {
+            self.resource_list.reset(self.resources.len());
         }
-        let is_light = theme.bg_primary.r + theme.bg_primary.g + theme.bg_primary.b > 1.8;
+        let entity = cx.entity();
+        let mission_theme = theme.clone();
+        let mission_locale = SharedString::from(locale.to_string());
+        let mission_channels = public_channels;
+        let mission_state = self.mission_list.clone();
+        let mission_scroll_state = mission_state.clone();
+        let mission_height = (self.missions.len() as f32 * 92.0).min(320.0);
+        let missions = div()
+            .w_full()
+            .h(px(mission_height))
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta_y = event.delta.pixel_delta(window.line_height()).y;
+                if Self::list_can_consume_scroll(&mission_scroll_state, delta_y) {
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                list(mission_state, move |index, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        let mission = &this.missions[index];
+                        let channel = mission_channels
+                            .iter()
+                            .find(|(id, _)| *id == mission.channel_id)
+                            .map(|(_, name)| SharedString::from(format!("#{name}")));
+                        let edit = cx.entity().downgrade();
+                        this.guide_item(
+                            format!("mission-row-{index}"),
+                            mission.title.clone(),
+                            this.task_label(mission.task_type, &mission_locale),
+                            channel,
+                            Some(IconName::Hashtag),
+                            Some((edit, index, false)),
+                            &mission_theme,
+                        )
+                    })
+                })
+                .size_full(),
+            );
+        let entity = cx.entity();
+        let resource_theme = theme.clone();
+        let resource_state = self.resource_list.clone();
+        let resource_scroll_state = resource_state.clone();
+        let resource_height = (self.resources.len() as f32 * 92.0).min(320.0);
+        let resources = div()
+            .w_full()
+            .h(px(resource_height))
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta_y = event.delta.pixel_delta(window.line_height()).y;
+                if Self::list_can_consume_scroll(&resource_scroll_state, delta_y) {
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                list(resource_state, move |index, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        let resource = &this.resources[index];
+                        let edit = cx.entity().downgrade();
+                        this.guide_item(
+                            format!("resource-row-{index}"),
+                            resource.title.clone(),
+                            resource.description.clone(),
+                            None,
+                            Some(IconName::RuleIcon),
+                            Some((edit, index, true)),
+                            &resource_theme,
+                        )
+                    })
+                })
+                .size_full(),
+            );
+        let is_light = theme_is_light(theme);
         let (welcome_border_start, welcome_border_end, welcome_start, welcome_end) = if is_light {
             (0x8ea8ff, 0xd7b4ff, 0xa9b8ff, 0xd4b4ff)
         } else {
@@ -1460,11 +1604,12 @@ impl OnboardingSettingPage {
                 mezon_i18n::t(locale, "onBoardingClan.clanGuideSetting.dontDoThis").to_uppercase(),
             ))
             .child(self.guide_example_item(theme, locale))
-            .child(missions)
+            .when(!self.missions.is_empty(), |page| page.child(missions))
             .child(self.guide_item(
                 "read-rules-row",
                 mezon_i18n::t(locale, "onBoardingClan.clanGuideSetting.readTheRules"),
                 "",
+                None,
                 Some(IconName::RuleIcon),
                 None,
                 theme,
@@ -1541,7 +1686,7 @@ impl OnboardingSettingPage {
                         )
                     )),
             )
-            .child(resources)
+            .when(!self.resources.is_empty(), |page| page.child(resources))
             .child(
                 div()
                     .id("add-onboarding-resource")
@@ -1582,16 +1727,13 @@ impl OnboardingSettingPage {
         id: impl Into<SharedString>,
         title: impl Into<SharedString>,
         description: impl Into<SharedString>,
+        channel_name: Option<SharedString>,
         icon: Option<IconName>,
         edit_action: Option<(gpui::WeakEntity<Self>, usize, bool)>,
         theme: &Theme,
     ) -> gpui::AnyElement {
         let description = description.into();
         let has_description = !description.is_empty();
-        let (description_prefix, channel_name) = description
-            .rsplit_once(" #")
-            .map(|(prefix, channel)| (prefix.to_string(), Some(format!("#{channel}"))))
-            .unwrap_or_else(|| (description.to_string(), None));
         h_flex()
             .id(id.into())
             .w_full()
@@ -1637,7 +1779,7 @@ impl OnboardingSettingPage {
                                 .gap_1()
                                 .text_sm()
                                 .text_color(theme.text_secondary)
-                                .child(div().truncate().child(description_prefix))
+                                .child(div().truncate().child(description))
                                 .when_some(channel_name, |row, channel| {
                                     row.child(
                                         div()
@@ -2027,6 +2169,7 @@ impl OnboardingSettingPage {
                     )
                     .into_any_element();
                 let browse_button = Self::button(
+                    "onboarding-resource-browse",
                     mezon_i18n::t(locale, "onboardingRules.form.browse"),
                     true,
                     theme,
@@ -2084,12 +2227,14 @@ impl OnboardingSettingPage {
                     .gap_2()
                     .child(
                         Self::button(
+                            "onboarding-editor-cancel",
                             mezon_i18n::t(locale, "onBoardingClan.buttons.cancel"),
                             false,
                             theme,
                         )
                         .on_click(move |_, _, cx| {
                             let _ = cancel.update(cx, |this, cx| {
+                                this.editor_generation = this.editor_generation.wrapping_add(1);
                                 this.editor = None;
                                 cx.notify();
                             });
@@ -2097,6 +2242,7 @@ impl OnboardingSettingPage {
                     )
                     .child(
                         Self::button(
+                            "onboarding-editor-save",
                             mezon_i18n::t(locale, "onBoardingClan.buttons.save"),
                             true,
                             theme,
@@ -2114,6 +2260,7 @@ impl OnboardingSettingPage {
             theme,
             move |_, _, cx| {
                 let _ = close.update(cx, |this, cx| {
+                    this.editor_generation = this.editor_generation.wrapping_add(1);
                     this.editor = None;
                     cx.notify();
                 });
@@ -2156,7 +2303,7 @@ impl OnboardingSettingPage {
             cx.notify();
             return;
         }
-        let marks_global_dirty = !matches!(self.editor.as_ref(), Some(Editor::Answer { .. }));
+        let mut applied = false;
         match self.editor.take() {
             Some(Editor::Answer {
                 question,
@@ -2169,10 +2316,18 @@ impl OnboardingSettingPage {
                     title,
                     description: description.read(cx).value().trim().to_string(),
                 };
-                if let Some(index) = answer {
-                    self.questions[question].answers[index] = value;
-                } else {
-                    self.questions[question].answers.push(value);
+                if let Some(question_draft) = self.questions.get_mut(question) {
+                    if let Some(index) = answer {
+                        if let Some(answer) = question_draft.answers.get_mut(index) {
+                            *answer = value;
+                            applied = true;
+                        }
+                    } else {
+                        question_draft.answers.push(value);
+                        applied = true;
+                    }
+                    self.question_list
+                        .remeasure_items(question..question.saturating_add(1));
                 }
             }
             Some(Editor::Mission {
@@ -2184,15 +2339,21 @@ impl OnboardingSettingPage {
             }) => {
                 let title = title.read(cx).value().trim().to_string();
                 let value = MissionDraft {
-                    id: index.and_then(|i| self.missions[i].id),
+                    id: index
+                        .and_then(|i| self.missions.get(i))
+                        .and_then(|item| item.id),
                     title,
                     channel_id,
                     task_type,
                 };
                 if let Some(index) = index {
-                    self.missions[index] = value;
+                    if let Some(item) = self.missions.get_mut(index) {
+                        *item = value;
+                        applied = true;
+                    }
                 } else {
                     self.missions.push(value);
+                    applied = true;
                 }
             }
             Some(Editor::Resource {
@@ -2204,52 +2365,77 @@ impl OnboardingSettingPage {
             }) => {
                 let title = title.read(cx).value().trim().to_string();
                 let value = ResourceDraft {
-                    id: index.and_then(|i| self.resources[i].id),
+                    id: index
+                        .and_then(|i| self.resources.get(i))
+                        .and_then(|item| item.id),
                     title,
                     description: description.read(cx).value().trim().to_string(),
                     image_url,
                     image_path,
                 };
                 if let Some(index) = index {
-                    self.resources[index] = value;
+                    if let Some(item) = self.resources.get_mut(index) {
+                        *item = value;
+                        applied = true;
+                    }
                 } else {
                     self.resources.push(value);
+                    applied = true;
                 }
             }
             None => return,
         }
-        if marks_global_dirty {
+        self.editor_generation = self.editor_generation.wrapping_add(1);
+        if applied {
             self.dirty = true;
         }
         cx.notify();
     }
 
     fn remove_editor_item(&mut self, cx: &mut Context<Self>) {
+        let mut removed = false;
         match self.editor.take() {
             Some(Editor::Answer {
                 question,
                 answer: Some(answer),
                 ..
             }) => {
-                self.questions[question].answers.remove(answer);
+                if let Some(question_draft) = self.questions.get_mut(question)
+                    && answer < question_draft.answers.len()
+                {
+                    question_draft.answers.remove(answer);
+                    removed = true;
+                    self.question_list
+                        .remeasure_items(question..question.saturating_add(1));
+                }
             }
             Some(Editor::Mission {
                 index: Some(index), ..
             }) => {
-                self.missions.remove(index);
+                if index < self.missions.len() {
+                    self.missions.remove(index);
+                    removed = true;
+                }
             }
             Some(Editor::Resource {
                 index: Some(index), ..
             }) => {
-                self.resources.remove(index);
+                if index < self.resources.len() {
+                    self.resources.remove(index);
+                    removed = true;
+                }
             }
             _ => {}
         }
-        self.dirty = true;
+        self.editor_generation = self.editor_generation.wrapping_add(1);
+        if removed {
+            self.dirty = true;
+        }
         cx.notify();
     }
 
     fn reset_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor_generation = self.editor_generation.wrapping_add(1);
         let default_channel = self
             .public_channels(cx)
             .first()
@@ -2292,13 +2478,18 @@ impl OnboardingSettingPage {
     }
 
     fn pick_resource_image(&mut self, cx: &mut Context<Self>) {
+        let Some(Editor::Resource { index, .. }) = self.editor.as_ref() else {
+            return;
+        };
+        let target_index = *index;
+        let generation = self.editor_generation;
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        self._upload_task = Some(cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
@@ -2319,11 +2510,14 @@ impl OnboardingSettingPage {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(url) => {
-                        if let Some(Editor::Resource {
-                            image_url,
-                            image_path,
-                            ..
-                        }) = &mut this.editor
+                        if this.editor_generation == generation
+                            && let Some(Editor::Resource {
+                                index,
+                                image_url,
+                                image_path,
+                                ..
+                            }) = &mut this.editor
+                            && *index == target_index
                         {
                             *image_url = url;
                             *image_path = Some(path);
@@ -2333,13 +2527,12 @@ impl OnboardingSettingPage {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 }
 
 impl Render for OnboardingSettingPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
         if self.loading {
@@ -2349,12 +2542,43 @@ impl Render for OnboardingSettingPage {
                 .child(mezon_i18n::t(&locale, "common.loadingData"))
                 .into_any_element();
         }
+        if let Some(error) = self.load_error.clone() {
+            let retry = cx.entity().downgrade();
+            return v_flex()
+                .items_center()
+                .gap_3()
+                .py_8()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.danger_text)
+                        .child(mezon_i18n::t(&locale, "common.failedToLoad")),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.text_secondary)
+                        .child(error),
+                )
+                .child(
+                    Self::button(
+                        "onboarding-retry-load",
+                        mezon_i18n::t(&locale, "common.errorBoundary.reload"),
+                        true,
+                        &theme,
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = retry.update(cx, |this, cx| this.fetch(cx));
+                    }),
+                )
+                .into_any_element();
+        }
         if !self.enabled && !self.setup_open {
             return Self::render_enable_card(cx.entity(), &locale, &theme);
         }
         let content = match self.page {
             Page::Main => self.render_main(&theme, &locale, cx),
-            Page::Questions => self.render_questions(&theme, &locale, window, cx),
+            Page::Questions => self.render_questions(&theme, &locale, cx),
             Page::Guide => self.render_guide(&theme, &locale, cx),
         };
         let disable = cx.entity().downgrade();
@@ -2383,6 +2607,7 @@ impl Render for OnboardingSettingPage {
                         .when(self.enabled, |el| {
                             el.child(
                                 Self::button(
+                                    "onboarding-disable",
                                     mezon_i18n::t(&locale, "onBoardingClan.buttons.disable"),
                                     false,
                                     &theme,
@@ -2420,6 +2645,7 @@ impl Render for OnboardingSettingPage {
                 .border_color(theme.border)
                 .child(
                     Self::button(
+                        "onboarding-setup-cancel",
                         mezon_i18n::t(&locale, "onBoardingClan.buttons.cancel"),
                         false,
                         &theme,
@@ -2430,6 +2656,7 @@ impl Render for OnboardingSettingPage {
                 )
                 .child(
                     Self::button(
+                        "onboarding-setup-confirm",
                         if self.saving {
                             mezon_i18n::t(&locale, "onBoardingClan.buttons.saving")
                         } else {
