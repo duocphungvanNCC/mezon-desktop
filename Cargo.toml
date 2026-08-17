@@ -8,6 +8,7 @@ members = [
     "crates/mezon-voice",
     "crates/mezon-stream",
     "crates/mezon-video",
+    "crates/mezon-record",
     "crates/mezon-audio",
     "crates/mezon-native",
     "crates/mezon-updater",

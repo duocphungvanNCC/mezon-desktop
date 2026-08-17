@@ -5955,6 +5955,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-record"
+version = "2.0.14"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.0",
+ "core-foundation-sys 0.8.7",
+ "core-video",
+ "flume",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "libc",
+ "objc",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "yuv",
+]
+
+[[package]]
 name = "mezon-store"
 version = "2.0.14"
 dependencies = [
@@ -6113,6 +6136,7 @@ dependencies = [
  "livekit",
  "livekit-protocol",
  "mezon-native",
+ "mezon-record",
  "nokhwa",
  "objc",
  "parking_lot",
