@@ -7,8 +7,8 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, MAX_CHANNEL_TOPIC_CHARS,
     PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UpdateChannelOverviewError, truncate_chars,
-    validate_channel_name,
+    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UpdateChannelOverviewError,
+    overview_duplicate_thread_parent_id, truncate_chars, validate_channel_name,
 };
 
 use crate::app::shell::Shell;
@@ -430,11 +430,7 @@ impl OverviewTab {
                 });
                 return;
             };
-            let duplicate = if channel.channel_type == ChannelType::Thread {
-                let parent = channel
-                    .parent_id
-                    .map(|parent| parent.get().to_string())
-                    .unwrap_or_default();
+            let duplicate = if let Some(parent) = overview_duplicate_thread_parent_id(&channel) {
                 api.check_duplicate_thread_name(&validated, &parent)
                     .await
                     .unwrap_or(false)

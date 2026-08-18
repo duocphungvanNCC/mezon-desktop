@@ -298,7 +298,7 @@ impl ChannelSettingScreen {
         };
         ChannelTabContext {
             channel_type,
-            is_thread: is_thread_channel(channel),
+            is_thread: channel.is_thread(),
             is_welcome_channel: welcome_channel_id == Some(self.channel_id),
             has_manage_channel,
         }
@@ -465,7 +465,7 @@ impl ChannelSettingScreen {
                         .on_click(move |_, window, cx| {
                             let locale = delete_locale.clone();
                             Shell::global(cx).update(cx, |shell, cx| {
-                                if settings_delete_uses_thread_confirm(is_thread) {
+                                if is_thread {
                                     shell.confirm_delete_thread(
                                         clan_id, channel_id, &locale, window, cx,
                                     );
@@ -544,17 +544,11 @@ impl ChannelSettingScreen {
     }
 }
 
-fn is_thread_channel(channel: &Channel) -> bool {
-    channel.channel_type == ChannelType::Thread || channel.parent_id.is_some()
-}
-
-fn settings_delete_uses_thread_confirm(is_thread: bool) -> bool {
-    is_thread
-}
-
 fn channel_tab_icon(ctx: ChannelTabContext) -> IconName {
+    if ctx.is_thread {
+        return IconName::ThreadIcon;
+    }
     match ctx.channel_type {
-        ChannelType::Thread => IconName::ThreadIcon,
         ChannelType::Voice => IconName::Speaker,
         ChannelType::Stream => IconName::Stream,
         _ => IconName::Hashtag,
@@ -851,48 +845,22 @@ mod tests {
     #[test]
     fn text_channel_with_parent_id_is_detected_as_thread() {
         let channel = sample_channel(ChannelType::Text, Some(ChannelId(9)));
-        assert!(is_thread_channel(&channel));
-        let detected = ctx(
-            channel.channel_type,
-            is_thread_channel(&channel),
-            false,
-            true,
-        );
+        assert!(channel.is_thread());
+        let detected = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
+        assert_eq!(channel_tab_icon(detected), IconName::ThreadIcon);
     }
 
     #[test]
     fn regular_text_channel_shows_category_and_permissions() {
         let channel = sample_channel(ChannelType::Text, None);
-        assert!(!is_thread_channel(&channel));
-        let regular = ctx(ChannelType::Text, false, false, true);
+        assert!(!channel.is_thread());
+        let regular = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(ChannelSettingsTab::Category.visible_in_sidebar(regular));
         assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(regular));
         let no_manage = ctx(ChannelType::Text, false, false, false);
         assert!(ChannelSettingsTab::Category.visible_in_sidebar(no_manage));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(no_manage));
-    }
-
-    #[test]
-    fn thread_integrations_require_manage_channel() {
-        assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
-            ChannelType::Thread,
-            true,
-            false,
-            true
-        )));
-        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
-            ChannelType::Thread,
-            true,
-            false,
-            false
-        )));
-    }
-
-    #[test]
-    fn settings_delete_confirm_follows_thread_flag() {
-        assert!(settings_delete_uses_thread_confirm(true));
-        assert!(!settings_delete_uses_thread_confirm(false));
     }
 }

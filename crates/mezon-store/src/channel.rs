@@ -164,6 +164,10 @@ pub struct Channel {
 }
 
 impl Channel {
+    pub fn is_thread(&self) -> bool {
+        self.channel_type == ChannelType::Thread || self.parent_id.is_some()
+    }
+
     pub fn is_unread(&self) -> bool {
         self.badge_count > 0 || self.last_seen_timestamp < self.last_sent_timestamp
     }
@@ -209,13 +213,14 @@ pub fn archive_allowed_by_server(
     }
 }
 
-pub(crate) fn overview_duplicate_thread_parent_id(channel: &Channel) -> Option<String> {
-    (channel.channel_type == ChannelType::Thread).then(|| {
-        channel
-            .parent_id
-            .map(|parent| parent.get().to_string())
-            .unwrap_or_default()
-    })
+pub fn overview_duplicate_thread_parent_id(channel: &Channel) -> Option<String> {
+    if !channel.is_thread() {
+        return None;
+    }
+    channel
+        .parent_id
+        .filter(|parent| !parent.is_zero())
+        .map(|parent| parent.get().to_string())
 }
 
 pub fn delete_allowed_by_server(
@@ -3904,9 +3909,7 @@ impl ChannelList {
 }
 
 fn should_reactivate_thread_after_send(mode: i32, channel: &Channel, archived: bool) -> bool {
-    mode == STREAM_MODE_THREAD
-        && (channel.channel_type == ChannelType::Thread || channel.parent_id.is_some())
-        && archived
+    mode == STREAM_MODE_THREAD && channel.is_thread() && archived
 }
 
 fn thread_needs_reactivate(channel: &Channel) -> bool {
@@ -5095,14 +5098,19 @@ mod tests {
 
         let mut orphan_thread = make_channel(10, "orphan", "1");
         orphan_thread.channel_type = ChannelType::Thread;
-        assert_eq!(
-            overview_duplicate_thread_parent_id(&orphan_thread).as_deref(),
-            Some("")
-        );
+        assert_eq!(overview_duplicate_thread_parent_id(&orphan_thread), None);
+
+        let mut zero_parent = make_channel(11, "zero-parent", "1");
+        zero_parent.channel_type = ChannelType::Thread;
+        zero_parent.parent_id = Some(ChannelId(0));
+        assert_eq!(overview_duplicate_thread_parent_id(&zero_parent), None);
 
         let mut text_with_parent = make_channel(2, "text", "1");
         text_with_parent.parent_id = Some(ChannelId(77));
-        assert_eq!(overview_duplicate_thread_parent_id(&text_with_parent), None);
+        assert_eq!(
+            overview_duplicate_thread_parent_id(&text_with_parent).as_deref(),
+            Some("77")
+        );
 
         let channel = make_channel(1, "general", "1");
         assert_eq!(overview_duplicate_thread_parent_id(&channel), None);
