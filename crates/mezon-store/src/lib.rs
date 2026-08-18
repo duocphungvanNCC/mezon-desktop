@@ -326,7 +326,8 @@ pub struct Settings {
     pub zoom_factor: f32,
     /// Last window bounds [x, y, width, height]
     pub window_bounds: Option<[i32; 4]>,
-    /// UI theme: "dark" | "light" | "system"
+    /// UI theme key: "purple_haze" (default) | "dark" | "light" | "sunrise" | "redDark"
+    /// | "abyss_dark" | "berrynade" | "cisher" | "sunset"
     pub theme: String,
     /// UI language/locale code: "en" | "vi"
     pub language: String,
@@ -367,7 +368,7 @@ impl Default for Settings {
             hardware_acceleration: true,
             zoom_factor: 1.0,
             window_bounds: None,
-            theme: "dark".to_string(),
+            theme: "purple_haze".to_string(),
             language: "en".to_string(),
             notifications_enabled: true,
             notifications_hide_content: false,
