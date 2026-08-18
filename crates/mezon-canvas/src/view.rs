@@ -392,9 +392,7 @@ impl gpui::Render for CanvasView {
                                     });
                                 }
                             } else {
-                                this.title_input.update(cx, |input, cx| {
-                                    input.focus_handle(cx).blur(window);
-                                });
+                                window.blur();
                             }
                             cx.notify();
                         })),

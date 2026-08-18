@@ -258,9 +258,27 @@ fn is_blocked_canvas_image_url(src: &str) -> bool {
         return true;
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return !ip.is_global();
+        return is_non_global_ip(ip);
     }
-    parse_loose_ipv4(&host).is_some_and(|ip| !IpAddr::V4(ip).is_global())
+    parse_loose_ipv4(&host).is_some_and(|ip| is_non_global_ip(IpAddr::V4(ip)))
+}
+
+fn is_non_global_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
 }
 
 fn should_upgrade_http_to_https(src: &str, cx: Option<&App>) -> bool {
