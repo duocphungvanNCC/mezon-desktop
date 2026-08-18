@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, anchored,
-    deferred, div, img, prelude::*, px, relative, svg,
+    Anchor, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window,
+    anchored, deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use super::icon::{Icon, IconName};
@@ -42,6 +42,7 @@ enum Item {
         sub_text: Option<SharedString>,
         options: Vec<SubmenuOption>,
         open: bool,
+        danger: bool,
         on_open: MenuHandler,
         on_select: SubmenuHandler,
         on_parent_click: Option<MenuHandler>,
@@ -282,6 +283,30 @@ impl ContextMenu {
             sub_text,
             options,
             open,
+            danger: false,
+            on_open: Rc::new(on_open),
+            on_select: Rc::new(on_select),
+            on_parent_click: None,
+        });
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn danger_submenu(
+        mut self,
+        label: impl Into<SharedString>,
+        sub_text: Option<SharedString>,
+        options: Vec<SubmenuOption>,
+        open: bool,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+        on_select: impl Fn(i32, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Submenu {
+            label: label.into(),
+            sub_text,
+            options,
+            open,
+            danger: true,
             on_open: Rc::new(on_open),
             on_select: Rc::new(on_select),
             on_parent_click: None,
@@ -307,6 +332,7 @@ impl ContextMenu {
             sub_text,
             options,
             open,
+            danger: false,
             on_open: Rc::new(on_open),
             on_select: Rc::new(on_select),
             on_parent_click: Some(Rc::new(on_parent_click)),
@@ -326,6 +352,139 @@ impl ContextMenu {
             on_click: Rc::new(on_click),
         });
         self
+    }
+}
+
+pub struct ContextMenuProbeItem {
+    pub kind: &'static str,
+    pub label: String,
+    pub disabled: bool,
+    pub options: Vec<(i32, String)>,
+}
+
+impl ContextMenu {
+    pub fn probe_items(&self) -> Vec<ContextMenuProbeItem> {
+        self.items
+            .iter()
+            .map(|item| match item {
+                Item::Separator => ContextMenuProbeItem {
+                    kind: "separator",
+                    label: String::new(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+                Item::Entry {
+                    label,
+                    danger,
+                    disabled,
+                    ..
+                } => ContextMenuProbeItem {
+                    kind: if *danger { "danger" } else { "item" },
+                    label: label.to_string(),
+                    disabled: *disabled,
+                    options: Vec::new(),
+                },
+                Item::Submenu {
+                    label,
+                    options,
+                    danger,
+                    ..
+                } => ContextMenuProbeItem {
+                    kind: if *danger { "danger_submenu" } else { "submenu" },
+                    label: label.to_string(),
+                    disabled: false,
+                    options: options
+                        .iter()
+                        .map(|option| (option.value, option.label.to_string()))
+                        .collect(),
+                },
+                Item::Checkbox { label, checked, .. } => ContextMenuProbeItem {
+                    kind: if *checked {
+                        "checkbox_on"
+                    } else {
+                        "checkbox_off"
+                    },
+                    label: label.to_string(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+                Item::ReactionSubmenu { label, .. } => ContextMenuProbeItem {
+                    kind: "reaction_submenu",
+                    label: label.to_string(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+            })
+            .collect()
+    }
+
+    pub fn probe_activate(
+        &self,
+        index: usize,
+        value: Option<i32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        self.probe_invoke(index, value, window, cx)?;
+        if let Some(dismiss) = &self.on_dismiss {
+            dismiss(window, cx);
+        }
+        Ok(())
+    }
+
+    fn probe_invoke(
+        &self,
+        index: usize,
+        value: Option<i32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        let item = self
+            .items
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+        match item {
+            Item::Entry {
+                disabled, on_click, ..
+            } => {
+                if *disabled {
+                    anyhow::bail!("menu item at index {index} is disabled");
+                }
+                on_click(window, cx);
+                Ok(())
+            }
+            Item::Checkbox { on_click, .. } => {
+                on_click(window, cx);
+                Ok(())
+            }
+            Item::Submenu {
+                options,
+                on_open,
+                on_select,
+                on_parent_click,
+                ..
+            } => {
+                let Some(value) = value else {
+                    match on_parent_click {
+                        Some(on_parent_click) => on_parent_click(window, cx),
+                        None => on_open(window, cx),
+                    }
+                    return Ok(());
+                };
+                if !options.iter().any(|option| option.value == value) {
+                    anyhow::bail!(
+                        "submenu at index {index} has no option {value}; expected one of {:?}",
+                        options.iter().map(|o| o.value).collect::<Vec<_>>()
+                    );
+                }
+                on_select(value, window, cx);
+                Ok(())
+            }
+            Item::Separator => anyhow::bail!("menu item at index {index} is a separator"),
+            Item::ReactionSubmenu { .. } => {
+                anyhow::bail!("menu item at index {index} is the reaction submenu")
+            }
+        }
     }
 }
 
@@ -504,17 +663,15 @@ impl RenderOnce for ContextMenu {
                     sub_text,
                     options,
                     open,
+                    danger: is_danger,
                     on_open,
                     on_select,
                     on_parent_click,
                 } => {
                     let dismiss = dismiss.clone();
+                    let parent_label_color = if is_danger { danger_text } else { text };
                     let submenu = if open {
                         let mut sub = v_flex()
-                            .absolute()
-                            .top(px(-6.))
-                            .when(submenu_open_left, |el| el.right(relative(1.)).mr(px(4.)))
-                            .when(!submenu_open_left, |el| el.left(relative(1.)).ml(px(4.)))
                             .w(px(SUBMENU_WIDTH))
                             .p(px(6.))
                             .rounded_md()
@@ -559,7 +716,25 @@ impl RenderOnce for ContextMenu {
                                     }),
                             );
                         }
-                        Some(sub)
+                        Some(
+                            div()
+                                .absolute()
+                                .top(px(-6.))
+                                .w_0()
+                                .h_0()
+                                .when(submenu_open_left, |el| el.right(relative(1.)).mr(px(4.)))
+                                .when(!submenu_open_left, |el| el.left(relative(1.)).ml(px(4.)))
+                                .child(
+                                    anchored()
+                                        .anchor(if submenu_open_left {
+                                            Anchor::TopRight
+                                        } else {
+                                            Anchor::TopLeft
+                                        })
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(sub),
+                                ),
+                        )
                     } else {
                         None
                     };
@@ -585,9 +760,15 @@ impl RenderOnce for ContextMenu {
                             .py(px(8.))
                             .rounded(px(4.))
                             .text_sm()
-                            .text_color(text)
+                            .text_color(parent_label_color)
                             .cursor_pointer()
-                            .hover(|s| s.bg(hover))
+                            .hover(|s| {
+                                if is_danger {
+                                    s.bg(danger_hover_bg)
+                                } else {
+                                    s.bg(hover)
+                                }
+                            })
                             .on_hover(move |hovered, window, cx| {
                                 if *hovered {
                                     on_open(window, cx);

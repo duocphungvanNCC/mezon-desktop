@@ -1543,6 +1543,41 @@ impl AppApi {
             .await
     }
 
+    pub async fn remove_clan_users(&self, clan_id: i64, user_ids: Vec<String>) -> Result<()> {
+        self.transport.remove_clan_users(clan_id, user_ids).await
+    }
+
+    pub async fn ban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+        ban_time: i32,
+    ) -> Result<()> {
+        self.transport
+            .ban_clan_users(clan_id, channel_id, user_ids, ban_time)
+            .await
+    }
+
+    pub async fn unban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        self.transport
+            .unban_clan_users(clan_id, channel_id, user_ids)
+            .await
+    }
+
+    pub async fn list_banned_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::BannedUserList> {
+        self.transport.list_banned_users(clan_id, channel_id).await
+    }
+
     pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
         self.transport.get_clan_user_role(clan_id, 0).await
     }

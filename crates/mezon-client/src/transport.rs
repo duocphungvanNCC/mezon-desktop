@@ -114,6 +114,7 @@ pub enum RealtimeEvent {
     AddClanUser(realtime::AddClanUserEvent),
     ClanEventCreated(api::CreateEventRequest),
     UserClanRemoved(realtime::UserClanRemoved),
+    BanUser(realtime::BannedUserEvent),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
     UserProfileUpdated(realtime::UserProfileUpdatedEvent),
@@ -172,6 +173,7 @@ impl RealtimeEvent {
             Self::AddClanUser(_) => "AddClanUser",
             Self::ClanEventCreated(_) => "ClanEventCreated",
             Self::UserClanRemoved(_) => "UserClanRemoved",
+            Self::BanUser(_) => "BanUser",
             Self::ClanUpdated(_) => "ClanUpdated",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
             Self::UserProfileUpdated(_) => "UserProfileUpdated",
@@ -234,6 +236,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::ClanEventCreated(m) => Ok(Self::ClanEventCreated(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
+            realtime::envelope::Message::BanUserEvent(m) => Ok(Self::BanUser(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))

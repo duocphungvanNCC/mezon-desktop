@@ -238,6 +238,15 @@ impl McpBackend {
             }
             "get_user_status" => self.get_user_status().await,
             "get_member_list" => self.get_member_list().await,
+            "close_modal" => self.close_modal().await,
+            "list_banned_users" => self.list_banned_users(&arguments).await,
+            "member_menu_state" => self.member_menu_state().await,
+            "member_menu_open" => self.member_menu_open(&arguments).await,
+            "member_menu_close" => self.member_menu_close().await,
+            "member_menu_pick" => {
+                self.require_write_mode("member_menu_pick")?;
+                self.member_menu_pick(&arguments).await
+            }
             "set_user_status" => {
                 self.require_write_mode("set_user_status")?;
                 self.set_user_status(&arguments).await
@@ -1143,6 +1152,65 @@ impl McpBackend {
     async fn get_member_list(&self) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::GetMemberList { reply })
             .await
+    }
+
+    async fn list_banned_users(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("list_banned_users requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id").unwrap_or(0);
+        self.send_ui_result(|reply| McpCommand::ListBannedUsers {
+            clan_id,
+            channel_id,
+            reply,
+        })
+        .await
+    }
+
+    async fn close_modal(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CloseModal { reply })
+            .await
+    }
+
+    async fn member_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::MemberMenuState { reply })
+            .await
+    }
+
+    async fn member_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let user_id = optional_i64_field(arguments, "user_id")
+            .ok_or_else(|| anyhow::anyhow!("member_menu_open requires field user_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::MemberMenuOpen {
+            user_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn member_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::MemberMenuClose { reply })
+            .await
+    }
+
+    async fn member_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("member_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::MemberMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
     }
 
     async fn set_user_status(&self, arguments: &Value) -> anyhow::Result<Value> {

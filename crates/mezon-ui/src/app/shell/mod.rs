@@ -11,7 +11,7 @@ use gpui::{
     deferred, div, hsla, prelude::*, px,
 };
 
-use crate::components::primitives::{Toast, ToastKind};
+use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
 mod coming_soon_modal;
@@ -25,6 +25,7 @@ mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
 mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
+mod confirm_kick_member_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
@@ -41,6 +42,7 @@ use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
+use confirm_kick_member_modal::ConfirmKickMemberModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -118,6 +120,10 @@ impl Shell {
 
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalShell>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalShell>().map(|shell| shell.0.clone())
     }
 
     /// Show a transient toast; it auto-dismisses after [`TOAST_TTL`].
@@ -787,6 +793,82 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.confirm_delete_webhook(WebhookDeleteTarget::Clan(webhook), locale, window, cx);
+    }
+
+    pub fn confirm_kick_member(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        user_id: mezon_store::UserId,
+        display_username: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        let clan_name = if clan_name.is_empty() {
+            "clan".to_string()
+        } else {
+            clan_name
+        };
+        let title: SharedString = mezon_i18n::t(locale, "modalControls.kickMember.title")
+            .replace("{{username}}", display_username)
+            .replace("{{clanName}}", &clan_name)
+            .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "modalControls.kickMember.description")
+                .replace("{{username}}", display_username)
+                .replace("{{clanName}}", &clan_name)
+                .into();
+        let reason_label: SharedString =
+            mezon_i18n::t(locale, "modalControls.kickMember.reasonLabel")
+                .to_string()
+                .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "modalControls.buttons.cancel")
+            .to_string()
+            .into();
+        let confirm_label: SharedString = mezon_i18n::t(locale, "modalControls.buttons.kick")
+            .to_string()
+            .into();
+        let success_message: SharedString = mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.permissions.toast.kickMemberSuccess",
+        )
+        .to_string()
+        .into();
+        let error_message: SharedString = mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.permissions.toast.kickMemberFailed",
+        )
+        .to_string()
+        .into();
+        let view = cx.new(|cx| {
+            let reason_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line(true)
+                    .height(px(64.))
+                    .text_size(px(14.))
+            });
+            ConfirmKickMemberModal {
+                focus_handle: cx.focus_handle(),
+                clan_id,
+                user_id,
+                title,
+                description,
+                reason_label,
+                cancel_label,
+                confirm_label,
+                success_message,
+                error_message,
+                reason_input,
+            }
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
     }
 
     pub fn confirm_remove_friend(

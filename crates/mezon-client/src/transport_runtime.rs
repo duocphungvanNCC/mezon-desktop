@@ -680,6 +680,64 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn remove_clan_users(&self, clan_id: i64, user_ids: Vec<String>) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = user_ids.iter().map(String::as_str).collect();
+                transport.remove_clan_users(clan_id, &refs).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn ban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+        ban_time: i32,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = user_ids.iter().map(String::as_str).collect();
+                transport
+                    .ban_clan_users(clan_id, channel_id, &refs, ban_time)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn unban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = user_ids.iter().map(String::as_str).collect();
+                transport.unban_clan_users(clan_id, channel_id, &refs).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_banned_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::BannedUserList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_banned_users(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_emojis_by_user_id(&self) -> Result<mezon_proto::api::EmojiListedResponse> {
         let transport = self.inner.clone();
         runtime()

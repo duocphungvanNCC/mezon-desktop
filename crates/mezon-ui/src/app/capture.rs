@@ -710,6 +710,73 @@ pub fn member_list_snapshot(cx: &App) -> anyhow::Result<Value> {
     Ok(crate::chat::member_list::member_list_snapshot(cx))
 }
 
+pub fn banned_users_task(
+    cx: &mut App,
+    clan_id: i64,
+    channel_id: i64,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let Some(store) = mezon_store::BannedUsersStore::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("banned users store unavailable")));
+    };
+    let task = store.update(cx, |store, cx| {
+        store.fetch_raw(
+            mezon_store::ClanId(clan_id),
+            mezon_store::ChannelId(channel_id),
+            cx,
+        )
+    });
+    cx.background_spawn(async move {
+        let entries = task.await?;
+        Ok(json!({
+            "clan_id": clan_id.to_string(),
+            "channel_id": channel_id.to_string(),
+            "count": entries.len(),
+            "banned_users": entries
+                .into_iter()
+                .map(|e| json!({
+                    "channel_id": e.channel_id.to_string(),
+                    "banned_id": e.banned_id.to_string(),
+                    "banner_id": e.banner_id.to_string(),
+                    "ban_time": e.ban_time,
+                    "reason": e.reason,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+    })
+}
+
+pub fn close_modal(cx: &mut App) -> anyhow::Result<Value> {
+    let shell = crate::app::shell::Shell::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("shell unavailable"))?;
+    let had_modal = shell.read(cx).has_modal();
+    shell.update(cx, |shell, cx| shell.close_modal(cx));
+    Ok(json!({ "ok": true, "closed": had_modal }))
+}
+
+pub fn member_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_state(cx)
+}
+
+pub fn member_menu_open(
+    cx: &mut App,
+    user_id: mezon_store::UserId,
+    x: f32,
+    y: f32,
+) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_open(user_id, gpui::point(gpui::px(x), gpui::px(y)), cx)
+}
+
+pub fn member_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_close(cx)
+}
+
+pub fn member_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::chat::member_list::member_menu_pick(index, value, window, cx)
+    })?
+}
+
 pub fn user_status_snapshot(cx: &App) -> anyhow::Result<Value> {
     let Some((user_id, status)) = mezon_store::current_user_status(cx) else {
         return Ok(json!({ "signed_in": false }));
