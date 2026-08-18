@@ -127,6 +127,33 @@ impl McpRuntime {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
+                    McpCommand::JoinVoice {
+                        channel_id,
+                        clan_id,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::join_voice(channel_id, clan_id, cx)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::LeaveVoice { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::leave_voice);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetRecordingState { reply } => {
+                        let value = cx.update(mezon_ui::app::capture::recording_state);
+                        let _ = reply.send(value);
+                    }
+                    McpCommand::StartRecording { path, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::start_recording(path, cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::StopRecording { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::stop_recording);
+                        let _ = reply.send(result);
+                    }
                     McpCommand::GetScrollState { reply } => {
                         let result = cx.update(scroll_state);
                         let _ = reply.send(result);
