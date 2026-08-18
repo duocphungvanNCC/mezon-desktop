@@ -115,6 +115,7 @@ struct PcmStreamSource {
     offset: usize,
     silence_debt: usize,
     exhausted: bool,
+    looping: bool,
     channels: NonZeroU16,
     sample_rate: NonZeroU32,
 }
@@ -132,9 +133,15 @@ impl PcmStreamSource {
             offset: 0,
             silence_debt: 0,
             exhausted: false,
+            looping: false,
             channels,
             sample_rate,
         }
+    }
+
+    fn looping(mut self) -> Self {
+        self.looping = true;
+        self
     }
 
     fn silence(&mut self) -> Option<f32> {
@@ -169,6 +176,13 @@ impl Iterator for PcmStreamSource {
                 }
                 ChunkState::Pending => return self.silence(),
                 ChunkState::Complete => {
+                    if self.looping && self.next_chunk > 0 {
+                        self.next_chunk = 0;
+                        self.offset = 0;
+                        self.chunk = None;
+                        self.silence_debt = 0;
+                        continue;
+                    }
                     self.exhausted = true;
                     return None;
                 }
@@ -290,9 +304,9 @@ impl AudioPlayer {
                         }
                         .repeat_infinite(),
                     ),
-                    Playable::Stream(stream) => {
-                        self.player.append(PcmStreamSource::new(Arc::clone(stream)))
-                    }
+                    Playable::Stream(stream) => self
+                        .player
+                        .append(PcmStreamSource::new(Arc::clone(stream)).looping()),
                 }
             }
             self.started.set(true);

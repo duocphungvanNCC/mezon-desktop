@@ -42,6 +42,12 @@ fn dm_message_type(channel_id: i64, cx: &App) -> String {
         .unwrap_or_else(|| "3".into())
 }
 
+#[derive(Clone, Copy)]
+enum PermissionKind {
+    Mic,
+    Camera,
+}
+
 pub struct CallOverlay {
     call: Entity<CallStore>,
     last_phase: CallPhase,
@@ -53,23 +59,213 @@ impl CallOverlay {
         let last_phase = call.read(cx).phase();
         cx.observe(&call, |this, call, cx| {
             let phase = call.read(cx).phase();
-            if matches!(phase, CallPhase::Connected)
-                && !matches!(this.last_phase, CallPhase::Connected)
-            {
+            let was = this.last_phase;
+            this.last_phase = phase;
+            if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
                     .unwrap_or_else(|| "en".to_string());
-                let message =
+                let msg =
                     mezon_i18n::t(&locale, "channelVoice.toast.connectionConnected").to_string();
-                Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
+                Shell::global(cx).update(cx, |shell, cx| shell.success(msg, cx));
             }
-            this.last_phase = phase;
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
         Self { call, last_phase }
+    }
+
+    fn render_permission_modal(
+        &self,
+        cx: &mut Context<Self>,
+        kind: PermissionKind,
+    ) -> gpui::AnyElement {
+        let (
+            card_bg,
+            border,
+            title_color,
+            body_color,
+            icon_bg,
+            icon_color,
+            later_bg,
+            later_hover,
+            open_bg,
+            open_hover,
+        ) = {
+            let theme = cx.theme();
+            (
+                theme.bg_floating,
+                theme.border,
+                theme.text_primary,
+                theme.text_muted,
+                theme.bg_hover,
+                theme.danger_text,
+                theme.bg_tertiary,
+                theme.bg_hover,
+                theme.brand,
+                theme.brand_hover,
+            )
+        };
+        let (icon, title_key, body_key) = match kind {
+            PermissionKind::Mic => (
+                IconName::VoiceMicDisabledIcon,
+                "channelVoice.micPermissionTitle",
+                "channelVoice.micPermissionBody",
+            ),
+            PermissionKind::Camera => (
+                IconName::VoiceCameraDisabledIcon,
+                "channelVoice.permission.cameraTitle",
+                "channelVoice.permission.cameraBody",
+            ),
+        };
+        let locale = Settings::try_global(cx)
+            .map(|s| s.read(cx).language.clone())
+            .unwrap_or_default();
+        let title = mezon_i18n::t(&locale, title_key).to_string();
+        let body = mezon_i18n::t(&locale, body_key).to_string();
+        let open_label = mezon_i18n::t(&locale, "channelVoice.openSettings").to_string();
+        let later_label = mezon_i18n::t(&locale, "channelVoice.later").to_string();
+        let call_later = self.call.clone();
+        let call_open = self.call.clone();
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000cc))
+            .occlude()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .w(px(360.))
+                    .p_6()
+                    .rounded_xl()
+                    .bg(card_bg)
+                    .border_1()
+                    .border_color(border)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(56.))
+                            .h(px(56.))
+                            .rounded_full()
+                            .bg(icon_bg)
+                            .child(Icon::new(icon).size(px(26.)).text_color(icon_color)),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(title_color)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_center()
+                            .text_color(body_color)
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .w_full()
+                            .child(
+                                div()
+                                    .id("call-mic-perm-later")
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(later_bg)
+                                    .text_color(title_color)
+                                    .hover(move |s| s.bg(later_hover))
+                                    .on_click(move |_, _, cx| {
+                                        call_later.update(cx, |store, cx| match kind {
+                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
+                                            PermissionKind::Camera => {
+                                                store.dismiss_camera_prompt(cx)
+                                            }
+                                        });
+                                    })
+                                    .child(later_label),
+                            )
+                            .child(
+                                div()
+                                    .id("call-mic-perm-open")
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(open_bg)
+                                    .text_color(rgb(0xffffff))
+                                    .hover(move |s| s.bg(open_hover))
+                                    .on_click(move |_, _, cx| {
+                                        match kind {
+                                            PermissionKind::Mic => open_microphone_settings(),
+                                            PermissionKind::Camera => open_camera_settings(),
+                                        }
+                                        call_open.update(cx, |store, cx| match kind {
+                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
+                                            PermissionKind::Camera => {
+                                                store.dismiss_camera_prompt(cx)
+                                            }
+                                        });
+                                    })
+                                    .child(open_label),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn open_microphone_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "ms-settings:privacy-microphone"])
+            .spawn();
+    }
+}
+
+fn open_camera_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "ms-settings:privacy-webcam"])
+            .spawn();
     }
 }
 
@@ -79,6 +275,12 @@ impl Render for CallOverlay {
             let store = self.call.read(cx);
             (store.phase(), store.peer().cloned())
         };
+        if self.call.read(cx).mic_prompt() {
+            return self.render_permission_modal(cx, PermissionKind::Mic);
+        }
+        if self.call.read(cx).camera_prompt() {
+            return self.render_permission_modal(cx, PermissionKind::Camera);
+        }
         let Some(peer) = peer else {
             return div().into_any_element();
         };
@@ -88,6 +290,14 @@ impl Render for CallOverlay {
         let name = display_name(&peer);
         let avatar = peer.avatar.clone();
         let call = self.call.clone();
+        let (card_bg, title_color, subtitle_color) = {
+            let theme = cx.theme();
+            (theme.bg_secondary, theme.text_primary, theme.text_secondary)
+        };
+        let locale = Settings::try_global(cx)
+            .map(|s| s.read(cx).language.clone())
+            .unwrap_or_default();
+        let incoming_label = mezon_i18n::t(&locale, "message.callLog.incomingCall").to_string();
 
         div()
             .absolute()
@@ -108,10 +318,10 @@ impl Render for CallOverlay {
                     .w(px(280.))
                     .p_6()
                     .rounded_xl()
-                    .bg(rgb(0x2b2d31))
+                    .bg(card_bg)
                     .child(avatar_element(&name, avatar.as_deref(), px(96.)))
-                    .child(div().text_color(rgb(0xffffff)).text_xl().child(name))
-                    .child(div().text_color(rgb(0xb5bac1)).child("Incoming call…"))
+                    .child(div().text_color(title_color).text_xl().child(name))
+                    .child(div().text_color(subtitle_color).child(incoming_label))
                     .child(
                         div()
                             .flex()
@@ -163,7 +373,18 @@ pub struct CallPanelView {
 impl CallPanelView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let call = CallStore::global(cx);
-        cx.observe(&call, |_, _, cx| cx.notify()).detach();
+        cx.observe(&call, |this, call, cx| {
+            let active = !matches!(call.read(cx).phase(), CallPhase::Idle);
+            if active {
+                if this._frame_pump.is_none() {
+                    this.start_frame_pump(cx);
+                }
+            } else {
+                this._frame_pump = None;
+            }
+            cx.notify();
+        })
+        .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
         let mut audio_sub = None;
@@ -198,7 +419,9 @@ impl CallPanelView {
             _frame_pump: None,
             _audio_sub: audio_sub,
         };
-        this.start_frame_pump(cx);
+        if !matches!(this.call.read(cx).phase(), CallPhase::Idle) {
+            this.start_frame_pump(cx);
+        }
         this
     }
 

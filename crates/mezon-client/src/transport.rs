@@ -4417,11 +4417,22 @@ impl MezonTransport {
                     json_data,
                     channel_id,
                     caller_id,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("forward_webrtc_signaling error: code={code}");
+        }
+        Ok(())
+    }
+
     pub async fn write_voice_interactive(
         &self,
         clan_id: i64,
         voice_channel_id: i64,
-        user_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
         event_type: i32,
         params: String,
     ) -> Result<()> {
@@ -4437,7 +4448,8 @@ impl MezonTransport {
                 realtime::VoiceInteractiveEvent {
                     clan_id,
                     voice_channel_id,
-                    user_id,
+                    sender_id,
+                    receiver_id,
                     event_type,
                     params,
                 },
@@ -4445,7 +4457,7 @@ impl MezonTransport {
         };
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
-            anyhow::bail!("forward_webrtc_signaling error: code={code}");
+            anyhow::bail!("write_voice_interactive error: code={code}");
         }
         Ok(())
     }
@@ -4473,7 +4485,6 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("make_call_push error: code={code}");
-            anyhow::bail!("write_voice_interactive error: code={code}");
         }
         Ok(())
     }

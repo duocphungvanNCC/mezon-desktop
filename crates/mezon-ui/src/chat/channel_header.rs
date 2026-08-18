@@ -6,8 +6,8 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    CallPeer, CallStore, ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
-    Settings, StreamStore, ThreadsStore,
+    CallPeer, CallStore, ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo,
+    PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
@@ -259,14 +259,16 @@ impl ChannelHeader {
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
-        let dm_actions: &[(&str, IconName)] = &[
-            ("hdr-call", IconName::IconPhoneDM),
-            ("hdr-video-call", IconName::IconMeetDM),
-            ("hdr-members", IconName::MemberList),
-            ("hdr-pin", IconName::PinRight),
-        ];
+        let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
         let actions: Vec<(&str, IconName)> = if self.dm {
-            dm_actions.to_vec()
+            let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
+            if dm_one_to_one {
+                items.push(("hdr-call", IconName::IconPhoneDM));
+                items.push(("hdr-video-call", IconName::IconMeetDM));
+            }
+            items.push(("hdr-members", IconName::MemberList));
+            items.push(("hdr-pin", IconName::PinRight));
+            items
         } else {
             channel_only_actions.to_vec()
         };

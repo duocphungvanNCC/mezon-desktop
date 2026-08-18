@@ -139,6 +139,7 @@ pub fn start_camera_into(
     frame_store: Arc<VideoFrameStore>,
     device_id: Option<String>,
     source: NativeVideoSource,
+    err_tx: flume::Sender<String>,
 ) -> CameraController {
     let stop = Arc::new(AtomicBool::new(false));
     let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
@@ -151,6 +152,7 @@ pub fn start_camera_into(
 
             if !request_macos_permission() {
                 tracing::warn!("camera permission denied");
+                let _ = err_tx.send("camera permission denied".into());
                 return;
             }
 
@@ -159,6 +161,7 @@ pub fn start_camera_into(
                 Ok(camera) => camera,
                 Err(e) => {
                     tracing::warn!("camera start failed: {e}");
+                    let _ = err_tx.send(e);
                     return;
                 }
             };
@@ -518,6 +521,32 @@ fn request_macos_permission() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn request_macos_permission() -> bool {
     true
+}
+
+#[cfg(target_os = "macos")]
+fn camera_authorization_status() -> i64 {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::Class;
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let Some(cls) = Class::get("AVCaptureDevice") else {
+            return 3;
+        };
+        let media_type: id = NSString::alloc(nil).init_str("vide");
+        msg_send![cls, authorizationStatusForMediaType: media_type]
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn camera_denied() -> bool {
+    matches!(camera_authorization_status(), 1 | 2)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn camera_denied() -> bool {
+    false
 }
 
 #[cfg(test)]

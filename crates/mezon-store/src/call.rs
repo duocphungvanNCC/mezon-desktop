@@ -109,6 +109,8 @@ pub struct CallStore {
     media: MediaKind,
     local: MediaFlags,
     remote: MediaFlags,
+    mic_prompt: bool,
+    camera_prompt: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
     incoming_offer: Option<String>,
@@ -156,6 +158,8 @@ impl CallStore {
             media: MediaKind::Audio,
             local: MediaFlags::default(),
             remote: MediaFlags::default(),
+            mic_prompt: false,
+            camera_prompt: false,
             selected_input: None,
             selected_output: None,
             incoming_offer: None,
@@ -242,6 +246,28 @@ impl CallStore {
 
     pub fn remote_frame_key(&self) -> u64 {
         mezon_call::REMOTE_FRAME_KEY
+    }
+
+    pub fn mic_prompt(&self) -> bool {
+        self.mic_prompt
+    }
+
+    pub fn dismiss_mic_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.mic_prompt {
+            self.mic_prompt = false;
+            cx.notify();
+        }
+    }
+
+    pub fn camera_prompt(&self) -> bool {
+        self.camera_prompt
+    }
+
+    pub fn dismiss_camera_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.camera_prompt {
+            self.camera_prompt = false;
+            cx.notify();
+        }
     }
 
     pub fn has_remote_video(&self) -> bool {
@@ -358,6 +384,16 @@ impl CallStore {
         if !matches!(self.phase, CallPhase::Idle) {
             return;
         }
+        if mezon_voice::microphone_denied() {
+            self.mic_prompt = true;
+            cx.notify();
+            return;
+        }
+        if video && mezon_voice::camera_denied() {
+            self.camera_prompt = true;
+            cx.notify();
+            return;
+        }
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
             tracing::warn!("cannot start call: no account");
             return;
@@ -385,8 +421,8 @@ impl CallStore {
             ice_servers: ice_servers(cx),
             is_caller: true,
             self_identity: self_id.to_string(),
-            input_device: None,
-            output_device: None,
+            input_device: self.selected_input.clone(),
+            output_device: self.selected_output.clone(),
             camera_device: None,
             initial_camera_on: video,
         };
@@ -407,6 +443,9 @@ impl CallStore {
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
             return;
         };
+        if mezon_voice::microphone_denied() {
+            self.mic_prompt = true;
+        }
         self.self_id = self_id;
         self.self_name = self_name;
         self.self_avatar = self_avatar;
@@ -427,8 +466,8 @@ impl CallStore {
             ice_servers: ice_servers(cx),
             is_caller: false,
             self_identity: self_id.to_string(),
-            input_device: None,
-            output_device: None,
+            input_device: self.selected_input.clone(),
+            output_device: self.selected_output.clone(),
             camera_device: None,
             initial_camera_on: video,
         };
@@ -436,6 +475,7 @@ impl CallStore {
         if let Some(engine) = &self.engine {
             engine.send(EngineCommand::ApplyRemoteOffer(offer_sdp));
         }
+        self.start_timeout(cx);
         cx.notify();
     }
 
@@ -443,7 +483,6 @@ impl CallStore {
         if !matches!(self.phase, CallPhase::Incoming) {
             return;
         }
-        self.send_to_peer(WEBRTC_SDP_QUIT, String::new(), cx);
         self.end_call(EndReason::LocalHangup, cx);
     }
 
@@ -451,7 +490,13 @@ impl CallStore {
         if matches!(self.phase, CallPhase::Idle) {
             return;
         }
-        self.send_to_peer(WEBRTC_SDP_QUIT, String::new(), cx);
+        self.end_call(EndReason::LocalHangup, cx);
+    }
+
+    pub fn logout_teardown(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.phase, CallPhase::Idle) {
+            return;
+        }
         self.end_call(EndReason::LocalHangup, cx);
     }
 
@@ -592,6 +637,19 @@ impl CallStore {
             EngineEvent::Failed | EngineEvent::Closed => {
                 self.end_call(EndReason::Failed, cx);
             }
+            EngineEvent::MicUnavailable => {
+                self.mic_prompt = true;
+                cx.notify();
+            }
+            EngineEvent::CameraUnavailable => {
+                self.camera_prompt = true;
+                if self.local.cam_on {
+                    self.local.cam_on = false;
+                    let status = serde_json::json!({ "cameraEnabled": false }).to_string();
+                    self.send_to_peer(WEBRTC_SDP_STATUS_REMOTE_MEDIA, status, cx);
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -631,6 +689,11 @@ impl CallStore {
         };
         if matches!(self.phase, CallPhase::Idle) {
             self.generation += 1;
+            if let Some((self_id, self_name, self_avatar)) = self_identity(cx) {
+                self.self_id = self_id;
+                self.self_name = self_name;
+                self.self_avatar = self_avatar;
+            }
             self.peer = Some(CallPeer {
                 user_id: caller_id,
                 channel_id,
@@ -648,6 +711,7 @@ impl CallStore {
             self.connected_at = None;
             self.phase = CallPhase::Incoming;
             self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
+            self.start_timeout(cx);
             cx.notify();
         } else if self.peer.as_ref().map(|p| p.user_id) == Some(caller_id) {
             if let Some(engine) = &self.engine {
@@ -709,7 +773,7 @@ impl CallStore {
         if self.peer.as_ref().map(|p| p.user_id) != Some(caller_id) {
             return;
         }
-        self.end_call(reason, cx);
+        self.terminate(reason, false, cx);
     }
 
     fn on_remote_status(&mut self, caller_id: i64, json: &str, cx: &mut Context<Self>) {
@@ -737,8 +801,15 @@ impl CallStore {
     }
 
     fn end_call(&mut self, reason: EndReason, cx: &mut Context<Self>) {
+        self.terminate(reason, true, cx);
+    }
+
+    fn terminate(&mut self, reason: EndReason, notify_peer: bool, cx: &mut Context<Self>) {
         if matches!(self.phase, CallPhase::Idle) {
             return;
+        }
+        if notify_peer {
+            self.send_to_peer(WEBRTC_SDP_QUIT, String::new(), cx);
         }
         if let Some(engine) = &self.engine {
             engine.send(EngineCommand::Hangup);
@@ -763,6 +834,8 @@ impl CallStore {
         self.media = MediaKind::Audio;
         self.local = MediaFlags::default();
         self.remote = MediaFlags::default();
+        self.mic_prompt = false;
+        self.camera_prompt = false;
         self.incoming_offer = None;
         self.engine = None;
         self.frame_store = None;
@@ -793,7 +866,10 @@ impl CallStore {
             cx.background_executor().timer(NO_ANSWER_TIMEOUT).await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation
-                    && matches!(this.phase, CallPhase::Outgoing | CallPhase::Connecting)
+                    && matches!(
+                        this.phase,
+                        CallPhase::Outgoing | CallPhase::Connecting | CallPhase::Incoming
+                    )
                 {
                     this.end_call(EndReason::Timeout, cx);
                 }

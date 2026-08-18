@@ -39,12 +39,15 @@ use parking_lot::{Condvar, Mutex};
 
 pub use audio::{AudioFormat, AudioIo, DeviceResetKind, PlaybackMixer};
 pub use camera::{
-    CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
+    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
+    start_camera_into,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
-pub use record::{RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter};
+pub use record::{
+    RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
+};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {

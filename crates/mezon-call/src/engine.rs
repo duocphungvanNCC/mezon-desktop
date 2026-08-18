@@ -26,8 +26,8 @@ use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::webrtc::video_track::RtcVideoTrack;
 use mezon_voice::{
-    AudioFormat, AudioIo, CameraController, IceServerConfig, PlaybackMixer, VideoFrameStore,
-    i420_to_bgra_into, local_camera_key, start_camera_into,
+    AudioFormat, AudioIo, CameraController, IceServerConfig, PlaybackMixer, RecordTaps,
+    VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
 };
 use parking_lot::Mutex;
 
@@ -42,6 +42,8 @@ const VIDEO_SOURCE_WIDTH: u32 = 1280;
 const VIDEO_SOURCE_HEIGHT: u32 = 720;
 const CALL_AUDIO_RATE: u32 = 48_000;
 const CALL_AUDIO_CHANNELS: u32 = 1;
+#[cfg(not(target_os = "macos"))]
+const MIC_OPEN_DEADLINE: Duration = Duration::from_secs(6);
 
 type InputFmt = Arc<Mutex<(u32, u32)>>;
 
@@ -76,6 +78,8 @@ pub enum EngineEvent {
     Disconnected,
     Failed,
     Closed,
+    MicUnavailable,
+    CameraUnavailable,
 }
 
 pub struct CallEngine {
@@ -150,7 +154,7 @@ impl Drop for CallEngine {
 }
 
 async fn run_engine(
-    config: CallConfig,
+    mut config: CallConfig,
     frame_store: Arc<VideoFrameStore>,
     cmd_rx: Receiver<EngineCommand>,
     event_tx: Sender<EngineEvent>,
@@ -166,7 +170,7 @@ async fn run_engine(
     let audio_io = tokio::task::spawn_blocking({
         let input = config.input_device.clone();
         let output = config.output_device.clone();
-        move || AudioIo::start(input, output)
+        move || AudioIo::start(input, output, RecordTaps::default())
     })
     .await
     .map_err(|e| anyhow!("audio init task failed: {e}"))?
@@ -194,21 +198,23 @@ async fn run_engine(
         }));
     })));
 
+    let pump_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let track_mixer = mixer.clone();
     let track_frame_store = frame_store.clone();
     let track_handle = handle.clone();
+    let track_pump_tasks = pump_tasks.clone();
     pc.on_track(Some(Box::new(move |event| match event.track {
         MediaStreamTrack::Video(video_track) => {
             tracing::info!("call: remote track added (video)");
             let store = track_frame_store.clone();
-            let rt = track_handle.clone();
-            std::thread::spawn(move || pump_video(video_track, store, rt));
+            let task = track_handle.spawn(pump_video(video_track, store));
+            track_pump_tasks.lock().push(task);
         }
         MediaStreamTrack::Audio(audio_track) => {
             tracing::info!("call: remote track added (audio)");
             let mixer = track_mixer.clone();
-            let rt = track_handle.clone();
-            std::thread::spawn(move || pump_audio(audio_track, mixer, out_fmt, rt));
+            let task = track_handle.spawn(pump_audio(audio_track, mixer, out_fmt));
+            track_pump_tasks.lock().push(task);
         }
     })));
 
@@ -231,6 +237,19 @@ async fn run_engine(
         .await
         .ok()
         .and_then(|result| result.ok());
+    let mic_opened = Arc::new(AtomicBool::new(first_fmt.is_some()));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mic_opened = mic_opened.clone();
+        let event_tx = event_tx.clone();
+        handle.spawn(async move {
+            tokio::time::sleep(MIC_OPEN_DEADLINE).await;
+            if !mic_opened.load(Ordering::Relaxed) {
+                tracing::warn!("call: microphone did not open (permission/device)");
+                let _ = event_tx.send(EngineEvent::MicUnavailable);
+            }
+        });
+    }
     let input_fmt: InputFmt = Arc::new(Mutex::new(match first_fmt {
         Some(format) => (format.sample_rate, format.channels.max(1)),
         None => (CALL_AUDIO_RATE, CALL_AUDIO_CHANNELS),
@@ -286,7 +305,15 @@ async fn run_engine(
     let pc = Arc::new(pc);
     let mut camera: Option<CameraController> = None;
     if config.initial_camera_on {
-        set_camera(true, &config, &frame_store, &video_source, &mut camera);
+        set_camera(
+            true,
+            &config,
+            &frame_store,
+            &video_source,
+            &mut camera,
+            &handle,
+            &event_tx,
+        );
     }
 
     if config.is_caller {
@@ -313,6 +340,7 @@ async fn run_engine(
             format = next_input_format(&input_format_rx) => {
                 match format {
                     Some(format) => {
+                        mic_opened.store(true, Ordering::Relaxed);
                         let next = (format.sample_rate, format.channels.max(1));
                         let mut current = input_fmt.lock();
                         if *current != next {
@@ -370,11 +398,20 @@ async fn run_engine(
                     }
                     EngineCommand::SetMicEnabled(on) => mic_enabled.store(on, Ordering::Relaxed),
                     EngineCommand::SetCameraEnabled(on) => {
-                        set_camera(on, &config, &frame_store, &video_source, &mut camera);
+                        set_camera(
+                            on,
+                            &config,
+                            &frame_store,
+                            &video_source,
+                            &mut camera,
+                            &handle,
+                            &event_tx,
+                        );
                     }
                     EngineCommand::SetInputDevice(device) => audio_io.set_input_device(device),
                     EngineCommand::SetOutputDevice(device) => audio_io.set_output_device(device),
                     EngineCommand::SetCameraDevice(device) => {
+                        config.camera_device = device.clone();
                         if let Some(controller) = camera.as_ref() {
                             controller.switch(device);
                         }
@@ -388,6 +425,9 @@ async fn run_engine(
     mic_enabled.store(false, Ordering::Relaxed);
     mic_task.abort();
     let _ = mic_task.await;
+    for task in pump_tasks.lock().drain(..) {
+        task.abort();
+    }
     if let Some(controller) = camera.take() {
         controller.stop();
         frame_store.remove(local_camera_key(&config.self_identity));
@@ -410,19 +450,20 @@ fn sendrecv_init() -> RtpTransceiverInit {
 }
 
 fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
-    let mut ice_servers = vec![IceServer {
-        urls: vec!["stun:stun.l.google.com:19302".into()],
-        username: String::new(),
-        password: String::new(),
-    }];
-    for server in servers {
-        if server.urls.is_empty() {
-            continue;
-        }
-        ice_servers.push(IceServer {
+    let mut ice_servers: Vec<IceServer> = servers
+        .iter()
+        .filter(|server| !server.urls.is_empty())
+        .map(|server| IceServer {
             urls: server.urls.clone(),
             username: server.username.clone(),
             password: server.credential.clone(),
+        })
+        .collect();
+    if ice_servers.is_empty() {
+        ice_servers.push(IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".into()],
+            username: String::new(),
+            password: String::new(),
         });
     }
     RtcConfiguration {
@@ -590,17 +631,28 @@ fn set_camera(
     frame_store: &Arc<VideoFrameStore>,
     video_source: &NativeVideoSource,
     camera: &mut Option<CameraController>,
+    handle: &tokio::runtime::Handle,
+    event_tx: &Sender<EngineEvent>,
 ) {
     if enable {
         if camera.is_some() {
             return;
         }
+        let (err_tx, err_rx) = flume::bounded::<String>(1);
         let controller = start_camera_into(
             config.self_identity.clone(),
             frame_store.clone(),
             config.camera_device.clone(),
             video_source.clone(),
+            err_tx,
         );
+        let event_tx = event_tx.clone();
+        handle.spawn(async move {
+            if let Ok(err) = err_rx.recv_async().await {
+                tracing::warn!("call: camera unavailable: {err}");
+                let _ = event_tx.send(EngineEvent::CameraUnavailable);
+            }
+        });
         *camera = Some(controller);
     } else if let Some(controller) = camera.take() {
         controller.stop();
@@ -608,72 +660,59 @@ fn set_camera(
     }
 }
 
-fn pump_video(
-    video_track: RtcVideoTrack,
-    frame_store: Arc<VideoFrameStore>,
-    handle: tokio::runtime::Handle,
-) {
-    handle.block_on(async move {
-        let mut bgra: Vec<u8> = Vec::new();
-        let mut stream = NativeVideoStream::new(video_track);
-        let mut logged_first = false;
-        while let Some(frame) = stream.next().await {
-            let buffer = frame.buffer.to_i420();
-            let width = buffer.width();
-            let height = buffer.height();
-            if !logged_first {
-                logged_first = true;
-                tracing::info!("call: remote video first frame {width}x{height}");
-            }
-            let (stride_y, stride_u, stride_v) = buffer.strides();
-            let (y, u, v) = buffer.data();
-            bgra.clear();
-            bgra.resize(width as usize * height as usize * 4, 0);
-            i420_to_bgra_into(
-                &mut bgra,
-                y,
-                u,
-                v,
-                stride_y as usize,
-                stride_u as usize,
-                stride_v as usize,
-                width as usize,
-                height as usize,
-            );
-            if let Some(recycled) =
-                frame_store.publish(REMOTE_FRAME_KEY, width, height, std::mem::take(&mut bgra))
-            {
-                bgra = recycled;
-            }
+async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore>) {
+    let mut bgra: Vec<u8> = Vec::new();
+    let mut stream = NativeVideoStream::new(video_track);
+    let mut logged_first = false;
+    while let Some(frame) = stream.next().await {
+        let buffer = frame.buffer.to_i420();
+        let width = buffer.width();
+        let height = buffer.height();
+        if !logged_first {
+            logged_first = true;
+            tracing::info!("call: remote video first frame {width}x{height}");
         }
-        frame_store.remove(REMOTE_FRAME_KEY);
-    });
+        let (stride_y, stride_u, stride_v) = buffer.strides();
+        let (y, u, v) = buffer.data();
+        bgra.clear();
+        bgra.resize(width as usize * height as usize * 4, 0);
+        i420_to_bgra_into(
+            &mut bgra,
+            y,
+            u,
+            v,
+            stride_y as usize,
+            stride_u as usize,
+            stride_v as usize,
+            width as usize,
+            height as usize,
+        );
+        if let Some(recycled) =
+            frame_store.publish(REMOTE_FRAME_KEY, width, height, std::mem::take(&mut bgra))
+        {
+            bgra = recycled;
+        }
+    }
+    frame_store.remove(REMOTE_FRAME_KEY);
 }
 
-fn pump_audio(
-    audio_track: RtcAudioTrack,
-    mixer: Arc<PlaybackMixer>,
-    out_fmt: AudioFormat,
-    handle: tokio::runtime::Handle,
-) {
-    handle.block_on(async move {
-        let mut stream = NativeAudioStream::new(
-            audio_track,
-            out_fmt.sample_rate as i32,
-            out_fmt.channels as i32,
-        );
-        let mut logged_first = false;
-        while let Some(frame) = stream.next().await {
-            if !logged_first {
-                logged_first = true;
-                tracing::info!(
-                    "call: remote audio first frame ({}Hz/{}ch)",
-                    frame.sample_rate,
-                    frame.num_channels
-                );
-            }
-            mixer.push(REMOTE_AUDIO_KEY, &frame.data);
+async fn pump_audio(audio_track: RtcAudioTrack, mixer: Arc<PlaybackMixer>, out_fmt: AudioFormat) {
+    let mut stream = NativeAudioStream::new(
+        audio_track,
+        out_fmt.sample_rate as i32,
+        out_fmt.channels as i32,
+    );
+    let mut logged_first = false;
+    while let Some(frame) = stream.next().await {
+        if !logged_first {
+            logged_first = true;
+            tracing::info!(
+                "call: remote audio first frame ({}Hz/{}ch)",
+                frame.sample_rate,
+                frame.num_channels
+            );
         }
-        mixer.remove(REMOTE_AUDIO_KEY);
-    });
+        mixer.push(REMOTE_AUDIO_KEY, &frame.data);
+    }
+    mixer.remove(REMOTE_AUDIO_KEY);
 }

@@ -931,13 +931,6 @@ impl TransportClient {
         content_json: String,
         mode: i32,
         create_time_seconds: u32,
-    pub async fn write_voice_interactive(
-        &self,
-        clan_id: i64,
-        voice_channel_id: i64,
-        user_id: i64,
-        event_type: i32,
-        params: String,
     ) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
@@ -951,7 +944,33 @@ impl TransportClient {
                         mode,
                         create_time_seconds,
                     )
-                    .write_voice_interactive(clan_id, voice_channel_id, user_id, event_type, params)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn write_voice_interactive(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_voice_interactive(
+                        clan_id,
+                        voice_channel_id,
+                        sender_id,
+                        receiver_id,
+                        event_type,
+                        params,
+                    )
                     .await
             })
             .await
