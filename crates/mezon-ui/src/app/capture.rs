@@ -777,6 +777,60 @@ pub fn member_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyho
     })?
 }
 
+pub fn create_clan_task(
+    cx: &mut App,
+    name: String,
+    logo: String,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let Some(clan_list) = mezon_store::ClanList::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("clan store unavailable")));
+    };
+    let task = clan_list.update(cx, |list, cx| list.create_clan(name.clone(), logo, cx));
+    cx.background_spawn(async move {
+        let clan_id = task.await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(json!({ "ok": true, "clan_id": clan_id, "name": name }))
+    })
+}
+
+pub fn open_create_clan_modal(cx: &mut App) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        let clan_list = mezon_store::ClanList::global(cx);
+        let settings = mezon_store::Settings::try_global(cx)
+            .ok_or_else(|| anyhow::anyhow!("settings unavailable"))?;
+        let modal = cx.new(|cx| {
+            crate::clan::create_clan_modal::CreateClanModal::new(clan_list, settings, window, cx)
+        });
+        crate::app::shell::Shell::global(cx)
+            .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+        anyhow::Ok(json!({ "ok": true }))
+    })?
+}
+
+pub fn clan_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_state(cx)
+}
+
+pub fn clan_menu_open(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    x: f32,
+    y: f32,
+) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_open(clan_id, gpui::point(gpui::px(x), gpui::px(y)), cx)
+}
+
+pub fn clan_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_close(cx)
+}
+
+pub fn clan_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::sidebar::clan_sidebar::clan_menu_pick(index, value, window, cx)
+    })?
+}
+
 pub fn user_status_snapshot(cx: &App) -> anyhow::Result<Value> {
     let Some((user_id, status)) = mezon_store::current_user_status(cx) else {
         return Ok(json!({ "signed_in": false }));

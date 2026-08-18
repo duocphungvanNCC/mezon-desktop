@@ -247,6 +247,18 @@ impl McpBackend {
                 self.require_write_mode("member_menu_pick")?;
                 self.member_menu_pick(&arguments).await
             }
+            "clan_menu_state" => self.clan_menu_state().await,
+            "clan_menu_open" => self.clan_menu_open(&arguments).await,
+            "clan_menu_close" => self.clan_menu_close().await,
+            "clan_menu_pick" => {
+                self.require_write_mode("clan_menu_pick")?;
+                self.clan_menu_pick(&arguments).await
+            }
+            "open_create_clan_modal" => self.open_create_clan_modal().await,
+            "create_clan" => {
+                self.require_write_mode("create_clan")?;
+                self.create_clan(&arguments).await
+            }
             "set_user_status" => {
                 self.require_write_mode("set_user_status")?;
                 self.set_user_status(&arguments).await
@@ -1211,6 +1223,68 @@ impl McpBackend {
             reply,
         })
         .await
+    }
+
+    async fn clan_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ClanMenuState { reply })
+            .await
+    }
+
+    async fn clan_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("clan_menu_open requires field clan_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::ClanMenuOpen {
+            clan_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn clan_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ClanMenuClose { reply })
+            .await
+    }
+
+    async fn clan_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("clan_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::ClanMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn create_clan(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("create_clan requires string field name"))?;
+        let logo = arguments
+            .get("logo")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        self.send_ui_result(|reply| McpCommand::CreateClan { name, logo, reply })
+            .await
+    }
+
+    async fn open_create_clan_modal(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::OpenCreateClanModal { reply })
+            .await
     }
 
     async fn set_user_status(&self, arguments: &Value) -> anyhow::Result<Value> {
