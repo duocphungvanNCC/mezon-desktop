@@ -20,6 +20,7 @@ use libwebrtc::peer_connection_factory::{
 use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
 use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
 use libwebrtc::session_description::{SdpType, SessionDescription};
+use libwebrtc::stats::RtcStats;
 use libwebrtc::video_source::VideoResolution;
 use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
@@ -41,6 +42,8 @@ const VIDEO_SOURCE_WIDTH: u32 = 1280;
 const VIDEO_SOURCE_HEIGHT: u32 = 720;
 const CALL_AUDIO_RATE: u32 = 48_000;
 const CALL_AUDIO_CHANNELS: u32 = 1;
+const MEDIA_STATS_INTERVAL: Duration = Duration::from_secs(5);
+const LEVEL_LOG_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(not(target_os = "macos"))]
 const MIC_OPEN_DEADLINE: Duration = Duration::from_secs(6);
 
@@ -187,14 +190,33 @@ async fn run_engine(
 
     let ice_tx = event_tx.clone();
     pc.on_ice_candidate(Some(Box::new(move |candidate| {
-        if candidate.candidate().is_empty() {
+        let sdp = candidate.candidate();
+        if sdp.is_empty() {
             return;
         }
+        tracing::debug!("call: local ice candidate typ={}", candidate_kind(&sdp));
         let _ = ice_tx.send(EngineEvent::LocalIce(IcePayload {
-            candidate: candidate.candidate(),
+            candidate: sdp,
             sdp_mid: Some(candidate.sdp_mid()),
             sdp_mline_index: Some(candidate.sdp_mline_index()),
         }));
+    })));
+
+    pc.on_ice_candidate_error(Some(Box::new(|error| {
+        tracing::warn!(
+            "call: ice candidate error url={} code={} {}",
+            error.url,
+            error.error_code,
+            error.error_text
+        );
+    })));
+
+    pc.on_ice_connection_state_change(Some(Box::new(|state| {
+        tracing::info!("call: ice connection state = {state:?}");
+    })));
+
+    pc.on_ice_gathering_state_change(Some(Box::new(|state| {
+        tracing::debug!("call: ice gathering state = {state:?}");
     })));
 
     let pump_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -330,9 +352,13 @@ async fn run_engine(
 
     let mut remote_set = false;
     let mut pending_ice: Vec<IcePayload> = Vec::new();
+    let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
+    stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    stats_timer.tick().await;
     loop {
         tokio::select! {
             _ = stop_rx.recv_async() => break,
+            _ = stats_timer.tick() => log_media_stats(&pc).await,
             format = next_input_format(&input_format_rx) => {
                 match format {
                     Some(format) => {
@@ -475,6 +501,87 @@ async fn drain_ice(pc: &PeerConnection, pending: &mut Vec<IcePayload>) {
     }
 }
 
+async fn log_media_stats(pc: &PeerConnection) {
+    let Ok(stats) = pc.get_stats().await else {
+        return;
+    };
+    let mut packets_sent = 0u64;
+    let mut bytes_sent = 0u64;
+    let mut packets_received = 0u64;
+    let mut bytes_received = 0u64;
+    let mut remote_level = 0.0f64;
+    let mut mic_level = 0.0f64;
+    let mut mic_samples = 0u64;
+    for stat in &stats {
+        match stat {
+            RtcStats::OutboundRtp(sent) if sent.stream.kind == "audio" => {
+                packets_sent += sent.sent.packets_sent;
+                bytes_sent += sent.sent.bytes_sent;
+            }
+            RtcStats::InboundRtp(received) if received.stream.kind == "audio" => {
+                packets_received += received.received.packets_received;
+                bytes_received += received.inbound.bytes_received;
+                remote_level = remote_level.max(received.inbound.audio_level);
+            }
+            RtcStats::MediaSource(source) if source.source.kind == "audio" => {
+                mic_level = mic_level.max(source.audio.audio_level);
+                mic_samples = mic_samples.max(source.audio.total_samples_captured);
+            }
+            _ => {}
+        }
+    }
+    tracing::info!(
+        "call: audio stats out(packets={packets_sent} bytes={bytes_sent} mic_level={mic_level:.4} captured={mic_samples}) in(packets={packets_received} bytes={bytes_received} level={remote_level:.4})"
+    );
+}
+
+fn candidate_kind(candidate: &str) -> &str {
+    candidate
+        .split_whitespace()
+        .skip_while(|token| *token != "typ")
+        .nth(1)
+        .unwrap_or("unknown")
+}
+
+struct LevelMeter {
+    label: &'static str,
+    energy: f64,
+    samples: u64,
+    next_log: tokio::time::Instant,
+}
+
+impl LevelMeter {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            energy: 0.0,
+            samples: 0,
+            next_log: tokio::time::Instant::now() + LEVEL_LOG_INTERVAL,
+        }
+    }
+
+    fn record(&mut self, samples: &[i16]) {
+        self.energy += samples
+            .iter()
+            .map(|&s| (s as f64) * (s as f64))
+            .sum::<f64>();
+        self.samples += samples.len() as u64;
+        let now = tokio::time::Instant::now();
+        if now < self.next_log {
+            return;
+        }
+        let rms = if self.samples == 0 {
+            0.0
+        } else {
+            (self.energy / self.samples as f64).sqrt()
+        };
+        tracing::debug!("call: {} rms={rms:.0} samples={}", self.label, self.samples);
+        self.energy = 0.0;
+        self.samples = 0;
+        self.next_log = now + LEVEL_LOG_INTERVAL;
+    }
+}
+
 async fn add_ice(pc: &PeerConnection, ice: &IcePayload) {
     match IceCandidate::parse(
         ice.sdp_mid.as_deref().unwrap_or_default(),
@@ -482,6 +589,10 @@ async fn add_ice(pc: &PeerConnection, ice: &IcePayload) {
         &ice.candidate,
     ) {
         Ok(candidate) => {
+            tracing::debug!(
+                "call: remote ice candidate typ={}",
+                candidate_kind(&ice.candidate)
+            );
             if let Err(e) = pc.add_ice_candidate(candidate).await {
                 tracing::warn!("add ice candidate failed: {e:?}");
             }
@@ -505,6 +616,7 @@ async fn mic_capture(
 ) {
     let mut resampler = MicResampler::new();
     let mut out: Vec<i16> = Vec::new();
+    let mut meter = LevelMeter::new("mic level");
     while let Ok(samples) = mic_rx.recv_async().await {
         if !mic_enabled.load(Ordering::Relaxed) {
             continue;
@@ -518,6 +630,7 @@ async fn mic_capture(
         if out.is_empty() {
             continue;
         }
+        meter.record(&out);
         let frame = AudioFrame {
             data: std::borrow::Cow::Borrowed(out.as_slice()),
             num_channels: CALL_AUDIO_CHANNELS,
@@ -699,6 +812,7 @@ async fn pump_audio(audio_track: RtcAudioTrack, mixer: Arc<PlaybackMixer>, out_f
         out_fmt.channels as i32,
     );
     let mut logged_first = false;
+    let mut meter = LevelMeter::new("remote audio level");
     while let Some(frame) = stream.next().await {
         if !logged_first {
             logged_first = true;
@@ -708,6 +822,7 @@ async fn pump_audio(audio_track: RtcAudioTrack, mixer: Arc<PlaybackMixer>, out_f
                 frame.num_channels
             );
         }
+        meter.record(&frame.data);
         mixer.push(REMOTE_AUDIO_KEY, &frame.data);
     }
     mixer.remove(REMOTE_AUDIO_KEY);

@@ -25,6 +25,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const NO_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(12);
+const MAX_PENDING_ICE: usize = 128;
 const DM_STREAM_MODE: i32 = 4;
 
 static DIALTONE_SOUND: &[u8] = include_bytes!("../assets/audio/dialtone.mp3");
@@ -124,6 +125,8 @@ pub struct CallStore {
     call_create_time: u32,
     tones: CallTones,
     generation: u64,
+    pending_remote_ice: Vec<IcePayload>,
+    pending_local_ice: Vec<IcePayload>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
@@ -172,6 +175,8 @@ impl CallStore {
             call_message_id: None,
             call_create_time: 0,
             tones: CallTones::default(),
+            pending_remote_ice: Vec::new(),
+            pending_local_ice: Vec::new(),
             generation: 0,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
@@ -417,13 +422,14 @@ impl CallStore {
         self.connected_at = None;
         self.phase = CallPhase::Outgoing;
 
+        let (input_device, output_device, camera_device) = self.call_devices(cx);
         let config = CallConfig {
             ice_servers: ice_servers(cx),
             is_caller: true,
             self_identity: self_id.to_string(),
-            input_device: self.selected_input.clone(),
-            output_device: self.selected_output.clone(),
-            camera_device: None,
+            input_device,
+            output_device,
+            camera_device,
             initial_camera_on: video,
         };
         self.spawn_engine(config, cx);
@@ -462,13 +468,14 @@ impl CallStore {
         self.phase = CallPhase::Connecting;
         self.tones.stop_dial_ring();
 
+        let (input_device, output_device, camera_device) = self.call_devices(cx);
         let config = CallConfig {
             ice_servers: ice_servers(cx),
             is_caller: false,
             self_identity: self_id.to_string(),
-            input_device: self.selected_input.clone(),
-            output_device: self.selected_output.clone(),
-            camera_device: None,
+            input_device,
+            output_device,
+            camera_device,
             initial_camera_on: video,
         };
         self.spawn_engine(config, cx);
@@ -574,6 +581,56 @@ impl CallStore {
         });
         self._events_task = Some(task);
         self.engine = Some(engine);
+        self.flush_remote_ice();
+    }
+
+    fn call_devices(&self, cx: &App) -> (Option<String>, Option<String>, Option<String>) {
+        let (input, output, camera) = crate::Settings::try_global(cx)
+            .map(|settings| {
+                let settings = settings.read(cx);
+                (
+                    settings.input_device_id.clone(),
+                    settings.output_device_id.clone(),
+                    settings.camera_device_id.clone(),
+                )
+            })
+            .unwrap_or_default();
+        (
+            self.selected_input.clone().or(input),
+            self.selected_output.clone().or(output),
+            camera,
+        )
+    }
+
+    fn flush_remote_ice(&mut self) {
+        let Some(engine) = &self.engine else {
+            return;
+        };
+        let pending = std::mem::take(&mut self.pending_remote_ice);
+        if pending.is_empty() {
+            return;
+        }
+        tracing::debug!("call: flushing {} buffered remote ice", pending.len());
+        for ice in pending {
+            engine.send(EngineCommand::AddRemoteIce(ice));
+        }
+    }
+
+    fn flush_local_ice(&mut self, cx: &Context<Self>) {
+        let pending = std::mem::take(&mut self.pending_local_ice);
+        if pending.is_empty() {
+            return;
+        }
+        tracing::debug!("call: flushing {} buffered local ice", pending.len());
+        for ice in pending {
+            self.send_local_ice(ice, cx);
+        }
+    }
+
+    fn send_local_ice(&self, ice: IcePayload, cx: &Context<Self>) {
+        if let Ok(json) = serde_json::to_string(&ice) {
+            self.send_to_peer(WEBRTC_ICE_CANDIDATE, json, cx);
+        }
     }
 
     fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
@@ -606,9 +663,13 @@ impl CallStore {
                 }
             }
             EngineEvent::LocalIce(ice) => {
-                if let Ok(json) = serde_json::to_string(&ice) {
-                    self.send_to_peer(WEBRTC_ICE_CANDIDATE, json, cx);
+                if matches!(self.phase, CallPhase::Outgoing) {
+                    if self.pending_local_ice.len() < MAX_PENDING_ICE {
+                        self.pending_local_ice.push(ice);
+                    }
+                    return;
                 }
+                self.send_local_ice(ice, cx);
             }
             EngineEvent::Connected => {
                 self._ice_grace_task = None;
@@ -754,6 +815,7 @@ impl CallStore {
         if matches!(self.phase, CallPhase::Outgoing) {
             self.phase = CallPhase::Connecting;
         }
+        self.flush_local_ice(cx);
         self.start_timeout(cx);
         cx.notify();
     }
@@ -762,10 +824,16 @@ impl CallStore {
         if self.peer.as_ref().map(|p| p.user_id) != Some(caller_id) {
             return;
         }
-        if let Ok(ice) = serde_json::from_str::<IcePayload>(json)
-            && let Some(engine) = &self.engine
-        {
-            engine.send(EngineCommand::AddRemoteIce(ice));
+        let Ok(ice) = serde_json::from_str::<IcePayload>(json) else {
+            tracing::warn!("call: unparsable remote ice candidate");
+            return;
+        };
+        match &self.engine {
+            Some(engine) => engine.send(EngineCommand::AddRemoteIce(ice)),
+            None if self.pending_remote_ice.len() < MAX_PENDING_ICE => {
+                self.pending_remote_ice.push(ice)
+            }
+            None => {}
         }
     }
 
@@ -837,6 +905,8 @@ impl CallStore {
         self.mic_prompt = false;
         self.camera_prompt = false;
         self.incoming_offer = None;
+        self.pending_remote_ice.clear();
+        self.pending_local_ice.clear();
         self.engine = None;
         self.frame_store = None;
         self.connected_at = None;
