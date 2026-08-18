@@ -4,7 +4,7 @@
 //! Any view can surface a toast or a modal from anywhere via [`Shell::global`], instead of each
 //! page wiring its own local toast/dialog state.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
@@ -57,7 +57,6 @@ use upload_limit_modal::UploadLimitModal;
 use wallet_not_available_modal::WalletNotAvailableModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
-const TOAST_COUNTDOWN_FPS: f32 = 12.;
 
 struct ToastItem {
     id: usize,
@@ -65,7 +64,8 @@ struct ToastItem {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
-    countdown: Option<f32>,
+    /// How long the countdown bar has to drain; the bar animates itself, so nothing here ticks.
+    countdown: Option<Duration>,
     _dismiss_task: Option<Task<()>>,
 }
 
@@ -143,32 +143,8 @@ impl Shell {
         self.next_id = self.next_id.wrapping_add(1);
         let ttl = TOAST_TTL;
         let dismiss_task = cx.spawn(async move |this, cx| {
-            let started_at = Instant::now();
-            let tick = Duration::from_secs_f32(1. / TOAST_COUNTDOWN_FPS);
-            loop {
-                let remaining = ttl.saturating_sub(started_at.elapsed());
-                cx.background_executor().timer(tick.min(remaining)).await;
-                let elapsed = started_at.elapsed();
-                let should_continue = this
-                    .update(cx, |this, cx| {
-                        if elapsed >= ttl {
-                            this.toasts.retain(|toast| toast.id != id);
-                            cx.notify();
-                            return false;
-                        }
-                        let Some(toast) = this.toasts.iter_mut().find(|toast| toast.id == id)
-                        else {
-                            return false;
-                        };
-                        toast.countdown = Some(1. - elapsed.as_secs_f32() / ttl.as_secs_f32());
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !should_continue {
-                    break;
-                }
-            }
+            cx.background_executor().timer(ttl).await;
+            this.update(cx, |this, cx| this.dismiss_by_id(id, cx)).ok();
         });
         self.toasts.push(ToastItem {
             id,
@@ -176,7 +152,7 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
-            countdown: Some(1.),
+            countdown: Some(ttl),
             _dismiss_task: Some(dismiss_task),
         });
         cx.notify();
@@ -1307,7 +1283,7 @@ impl Shell {
                             let toast = Toast::new(item.message.clone())
                                 .kind(item.kind)
                                 .progress(item.progress)
-                                .countdown(item.countdown);
+                                .countdown(id, item.countdown);
                             div()
                                 .id(("toast", id))
                                 .cursor_pointer()
