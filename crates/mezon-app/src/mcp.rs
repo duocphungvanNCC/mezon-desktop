@@ -396,6 +396,48 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::ClanMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::clan_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuOpen {
+                        clan_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::clan_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::clan_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::clan_menu_pick(cx, index, value));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateClan { name, logo, reply } => {
+                        let task = cx
+                            .update(|cx| mezon_ui::app::capture::create_clan_task(cx, name, logo));
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::OpenCreateClanModal { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::open_create_clan_modal);
+                        let _ = reply.send(result);
+                    }
                     McpCommand::SetUserStatus {
                         status,
                         minutes,

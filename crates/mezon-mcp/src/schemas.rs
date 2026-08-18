@@ -95,6 +95,9 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "close_modal"
         | "member_menu_state"
         | "member_menu_close"
+        | "clan_menu_state"
+        | "clan_menu_close"
+        | "open_create_clan_modal"
         | "quit_app" => Arc::new(empty()),
         "list_banned_users" => Arc::new(object(
             json!({
@@ -120,6 +123,31 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 ),
             }),
             &["index"],
+        )),
+        "clan_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["clan_id"],
+        )),
+        "clan_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from clan_menu_open/clan_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Notification Settings row.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "create_clan" => Arc::new(object(
+            json!({
+                "name": { "type": "string", "description": "Clan name (letters, digits, space, - or _; must not start with a separator)." },
+                "logo": { "type": "string", "description": "Optional logo URL; empty for none." },
+            }),
+            &["name"],
         )),
         "list_channels" => Arc::new(object(
             json!({ "clan_id": id("Clan snowflake id to list channels for.") }),
