@@ -540,12 +540,9 @@ pub(super) fn build_channel_menu(
         if permissions.has_manage_thread && !permissions.is_welcome_channel {
             menu = menu
                 .separator()
-                .item(
-                    edit_label.clone(),
-                    coming_soon_modal(edit_label, locale_owned.clone()),
-                )
+                .item(edit_label, open_channel_settings(clan_id, channel_id))
                 .danger_item(
-                    delete_label.clone(),
+                    delete_label,
                     open_delete_thread_confirm(clan_id, channel_id, locale_owned.clone()),
                 );
         }

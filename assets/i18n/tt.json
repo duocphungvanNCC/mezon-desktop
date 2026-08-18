@@ -795,6 +795,7 @@
   "channelSetting.fields.threadLeave.leave": "Ботакламадан чыгу",
   "channelSetting.fields.threadLeave.title": "",
   "channelSetting.fields.threadName.duplicateError": "Бу ботаклама исеме каналда инде бар. Башка исем керетегез.",
+  "channelSetting.fields.threadName.emptyError": "Зинһар, ботаклама исемен керетегез (64 символдан да ким, бары тик хәрефләр, саннар, _ яки -).",
   "channelSetting.fields.threadName.errorMessage": "Зинһар, дөрес ботаклама исемен керетегез (64 символдан да ким, бары тик хәрефләр, саннар, _ яки -).",
   "channelSetting.fields.threadName.placeholder": "Ботаклама исемен керетегез",
   "channelSetting.fields.threadName.title": "Ботаклама исеме",
