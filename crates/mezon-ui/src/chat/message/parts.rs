@@ -836,7 +836,7 @@ fn render_audio(
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
-        false,
+        IconName::AudioPlay,
         audio_time_label(0.0, duration),
         move |_, _, cx| {
             if activate_selection.borrow().has_selection() {

@@ -243,6 +243,40 @@ impl McpBackend {
                 self.set_user_status(&arguments).await
             }
             "get_settings" => self.get_settings().await,
+            "join_voice" => {
+                self.require_write_mode("join_voice")?;
+                let clan_id = parse_i64_field(&arguments, "clan_id")?;
+                let channel_id = parse_i64_field(&arguments, "channel_id")?;
+                self.send_ui_result(|reply| McpCommand::JoinVoice {
+                    channel_id,
+                    clan_id,
+                    reply,
+                })
+                .await
+            }
+            "leave_voice" => {
+                self.require_write_mode("leave_voice")?;
+                self.send_ui_result(|reply| McpCommand::LeaveVoice { reply })
+                    .await
+            }
+            "get_recording_state" => {
+                self.send_ui_value(|reply| McpCommand::GetRecordingState { reply })
+                    .await
+            }
+            "start_recording" => {
+                self.require_write_mode("start_recording")?;
+                let path = arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::StartRecording { path, reply })
+                    .await
+            }
+            "stop_recording" => {
+                self.require_write_mode("stop_recording")?;
+                self.send_ui_result(|reply| McpCommand::StopRecording { reply })
+                    .await
+            }
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
             "get_sticker" => self.get_sticker(&arguments).await,

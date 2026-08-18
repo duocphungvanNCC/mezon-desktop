@@ -8,6 +8,7 @@ members = [
     "crates/mezon-voice",
     "crates/mezon-stream",
     "crates/mezon-video",
+    "crates/mezon-record",
     "crates/mezon-audio",
     "crates/mezon-native",
     "crates/mezon-updater",
@@ -387,6 +388,19 @@ opt-level = 3
 [profile.dev.package.derive_refineable]
 opt-level = 3
 [profile.dev.package.ztracing_macro]
+opt-level = 3
+
+[profile.dev.package.mezon-voice]
+opt-level = 2
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+[profile.dev.package.cosmic-text]
+opt-level = 3
+[profile.dev.package.swash]
+opt-level = 3
+[profile.dev.package.rustybuzz]
 opt-level = 3
 
 [profile.release]

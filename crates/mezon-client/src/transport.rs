@@ -106,8 +106,8 @@ pub enum RealtimeEvent {
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
-    ScreenShare(realtime::ScreenShareEvent),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
+    ScreenShare(realtime::ScreenShareEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -163,8 +163,8 @@ impl RealtimeEvent {
             Self::VoiceJoined(_) => "VoiceJoined",
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
-            Self::ScreenShare(_) => "ScreenShare",
             Self::VoiceInteractive(_) => "VoiceInteractive",
+            Self::ScreenShare(_) => "ScreenShare",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -222,8 +222,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
-            realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
+            realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -4405,6 +4405,11 @@ impl MezonTransport {
         params: String,
     ) -> Result<()> {
         let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=VoiceInteractiveEvent cid={} channel_id={voice_channel_id}",
+            i32::from(cid)
+        );
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
@@ -8588,13 +8593,13 @@ impl MezonTransport {
     }
 
     /// Create onboarding.
-    pub async fn create_onboarding(&self, clan_id: i64) -> Result<api::ListOnboardingResponse> {
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<api::OnboardingContent>,
+    ) -> Result<api::ListOnboardingResponse> {
         let cid = self.generate_cid();
-        let body = api::CreateOnboardingRequest {
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = api::CreateOnboardingRequest { clan_id, contents }.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateOnboarding", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8603,12 +8608,22 @@ impl MezonTransport {
     }
 
     /// Update onboarding.
-    pub async fn update_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: api::OnboardingContent,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateOnboardingRequest {
             id,
             clan_id,
-            ..Default::default()
+            task_type: content.task_type,
+            channel_id: content.channel_id,
+            title: content.title,
+            content: content.content,
+            image_url: content.image_url,
+            answers: content.answers,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateOnboarding", body).await?;
