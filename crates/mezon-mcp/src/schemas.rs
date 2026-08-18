@@ -92,7 +92,35 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "show_window"
         | "logout"
         | "refresh"
+        | "close_modal"
+        | "member_menu_state"
+        | "member_menu_close"
         | "quit_app" => Arc::new(empty()),
+        "list_banned_users" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id."),
+                "channel_id": id("Channel snowflake id; 0 asks clan-wide."),
+            }),
+            &["clan_id"],
+        )),
+        "member_menu_open" => Arc::new(object(
+            json!({
+                "user_id": id("Member snowflake id from get_member_list."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["user_id"],
+        )),
+        "member_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from member_menu_open/member_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Ban row (seconds, 0 = until lifted).",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
         "list_channels" => Arc::new(object(
             json!({ "clan_id": id("Clan snowflake id to list channels for.") }),
             &["clan_id"],

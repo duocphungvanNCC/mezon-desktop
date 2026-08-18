@@ -138,6 +138,9 @@ impl LoginStore {
         if let Some(e) = crate::channel_users::ChannelUsersStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::banned_users::BannedUsersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) =
             crate::channel_role_permissions::ChannelRolePermissionsStore::try_global(cx)
         {
