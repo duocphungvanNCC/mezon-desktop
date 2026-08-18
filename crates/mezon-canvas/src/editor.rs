@@ -23,13 +23,13 @@ use ui::Tooltip as TooltipView;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::image::{
-    CANVAS_IMAGE_FALLBACK_HEIGHT, canvas_image_display_size, canvas_image_display_src,
-    canvas_image_known_size, canvas_img, ensure_canvas_image_dimensions_loaded, is_data_image_url,
-    remember_canvas_image_size,
+    CANVAS_IMAGE_BLOCK_PADDING, CANVAS_IMAGE_FALLBACK_HEIGHT, canvas_image_display_size,
+    canvas_image_element_id, canvas_image_known_size, canvas_img,
+    ensure_canvas_image_dimensions_loaded, is_data_image_url, remember_canvas_image_size,
 };
 use crate::view::{
     CANVAS_CONTENT_HORIZONTAL_PADDING, CANVAS_CONTENT_MAX_WIDTH_RATIO, TipTapMark, TipTapNode,
-    is_tiptap_content_empty, parse_tiptap_doc,
+    image_src_from_attrs, is_tiptap_content_empty, parse_tiptap_doc, remember_tiptap_image_sizes,
 };
 use mezon_theme::ActiveTheme;
 use mezon_widgets::text_actions::{
@@ -54,11 +54,13 @@ fn editor_key_context() -> KeyContext {
     context.add(FORMAT_KEY_CONTEXT);
     context
 }
-const CANVAS_IMAGE_MARGIN: Pixels = px(16.);
 const CANVAS_MIN_LAYOUT_WIDTH: Pixels = px(64.);
 const CANVAS_LAYOUT_WIDTH_FALLBACK: Pixels = px(480.);
 
-fn canvas_content_layout_width(parent_w: Pixels) -> Pixels {
+pub(crate) fn canvas_content_layout_width(parent_w: Pixels) -> Pixels {
+    if parent_w <= CANVAS_MIN_LAYOUT_WIDTH {
+        return CANVAS_LAYOUT_WIDTH_FALLBACK;
+    }
     let content_w = parent_w * CANVAS_CONTENT_MAX_WIDTH_RATIO;
     (content_w - CANVAS_CONTENT_HORIZONTAL_PADDING * 2.).max(CANVAS_MIN_LAYOUT_WIDTH)
 }
@@ -214,6 +216,7 @@ pub struct CanvasEditorState {
     link_menu_open: bool,
     link_input: Entity<InputState>,
     is_selecting: bool,
+    hovering_link: bool,
     select_granularity: SelectGranularity,
     select_anchor: Range<usize>,
     layout_generation: u64,
@@ -259,6 +262,7 @@ impl CanvasEditorState {
             link_menu_open: false,
             link_input,
             is_selecting: false,
+            hovering_link: false,
             select_granularity: SelectGranularity::Character,
             select_anchor: 0..0,
             layout_generation: 0,
@@ -347,7 +351,7 @@ impl CanvasEditorState {
             if editor_line.block == BlockKind::Image {
                 let src = editor_line.image_src.as_deref().unwrap_or("");
                 let (_, image_h) = canvas_image_display_size(cx, src, width);
-                content_y += image_h + CANVAS_IMAGE_MARGIN * 2.;
+                content_y += image_h + CANVAS_IMAGE_BLOCK_PADDING * 2.;
                 continue;
             }
             let meta = block_paint_meta(editor_line, logical_ix, &self.lines, px(16.));
@@ -386,6 +390,9 @@ impl CanvasEditorState {
 
     pub fn set_doc(&mut self, raw: &str, cx: &mut Context<Self>) {
         self.lines = lines_from_tiptap(raw);
+        if let Some(doc) = parse_tiptap_doc(raw) {
+            remember_tiptap_image_sizes(&doc, cx);
+        }
         if self.lines.is_empty() {
             self.lines.push(EditorLine::default());
         }
@@ -394,6 +401,7 @@ impl CanvasEditorState {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.hovering_link = false;
         self.overlay_images.clear();
         if self.page_scroll {
             self.refresh_content_height_estimate(cx);
@@ -980,6 +988,17 @@ impl CanvasEditorState {
         })
     }
 
+    fn update_hovering_link(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let hovering = self
+            .link_href_at_offset(self.index_for_mouse_position(position))
+            .is_some();
+        if hovering == self.hovering_link {
+            return;
+        }
+        self.hovering_link = hovering;
+        cx.notify();
+    }
+
     fn selection_has_mark(&self, kind: MarkKind) -> bool {
         if self.selected_range.is_empty() {
             return false;
@@ -1193,6 +1212,7 @@ impl CanvasEditorState {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.update_hovering_link(event.position, cx);
         if !self.is_selecting {
             return;
         }
@@ -1228,6 +1248,15 @@ impl CanvasEditorState {
         {
             open_canvas_link(&href, cx);
         }
+    }
+
+    fn on_read_only_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_hovering_link(event.position, cx);
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -1781,18 +1810,25 @@ impl Render for CanvasEditorState {
         let fallback_bg = cx.theme().bg_tertiary;
         let page_scroll = self.page_scroll;
         let layout_height = self.content_layout_height();
+        let hover_cursor = if self.hovering_link {
+            CursorStyle::PointingHand
+        } else if read_only {
+            CursorStyle::Arrow
+        } else {
+            CursorStyle::IBeam
+        };
 
         div()
             .relative()
             .flex()
             .flex_col()
             .w_full()
+            .cursor(hover_cursor)
             .when(page_scroll, |el| el.h(layout_height))
             .when(!page_scroll, |el| el.flex_1().min_h_0())
             .when(!read_only, |el| {
                 el.key_context(editor_key_context())
                     .track_focus(&self.focus_handle)
-                    .cursor(CursorStyle::IBeam)
                     .when(focused, |el| {
                         el.on_action(cx.listener(Self::backspace))
                             .on_action(cx.listener(Self::delete))
@@ -1834,8 +1870,8 @@ impl Render for CanvasEditorState {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
             })
             .when(read_only, |el| {
-                el.cursor(CursorStyle::Arrow)
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_read_only_mouse_up))
+                el.on_mouse_up(MouseButton::Left, cx.listener(Self::on_read_only_mouse_up))
+                    .on_mouse_move(cx.listener(Self::on_read_only_mouse_move))
             })
             .child(
                 div()
@@ -1848,8 +1884,10 @@ impl Render for CanvasEditorState {
                             .overflow_hidden()
                             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                     })
-                    .children(overlay_images.into_iter().enumerate().map(|(ix, image)| {
+                    .children(overlay_images.into_iter().map(|image| {
+                        let img_id = canvas_image_element_id(image.src.as_ref());
                         div()
+                            .id(SharedString::from(format!("{img_id}-wrap")))
                             .absolute()
                             .left_0()
                             .top(if page_scroll {
@@ -1857,17 +1895,15 @@ impl Render for CanvasEditorState {
                             } else {
                                 image.top - scroll_offset.y
                             })
-                            .w(image.width + CANVAS_IMAGE_MARGIN * 2.)
-                            .h(image.height + CANVAS_IMAGE_MARGIN * 2.)
-                            .px(CANVAS_IMAGE_MARGIN)
+                            .w(image.width)
+                            .h(image.height + CANVAS_IMAGE_BLOCK_PADDING * 2.)
+                            .py(CANVAS_IMAGE_BLOCK_PADDING)
                             .child(canvas_img(
                                 cx,
                                 image.src.as_ref(),
-                                ("canvas-edit-img", ix),
                                 fallback_fg,
                                 fallback_bg,
-                                Some(image.width),
-                                Some(image.height),
+                                image.width,
                             ))
                     }))
                     .child(CanvasEditorElement {
@@ -2173,7 +2209,7 @@ impl Element for CanvasEditorElement {
                         {
                             missing_dim_srcs.push(src.to_string());
                         }
-                        let block_h = image_h + CANVAS_IMAGE_MARGIN * 2.;
+                        let block_h = image_h + CANVAS_IMAGE_BLOCK_PADDING * 2.;
                         layout.push(PreparedLine {
                             line: None,
                             origin: point(Pixels::ZERO, content_y),
@@ -2186,10 +2222,10 @@ impl Element for CanvasEditorElement {
                         });
                         if !src.is_empty() {
                             images.push(PreparedImage {
-                                top: content_y + CANVAS_IMAGE_MARGIN,
+                                top: content_y + CANVAS_IMAGE_BLOCK_PADDING,
                                 width: image_w,
                                 height: image_h,
-                                src: canvas_image_display_src(src).into(),
+                                src: src.to_string().into(),
                             });
                         }
                         content_y += block_h;
@@ -2968,7 +3004,7 @@ fn block_paint_meta(
         },
         BlockKind::Paragraph => base,
         BlockKind::Image => BlockPaintMeta {
-            line_height: CANVAS_IMAGE_FALLBACK_HEIGHT + CANVAS_IMAGE_MARGIN * 2.,
+            line_height: CANVAS_IMAGE_FALLBACK_HEIGHT + CANVAS_IMAGE_BLOCK_PADDING * 2.,
             ..base
         },
     }
@@ -3589,13 +3625,16 @@ fn lines_from_tiptap(raw: &str) -> Vec<EditorLine> {
 
 fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
     match node.kind.as_str() {
-        "paragraph" => lines.push(EditorLine {
-            block: BlockKind::Paragraph,
-            text: inline_to_text(node.content.as_ref()),
-            marks: inline_to_marks(node.content.as_ref()),
-            image_src: None,
-            ordered_start: None,
-        }),
+        "paragraph" => {
+            lines.push(EditorLine {
+                block: BlockKind::Paragraph,
+                text: inline_to_text(node.content.as_ref()),
+                marks: inline_to_marks(node.content.as_ref()),
+                image_src: None,
+                ordered_start: None,
+            });
+            push_nested_images(node, lines);
+        }
         "heading" => {
             let level = node
                 .attrs
@@ -3639,14 +3678,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
         "orderedList" => flatten_list(node, lines, BlockKind::OrderedItem),
         "taskList" => flatten_task_list(node, lines),
         "image" => {
-            let src = node
-                .attrs
-                .as_ref()
-                .and_then(|a| a.get("src"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            if let Some(src) = src {
+            if let Some(src) = image_src_from_attrs(node.attrs.as_ref()) {
                 lines.push(EditorLine {
                     block: BlockKind::Image,
                     text: String::new(),
@@ -3662,6 +3694,25 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                     flatten_block(child, lines);
                 }
             }
+        }
+    }
+}
+
+fn push_nested_images(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
+    let Some(children) = &node.content else {
+        return;
+    };
+    for child in children {
+        if child.kind == "image"
+            && let Some(src) = image_src_from_attrs(child.attrs.as_ref())
+        {
+            lines.push(EditorLine {
+                block: BlockKind::Image,
+                text: String::new(),
+                marks: Vec::new(),
+                image_src: Some(src),
+                ordered_start: None,
+            });
         }
     }
 }
@@ -4106,6 +4157,15 @@ mod tests {
     }
 
     #[test]
+    fn content_column_width_is_80_percent_minus_padding() {
+        assert_eq!(canvas_content_layout_width(px(1000.)), px(768.));
+        assert_eq!(
+            canvas_content_layout_width(px(32.)),
+            CANVAS_LAYOUT_WIDTH_FALLBACK
+        );
+    }
+
+    #[test]
     fn roundtrip_italic_text() {
         let raw = r#"{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Hello","marks":[{"type":"italic"}]}]}]}"#;
         let lines = lines_from_tiptap(raw);
@@ -4189,6 +4249,25 @@ mod tests {
         let back = lines_to_tiptap_json(&lines);
         assert!(back.contains(r#""type":"image""#));
         assert!(back.contains(src));
+    }
+
+    #[test]
+    fn extracts_image_nested_in_paragraph() {
+        let src = "https://cdn.mezon.ai/clan/nested.png";
+        let raw = format!(
+            r#"{{"type":"doc","content":[{{"type":"paragraph","content":[{{"type":"text","text":"Caption"}},{{"type":"image","attrs":{{"src":"{src}"}}}}]}}]}}"#
+        );
+        let lines = lines_from_tiptap(&raw);
+        assert!(
+            lines.iter().any(
+                |line| line.block == BlockKind::Image && line.image_src.as_deref() == Some(src)
+            )
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.block == BlockKind::Paragraph && line.text == "Caption")
+        );
     }
 
     #[test]
