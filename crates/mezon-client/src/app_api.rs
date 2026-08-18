@@ -2723,6 +2723,16 @@ impl AppApi {
                 mode,
                 create_time_seconds,
             )
+    pub async fn write_voice_interactive(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        user_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        self.transport
+            .write_voice_interactive(clan_id, voice_channel_id, user_id, event_type, params)
             .await
     }
 

@@ -41,6 +41,7 @@ pub enum RealtimeKind {
     VoiceJoined,
     VoiceLeaved,
     VoiceReaction,
+    VoiceInteractive,
     ScreenShare,
     StreamingJoined,
     StreamingLeaved,
@@ -94,6 +95,7 @@ impl RealtimeKind {
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
+            RealtimeEvent::VoiceInteractive(_) => Self::VoiceInteractive,
             RealtimeEvent::ScreenShare(_) => Self::ScreenShare,
             RealtimeEvent::StreamingJoined(_) => Self::StreamingJoined,
             RealtimeEvent::StreamingLeaved(_) => Self::StreamingLeaved,
@@ -300,6 +302,16 @@ mod tests {
                 realtime::VoiceReactionSend::default()
             )),
             Some(RealtimeKind::VoiceReaction)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_voice_interactive() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::VoiceInteractive(
+                realtime::VoiceInteractiveEvent::default()
+            )),
+            Some(RealtimeKind::VoiceInteractive)
         );
     }
 
