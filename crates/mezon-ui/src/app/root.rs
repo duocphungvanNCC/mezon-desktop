@@ -2,6 +2,7 @@ use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
+use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
@@ -33,6 +34,7 @@ pub struct RootView {
     image_cache: Entity<LruImageCache>,
     connecting_since: Option<Instant>,
     network_online: bool,
+    call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
 }
@@ -254,7 +256,9 @@ impl RootView {
         } else {
             (None, None)
         };
+        let call_overlay = cx.new(CallOverlay::new);
         Self {
+            call_overlay,
             title_bar,
             auth_state,
             login_view,
@@ -419,6 +423,7 @@ impl Render for RootView {
                 this.child(window_controls::render_resize_edges(window))
             })
             .child(self.shell.clone())
+            .child(self.call_overlay.clone())
     }
 }
 
