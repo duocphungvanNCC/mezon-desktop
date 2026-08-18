@@ -499,6 +499,47 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "join_voice",
+        description: "\
+Join the voice call of a voice channel.
+
+Parameters: clan_id (string), channel_id (string).",
+        write: true,
+    },
+    ToolSpec {
+        name: "leave_voice",
+        description: "\
+Leave the current voice call.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "get_recording_state",
+        description: "\
+Return call-recording state: state (idle|starting|recording|stopping), elapsed_seconds,
+video_stalled, can_record, in_call.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "start_recording",
+        description: "\
+Start recording the current voice call, skipping the native save dialog. Requires being in a call.
+
+Parameters: path (optional string) - absolute output path; defaults to a timestamped file in Downloads.",
+        write: true,
+    },
+    ToolSpec {
+        name: "stop_recording",
+        description: "\
+Stop the running call recording and finalize the file.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_voice_status",
         description: "\
 Return voice call status derived from settings: in_call, channel label, mic/camera enabled.

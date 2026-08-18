@@ -880,6 +880,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn write_voice_interactive(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        user_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_voice_interactive(clan_id, voice_channel_id, user_id, event_type, params)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: &str,
@@ -1153,6 +1172,52 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.list_clan_descs().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_onboarding(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_onboarding(clan_id, limit, page).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<mezon_proto::api::OnboardingContent>,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_onboarding(clan_id, contents).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: mezon_proto::api::OnboardingContent,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_onboarding(id, clan_id, content).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_onboarding(id, clan_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

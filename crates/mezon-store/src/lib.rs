@@ -27,6 +27,7 @@ pub mod files;
 pub mod friend;
 pub mod gallery;
 pub mod gif;
+pub mod gifts;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
@@ -119,11 +120,11 @@ pub use direct::{
     dm_counts_toward_unread_badge,
 };
 pub use emoji::{
-    EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
-    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
-    STICKER_UPLOAD_MAX_PX, generate_snowflake_id, is_valid_emoticon_shortname,
-    normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
-    validate_emoticon_file,
+    EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
+    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, generate_snowflake_id,
+    is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
+    validate_emoji_create_shortname, validate_emoticon_file,
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
 pub use files::{
@@ -137,6 +138,15 @@ pub use gallery::{
     initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
+pub use gifts::{
+    FLOWER_ANIMATION_TTL, FLOWER_GIFT_TYPE, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT,
+    FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerInteractiveParams, FlowerParticle,
+    FlowerParticlePose, GiveFlowerDeny, VoiceInteractiveEventType, build_flower_transfer,
+    can_afford, can_give_flower, flower_effect_key, flower_event_from_payload, flower_menu_blocked,
+    flower_particle_pose, flower_particles, flower_price, format_flower_amount,
+    is_uncertain_transfer_error, parse_flower_interactive_params,
+    serialize_flower_interactive_params,
+};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
@@ -204,12 +214,13 @@ pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
-    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
+    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
+    NetworkQuality, PickedScreen, RecordingState, RecordingToast, SOUND_ALLOWED_EXTENSIONS,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
+    VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, screen_tile_id, system_screen_share_pick,
+    upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -325,7 +336,8 @@ pub struct Settings {
     pub zoom_factor: f32,
     /// Last window bounds [x, y, width, height]
     pub window_bounds: Option<[i32; 4]>,
-    /// UI theme: "dark" | "light" | "system"
+    /// UI theme key: "purple_haze" (default) | "dark" | "light" | "sunrise" | "redDark"
+    /// | "abyss_dark" | "berrynade" | "cisher" | "sunset"
     pub theme: String,
     /// UI language/locale code: "en" | "vi"
     pub language: String,
@@ -366,7 +378,7 @@ impl Default for Settings {
             hardware_acceleration: true,
             zoom_factor: 1.0,
             window_bounds: None,
-            theme: "dark".to_string(),
+            theme: "purple_haze".to_string(),
             language: "en".to_string(),
             notifications_enabled: true,
             notifications_hide_content: false,

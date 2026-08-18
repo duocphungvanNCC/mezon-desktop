@@ -4249,7 +4249,7 @@ fn insert_channel(categories: &mut Vec<Category>, mut channel: Channel) -> bool 
         let insert_pos = cat
             .channels
             .iter()
-            .position(|ch| ch.id > channel.id)
+            .position(|ch| ch.parent_id.is_none() && ch.id > channel.id)
             .unwrap_or(cat.channels.len());
         cat.channels.insert(insert_pos, channel);
     } else {
@@ -5738,6 +5738,50 @@ mod tests {
         let cats = build_categories(api_cats, &mut channels);
         let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["parent", "zulu", "alpha", "mike"]);
+    }
+
+    #[test]
+    fn insert_channel_does_not_split_a_thread_block() {
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "xfans", "cat1"),
+                make_thread(15, 10, "cat1"),
+                make_thread(40, 10, "cat1"),
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        assert!(insert_channel(
+            &mut cats,
+            make_channel(20, "yi-crycemi", "cat1")
+        ));
+
+        let ids: Vec<i64> = cats[0].channels.iter().map(|c| c.id.get()).collect();
+        assert_eq!(ids, vec![10, 15, 40, 20, 50]);
+    }
+
+    #[test]
+    fn insert_channel_keeps_top_level_id_order() {
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "a", "cat1"),
+                make_thread(90, 10, "cat1"),
+                make_channel(30, "c", "cat1"),
+            ],
+        }];
+
+        assert!(insert_channel(&mut cats, make_channel(20, "b", "cat1")));
+
+        let ids: Vec<i64> = cats[0].channels.iter().map(|c| c.id.get()).collect();
+        assert_eq!(ids, vec![10, 90, 20, 30]);
     }
 
     #[test]
