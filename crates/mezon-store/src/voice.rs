@@ -49,25 +49,25 @@ pub enum DeviceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceInteractiveApp {
-    Kahoot,
+    Quiz,
     Blackboard,
-    Slido,
+    Interactive,
 }
 
 impl VoiceInteractiveApp {
     pub fn event_type(self) -> i32 {
         match self {
-            Self::Kahoot => 10,
+            Self::Quiz => 10,
             Self::Blackboard => 11,
-            Self::Slido => 12,
+            Self::Interactive => 12,
         }
     }
 
     fn from_event_type(value: i32) -> Option<Self> {
         match value {
-            10 => Some(Self::Kahoot),
+            10 => Some(Self::Quiz),
             11 => Some(Self::Blackboard),
-            12 => Some(Self::Slido),
+            12 => Some(Self::Interactive),
             _ => None,
         }
     }
@@ -926,9 +926,9 @@ impl VoiceStore {
     ) {
         let config = AppConfig::global(cx);
         let base_url = match app {
-            VoiceInteractiveApp::Kahoot => &config.quiz_url,
+            VoiceInteractiveApp::Quiz => &config.quiz_url,
             VoiceInteractiveApp::Blackboard => &config.blackboard_url,
-            VoiceInteractiveApp::Slido => &config.interactive_url,
+            VoiceInteractiveApp::Interactive => &config.interactive_url,
         };
         let clan_id_string = clan_id.to_string();
         let clan_name = crate::ClanList::global(cx)

@@ -3132,7 +3132,7 @@ fn control_bar(
             neutral_bg,
             neutral_hover,
             IconName::Joystick,
-            theme.text_primary,
+            theme.text_muted,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
             locale,
@@ -3428,6 +3428,7 @@ fn control_bar(
         .gap_3()
         .child(emoji_button)
         .child(sound_button)
+        .child(interactive_app_button)
         .children(record_button)
         .children(record_badge);
 
@@ -3440,7 +3441,6 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
-        .child(interactive_app_button)
         .children(agent_button)
         .child(raise_hand_button)
         .child(leave_button);
@@ -3489,9 +3489,9 @@ fn interactive_app_menu(voice: &Entity<VoiceStore>) -> ContextMenu {
         }
     };
     [
-        ("Kahoot", VoiceInteractiveApp::Kahoot),
+        ("Quiz", VoiceInteractiveApp::Quiz),
         ("Blackboard", VoiceInteractiveApp::Blackboard),
-        ("Slido", VoiceInteractiveApp::Slido),
+        ("Interactive", VoiceInteractiveApp::Interactive),
     ]
     .into_iter()
     .fold(

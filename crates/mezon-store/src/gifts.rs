@@ -13,9 +13,9 @@ pub const FLOWER_GIFT_TYPE: &str = "flower";
 pub enum VoiceInteractiveEventType {
     Gift = 1,
     Recording = 2,
-    AppKahoot = 10,
+    AppQuiz = 10,
     AppBlackboard = 11,
-    AppSlido = 12,
+    AppInteractive = 12,
 }
 
 impl VoiceInteractiveEventType {
@@ -23,9 +23,9 @@ impl VoiceInteractiveEventType {
         match value {
             1 => Some(Self::Gift),
             2 => Some(Self::Recording),
-            10 => Some(Self::AppKahoot),
+            10 => Some(Self::AppQuiz),
             11 => Some(Self::AppBlackboard),
-            12 => Some(Self::AppSlido),
+            12 => Some(Self::AppInteractive),
             _ => None,
         }
     }
@@ -444,7 +444,7 @@ mod tests {
         );
         assert!(
             flower_event_from_payload(
-                VoiceInteractiveEventType::AppKahoot as i32,
+                VoiceInteractiveEventType::AppQuiz as i32,
                 10,
                 2,
                 &params,
@@ -458,9 +458,9 @@ mod tests {
     fn voice_interactive_event_type_matches_js_enum() {
         assert_eq!(VoiceInteractiveEventType::Gift as i32, 1);
         assert_eq!(VoiceInteractiveEventType::Recording as i32, 2);
-        assert_eq!(VoiceInteractiveEventType::AppKahoot as i32, 10);
+        assert_eq!(VoiceInteractiveEventType::AppQuiz as i32, 10);
         assert_eq!(VoiceInteractiveEventType::AppBlackboard as i32, 11);
-        assert_eq!(VoiceInteractiveEventType::AppSlido as i32, 12);
+        assert_eq!(VoiceInteractiveEventType::AppInteractive as i32, 12);
         assert_eq!(
             VoiceInteractiveEventType::from_i32(1),
             Some(VoiceInteractiveEventType::Gift)
