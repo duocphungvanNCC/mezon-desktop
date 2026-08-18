@@ -3042,6 +3042,7 @@ impl TransportClient {
         &self,
         clan_id: &str,
         limit: i32,
+        page: i32,
     ) -> Result<Vec<crate::TopicDiscussion>> {
         let transport = self.inner.clone();
         let clan_id = clan_id
@@ -3049,7 +3050,7 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         runtime()
             .spawn(async move {
-                let list = transport.list_sd_topic(clan_id, limit).await?;
+                let list = transport.list_sd_topic(clan_id, limit, page).await?;
                 Ok(crate::topics_from_list(list))
             })
             .await

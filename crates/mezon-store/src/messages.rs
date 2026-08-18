@@ -3096,13 +3096,21 @@ impl MessagesStore {
                 size: i32::try_from(att.size).unwrap_or(0),
             })
             .collect();
-        let attachment_link = attachments
-            .first()
+        let first_attachment = attachments.first();
+        let attachment_link = first_attachment
             .map(|att| att.url.clone())
             .unwrap_or_default();
-        let attachment_type = attachments
-            .first()
+        let attachment_type = first_attachment
             .map(|att| att.filetype.clone())
+            .unwrap_or_default();
+        let attachment_filename = first_attachment
+            .map(|att| att.filename.clone())
+            .unwrap_or_default();
+        let attachment_size = first_attachment
+            .map(|att| att.size.max(0) as u64)
+            .unwrap_or(0);
+        let attachment_thumbnail = first_attachment
+            .map(|att| att.thumbnail.clone())
             .unwrap_or_default();
         let has_more_attachment = attachments.len() > 1;
         let avatar = msg.avatar_url.to_string();
@@ -3132,6 +3140,9 @@ impl MessagesStore {
             create_time_seconds,
             attachment_link,
             attachment_type,
+            attachment_filename,
+            attachment_size,
+            attachment_thumbnail,
             has_more_attachment,
             mention_spans,
             channel_type,

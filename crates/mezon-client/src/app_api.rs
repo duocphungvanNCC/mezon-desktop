@@ -2695,8 +2695,9 @@ impl AppApi {
         &self,
         clan_id: &str,
         limit: i32,
+        page: i32,
     ) -> Result<Vec<crate::TopicDiscussion>> {
-        self.transport.list_sd_topics(clan_id, limit).await
+        self.transport.list_sd_topics(clan_id, limit, page).await
     }
 
     pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {

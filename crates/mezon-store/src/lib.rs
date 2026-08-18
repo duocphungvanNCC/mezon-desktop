@@ -170,7 +170,8 @@ pub use message_search::{
 pub use messages::*;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
-    TopicReplyPreview, attachment_link_is_image, message_content_is_attachment,
+    TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
+    message_content_is_attachment,
 };
 pub use mezon_client::{
     SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
