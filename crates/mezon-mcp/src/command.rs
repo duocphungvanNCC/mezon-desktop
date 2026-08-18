@@ -199,4 +199,54 @@ pub enum McpCommand {
     GetMemberList {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    CloseModal {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ListBannedUsers {
+        clan_id: i64,
+        channel_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuOpen {
+        user_id: i64,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuOpen {
+        clan_id: i64,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateClan {
+        name: String,
+        logo: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    OpenCreateClanModal {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
 }

@@ -257,6 +257,154 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "list_banned_users",
+        description: "\
+Fetch the raw chat-ban list for a clan/channel straight from the server, bypassing the store cache.
+
+Diagnostic for the Ban/Unban member action: shows exactly what ListBannedUsers returns
+(channel_id, banned_id, banner_id, ban_time, reason).
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- channel_id (optional): channel snowflake id; 0 (default) asks clan-wide.",
+        write: false,
+    },
+    ToolSpec {
+        name: "close_modal",
+        description: "\
+Dismiss the modal the app currently shows (profile, confirmation, settings dialog).
+
+Equivalent to pressing Escape. Returns closed:false when nothing was open.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "member_menu_state",
+        description: "\
+Return the member-list context menu that is currently open, if any.
+
+Includes the target user, the resolved permission/relationship flags that decide which rows show
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+with the index to pass to member_menu_pick.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "member_menu_open",
+        description: "\
+Open the right-click context menu for one member of the visible member list.
+
+The user must be listed by get_member_list. Returns the same shape as member_menu_state, so use the
+returned item indexes with member_menu_pick.
+
+Parameters:
+- user_id (required): member snowflake id.
+- x, y (optional): anchor point in window points, to exercise menu placement near a window edge.",
+        write: false,
+    },
+    ToolSpec {
+        name: "member_menu_close",
+        description: "\
+Dismiss the member-list context menu without running an action.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "member_menu_pick",
+        description: "\
+Run one row of the open member context menu (Profile, Message, Add Friend, Unblock, Remove Friend,
+Ban, Unban, Kick, Remove from thread).
+
+Call member_menu_open first and pick the index from its item list. Rows of kind \"submenu\" or
+\"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
+(seconds; 0 means until the ban is lifted).
+
+Destructive: Kick, Ban and Remove-from-thread hit the server immediately; Remove Friend and Kick
+open a confirmation modal instead.
+
+Parameters:
+- index (required): item index from member_menu_open/member_menu_state.
+- value (optional): submenu option value. Omit on a submenu row to just open its flyout.",
+        write: true,
+    },
+    ToolSpec {
+        name: "clan_menu_state",
+        description: "\
+Return the clan-rail context menu that is currently open, if any.
+
+Includes the target clan, whether the signed-in user owns it (owners get no Leave Clan row) and
+whether it is the active clan, plus the item list with the index to pass to clan_menu_pick.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "clan_menu_open",
+        description: "\
+Open the right-click context menu for one clan in the left clan rail.
+
+The clan must be listed by list_clans. Returns the same shape as clan_menu_state, so use the
+returned item indexes with clan_menu_pick.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- x, y (optional): anchor point in window points, to exercise menu placement near a window edge.",
+        write: false,
+    },
+    ToolSpec {
+        name: "clan_menu_close",
+        description: "\
+Dismiss the clan-rail context menu without running an action.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "clan_menu_pick",
+        description: "\
+Run one row of the open clan context menu (Mark As Read, Notification Settings, Edit Clan Profile,
+Leave Clan).
+
+Call clan_menu_open first and pick the index from its item list. The \"submenu\" row (Notification
+Settings) additionally needs value — one of the option values returned for that row.
+
+Mark As Read and Notification Settings hit the server immediately; Edit Clan Profile navigates to
+that clan's profile settings; Leave Clan opens a confirmation modal instead of leaving straight
+away.
+
+Parameters:
+- index (required): item index from clan_menu_open/clan_menu_state.
+- value (optional): submenu option value. Omit on a submenu row to just open its flyout.",
+        write: true,
+    },
+    ToolSpec {
+        name: "open_create_clan_modal",
+        description: "\
+Open the Create Clan modal on its template-picker step.
+
+Renders over everything, so pair it with capture_window to inspect the modal chrome. Dismiss it
+with close_modal. Use create_clan instead to actually create one without the UI.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "create_clan",
+        description: "\
+Create a clan without opening the modal, through the same store path the modal uses.
+
+The name is validated server-side for duplicates and the new clan becomes the active one. Useful
+for making a throwaway clan to exercise clan_menu_pick rows against.
+
+Parameters:
+- name (required): clan name.
+- logo (optional): logo URL; omit for none.",
+        write: true,
+    },
+    ToolSpec {
         name: "set_user_status",
         description: "\
 Set the signed-in user's own presence.
