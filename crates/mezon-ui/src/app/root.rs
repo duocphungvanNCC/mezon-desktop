@@ -422,7 +422,7 @@ impl Render for RootView {
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
             })
-            .child(overlay)
+            .child(self.shell.clone())
             .child(self.call_overlay.clone())
     }
 }
