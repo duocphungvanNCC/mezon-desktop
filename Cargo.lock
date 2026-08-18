@@ -5821,7 +5821,7 @@ dependencies = [
  "flate2",
  "flume",
  "futures",
- "livekit",
+ "libwebrtc",
  "mezon-voice",
  "parking_lot",
  "serde",

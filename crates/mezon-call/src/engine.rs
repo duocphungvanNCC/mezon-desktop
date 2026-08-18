@@ -5,26 +5,25 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use flume::{Receiver, Sender};
 use futures::StreamExt as _;
-use livekit::track::LocalVideoTrack;
-use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::audio_track::RtcAudioTrack;
-use livekit::webrtc::ice_candidate::IceCandidate;
-use livekit::webrtc::media_stream_track::MediaStreamTrack;
-use livekit::webrtc::peer_connection::{
+use libwebrtc::audio_source::native::NativeAudioSource;
+use libwebrtc::audio_stream::native::NativeAudioStream;
+use libwebrtc::audio_track::RtcAudioTrack;
+use libwebrtc::ice_candidate::IceCandidate;
+use libwebrtc::media_stream_track::MediaStreamTrack;
+use libwebrtc::peer_connection::{
     AnswerOptions, OfferOptions, PeerConnection, PeerConnectionState, SignalingState,
 };
-use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
-use livekit::webrtc::peer_connection_factory::{
+use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
+use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
-use livekit::webrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
-use livekit::webrtc::session_description::{SdpType, SessionDescription};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
-use livekit::webrtc::video_stream::native::NativeVideoStream;
-use livekit::webrtc::video_track::RtcVideoTrack;
+use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
+use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
+use libwebrtc::session_description::{SdpType, SessionDescription};
+use libwebrtc::video_source::VideoResolution;
+use libwebrtc::video_source::native::NativeVideoSource;
+use libwebrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::video_track::RtcVideoTrack;
 use mezon_voice::{
     AudioFormat, AudioIo, CameraController, IceServerConfig, PlaybackMixer, RecordTaps,
     VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
@@ -284,13 +283,10 @@ async fn run_engine(
         },
         false,
     );
-    let video_track = LocalVideoTrack::create_video_track(
-        "call-camera",
-        RtcVideoSource::Native(video_source.clone()),
-    );
+    let video_track = factory.create_video_track("call-camera", video_source.clone());
     video_transceiver
         .sender()
-        .set_track(Some(MediaStreamTrack::from(video_track.rtc_track())))
+        .set_track(Some(MediaStreamTrack::from(video_track.clone())))
         .context("attach video track failed")?;
 
     let mic_enabled = Arc::new(AtomicBool::new(true));

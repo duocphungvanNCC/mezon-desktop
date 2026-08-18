@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-livekit = { workspace = true }
+libwebrtc = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
