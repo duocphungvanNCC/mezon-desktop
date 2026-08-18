@@ -1,4 +1,8 @@
-use gpui::{App, SharedString, Window, div, prelude::*, px, relative};
+use std::time::Duration;
+
+use gpui::{
+    Animation, AnimationExt as _, App, SharedString, Window, div, prelude::*, px, relative,
+};
 
 use super::icon::{Icon, IconName};
 use super::stack::h_flex;
@@ -17,7 +21,7 @@ pub struct Toast {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
-    countdown: Option<f32>,
+    countdown: Option<(usize, Duration)>,
 }
 
 impl Toast {
@@ -40,8 +44,11 @@ impl Toast {
         self
     }
 
-    pub fn countdown(mut self, progress: Option<f32>) -> Self {
-        self.countdown = progress;
+    /// Drain the bar from full to empty over `ttl`. GPUI's animation clock drives it off the
+    /// display refresh, so the toast never has to re-render the window to move the bar. `id`
+    /// keys the animation state and must stay stable for the life of the toast.
+    pub fn countdown(mut self, id: usize, ttl: Option<Duration>) -> Self {
+        self.countdown = ttl.map(|ttl| (id, ttl));
         self
     }
 
@@ -62,7 +69,19 @@ impl RenderOnce for Toast {
             ToastKind::Success => (theme.status_online, IconName::Check),
             ToastKind::Error => (theme.danger_text, IconName::TriangleAlert),
         };
-        let bar_progress = self.countdown.or(self.progress);
+        let fill = div().h_full().rounded_full().bg(accent);
+        let bar = match (self.countdown, self.progress) {
+            (Some((id, ttl)), _) => Some(
+                fill.with_animation(("toast-countdown", id), Animation::new(ttl), |el, delta| {
+                    el.w(relative(1. - delta))
+                })
+                .into_any_element(),
+            ),
+            (None, Some(progress)) => {
+                Some(fill.w(relative(progress.clamp(0., 1.))).into_any_element())
+            }
+            (None, None) => None,
+        };
 
         div()
             .relative()
@@ -104,7 +123,7 @@ impl RenderOnce for Toast {
                             .child(self.message),
                     ),
             )
-            .when(bar_progress.is_some(), |card| {
+            .when_some(bar, |card, bar| {
                 card.child(
                     div()
                         .absolute()
@@ -114,13 +133,7 @@ impl RenderOnce for Toast {
                         .h(px(3.))
                         .rounded_full()
                         .bg(theme.bg_tertiary)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(bar_progress.unwrap_or_default().clamp(0., 1.)))
-                                .rounded_full()
-                                .bg(accent),
-                        ),
+                        .child(bar),
                 )
             })
     }
