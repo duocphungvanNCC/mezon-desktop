@@ -10,7 +10,7 @@ use gpui::{
     Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
+    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
     PERMISSION_MANAGE_CLAN, PermissionStore, Settings, can_delete_channel,
 };
 
@@ -298,7 +298,7 @@ impl ChannelSettingScreen {
         };
         ChannelTabContext {
             channel_type,
-            is_thread: channel_type == ChannelType::Thread,
+            is_thread: is_thread_channel(channel),
             is_welcome_channel: welcome_channel_id == Some(self.channel_id),
             has_manage_channel,
         }
@@ -436,8 +436,8 @@ impl ChannelSettingScreen {
         } else {
             mezon_i18n::t(locale, "channelSetting.fields.channelDelete.delete")
         };
-        let can_delete_channel =
-            !ctx.is_thread && can_delete_channel(self.clan_id, self.channel_id, cx);
+        let can_delete = can_delete_channel(self.clan_id, self.channel_id, cx);
+        let is_thread = ctx.is_thread;
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         let delete_locale = locale.to_string();
@@ -458,20 +458,26 @@ impl ChannelSettingScreen {
                 .rounded(px(5.0))
                 .text_base()
                 .font_weight(FontWeight::MEDIUM)
-                .when(can_delete_channel, |el| {
+                .when(can_delete, |el| {
                     el.cursor_pointer()
                         .text_color(gpui::rgb(0xdc_26_26))
                         .hover(|style| style.bg(theme.tokens.bg_item_theme_hover))
                         .on_click(move |_, window, cx| {
                             let locale = delete_locale.clone();
                             Shell::global(cx).update(cx, |shell, cx| {
-                                shell.confirm_delete_channel(
-                                    clan_id, channel_id, &locale, window, cx,
-                                );
+                                if settings_delete_uses_thread_confirm(is_thread) {
+                                    shell.confirm_delete_thread(
+                                        clan_id, channel_id, &locale, window, cx,
+                                    );
+                                } else {
+                                    shell.confirm_delete_channel(
+                                        clan_id, channel_id, &locale, window, cx,
+                                    );
+                                }
                             });
                         })
                 })
-                .when(!can_delete_channel, |el| {
+                .when(!can_delete, |el| {
                     el.opacity(0.5)
                         .cursor_default()
                         .when(ctx.is_welcome_channel, |el| el.text_color(theme.text_muted))
@@ -536,6 +542,14 @@ impl ChannelSettingScreen {
                     ),
             )
     }
+}
+
+fn is_thread_channel(channel: &Channel) -> bool {
+    channel.channel_type == ChannelType::Thread || channel.parent_id.is_some()
+}
+
+fn settings_delete_uses_thread_confirm(is_thread: bool) -> bool {
+    is_thread
 }
 
 fn channel_tab_icon(ctx: ChannelTabContext) -> IconName {
@@ -787,5 +801,98 @@ mod tests {
         ] {
             assert_eq!(ChannelSettingsTab::from_slug(tab.slug()), Some(tab));
         }
+    }
+
+    fn sample_channel(channel_type: ChannelType, parent_id: Option<ChannelId>) -> Channel {
+        Channel {
+            id: ChannelId(1),
+            name: "n".into(),
+            channel_type,
+            private: false,
+            clan_id: ClanId(1),
+            clan_name: String::new(),
+            category_name: String::new(),
+            category_id: None,
+            member_count: 0,
+            badge_count: 0,
+            muted: false,
+            parent_id,
+            last_seen_message_id: mezon_store::MessageId(0),
+            last_seen_timestamp: 0,
+            last_sent_message_id: mezon_store::MessageId(0),
+            last_sent_timestamp: 0,
+            voice_members: Vec::new(),
+            is_favorite: false,
+            creator_id: mezon_store::UserId(0),
+            active: 1,
+            avatar_url: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        }
+    }
+
+    #[test]
+    fn thread_sidebar_hides_category_and_permissions() {
+        let thread = ctx(ChannelType::Thread, true, false, true);
+        assert!(ChannelSettingsTab::Overview.visible_in_sidebar(thread));
+        assert!(!ChannelSettingsTab::Category.visible_in_sidebar(thread));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(thread));
+        assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(thread));
+        assert!(ChannelSettingsTab::QuickMenu.visible_in_sidebar(thread));
+        assert!(!ChannelSettingsTab::StreamThumbnail.visible_in_sidebar(thread));
+
+        let thread_no_manage = ctx(ChannelType::Thread, true, false, false);
+        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(thread_no_manage));
+        assert!(!ChannelSettingsTab::QuickMenu.visible_in_sidebar(thread_no_manage));
+    }
+
+    #[test]
+    fn text_channel_with_parent_id_is_detected_as_thread() {
+        let channel = sample_channel(ChannelType::Text, Some(ChannelId(9)));
+        assert!(is_thread_channel(&channel));
+        let detected = ctx(
+            channel.channel_type,
+            is_thread_channel(&channel),
+            false,
+            true,
+        );
+        assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
+    }
+
+    #[test]
+    fn regular_text_channel_shows_category_and_permissions() {
+        let channel = sample_channel(ChannelType::Text, None);
+        assert!(!is_thread_channel(&channel));
+        let regular = ctx(ChannelType::Text, false, false, true);
+        assert!(ChannelSettingsTab::Category.visible_in_sidebar(regular));
+        assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(regular));
+        let no_manage = ctx(ChannelType::Text, false, false, false);
+        assert!(ChannelSettingsTab::Category.visible_in_sidebar(no_manage));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(no_manage));
+    }
+
+    #[test]
+    fn thread_integrations_require_manage_channel() {
+        assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Thread,
+            true,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Thread,
+            true,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn settings_delete_confirm_follows_thread_flag() {
+        assert!(settings_delete_uses_thread_confirm(true));
+        assert!(!settings_delete_uses_thread_confirm(false));
     }
 }
