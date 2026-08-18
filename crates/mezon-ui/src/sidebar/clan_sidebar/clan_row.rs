@@ -81,24 +81,12 @@ const CLAN_NOTI_LEVELS: [(i32, &str); 3] = [
     ),
 ];
 
-fn clan_menu_coming_soon(
-    title: String,
-    locale: String,
-) -> impl Fn(&mut Window, &mut App) + 'static {
-    move |window: &mut Window, cx: &mut App| {
-        let title = title.clone();
-        let locale = locale.clone();
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.show_coming_soon(title, &locale, window, cx);
-        });
-    }
-}
-
 pub(super) fn build_clan_rail_menu(
     sidebar: WeakEntity<ClanSidebar>,
     clan_id: ClanId,
     clan_default: Option<i32>,
     noti_sub_open: bool,
+    can_leave: bool,
     locale: &str,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
@@ -151,17 +139,21 @@ pub(super) fn build_clan_rail_menu(
         },
     );
 
-    let edit_label = t("contextMenu.editClanProfile");
-    let leave_label = t("contextMenu.leaveClan");
-    menu = menu
-        .item(
-            edit_label.clone(),
-            clan_menu_coming_soon(edit_label, locale_owned.clone()),
-        )
-        .danger_item(
-            leave_label.clone(),
-            clan_menu_coming_soon(leave_label, locale_owned),
-        );
+    menu = menu.item(t("contextMenu.editClanProfile"), move |_window, cx| {
+        crate::router::navigate(cx, Route::SettingsClanProfile { clan_id });
+    });
+
+    // React gates Leave Clan behind `UserRestrictionZone policy={!isOwnerOfContextClan}`:
+    // the owner has to transfer or delete the clan instead.
+    if can_leave {
+        let leave_locale = locale_owned;
+        menu = menu.danger_item(t("contextMenu.leaveClan"), move |window, cx| {
+            let leave_locale = leave_locale.clone();
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.confirm_leave_clan(clan_id, &leave_locale, window, cx);
+            });
+        });
+    }
 
     menu
 }

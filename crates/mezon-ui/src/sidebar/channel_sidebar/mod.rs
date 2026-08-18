@@ -810,6 +810,11 @@ impl Render for ChannelSidebar {
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
                 can_create_category,
+                !PermissionStore::try_global(cx).is_some_and(|store| {
+                    store
+                        .read(cx)
+                        .is_clan_owner(self.active_clan_id.unwrap_or(ClanId(0)), cx)
+                }),
                 locale.clone(),
             )
         });
@@ -979,6 +984,7 @@ impl Render for ChannelSidebar {
                             clan_avatar_url,
                             show_empty,
                             can_create_category,
+                            can_leave,
                             locale,
                         )| {
                             let Some(clan_id) = clan_id else {
@@ -994,6 +1000,7 @@ impl Render for ChannelSidebar {
                                     &locale,
                                     show_empty,
                                     can_create_category,
+                                    can_leave,
                                 ),
                                 px(50.),
                                 px(8.),

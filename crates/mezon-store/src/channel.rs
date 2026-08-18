@@ -642,9 +642,10 @@ impl ChannelList {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(active) = event {
-                match active {
+        let clan_sub = cx.subscribe(
+            &ClanList::global(cx),
+            |this, _clan, event, cx| match event {
+                ClanEvent::ActiveClanChanged(active) => match active {
                     Some(clan_id) => {
                         this.active_clan_id = Some(*clan_id);
                         cx.notify();
@@ -657,9 +658,10 @@ impl ChannelList {
                         }
                         cx.notify();
                     }
-                }
-            }
-        });
+                },
+                ClanEvent::Deleted(clan_id) => this.forget_clan(*clan_id, cx),
+            },
+        );
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
@@ -726,6 +728,70 @@ impl ChannelList {
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
+    }
+
+    /// Forget every cache entry belonging to a clan the user is no longer in.
+    ///
+    /// React does this from the `UserClanRemoved` push (`channelsActions.removeByClanId`,
+    /// `listChannelsByUserActions.remove`, `appActions.cleanHistoryClan`); here it is driven
+    /// by [`ClanEvent::Deleted`], which `ClanList::drop_clan` emits for a leave, an owner
+    /// delete and both server pushes. Without it the clan's channels keep feeding badge
+    /// aggregation and come back stale on re-join.
+    pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let channel_ids: Vec<ChannelId> = self
+            .cache
+            .get(&clan_id)
+            .map(|categories| {
+                categories
+                    .iter()
+                    .flat_map(|category| category.channels.iter().map(|channel| channel.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.cache.remove(&clan_id);
+        self.app_channels_cache.remove(&clan_id);
+        self.favorites.remove(&clan_id);
+        self.pending_badge_seed.remove(&clan_id);
+        self.want_extras.remove(&clan_id);
+        self.extras_loaded.remove(&clan_id);
+        self.extras_loading.remove(&clan_id);
+        self.badge_seeding.remove(&clan_id);
+        self.badge_seeded.remove(&clan_id);
+        self.loading.remove(&clan_id);
+        self.show_empty_categories.remove(&clan_id);
+        self.remembered_channels.remove(&clan_id);
+        if self.previous_channels.remove(&clan_id).is_some() {
+            self.persist_previous_channels(cx);
+        }
+
+        for channel_id in &channel_ids {
+            self.topic_parent_badges.remove(channel_id);
+            self.pending_channel_badges.remove(channel_id);
+            self.reactivating.remove(channel_id);
+            self.archiving.remove(channel_id);
+            self.deleting.remove(channel_id);
+            self.archived_channel_ids.remove(channel_id);
+            self.archived_cascade_children.remove(channel_id);
+            self.archived_channel_parents.remove(channel_id);
+            self.deleted_channel_ids.remove(channel_id);
+            self.deleted_channel_parents.remove(channel_id);
+            self.channel_detail_pending.remove(channel_id);
+            self.channel_detail_failed.remove(channel_id);
+        }
+
+        self.invalidate_channel_index(clan_id);
+        if self.active_clan_id == Some(clan_id) {
+            self.active_clan_id = None;
+        }
+        if self
+            .active_channel_id
+            .is_some_and(|active| channel_ids.contains(&active))
+        {
+            self.active_channel_id = None;
+            cx.emit(ChannelEvent::ActiveChannelChanged(None));
+        }
+        cx.notify();
     }
 
     fn invalidate_channel_index(&mut self, clan_id: ClanId) {
@@ -6318,6 +6384,72 @@ mod tests {
         crate::badge::BadgeService::init(auth_state, cx);
         crate::clan::ClanList::init(api.clone(), cx);
         cx.new(|cx| ChannelList::new(api, cx))
+    }
+
+    fn test_clan(id: ClanId, name: &str) -> crate::clan::Clan {
+        crate::clan::Clan {
+            id,
+            creator_id: UserId(0),
+            name: name.into(),
+            avatar_url: None,
+            banner_url: None,
+            badge_count: 0,
+            has_unread: false,
+            muted: false,
+            welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
+            community_banner: String::new(),
+            about: String::new(),
+            description: String::new(),
+            short_url: String::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn leaving_a_clan_forgets_its_channels(cx: &mut gpui::TestAppContext) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(ClanId(1), categories());
+                channels.show_empty_categories.insert(ClanId(1));
+                channels
+                    .remembered_channels
+                    .insert(ClanId(1), ChannelId(10));
+                channels.select_channel(ChannelId(10), cx);
+            });
+            channels
+        });
+
+        // `drop_clan` -> ClanEvent::Deleted -> ChannelList::forget_clan. The emit is only
+        // delivered when effects flush, so the assertions need their own update cycle.
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.handle_event(
+                    &RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                        clan_id: 1,
+                        user_ids: vec![REMOVED_SELF],
+                    }),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let channels = channels.read(cx);
+            assert!(
+                channels.cache.get(&ClanId(1)).is_none(),
+                "a clan you left must not keep its channel structure cached"
+            );
+            assert!(!channels.show_empty_categories.contains(&ClanId(1)));
+            assert!(!channels.remembered_channels.contains_key(&ClanId(1)));
+            assert_eq!(channels.active_channel_id, None);
+        });
     }
 
     fn structure_with_a_thread() -> Vec<Category> {

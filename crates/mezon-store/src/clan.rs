@@ -658,21 +658,10 @@ impl ClanList {
     }
 
     /// Apply a server-pushed realtime event. Cf. `ChannelStore::handle_update_channels`.
-    fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+    pub(crate) fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ClanDeleted(e) => {
-                let id = ClanId(e.clan_id);
-                let before = self.clans.len();
-                self.clans.retain(|c| c.id != id);
-                if self.clans.len() != before {
-                    cx.emit(ClanEvent::Deleted(id));
-                    if self.active_clan_id == Some(id) {
-                        let next = self.clans.first().map(|c| c.id);
-                        self.active_clan_id = next;
-                        cx.emit(ClanEvent::ActiveClanChanged(next));
-                    }
-                    cx.notify();
-                }
+                self.drop_clan(ClanId(e.clan_id), cx);
             }
             RealtimeEvent::ClanUpdated(e) => {
                 let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
@@ -706,20 +695,69 @@ impl ClanList {
                 if !crate::event_targets_user(&e.user_ids, me) {
                     return;
                 }
-                let before = self.clans.len();
-                self.clans.retain(|c| c.id != id);
-                if self.clans.len() != before {
-                    cx.emit(ClanEvent::Deleted(id));
-                    if self.active_clan_id == Some(id) {
-                        let next = self.clans.first().map(|c| c.id);
-                        self.active_clan_id = next;
-                        cx.emit(ClanEvent::ActiveClanChanged(next));
-                    }
-                    cx.notify();
-                }
+                self.drop_clan(id, cx);
             }
             _ => {}
         }
+    }
+
+    /// Drop a clan the current user is no longer a member of, promoting the first remaining
+    /// clan when the dropped one was active. Shared by the `UserClanRemoved` push and by
+    /// [`ClanList::leave_clan`], which cannot rely on that push reaching the leaver.
+    fn drop_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let before = self.clans.len();
+        self.clans.retain(|c| c.id != clan_id);
+        if self.clans.len() == before {
+            return;
+        }
+        cx.emit(ClanEvent::Deleted(clan_id));
+        if self.active_clan_id == Some(clan_id) {
+            let next = self.clans.first().map(|c| c.id);
+            self.active_clan_id = next;
+            cx.emit(ClanEvent::ActiveClanChanged(next));
+        }
+        cx.notify();
+    }
+
+    /// Leave a clan — React `PanelClan`/`ClanHeader` -> `removeMemberClan`, which posts
+    /// `RemoveClanUsers` with the caller's own id.
+    pub fn leave_clan(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(user_id) = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return Task::ready(Err("no signed-in user".to_string()));
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.remove_clan_users(clan_id.get(), vec![user_id.get().to_string()])
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.drop_clan(clan_id, cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    /// Delete a clan the signed-in user owns — React `ClanSettings.handleDeleteCurrentClan`
+    /// -> `deleteClan` -> `DeleteClanDesc`.
+    pub fn delete_clan(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.delete_clan_desc(clan_id.get())
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.drop_clan(clan_id, cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
     }
 
     pub fn set_has_unread_message(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -2036,6 +2074,53 @@ mod tests {
                 list.handle_event(&removed_event(1, &[]), cx);
                 assert!(list.clan_by_id(ClanId(1)).is_some());
             });
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_the_active_clan_promotes_the_first_remaining_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.select_clan(ClanId(1), cx);
+
+                list.handle_event(&removed_event(1, &[TEST_SELF]), cx);
+                assert_eq!(
+                    list.active_clan_id,
+                    Some(ClanId(2)),
+                    "leaving the clan you are viewing must fall back to a clan you are still in"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn leaving_without_a_signed_in_user_fails_before_calling_the_server(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_list = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| crate::AuthState::NotAuthenticated);
+            crate::badge::BadgeService::init(auth_state, cx);
+            ClanList::init(api, cx)
+        });
+        let task = cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.leave_clan(ClanId(1), cx)
+            })
+        });
+        assert!(task.await.is_err());
+        clan_list.update(cx, |list, _| {
+            assert!(
+                list.clan_by_id(ClanId(1)).is_some(),
+                "a rejected leave must not drop the clan locally"
+            );
         });
     }
 }

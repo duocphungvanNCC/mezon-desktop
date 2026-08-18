@@ -18,6 +18,7 @@ mod coming_soon_modal;
 mod confirm_archive_channel_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_channel_modal;
+mod confirm_delete_clan_modal;
 mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
@@ -26,6 +27,7 @@ mod confirm_delete_sticker_modal;
 mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_kick_member_modal;
+mod confirm_leave_clan_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
@@ -35,6 +37,7 @@ use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
+use confirm_delete_clan_modal::ConfirmDeleteClanModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
@@ -43,6 +46,7 @@ use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 use confirm_kick_member_modal::ConfirmKickMemberModal;
+use confirm_leave_clan_modal::ConfirmLeaveClanModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -865,6 +869,114 @@ impl Shell {
                 error_message,
                 reason_input,
             }
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    /// Confirm-then-delete a clan (React `DeleteClanModal`, opened from Clan Settings).
+    pub fn confirm_delete_clan(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        let title: SharedString = mezon_i18n::t(locale, "clanSettings.deleteClanTitle")
+            .replace("{{clanName}}", &clan_name)
+            .into();
+        let warning: SharedString = mezon_i18n::t(locale, "deleteClan.confirmMessage")
+            .to_string()
+            .into();
+        let name_label: SharedString = mezon_i18n::t(locale, "deleteClan.enterClanName")
+            .to_string()
+            .into();
+        let incorrect_name: SharedString = mezon_i18n::t(locale, "deleteClan.incorrectName")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "deleteClan.cancel")
+            .to_string()
+            .into();
+        let confirm_label: SharedString = mezon_i18n::t(locale, "clanSettings.sidebar.deleteClan")
+            .to_string()
+            .into();
+        let error_message: SharedString = mezon_i18n::t(locale, "deleteClan.deleteClanModal.error")
+            .to_string()
+            .into();
+        let clan_name: SharedString = clan_name.into();
+        let view = cx.new(|cx| {
+            let name_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(clan_name.clone())
+                    .text_size(px(14.))
+            });
+            ConfirmDeleteClanModal {
+                focus_handle: cx.focus_handle(),
+                clan_id,
+                clan_name,
+                title,
+                warning,
+                name_label,
+                incorrect_name,
+                cancel_label,
+                confirm_label,
+                error_message,
+                _name_sub: ConfirmDeleteClanModal::watch_name(&name_input, cx),
+                name_input,
+                name_matches: None,
+            }
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    /// Confirm-then-leave a clan (React `ModalConfirm` from `PanelClan` / `ClanHeader`).
+    pub fn confirm_leave_clan(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        // React renders `<span class="capitalize mr-1">{title}</span>{modalName}`.
+        let title: SharedString = format!(
+            "{} {}",
+            mezon_i18n::t(locale, "contextMenu.leave"),
+            clan_name
+        )
+        .trim_end()
+        .to_string()
+        .into();
+        let description: SharedString = mezon_i18n::t(locale, "common.modalConfirm.defaultMessage")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let confirm_label: SharedString = mezon_i18n::t(locale, "contextMenu.leaveClan")
+            .to_string()
+            .into();
+        let error_message: SharedString = mezon_i18n::t(locale, "common.somethingWentWrong")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmLeaveClanModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+            error_message,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

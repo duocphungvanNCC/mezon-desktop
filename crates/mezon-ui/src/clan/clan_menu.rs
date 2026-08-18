@@ -235,16 +235,6 @@ pub fn clan_menu_overlay(menu: ClanMenuDropdown, top: Pixels, left: Pixels) -> i
     deferred(div().absolute().top(top).left(left).child(menu))
 }
 
-fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut App) + 'static {
-    move |window: &mut Window, cx: &mut App| {
-        let title = title.clone();
-        let locale = locale.clone();
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.show_coming_soon(title, &locale, window, cx);
-        });
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn build_clan_menu(
     sidebar: WeakEntity<crate::sidebar::channel_sidebar::ChannelSidebar>,
@@ -255,6 +245,7 @@ pub fn build_clan_menu(
     locale: &str,
     show_empty_categories: bool,
     can_create_category: bool,
+    can_leave: bool,
 ) -> ClanMenuDropdown {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let locale_owned = locale.to_string();
@@ -367,12 +358,19 @@ pub fn build_clan_menu(
         },
     );
 
-    let leave_label = t("clanMenu.modalPanel.leaveClan");
-    menu = menu.danger_item_icon(
-        leave_label.clone(),
-        IconName::LeaveClanIcon,
-        coming_soon_modal(leave_label, locale_owned),
-    );
+    // React hides Leave Clan from the owner (`ModalPanel`: `{!isClanOwner && ...}`).
+    if can_leave {
+        menu = menu.danger_item_icon(
+            t("clanMenu.modalPanel.leaveClan"),
+            IconName::LeaveClanIcon,
+            move |window, cx| {
+                let locale = locale_owned.clone();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_leave_clan(clan_id, &locale, window, cx);
+                });
+            },
+        );
+    }
 
     menu
 }

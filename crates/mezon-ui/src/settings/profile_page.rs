@@ -74,6 +74,10 @@ pub struct ProfilePage {
     fetch_error: bool,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
+    /// Clan whose profile the Clan tab edits. React keeps this as `clanIdSettingProfile`,
+    /// set by the clan-rail "Edit Clan Profile" row — it is NOT the active clan, which can
+    /// be none at all when the route sits on DM/Friends.
+    clan_tab_id: Option<mezon_store::ClanId>,
     avatar_local_preview: Option<std::path::PathBuf>,
     dm_icon_menu_position: Option<Point<Pixels>>,
     avatar_image_cache: Entity<LruImageCache>,
@@ -203,6 +207,7 @@ impl ProfilePage {
             settings,
             clan_list,
             active_tab: ProfileTab::User,
+            clan_tab_id: None,
             profile,
             display_name_input: None,
             about_me_input: None,
@@ -236,6 +241,7 @@ impl ProfilePage {
 
     pub fn show_clan_profile(&mut self, clan_id: mezon_store::ClanId, cx: &mut Context<Self>) {
         self.active_tab = ProfileTab::Clan;
+        self.clan_tab_id = Some(clan_id);
         let display_name = self
             .profile
             .as_ref()
@@ -514,7 +520,13 @@ impl Render for ProfilePage {
                 .into_any_element();
         }
 
-        let active_clan_id = self.clan_list.read(cx).active_clan().map(|clan| clan.id);
+        // The tab follows the clan the caller asked for, falling back to the active clan;
+        // a clan the user has since left drops back to the user profile.
+        let clan_list = self.clan_list.read(cx);
+        let active_clan_id = self
+            .clan_tab_id
+            .filter(|id| clan_list.clan_by_id(*id).is_some())
+            .or_else(|| clan_list.active_clan().map(|clan| clan.id));
         if active_clan_id.is_none() && self.active_tab == ProfileTab::Clan {
             self.active_tab = ProfileTab::User;
         }
@@ -601,13 +613,17 @@ impl Render for ProfilePage {
                                         )
                                     },
                                 );
-                            let active_clan_id =
-                                this.clan_list.read(cx).active_clan().map(|c| c.id);
+                            let clan_list = this.clan_list.read(cx);
+                            let active_clan_id = this
+                                .clan_tab_id
+                                .filter(|id| clan_list.clan_by_id(*id).is_some())
+                                .or_else(|| clan_list.active_clan().map(|c| c.id));
                             let Some(active_clan_id) = active_clan_id else {
                                 this.active_tab = ProfileTab::User;
                                 cx.notify();
                                 return;
                             };
+                            this.clan_tab_id = Some(active_clan_id);
                             let section = this.ensure_clan_section(cx);
                             section.update(cx, |s, cx| {
                                 s.set_user_profile(

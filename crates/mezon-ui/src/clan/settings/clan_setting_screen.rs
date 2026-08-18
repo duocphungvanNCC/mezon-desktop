@@ -757,11 +757,8 @@ impl Render for ClanSettingScreen {
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "clanSettings.sidebar.deleteClan"))
                     .on_click(move |_, window, cx| {
-                        let title =
-                            mezon_i18n::t(&locale_for_delete, "clanSettings.sidebar.deleteClan")
-                                .to_string();
                         crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
-                            shell.show_coming_soon(title, &locale_for_delete, window, cx);
+                            shell.confirm_delete_clan(clan_id, &locale_for_delete, window, cx);
                         });
                     }),
             );
