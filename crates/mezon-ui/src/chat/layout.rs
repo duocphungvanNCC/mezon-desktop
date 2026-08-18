@@ -21,6 +21,7 @@ use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::message_search::{
     MessageSearchPanel, apply_search_dropdown_item, register_chat_layout,
@@ -93,7 +94,8 @@ pub struct ChatLayout {
     pub(crate) thread_search_input: Option<Entity<InputState>>,
     pub(crate) canvas_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
-    create_thread_message_input: Option<Entity<InputState>>,
+    create_thread_message_input: Option<Entity<MentionInput>>,
+    _create_thread_mention_sub: Option<Subscription>,
     topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     canvas_popover_handle: PopoverMenuHandle<CanvasPopoverPanel>,
@@ -530,6 +532,7 @@ impl ChatLayout {
             canvas_search_input: None,
             thread_name_input: None,
             create_thread_message_input: None,
+            _create_thread_mention_sub: None,
             topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             canvas_popover_handle: PopoverMenuHandle::default(),
@@ -2050,9 +2053,8 @@ impl ChatLayout {
         if let Some(input) = &self.thread_name_input {
             input.update(cx, |state, cx| state.clear(cx));
         }
-        if let Some(input) = &self.create_thread_message_input {
-            input.update(cx, |state, cx| state.clear(cx));
-        }
+        self.create_thread_message_input = None;
+        self._create_thread_mention_sub = None;
     }
 
     fn clear_thread_search(&mut self, cx: &mut Context<Self>) {
@@ -2064,17 +2066,20 @@ impl ChatLayout {
         });
     }
 
-    pub(crate) fn submit_create_thread(
-        &mut self,
-        name: String,
-        message: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn submit_create_thread(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .thread_name_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let (message, tokens, attachments) = self
+            .create_thread_message_input
+            .as_ref()
+            .map(|input| input.read(cx).current_content(cx))
+            .unwrap_or_default();
         ThreadsStore::global(cx).update(cx, |store, cx| {
-            store.submit_create(name, message, cx);
+            store.submit_create(name, message, tokens, attachments, cx);
         });
-        let _ = window;
     }
 
     pub(crate) fn navigate_to_thread(
@@ -2244,8 +2249,18 @@ impl ChatLayout {
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-            self.create_thread_message_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let settings = self.settings.clone();
+            let input = cx.new(|cx| MentionInput::new_compact(ph, settings, window, cx));
+            self._create_thread_mention_sub = Some(cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &MentionInputEvent, window, cx| match event {
+                    MentionInputEvent::Submit => this.submit_create_thread(window, cx),
+                    MentionInputEvent::Cancel => this.close_create_thread(cx),
+                    _ => {}
+                },
+            ));
+            self.create_thread_message_input = Some(input);
         }
     }
 

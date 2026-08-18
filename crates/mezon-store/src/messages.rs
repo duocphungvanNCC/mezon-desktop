@@ -5953,7 +5953,7 @@ async fn ensure_archived_thread_reactivated(
     }
 }
 
-fn plan_thread_membership(
+pub(crate) fn plan_thread_membership(
     self_id: Option<UserId>,
     thread_members: &[UserId],
     parent_members: &[UserId],
@@ -5984,7 +5984,7 @@ fn needs_parent_lookup(thread_members: &[UserId], candidates: &[UserId]) -> bool
         .any(|user_id| !thread_members.contains(user_id))
 }
 
-fn mentioned_thread_candidates(
+pub(crate) fn mentioned_thread_candidates(
     mentions: &[TransportMention],
     clan_id: ClanId,
     cx: &App,
@@ -7053,7 +7053,7 @@ async fn send_anonymous_attachment_message(
     });
 }
 
-async fn upload_attachments_now(
+pub(crate) async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
 ) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {
