@@ -2063,13 +2063,13 @@ impl ChatLayout {
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default();
-        let (message, tokens) = self
+        let (message, tokens, attachments) = self
             .create_thread_message_input
             .as_ref()
             .map(|input| input.read(cx).current_content(cx))
             .unwrap_or_default();
         ThreadsStore::global(cx).update(cx, |store, cx| {
-            store.submit_create(name, message, tokens, cx);
+            store.submit_create(name, message, tokens, attachments, cx);
         });
     }
 
@@ -2245,10 +2245,10 @@ impl ChatLayout {
             self._create_thread_mention_sub = Some(cx.subscribe_in(
                 &input,
                 window,
-                |this, _, event: &MentionInputEvent, window, cx| {
-                    if matches!(event, MentionInputEvent::Submit) {
-                        this.submit_create_thread(window, cx);
-                    }
+                |this, _, event: &MentionInputEvent, window, cx| match event {
+                    MentionInputEvent::Submit => this.submit_create_thread(window, cx),
+                    MentionInputEvent::Cancel => this.close_create_thread(cx),
+                    _ => {}
                 },
             ));
             self.create_thread_message_input = Some(input);

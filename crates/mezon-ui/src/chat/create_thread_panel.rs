@@ -253,9 +253,6 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .bg(theme.surfaces.surface)
                         .border_1()
                         .border_color(tokens.border_primary)
-                        .px_3()
-                        .py_2()
-                        .min_h(px(45.))
                         .child(message_input.clone()),
                 )
                 .child(

@@ -15,13 +15,12 @@ use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId, RoleId, UserId};
-use crate::is_here_user_id;
+use crate::ids::{ChannelId, ClanId, UserId};
 use crate::messages::{
-    MessagesStore, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, viewer_user_id,
+    MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, mentioned_thread_candidates, plan_thread_membership, upload_attachments_now,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::roles::RolesStore;
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
 pub const THREAD_STATUS_JOINED: i32 = 1;
@@ -974,24 +973,24 @@ impl ThreadsStore {
         name: String,
         message: String,
         content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
         cx: &mut Context<Self>,
     ) {
         if self._create_task.is_some() || self.submitting || !self.can_create_thread(cx) {
             return;
         }
         let name = name.trim().to_string();
-        let message = message.trim().to_string();
-
         if name.is_empty() {
             self.name_error = Some("thread_name_too_short".into());
             cx.notify();
             return;
         }
-        if message.is_empty() {
+        if message.trim().is_empty() && attachments.is_empty() {
             self.name_error = Some("initial_message_required".into());
             cx.notify();
             return;
         }
+        let message = message.trim_end().to_string();
 
         let Some(parent_id) = self.list_channel_id.clone() else {
             return;
@@ -999,19 +998,34 @@ impl ThreadsStore {
         let Some(clan_id) = self.clan_id.clone() else {
             return;
         };
+        let Ok(clan_id_parsed) = clan_id.parse::<ClanId>() else {
+            return;
+        };
+        if clan_id_parsed.is_zero() {
+            return;
+        }
+        let Ok(parent_channel_id) = parent_id.parse::<ChannelId>() else {
+            return;
+        };
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
-        let clan_id_parsed = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
-        let invite_ids = create_thread_invitees(
-            &mention_invite_candidates(&content_tokens.mentions, clan_id_parsed, cx),
-            parent_members_for_create(&parent_id, cx).as_deref(),
-            viewer_user_id(cx),
-        );
+        let clan_id_i64 = clan_id_parsed.get();
+        let parent_channel_type = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id_parsed, parent_channel_id)
+            .map(|channel| channel.channel_type.as_raw() as i32);
+        let cached_parent_members = ChannelMembersStore::try_global(cx).and_then(|members| {
+            let members = members.read(cx);
+            members
+                .has_channel(parent_channel_id)
+                .then(|| members.member_ids(parent_channel_id))
+        });
         let transport_mentions = content_tokens
             .mentions
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect::<Vec<_>>();
+        let mentioned = mentioned_thread_candidates(&transport_mentions, clan_id_parsed, cx);
         let transport_hashtags = content_tokens
             .hashtags
             .into_iter()
@@ -1059,11 +1073,11 @@ impl ThreadsStore {
 
             let create_result = api
                 .create_channel(
-                    clan_id.parse::<i64>().unwrap_or(0),
+                    clan_id_i64,
                     &name,
                     CHANNEL_TYPE_THREAD,
                     category_id.as_deref().and_then(|s| s.parse().ok()),
-                    parent_id.parse::<i64>().ok(),
+                    Some(parent_channel_id.get()),
                     channel_private,
                 )
                 .await;
@@ -1087,7 +1101,6 @@ impl ThreadsStore {
 
             let thread_id = thread.channel_id;
             let thread_id_str = thread_id.to_string();
-            let clan_id_i64 = clan_id.parse::<i64>().unwrap_or(0);
 
             if let Err(e) = api
                 .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
@@ -1096,6 +1109,44 @@ impl ThreadsStore {
                 tracing::warn!("join_chat after thread create failed: {e}");
             }
 
+            let parent_members = match cached_parent_members {
+                Some(ids) => ids,
+                None => match parent_channel_type {
+                    Some(channel_type) => {
+                        match api
+                            .list_channel_users(clan_id_i64, parent_channel_id.get(), channel_type)
+                            .await
+                        {
+                            Ok(users) => {
+                                let ids: Vec<UserId> =
+                                    users.iter().map(|user| UserId(user.user_id)).collect();
+                                let _ = this.update(cx, |_this, cx| {
+                                    if let Some(members) = ChannelMembersStore::try_global(cx) {
+                                        members.update(cx, |members, cx| {
+                                            members.apply_members_loaded(
+                                                parent_channel_id,
+                                                &users,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                });
+                                ids
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "list parent members for thread create failed: {e}"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    }
+                    None => Vec::new(),
+                },
+            };
+            let invite_ids = plan_thread_membership(None, &[], &parent_members, &mentioned);
+
+            let mut invite_failed = false;
             if !invite_ids.is_empty() {
                 let user_ids: Vec<String> = invite_ids
                     .iter()
@@ -1103,31 +1154,51 @@ impl ThreadsStore {
                     .collect();
                 if let Err(e) = api.add_channel_users(thread_id, user_ids).await {
                     tracing::error!("add mentioned users to new thread failed: {e}");
-                } else {
-                    let _ = this.update(cx, |_this, cx| {
-                        if let Some(members) = ChannelMembersStore::try_global(cx) {
-                            members.update(cx, |members, cx| {
-                                members.apply_members_added(ChannelId(thread_id), &invite_ids, cx);
-                            });
-                        }
-                    });
+                    invite_failed = true;
                 }
             }
+            let starter_mentions = if channel_private != 0 && invite_failed {
+                Vec::new()
+            } else {
+                transport_mentions
+            };
 
-            if let Err(e) = api
-                .send_channel_message(
+            let send_result = if attachments.is_empty() {
+                api.send_channel_message(
                     clan_id_i64,
                     thread_id,
                     &message,
                     false,
                     STREAM_MODE_THREAD,
-                    transport_mentions,
+                    starter_mentions,
                     transport_hashtags,
                     transport_emojis,
                     None,
                 )
                 .await
-            {
+            } else {
+                match upload_attachments_now(&api, attachments).await {
+                    Ok(uploaded) => {
+                        api.send_presigned_message(
+                            clan_id_i64,
+                            thread_id,
+                            &message,
+                            false,
+                            STREAM_MODE_THREAD,
+                            uploaded,
+                            None,
+                            starter_mentions,
+                            transport_hashtags,
+                            transport_emojis,
+                            None,
+                            Default::default(),
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            if let Err(e) = send_result {
                 tracing::error!("send starter message to thread failed: {e}");
                 if let Err(e) = this.update(cx, |this, cx| {
                     this.finish_create_request();
@@ -1145,9 +1216,8 @@ impl ThreadsStore {
                 this.creating = false;
                 this.finish_create_request();
                 this.loaded_channel = None;
-                let clan_id_for_refresh = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
                 ChannelList::global(cx).update(cx, |list, cx| {
-                    list.refresh_clan(clan_id_for_refresh, cx);
+                    list.refresh_clan(clan_id_parsed, cx);
                 });
                 cx.emit(ThreadsEvent::ThreadCreated {
                     channel_id: thread_id_str,
@@ -1168,67 +1238,6 @@ fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
     } else {
         ThreadCreateFailReason::Other
     }
-}
-
-fn mention_invite_candidates(
-    mentions: &[OutgoingMention],
-    clan_id: ClanId,
-    cx: &App,
-) -> Vec<UserId> {
-    let roles = RolesStore::try_global(cx);
-    let mut candidates = Vec::new();
-    for mention in mentions {
-        if !mention.user_id.is_empty() {
-            if is_here_user_id(&mention.user_id) {
-                continue;
-            }
-            if let Ok(user_id) = mention.user_id.parse::<UserId>()
-                && !candidates.contains(&user_id)
-            {
-                candidates.push(user_id);
-            }
-            continue;
-        }
-        let Ok(role_id) = mention.role_id.parse::<RoleId>() else {
-            continue;
-        };
-        let Some(roles) = roles.as_ref() else {
-            continue;
-        };
-        for user_id in roles.read(cx).role_member_ids(clan_id, role_id) {
-            if !candidates.contains(&user_id) {
-                candidates.push(user_id);
-            }
-        }
-    }
-    candidates
-}
-
-fn parent_members_for_create(parent_id: &str, cx: &App) -> Option<Vec<UserId>> {
-    let parent_id = parent_id.parse::<ChannelId>().ok()?;
-    let members = ChannelMembersStore::try_global(cx)?;
-    let members = members.read(cx);
-    members
-        .has_channel(parent_id)
-        .then(|| members.member_ids(parent_id))
-}
-
-fn create_thread_invitees(
-    mentioned: &[UserId],
-    parent_members: Option<&[UserId]>,
-    self_id: Option<UserId>,
-) -> Vec<UserId> {
-    let mut invitees = Vec::new();
-    for user_id in mentioned {
-        if Some(*user_id) == self_id || invitees.contains(user_id) {
-            continue;
-        }
-        if parent_members.is_some_and(|members| !members.contains(user_id)) {
-            continue;
-        }
-        invitees.push(*user_id);
-    }
-    invitees
 }
 
 fn list_channel_id_for(channel: &Channel) -> String {
@@ -1414,26 +1423,6 @@ pub fn group_threads(threads: &[ThreadSummary]) -> GroupedThreadIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn create_thread_invitees_skip_self_and_keep_parent_members() {
-        assert_eq!(
-            create_thread_invitees(
-                &[UserId(1), UserId(2), UserId(3), UserId(2)],
-                Some(&[UserId(1), UserId(2)]),
-                Some(UserId(1)),
-            ),
-            vec![UserId(2)]
-        );
-    }
-
-    #[test]
-    fn create_thread_invitees_keep_mentions_when_parent_roster_is_unknown() {
-        assert_eq!(
-            create_thread_invitees(&[UserId(2), UserId(3)], None, Some(UserId(1))),
-            vec![UserId(2), UserId(3)]
-        );
-    }
 
     #[test]
     fn thread_creation_scope_is_none_in_a_dm() {

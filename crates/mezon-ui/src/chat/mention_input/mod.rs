@@ -791,14 +791,18 @@ impl MentionInput {
         cx.notify();
     }
 
-    pub fn current_content(&self, cx: &App) -> (String, OutgoingContent) {
+    pub fn current_content(&self, cx: &App) -> (String, OutgoingContent, Vec<OutgoingAttachment>) {
         let raw = self.input.read(cx).value().to_string();
         let text = if self.committed.is_empty() {
             raw.trim().to_string()
         } else {
             raw.trim_end().to_string()
         };
-        (text, outgoing_content_from_committed(&raw, &self.committed))
+        (
+            text,
+            outgoing_content_from_committed(&raw, &self.committed),
+            outgoing_attachments(&self.pending_attachments),
+        )
     }
 
     pub fn take_payload(
@@ -836,19 +840,7 @@ impl MentionInput {
             return None;
         }
         let content = outgoing_content_from_committed(&raw, &self.committed);
-        let attachments: Vec<OutgoingAttachment> = self
-            .pending_attachments
-            .drain(..)
-            .map(|p| OutgoingAttachment {
-                path: p.path,
-                filename: p.filename,
-                filetype: p.filetype,
-                width: i32::try_from(p.width).unwrap_or(0),
-                height: i32::try_from(p.height).unwrap_or(0),
-                duration: p.duration,
-                poster_jpeg: p.poster_jpeg,
-            })
-            .collect();
+        let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
@@ -2577,12 +2569,15 @@ impl MentionInput {
     fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.popup_open();
         let popup = open.then(|| self.build_suggestion_popup(cx));
+        let previews =
+            (!self.pending_attachments.is_empty()).then(|| self.render_attachment_previews(cx));
         div()
             .relative()
             .w_full()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
+            .when_some(previews, |this, previews| this.child(previews))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
             .into_any_element()
@@ -2728,6 +2723,21 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
             emoji_id: emoji_suggest_id(emoji),
             shortname: emoji.shortname.clone(),
             shortname_lc: emoji.shortname.to_lowercase(),
+        })
+        .collect()
+}
+
+fn outgoing_attachments(pending: &[PendingAttachment]) -> Vec<OutgoingAttachment> {
+    pending
+        .iter()
+        .map(|pending| OutgoingAttachment {
+            path: pending.path.clone(),
+            filename: pending.filename.clone(),
+            filetype: pending.filetype.clone(),
+            width: i32::try_from(pending.width).unwrap_or(0),
+            height: i32::try_from(pending.height).unwrap_or(0),
+            duration: pending.duration,
+            poster_jpeg: pending.poster_jpeg.clone(),
         })
         .collect()
 }
