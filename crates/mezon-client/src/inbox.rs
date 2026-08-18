@@ -994,12 +994,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_message_preview_json_reads_sibling_attachments() {
+    fn parse_message_preview_json_reads_attachments_inside_content() {
         let bytes = br#"{"message_id":"42","sender_id":"9","content":"{\"attachments\":[{\"url\":\"https://cdn/a.pdf\",\"filetype\":\"application/pdf\"}]}","display_name":"KOMU"}"#;
         let preview = parse_notification_content(bytes).expect("preview");
         assert!(preview.content.is_empty());
         assert_eq!(preview.attachment_link, "https://cdn/a.pdf");
         assert_eq!(preview.attachment_type, "application/pdf");
+    }
+
+    #[test]
+    fn parse_message_preview_json_reads_sibling_attachments() {
+        let bytes = br#"{"message_id":"42","sender_id":"9","content":"{\"t\":\"\"}","attachments":[{"url":"https://cdn/b.pdf","filetype":"application/pdf","filename":"b.pdf","size":512}],"display_name":"KOMU"}"#;
+        let preview = parse_notification_content(bytes).expect("preview");
+        assert_eq!(preview.attachment_link, "https://cdn/b.pdf");
+        assert_eq!(preview.attachment_type, "application/pdf");
+        assert_eq!(preview.attachment_filename, "b.pdf");
+        assert_eq!(preview.attachment_size, 512);
     }
 
     #[test]

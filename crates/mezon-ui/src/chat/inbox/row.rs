@@ -15,14 +15,13 @@ use mezon_store::{
 };
 
 use crate::chat::file_type_icon::file_type_icon_for;
+use crate::chat::message::parts::FILE_NAME_COLOR;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
 use crate::router::Route;
 use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
-
-const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
@@ -73,6 +72,7 @@ pub(crate) struct NotificationRowView {
     attachment_size: u64,
     attachment_thumbnail: String,
     has_more_attachment: bool,
+    media: Option<InboxMediaOpen>,
     pub(crate) can_jump: bool,
 }
 
@@ -486,6 +486,14 @@ pub(crate) fn build_notification_row_view(
 
     let can_jump = notification.effective_message_id().is_some()
         && notification_jump_route(notification, cx).is_some();
+    let media = (!attachment_link.is_empty()).then(|| {
+        inbox_media_open(
+            notification,
+            &attachment_link,
+            &attachment_filename,
+            &attachment_type,
+        )
+    });
 
     NotificationRowView {
         sender_name,
@@ -508,6 +516,7 @@ pub(crate) fn build_notification_row_view(
         attachment_size,
         attachment_thumbnail,
         has_more_attachment,
+        media,
         can_jump,
     }
 }
@@ -1272,7 +1281,9 @@ struct InboxMediaOpen {
 
 fn inbox_media_open(
     notification: &InboxNotification,
-    view: &NotificationRowView,
+    url: &str,
+    filename: &str,
+    filetype: &str,
 ) -> InboxMediaOpen {
     let clan_id = notification
         .effective_clan_id()
@@ -1302,9 +1313,9 @@ fn inbox_media_open(
         message_id,
         uploader_id,
         create_time_seconds: notification.message_timestamp(),
-        url: view.attachment_link.clone(),
-        filename: view.attachment_filename.clone(),
-        filetype: view.attachment_type.clone(),
+        url: url.to_string(),
+        filename: filename.to_string(),
+        filetype: filetype.to_string(),
     }
 }
 
@@ -1357,7 +1368,7 @@ fn open_inbox_media_viewer(media: InboxMediaOpen, window: &Window, cx: &mut App)
 fn render_inbox_image(
     link: &str,
     image_cache: Entity<LruImageCache>,
-    media: InboxMediaOpen,
+    media: Option<InboxMediaOpen>,
 ) -> gpui::AnyElement {
     div()
         .id(SharedString::from(format!("inbox-image-{link}")))
@@ -1375,7 +1386,9 @@ fn render_inbox_image(
         )
         .on_click(move |_: &ClickEvent, window, cx| {
             cx.stop_propagation();
-            open_inbox_media_viewer(media.clone(), window, cx);
+            if let Some(media) = media.clone() {
+                open_inbox_media_viewer(media, window, cx);
+            }
         })
         .into_any_element()
 }
@@ -1385,7 +1398,7 @@ fn render_inbox_video(
     link: &str,
     thumbnail: &str,
     image_cache: Entity<LruImageCache>,
-    media: InboxMediaOpen,
+    media: Option<InboxMediaOpen>,
 ) -> gpui::AnyElement {
     let poster = if thumbnail.is_empty() {
         None
@@ -1398,8 +1411,8 @@ fn render_inbox_video(
         .flex()
         .items_center()
         .justify_center()
-        .max_w(px(180.))
-        .h(px(110.))
+        .w(px(150.))
+        .h(px(150.))
         .overflow_hidden()
         .rounded(px(8.))
         .bg(theme.bg_tertiary)
@@ -1449,7 +1462,9 @@ fn render_inbox_video(
         )
         .on_click(move |_: &ClickEvent, window, cx| {
             cx.stop_propagation();
-            open_inbox_media_viewer(media.clone(), window, cx);
+            if let Some(media) = media.clone() {
+                open_inbox_media_viewer(media, window, cx);
+            }
         })
         .into_any_element()
 }
@@ -1485,7 +1500,7 @@ fn render_inbox_file_card(
         .w_full()
         .max_w_full()
         .min_w_0()
-        .mt(px(6.))
+        .mt(px(10.))
         .p_3()
         .rounded_lg()
         .bg(theme.tokens.bg_item_theme_hover)
@@ -1572,14 +1587,13 @@ fn render_inbox_file_card(
 fn render_attachment_preview(
     theme: &Theme,
     locale: &SharedString,
-    notification: &InboxNotification,
     view: &NotificationRowView,
     image_cache: Entity<LruImageCache>,
 ) -> impl IntoElement {
     let more_files = mezon_i18n::t(locale, "channelTopbar.moreFiles");
     let link = view.attachment_link.as_str();
     let filetype = view.attachment_type.as_str();
-    let media = inbox_media_open(notification, view);
+    let media = view.media.clone();
     let preview = if attachment_link_is_image(link, filetype) {
         render_inbox_image(link, image_cache, media)
     } else if attachment_link_is_video(link, filetype) {
@@ -1775,7 +1789,6 @@ pub fn render_notification_body(
                                     c.child(render_attachment_preview(
                                         theme,
                                         locale,
-                                        &notification,
                                         view,
                                         image_cache.clone(),
                                     ))
