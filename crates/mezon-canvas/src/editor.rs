@@ -24,8 +24,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::image::{
     CANVAS_IMAGE_BLOCK_PADDING, CANVAS_IMAGE_FALLBACK_HEIGHT, canvas_image_display_size,
-    canvas_image_element_id, canvas_image_known_size, canvas_img,
-    ensure_canvas_image_dimensions_loaded, is_data_image_url, remember_canvas_image_size,
+    canvas_image_display_src_with_app, canvas_image_element_id_at, canvas_image_known_size,
+    canvas_img, ensure_canvas_image_dimensions_loaded, is_data_image_url,
+    remember_canvas_image_size,
 };
 use crate::view::{
     CANVAS_CONTENT_HORIZONTAL_PADDING, CANVAS_CONTENT_MAX_WIDTH_RATIO, TipTapMark, TipTapNode,
@@ -389,9 +390,13 @@ impl CanvasEditorState {
     }
 
     pub fn set_doc(&mut self, raw: &str, cx: &mut Context<Self>) {
-        self.lines = lines_from_tiptap(raw);
-        if let Some(doc) = parse_tiptap_doc(raw) {
-            remember_tiptap_image_sizes(&doc, cx);
+        let doc = parse_tiptap_doc(raw);
+        self.lines = doc
+            .as_ref()
+            .map(lines_from_tiptap_doc)
+            .unwrap_or_else(|| vec![EditorLine::default()]);
+        if let Some(doc) = doc.as_ref() {
+            remember_tiptap_image_sizes(doc, cx);
         }
         if self.lines.is_empty() {
             self.lines.push(EditorLine::default());
@@ -979,19 +984,34 @@ impl CanvasEditorState {
     }
 
     fn link_href_at_offset(&self, offset: usize) -> Option<String> {
+        self.link_mark_at_offset(offset)?.href.clone()
+    }
+
+    fn link_mark_at_offset(&self, offset: usize) -> Option<&EditorMark> {
         let (line_ix, col) = self.offset_to_line_col(offset);
         let line = self.lines.get(line_ix)?;
-        line.marks.iter().find_map(|mark| {
-            (mark.kind == MarkKind::Link && mark.range.start <= col && mark.range.end > col)
-                .then(|| mark.href.clone())
-                .flatten()
+        line.marks.iter().find(|mark| {
+            mark.kind == MarkKind::Link
+                && mark.range.start <= col
+                && mark.range.end > col
+                && mark.href.as_ref().is_some_and(|href| !href.is_empty())
+        })
+    }
+
+    fn document_has_link(&self) -> bool {
+        self.lines.iter().any(|line| {
+            line.marks.iter().any(|mark| {
+                mark.kind == MarkKind::Link
+                    && mark.href.as_ref().is_some_and(|href| !href.is_empty())
+            })
         })
     }
 
     fn update_hovering_link(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let hovering = self
-            .link_href_at_offset(self.index_for_mouse_position(position))
-            .is_some();
+        let hovering = self.document_has_link()
+            && self
+                .link_mark_at_offset(self.index_for_mouse_position(position))
+                .is_some();
         if hovering == self.hovering_link {
             return;
         }
@@ -1154,14 +1174,12 @@ impl CanvasEditorState {
             return block.start.min(max_offset);
         };
         let local_x = (rel_x - block.prefix_width).max(Pixels::ZERO);
-        let row_ranges = wrapped_line_row_ranges(wrapped);
         let row_idx = if block.row_height <= Pixels::ZERO {
             0
         } else {
             ((rel_y - block.top) / block.row_height) as usize
-        }
-        .min(row_ranges.len().saturating_sub(1));
-        let (wr_start, wr_end) = row_ranges[row_idx];
+        };
+        let (wr_start, wr_end) = wrapped_line_row_at(wrapped, row_idx);
         let row_start = block.text_start + wr_start;
         let row_end = block.text_start + wr_end;
         let offset = index_for_visual_row(wrapped, block.text_start, row_start, row_end, local_x);
@@ -1884,8 +1902,8 @@ impl Render for CanvasEditorState {
                             .overflow_hidden()
                             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                     })
-                    .children(overlay_images.into_iter().map(|image| {
-                        let img_id = canvas_image_element_id(image.src.as_ref());
+                    .children(overlay_images.into_iter().enumerate().map(|(ix, image)| {
+                        let img_id = canvas_image_element_id_at(image.src.as_ref(), ix);
                         div()
                             .id(SharedString::from(format!("{img_id}-wrap")))
                             .absolute()
@@ -1898,12 +1916,15 @@ impl Render for CanvasEditorState {
                             .w(image.width)
                             .h(image.height + CANVAS_IMAGE_BLOCK_PADDING * 2.)
                             .py(CANVAS_IMAGE_BLOCK_PADDING)
+                            .overflow_hidden()
                             .child(canvas_img(
                                 cx,
                                 image.src.as_ref(),
                                 fallback_fg,
                                 fallback_bg,
                                 image.width,
+                                Some(image.display_src.as_ref()),
+                                ix,
                             ))
                     }))
                     .child(CanvasEditorElement {
@@ -1975,6 +1996,7 @@ struct PreparedImage {
     width: Pixels,
     height: Pixels,
     src: SharedString,
+    display_src: SharedString,
 }
 
 struct EditorShapeCache {
@@ -1993,6 +2015,7 @@ struct EditorImageOverlay {
     width: Pixels,
     height: Pixels,
     src: SharedString,
+    display_src: SharedString,
 }
 
 struct EditorPrepaint {
@@ -2226,6 +2249,7 @@ impl Element for CanvasEditorElement {
                                 width: image_w,
                                 height: image_h,
                                 src: src.to_string().into(),
+                                display_src: canvas_image_display_src_with_app(cx, src).into(),
                             });
                         }
                         content_y += block_h;
@@ -2591,6 +2615,7 @@ impl Element for CanvasEditorElement {
                 width: image.width,
                 height: image.height,
                 src: image.src.clone(),
+                display_src: image.display_src.clone(),
             })
             .collect();
         let line_height = prepaint.line_height;
@@ -2808,21 +2833,40 @@ fn selection_x_range_in_row(
     (x0.max(Pixels::ZERO), x1.max(x0 + px(1.)))
 }
 
-fn wrapped_line_row_ranges(line: &WrappedLine) -> Vec<(usize, usize)> {
+fn wrap_boundary_index(line: &WrappedLine, run_ix: usize, glyph_ix: usize) -> usize {
+    line.unwrapped_layout.runs[run_ix].glyphs[glyph_ix].index
+}
+
+fn wrapped_line_row_at(line: &WrappedLine, row_idx: usize) -> (usize, usize) {
     let len = line.len();
-    let mut ends: Vec<usize> = line
-        .wrap_boundaries()
-        .iter()
-        .map(|boundary| line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index)
-        .collect();
-    ends.push(len);
-    let mut start = 0usize;
-    ends.into_iter()
-        .map(|end| {
-            let range = (start, end);
-            start = end;
-            range
-        })
+    let boundaries = line.wrap_boundaries();
+    let row_count = boundaries.len() + 1;
+    let row_idx = row_idx.min(row_count.saturating_sub(1));
+    let start = if row_idx == 0 {
+        0
+    } else {
+        wrap_boundary_index(
+            line,
+            boundaries[row_idx - 1].run_ix,
+            boundaries[row_idx - 1].glyph_ix,
+        )
+    };
+    let end = if row_idx < boundaries.len() {
+        wrap_boundary_index(
+            line,
+            boundaries[row_idx].run_ix,
+            boundaries[row_idx].glyph_ix,
+        )
+    } else {
+        len
+    };
+    (start, end)
+}
+
+fn wrapped_line_row_ranges(line: &WrappedLine) -> Vec<(usize, usize)> {
+    let row_count = line.wrap_boundaries().len() + 1;
+    (0..row_count)
+        .map(|row_idx| wrapped_line_row_at(line, row_idx))
         .collect()
 }
 
@@ -3611,29 +3655,72 @@ fn toggle_mark_on_line(line: &mut EditorLine, range: Range<usize>, kind: MarkKin
 }
 
 fn lines_from_tiptap(raw: &str) -> Vec<EditorLine> {
-    let Some(doc) = parse_tiptap_doc(raw) else {
-        return vec![EditorLine::default()];
-    };
+    match parse_tiptap_doc(raw) {
+        Some(doc) => lines_from_tiptap_doc(&doc),
+        None => vec![EditorLine::default()],
+    }
+}
+
+fn lines_from_tiptap_doc(doc: &TipTapNode) -> Vec<EditorLine> {
     let mut lines = Vec::new();
-    if let Some(children) = doc.content {
+    if let Some(children) = &doc.content {
         for child in children {
-            flatten_block(&child, &mut lines);
+            flatten_block(child, &mut lines);
         }
     }
     lines
 }
 
+fn flatten_mixed_inlines(
+    children: &[TipTapNode],
+    lines: &mut Vec<EditorLine>,
+    mut make_text: impl FnMut(String, Vec<EditorMark>) -> EditorLine,
+) {
+    if children.is_empty() {
+        lines.push(make_text(String::new(), Vec::new()));
+        return;
+    }
+    let mut i = 0;
+    while i < children.len() {
+        if children[i].kind == "image" {
+            if let Some(src) = image_src_from_attrs(children[i].attrs.as_ref()) {
+                lines.push(EditorLine {
+                    block: BlockKind::Image,
+                    text: String::new(),
+                    marks: Vec::new(),
+                    image_src: Some(src),
+                    ordered_start: None,
+                });
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < children.len() && children[i].kind != "image" {
+            i += 1;
+        }
+        let chunk = &children[start..i];
+        lines.push(make_text(
+            inline_to_text_slice(chunk),
+            inline_to_marks_slice(chunk),
+        ));
+    }
+}
+
 fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
     match node.kind.as_str() {
         "paragraph" => {
-            lines.push(EditorLine {
-                block: BlockKind::Paragraph,
-                text: inline_to_text(node.content.as_ref()),
-                marks: inline_to_marks(node.content.as_ref()),
-                image_src: None,
-                ordered_start: None,
-            });
-            push_nested_images(node, lines);
+            flatten_mixed_inlines(
+                node.content.as_deref().unwrap_or(&[]),
+                lines,
+                |text, marks| EditorLine {
+                    block: BlockKind::Paragraph,
+                    text,
+                    marks,
+                    image_src: None,
+                    ordered_start: None,
+                },
+            );
         }
         "heading" => {
             let level = node
@@ -3654,13 +3741,17 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
             if let Some(children) = &node.content {
                 for child in children {
                     if child.kind == "paragraph" {
-                        lines.push(EditorLine {
-                            block: BlockKind::Blockquote,
-                            text: inline_to_text(child.content.as_ref()),
-                            marks: inline_to_marks(child.content.as_ref()),
-                            image_src: None,
-                            ordered_start: None,
-                        });
+                        flatten_mixed_inlines(
+                            child.content.as_deref().unwrap_or(&[]),
+                            lines,
+                            |text, marks| EditorLine {
+                                block: BlockKind::Blockquote,
+                                text,
+                                marks,
+                                image_src: None,
+                                ordered_start: None,
+                            },
+                        );
                     } else {
                         flatten_block(child, lines);
                     }
@@ -3698,25 +3789,6 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
     }
 }
 
-fn push_nested_images(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
-    let Some(children) = &node.content else {
-        return;
-    };
-    for child in children {
-        if child.kind == "image"
-            && let Some(src) = image_src_from_attrs(child.attrs.as_ref())
-        {
-            lines.push(EditorLine {
-                block: BlockKind::Image,
-                text: String::new(),
-                marks: Vec::new(),
-                image_src: Some(src),
-                ordered_start: None,
-            });
-        }
-    }
-}
-
 fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind) {
     let ordered_start = (kind == BlockKind::OrderedItem)
         .then(|| {
@@ -3735,13 +3807,18 @@ fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind)
             {
                 for block in inner {
                     if block.kind == "paragraph" {
-                        lines.push(EditorLine {
-                            block: kind,
-                            text: inline_to_text(block.content.as_ref()),
-                            marks: inline_to_marks(block.content.as_ref()),
-                            image_src: None,
-                            ordered_start: if first_item { ordered_start } else { None },
-                        });
+                        let start = if first_item { ordered_start } else { None };
+                        flatten_mixed_inlines(
+                            block.content.as_deref().unwrap_or(&[]),
+                            lines,
+                            |text, marks| EditorLine {
+                                block: kind,
+                                text,
+                                marks,
+                                image_src: None,
+                                ordered_start: start,
+                            },
+                        );
                         first_item = false;
                     } else {
                         flatten_block(block, lines);
@@ -3765,13 +3842,17 @@ fn flatten_task_list(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                 if let Some(inner) = &child.content {
                     for block in inner {
                         if block.kind == "paragraph" {
-                            lines.push(EditorLine {
-                                block: BlockKind::TaskItem { checked },
-                                text: inline_to_text(block.content.as_ref()),
-                                marks: inline_to_marks(block.content.as_ref()),
-                                image_src: None,
-                                ordered_start: None,
-                            });
+                            flatten_mixed_inlines(
+                                block.content.as_deref().unwrap_or(&[]),
+                                lines,
+                                |text, marks| EditorLine {
+                                    block: BlockKind::TaskItem { checked },
+                                    text,
+                                    marks,
+                                    image_src: None,
+                                    ordered_start: None,
+                                },
+                            );
                         }
                     }
                 }
@@ -3781,9 +3862,10 @@ fn flatten_task_list(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
 }
 
 fn inline_to_text(content: Option<&Vec<TipTapNode>>) -> String {
-    let Some(content) = content else {
-        return String::new();
-    };
+    inline_to_text_slice(content.map(Vec::as_slice).unwrap_or(&[]))
+}
+
+fn inline_to_text_slice(content: &[TipTapNode]) -> String {
     let mut out = String::new();
     for node in content {
         match node.kind.as_str() {
@@ -3796,9 +3878,10 @@ fn inline_to_text(content: Option<&Vec<TipTapNode>>) -> String {
 }
 
 fn inline_to_marks(content: Option<&Vec<TipTapNode>>) -> Vec<EditorMark> {
-    let Some(content) = content else {
-        return Vec::new();
-    };
+    inline_to_marks_slice(content.map(Vec::as_slice).unwrap_or(&[]))
+}
+
+fn inline_to_marks_slice(content: &[TipTapNode]) -> Vec<EditorMark> {
     let mut marks = Vec::new();
     let mut offset = 0usize;
     for node in content {
@@ -4258,6 +4341,32 @@ mod tests {
             r#"{{"type":"doc","content":[{{"type":"paragraph","content":[{{"type":"text","text":"Caption"}},{{"type":"image","attrs":{{"src":"{src}"}}}}]}}]}}"#
         );
         let lines = lines_from_tiptap(&raw);
+        assert_eq!(lines[0].block, BlockKind::Paragraph);
+        assert_eq!(lines[0].text, "Caption");
+        assert_eq!(lines[1].block, BlockKind::Image);
+        assert_eq!(lines[1].image_src.as_deref(), Some(src));
+    }
+
+    #[test]
+    fn keeps_nested_image_before_text_order() {
+        let src = "https://cdn.mezon.ai/clan/first.png";
+        let raw = format!(
+            r#"{{"type":"doc","content":[{{"type":"paragraph","content":[{{"type":"image","attrs":{{"src":"{src}"}}}},{{"type":"text","text":"After"}}]}}]}}"#
+        );
+        let lines = lines_from_tiptap(&raw);
+        assert_eq!(lines[0].block, BlockKind::Image);
+        assert_eq!(lines[0].image_src.as_deref(), Some(src));
+        assert_eq!(lines[1].block, BlockKind::Paragraph);
+        assert_eq!(lines[1].text, "After");
+    }
+
+    #[test]
+    fn extracts_image_nested_in_list_item() {
+        let src = "https://cdn.mezon.ai/clan/list.png";
+        let raw = format!(
+            r#"{{"type":"doc","content":[{{"type":"bulletList","content":[{{"type":"listItem","content":[{{"type":"paragraph","content":[{{"type":"image","attrs":{{"src":"{src}"}}}},{{"type":"text","text":"Item"}}]}}]}}]}}]}}"#
+        );
+        let lines = lines_from_tiptap(&raw);
         assert!(
             lines.iter().any(
                 |line| line.block == BlockKind::Image && line.image_src.as_deref() == Some(src)
@@ -4266,7 +4375,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.block == BlockKind::Paragraph && line.text == "Caption")
+                .any(|line| line.block == BlockKind::BulletItem && line.text == "Item")
         );
     }
 

@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, Context, DefiniteLength, Entity, FontWeight, Hsla, Pixels, ScrollHandle,
-    SharedString, Window, div, prelude::*, px, relative,
+    App, ClickEvent, Context, DefiniteLength, Entity, Focusable, FontWeight, Hsla, Pixels,
+    ScrollHandle, SharedString, Window, div, prelude::*, px, relative,
 };
 use mezon_store::{BadgeService, CanvasDetail, CanvasStore, ChannelId, ClanId, Settings, UserId};
 use serde::Deserialize;
@@ -391,6 +391,10 @@ impl gpui::Render for CanvasView {
                                         input.focus(window, cx);
                                     });
                                 }
+                            } else {
+                                this.title_input.update(cx, |input, cx| {
+                                    input.focus_handle(cx).blur(window);
+                                });
                             }
                             cx.notify();
                         })),
@@ -452,17 +456,19 @@ impl gpui::Render for CanvasView {
                     .w_full()
                     .h(px(34.))
                     .min_h(px(34.))
-                    .child(Input::new(&self.title_input).text_color(tokens.text_theme_message))
-                    .when(!editing, |el| {
+                    .when(editing, |el| {
                         el.child(
-                            div()
-                                .absolute()
-                                .top(px(0.))
-                                .left(px(0.))
-                                .w_full()
-                                .h_full()
-                                .occlude(),
+                            Input::new(&self.title_input).text_color(tokens.text_theme_message),
                         )
+                    })
+                    .when(!editing, |el| {
+                        let title = self.title_input.read(cx).value();
+                        let display = if title.is_empty() {
+                            mezon_i18n::t(&locale, "common.canvas.untitled").to_string()
+                        } else {
+                            title.to_string()
+                        };
+                        el.child(display)
                     }),
             )
             .into_any_element();

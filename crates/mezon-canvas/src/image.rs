@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine as _;
@@ -227,19 +228,39 @@ fn is_already_imgproxy_url(src: &str, cx: Option<&App>) -> bool {
     .any(|origin| url_has_origin(src, origin))
 }
 
+fn parse_loose_ipv4(host: &str) -> Option<Ipv4Addr> {
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in host.split('.') {
+        if count == 4 || part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let value = if part.starts_with('0') && part.len() > 1 {
+            u32::from_str_radix(part, 8).ok()?
+        } else {
+            part.parse::<u32>().ok()?
+        };
+        if value > 255 {
+            return None;
+        }
+        octets[count] = value as u8;
+        count += 1;
+    }
+    (count == 4).then_some(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+}
+
 fn is_blocked_canvas_image_url(src: &str) -> bool {
     let Some(host) = canvas_url_host(src) else {
         return true;
     };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    host == "localhost"
-        || host == "127.0.0.1"
-        || host == "0.0.0.0"
-        || host == "::1"
-        || host == "[::1]"
-        || host.ends_with(".localhost")
-        || host.starts_with("127.")
-        || host.starts_with("169.254.")
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return !ip.is_global();
+    }
+    parse_loose_ipv4(&host).is_some_and(|ip| !IpAddr::V4(ip).is_global())
 }
 
 fn should_upgrade_http_to_https(src: &str, cx: Option<&App>) -> bool {
@@ -307,6 +328,13 @@ fn canvas_image_probe_src(cx: &App, src: &str) -> String {
         return String::new();
     }
     if is_blocked_canvas_image_url(&src) {
+        return String::new();
+    }
+    if let Some(cfg) = AppConfig::try_global(cx) {
+        if !cfg.is_own_media_origin(&src) {
+            return String::new();
+        }
+    } else if !is_static_canvas_origin(&src) {
         return String::new();
     }
     src
@@ -395,12 +423,12 @@ pub fn canvas_image_display_size(cx: &App, src: &str, max_width: Pixels) -> (Pix
 static CANVAS_DATA_IMAGE_CACHE: OnceLock<Mutex<HashMap<String, Arc<RenderImage>>>> =
     OnceLock::new();
 
-pub fn canvas_image_element_id(src: &str) -> SharedString {
+pub fn canvas_image_element_id_at(src: &str, instance: usize) -> SharedString {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     src.hash(&mut hasher);
-    SharedString::from(format!("canvas-img-{:x}", hasher.finish()))
+    SharedString::from(format!("canvas-img-{:x}-{instance}", hasher.finish()))
 }
 
 fn trim_data_image_cache(entries: &mut HashMap<String, Arc<RenderImage>>) {
@@ -472,7 +500,10 @@ fn apply_canvas_image_size<I: Styled + StyledImage>(
 ) -> I {
     match fitted {
         Some((width, height)) => el.w(width).h(height).object_fit(ObjectFit::Contain),
-        None => el.max_w(max_width).object_fit(ObjectFit::Contain),
+        None => el
+            .max_w(max_width)
+            .max_h(CANVAS_IMAGE_FALLBACK_HEIGHT)
+            .object_fit(ObjectFit::Contain),
     }
 }
 
@@ -482,8 +513,10 @@ pub fn canvas_img(
     fallback_fg: gpui::Rgba,
     fallback_bg: gpui::Rgba,
     max_width: Pixels,
+    display_src: Option<&str>,
+    instance: usize,
 ) -> AnyElement {
-    let img_id = canvas_image_element_id(src);
+    let img_id = canvas_image_element_id_at(src, instance);
     let max_width = max_width.max(px(1.));
     let fitted = canvas_image_known_display_size(cx, src, max_width);
     if is_data_image_url(src) {
@@ -494,7 +527,11 @@ pub fn canvas_img(
         }
         return canvas_image_fallback_inner(fallback_fg, fallback_bg);
     }
-    let display_src = canvas_image_display_src_with_app(cx, src);
+    let display_src = display_src
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| canvas_image_display_src_with_app(cx, src));
     if display_src.is_empty() {
         return canvas_image_fallback_inner(fallback_fg, fallback_bg);
     }
@@ -557,6 +594,10 @@ mod tests {
         assert!(canvas_image_display_src_checked("http://127.0.0.1/secret.png", None).is_empty());
         assert!(canvas_image_display_src_checked("https://localhost/x.png", None).is_empty());
         assert!(canvas_image_display_src_checked("javascript:alert(1)", None).is_empty());
+        assert!(canvas_image_display_src_checked("http://192.168.1.1/x.png", None).is_empty());
+        assert!(canvas_image_display_src_checked("http://10.0.0.8/x.png", None).is_empty());
+        assert!(canvas_image_display_src_checked("http://0177.0.0.1/x.png", None).is_empty());
+        assert!(canvas_image_display_src_checked("http://[::1]/x.png", None).is_empty());
     }
 
     #[test]

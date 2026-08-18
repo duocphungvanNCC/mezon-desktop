@@ -378,8 +378,16 @@ impl AppConfig {
     }
 
     pub fn is_own_media_origin(&self, url: &str) -> bool {
-        self.media_origins()
-            .into_iter()
+        let base = self.base_img_url.trim_end_matches('/');
+        if !base.is_empty() && url_has_origin(url, base) {
+            return true;
+        }
+        let profile = self.profile_img_url.trim_end_matches('/');
+        if !profile.is_empty() && url_has_origin(url, profile) {
+            return true;
+        }
+        READ_CDN_ORIGINS
+            .iter()
             .any(|origin| url_has_origin(url, origin))
     }
 
