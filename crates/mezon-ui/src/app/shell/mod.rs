@@ -929,16 +929,15 @@ impl Shell {
         focus
     }
 
-    pub fn close_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
-        let focus = self
-            .modal_underlay
-            .take()
-            .and_then(|(_, _, _, focus_handle)| focus_handle);
+    pub fn close_modal(&mut self, cx: &mut Context<Self>) {
+        if self.modal.is_none() && self.modal_underlay.is_none() {
+            return;
+        }
+        self.modal_underlay.take();
         self.modal.take();
         self.command_palette_open = false;
         self.modal_fullscreen = false;
         cx.notify();
-        focus
     }
 
     pub fn has_modal(&self) -> bool {

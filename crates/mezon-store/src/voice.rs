@@ -1126,13 +1126,12 @@ impl VoiceStore {
             return;
         }
         let now = Instant::now();
-        if self
+        let play_sound = self
             .last_flower_effect_at
-            .is_some_and(|last| now.duration_since(last) < FLOWER_RATE_LIMIT)
-        {
-            return;
+            .is_none_or(|last| now.duration_since(last) >= FLOWER_RATE_LIMIT);
+        if play_sound {
+            self.last_flower_effect_at = Some(now);
         }
-        self.last_flower_effect_at = Some(now);
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
@@ -1166,7 +1165,9 @@ impl VoiceStore {
             label,
             _remove_timer: remove_timer,
         });
-        self.play_flower_sound(cx);
+        if play_sound {
+            self.play_flower_sound(cx);
+        }
         cx.notify();
     }
 

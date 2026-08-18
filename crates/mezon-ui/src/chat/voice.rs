@@ -1364,10 +1364,7 @@ fn paint_flower_burst(
         }
         let position = point(origin.x + px(pose.x * unit), origin.y + px(pose.y * unit));
         let visual = particle.size * pose.scale;
-        if visual < 1.0 {
-            continue;
-        }
-        let radius = px(visual * 0.5);
+        let radius = px(visual * std::f32::consts::FRAC_1_SQRT_2);
         if position.x + radius < bounds.origin.x
             || position.y + radius < bounds.origin.y
             || position.x - radius > bounds.origin.x + bounds.size.width
