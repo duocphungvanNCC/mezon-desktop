@@ -70,6 +70,7 @@ pub struct ContextMenu {
     quick_reactions: Vec<QuickReaction>,
     on_quick_reaction: Option<QuickReactionHandler>,
     on_reaction_close: Option<MenuHandler>,
+    on_submenu_close: Option<MenuHandler>,
     on_dismiss: Option<DismissHandler>,
     anchor: Point<Pixels>,
 }
@@ -193,6 +194,14 @@ impl ContextMenu {
 
     pub fn separator(mut self) -> Self {
         self.items.push(Item::Separator);
+        self
+    }
+
+    pub fn on_submenu_close(
+        mut self,
+        on_submenu_close: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_submenu_close = Some(Rc::new(on_submenu_close));
         self
     }
 
@@ -501,6 +510,27 @@ impl RenderOnce for ContextMenu {
         let brand = theme.brand;
         let dismiss = self.on_dismiss.clone();
         let on_reaction_close = self.on_reaction_close;
+        let on_submenu_close = self.on_submenu_close;
+        let flyout_open = self.items.iter().any(|item| {
+            matches!(
+                item,
+                Item::Submenu { open: true, .. } | Item::ReactionSubmenu { open: true, .. }
+            )
+        });
+        let close_open_flyouts: Option<MenuHandler> = (flyout_open
+            && (on_reaction_close.is_some() || on_submenu_close.is_some()))
+        .then(|| {
+            let on_reaction_close = on_reaction_close.clone();
+            let on_submenu_close = on_submenu_close.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                if let Some(close) = &on_reaction_close {
+                    close(window, cx);
+                }
+                if let Some(close) = &on_submenu_close {
+                    close(window, cx);
+                }
+            }) as MenuHandler
+        });
         let on_quick_reaction = self.on_quick_reaction;
         // Flip the reaction submenu to the left of the menu when it would overflow
         // the window's right edge.
@@ -624,7 +654,7 @@ impl RenderOnce for ContextMenu {
                                     }
                                 })
                             })
-                            .when_some(on_reaction_close.clone(), |row, close| {
+                            .when_some(close_open_flyouts.clone(), |row, close| {
                                 row.on_hover(move |hovered, window, cx| {
                                     if *hovered {
                                         close(window, cx);
@@ -769,9 +799,15 @@ impl RenderOnce for ContextMenu {
                                     s.bg(hover)
                                 }
                             })
-                            .on_hover(move |hovered, window, cx| {
-                                if *hovered {
-                                    on_open(window, cx);
+                            .on_hover({
+                                let close = close_open_flyouts.clone();
+                                move |hovered, window, cx| {
+                                    if *hovered {
+                                        if !open && let Some(close) = &close {
+                                            close(window, cx);
+                                        }
+                                        on_open(window, cx);
+                                    }
                                 }
                             })
                             .when_some(on_parent_click, |row, on_parent_click| {
@@ -806,6 +842,13 @@ impl RenderOnce for ContextMenu {
                             .text_color(text)
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
+                            .when_some(close_open_flyouts.clone(), |row, close| {
+                                row.on_hover(move |hovered, window, cx| {
+                                    if *hovered {
+                                        close(window, cx);
+                                    }
+                                })
+                            })
                             .child(
                                 div()
                                     .w(px(16.))
@@ -954,9 +997,15 @@ impl RenderOnce for ContextMenu {
                             .text_color(text)
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
-                            .on_hover(move |hovered, window, cx| {
-                                if *hovered {
-                                    on_open(window, cx);
+                            .on_hover({
+                                let close = close_open_flyouts.clone();
+                                move |hovered, window, cx| {
+                                    if *hovered {
+                                        if !open && let Some(close) = &close {
+                                            close(window, cx);
+                                        }
+                                        on_open(window, cx);
+                                    }
                                 }
                             })
                             .child(div().flex_1().child(label))

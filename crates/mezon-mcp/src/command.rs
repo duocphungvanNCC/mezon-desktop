@@ -241,6 +241,52 @@ pub enum McpCommand {
         value: Option<i32>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ListCategories {
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateCategory {
+        clan_id: i64,
+        name: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuOpen {
+        clan_id: i64,
+        channel_id: i64,
+        x: f32,
+        y: f32,
+        in_favorites: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuOpen {
+        clan_id: i64,
+        category_id: String,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     CreateClan {
         name: String,
         logo: String,

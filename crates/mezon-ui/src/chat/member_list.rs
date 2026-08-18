@@ -1419,6 +1419,21 @@ struct MemberMenuArgs {
     permissions: MemberMenuPermissions,
 }
 
+fn close_member_submenus(
+    panel: WeakEntity<MemberListPanel>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = panel.update(cx, |this, cx| {
+            if let Some(menu) = this.open_menu.as_mut()
+                && menu.ban_sub_open
+            {
+                menu.ban_sub_open = false;
+                cx.notify();
+            }
+        });
+    }
+}
+
 fn close_member_menu(panel: &WeakEntity<MemberListPanel>, cx: &mut App) {
     if let Some(panel) = panel.upgrade() {
         panel.update(cx, |this, cx| {
@@ -1473,6 +1488,7 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
         .replace("{{username}}", display_name.as_ref());
 
     let mut menu = ContextMenu::new()
+        .on_submenu_close(close_member_submenus(panel.clone()))
         .on_dismiss(dismiss)
         .item(t("contextMenu.member.profile"), {
             let panel = panel.clone();

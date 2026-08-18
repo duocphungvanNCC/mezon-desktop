@@ -239,6 +239,15 @@ impl ClanSidebar {
         }
     }
 
+    pub(super) fn close_clan_submenus(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.clan_menu.as_mut()
+            && menu.noti_sub_open
+        {
+            menu.noti_sub_open = false;
+            cx.notify();
+        }
+    }
+
     fn sync_chrome(&mut self, cx: &App) {
         let locale = self.settings.read(cx).language.clone();
         self.discover_title = mezon_i18n::t(&locale, "common.discover").to_string().into();

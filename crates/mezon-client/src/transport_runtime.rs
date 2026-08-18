@@ -2905,6 +2905,34 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn update_category(
+        &self,
+        category_id: i64,
+        category_name: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let category_name = category_name.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_category(category_id, &category_name, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_category_desc(&self, category_id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.delete_category_desc(category_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn update_category_order(
         &self,
         clan_id: i64,

@@ -429,6 +429,104 @@ impl McpRuntime {
                             .update(|cx| mezon_ui::app::capture::clan_menu_pick(cx, index, value));
                         let _ = reply.send(result);
                     }
+                    McpCommand::ListCategories { clan_id, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_categories(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateCategory {
+                        clan_id,
+                        name,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::create_category_task(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                name,
+                            )
+                        });
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::ChannelMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::channel_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuOpen {
+                        clan_id,
+                        channel_id,
+                        x,
+                        y,
+                        in_favorites,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                mezon_store::ChannelId(channel_id),
+                                x,
+                                y,
+                                in_favorites,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::channel_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuState { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::category_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuOpen {
+                        clan_id,
+                        category_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                category_id,
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::category_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::CreateClan { name, logo, reply } => {
                         let task = cx
                             .update(|cx| mezon_ui::app::capture::create_clan_task(cx, name, logo));

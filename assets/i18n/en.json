@@ -2172,6 +2172,7 @@
   "contextMenu.copyUserId": "Copy User ID",
   "contextMenu.createThread": "Create Thread",
   "contextMenu.deleteCategory": "Delete Category",
+  "contextMenu.deleteCategoryFailed": "Failed to delete category. Please try again.",
   "contextMenu.deleteMessage": "Delete Message",
   "contextMenu.editCategory": "Edit Category",
   "contextMenu.editClanProfile": "Edit Clan Profile",
