@@ -1488,9 +1488,7 @@ impl ChatLayout {
             .active_channel()
             .map(|ch| (ch.channel_type, ch.id));
         self.stream_store.update(cx, |store, cx| {
-            if store.should_leave_for_active_channel(active) {
-                store.leave_stream(cx);
-            }
+            store.sync_chat_for_active_channel(active, cx);
             store.clear_error_on_active_channel_change(active, cx);
         });
     }
@@ -1502,7 +1500,9 @@ impl ChatLayout {
             .channel_list
             .read(cx)
             .active_channel()
-            .is_some_and(|ch| ch.channel_type == ChannelType::Stream);
+            .is_some_and(|ch| {
+                ch.channel_type == ChannelType::Stream && stream.is_session_channel(ch.id)
+            });
         let want_pump =
             stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
         if !want_pump {

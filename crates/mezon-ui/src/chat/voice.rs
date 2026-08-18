@@ -12,8 +12,8 @@ use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
     DeviceMenuKind, DisplayedFlower, DisplayedReaction, FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE,
     FLOWER_SPRITE_COUNT, FlowerParticle, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
-    PermissionStore, Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember,
-    VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
+    PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
+    VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
     flower_particle_pose,
 };
 
@@ -2999,6 +2999,8 @@ fn control_bar(
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
     let screen_enabled = store.screen_share_enabled();
+    let recording = store.recording_state();
+    let can_record = store.can_record();
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -3121,6 +3123,50 @@ fn control_bar(
             }
         })
     };
+
+    let record_button = can_record.then(|| {
+        let voice = voice.clone();
+        let active = matches!(recording, RecordingState::Recording);
+        let busy = matches!(
+            recording,
+            RecordingState::Starting | RecordingState::Stopping
+        );
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if active {
+            (
+                gpui::rgb(LEAVE_RED).into(),
+                gpui::rgb(LEAVE_RED_HOVER).into(),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_muted.into())
+        };
+        circle_button(
+            "voice-record-btn",
+            bg,
+            hover,
+            if active {
+                IconName::VoiceRecordStopIcon
+            } else {
+                IconName::VoiceRecordIcon
+            },
+            color,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if active {
+                "channelVoice.stopRecording"
+            } else {
+                "channelVoice.startRecording"
+            },
+        )))
+        .on_click(move |_, window, cx| {
+            if busy {
+                return;
+            }
+            let window_id = crate::chat::record_window::record_window_id(window);
+            voice.update(cx, |store, cx| store.toggle_recording(window_id, cx));
+        })
+    });
 
     let leave_button = {
         let voice = voice.clone();
@@ -3298,6 +3344,51 @@ fn control_bar(
         })
     };
 
+    let record_badge = matches!(recording, RecordingState::Recording).then(|| {
+        let elapsed = store.recording_elapsed().as_secs();
+        let stalled = store.recording_stalled();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded(px(999.))
+            .bg(gpui::rgba(0xc4362b26))
+            .border_1()
+            .border_color(gpui::rgb(LEAVE_RED))
+            .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(LEAVE_RED)))
+            .child(
+                div()
+                    .min_w(px(72.))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(gpui::rgb(LEAVE_RED))
+                    .child(format!(
+                        "REC {:02}:{:02}:{:02}",
+                        elapsed / 3600,
+                        (elapsed % 3600) / 60,
+                        elapsed % 60
+                    )),
+            )
+            .when(stalled, |el| {
+                el.child(
+                    div()
+                        .id("voice-record-stalled")
+                        .child(
+                            Icon::new(IconName::VoiceScreenShareStopIcon)
+                                .size(px(12.))
+                                .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                        )
+                        .tooltip(Tooltip::text(mezon_i18n::t(
+                            locale,
+                            "channelVoice.recordingVideoStalled",
+                        ))),
+                )
+            })
+    });
+
     let left = div()
         .flex()
         .flex_row()
@@ -3305,7 +3396,9 @@ fn control_bar(
         .items_center()
         .gap_3()
         .child(emoji_button)
-        .child(sound_button);
+        .child(sound_button)
+        .children(record_button)
+        .children(record_badge);
 
     let center = div()
         .flex()

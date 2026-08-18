@@ -32,6 +32,49 @@ pub struct RootView {
     connecting_since: Option<Instant>,
     network_online: bool,
     _splash_delay: Option<Task<()>>,
+    _recording_toasts: Option<gpui::Subscription>,
+}
+
+fn surface_recording_toast(
+    root: &mut RootView,
+    _voice: gpui::Entity<mezon_store::VoiceStore>,
+    event: &mezon_store::VoiceStoreEvent,
+    cx: &mut Context<RootView>,
+) {
+    let locale = root.cached_locale.clone();
+    let toast = match event {
+        mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Info,
+                    mezon_i18n::t(&locale, "channelVoice.recordingVideoUnavailable").to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
+    };
+    let (kind, message) = match toast {
+        mezon_store::RecordingToast::Saved(path) => (
+            crate::components::primitives::ToastKind::Success,
+            format!(
+                "{} {}",
+                mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+        mezon_store::RecordingToast::Failed(error) => (
+            crate::components::primitives::ToastKind::Error,
+            format!(
+                "{}: {error}",
+                mezon_i18n::t(&locale, "channelVoice.recordingFailed")
+            ),
+        ),
+    };
+    crate::app::shell::Shell::global(cx).update(cx, |shell, cx| shell.toast(kind, message, cx));
 }
 
 fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
@@ -54,6 +97,9 @@ impl RootView {
         // views so any of them can surface a toast/modal via `Shell::global`.
         let shell = crate::app::shell::Shell::init(cx);
         cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+
+        let recording_toasts = mezon_store::VoiceStore::try_global(cx)
+            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {
@@ -221,6 +267,7 @@ impl RootView {
             connecting_since,
             network_online,
             _splash_delay: splash_delay,
+            _recording_toasts: recording_toasts,
         }
     }
 
@@ -434,6 +481,11 @@ const SPLASH_LOGO_WIDTH: f32 = 280.;
 const SPLASH_LOGO_HEIGHT: f32 = 50.;
 const SPLASH_LOGO_VIEWPORT_FRACTION: f32 = 0.72;
 const SPLASH_DOT_BASE_SIZE: f32 = 6.;
+const SPLASH_DOT_SCALE_MIN: f32 = 0.8;
+const SPLASH_DOT_SCALE_RANGE: f32 = 0.4;
+const SPLASH_DOT_CELL_SIZE: f32 =
+    SPLASH_DOT_BASE_SIZE * (SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE);
+const SPLASH_DOT_PITCH: f32 = 12.;
 const SPLASH_DOT_CYCLE_MS: u64 = 1400;
 const SPLASH_DOT_STAGGER_MS: u64 = 200;
 const SPLASH_PROGRESS_MS: u64 = 30_000;
@@ -465,27 +517,43 @@ fn splash_dot_intensity(delta: f32, offset: f32) -> f32 {
 /// tick on the root view for as long as the machine stays offline. Nobody is watching a background
 /// window, so the pulse is dropped there.
 fn render_splash_dots(animate: bool) -> gpui::AnyElement {
-    let mut row = div().flex().flex_row().gap(px(6.)).mt(px(4.));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPLASH_DOT_PITCH - SPLASH_DOT_CELL_SIZE))
+        .mt(px(4.))
+        .h(px(SPLASH_DOT_CELL_SIZE));
     for index in 0..3u64 {
         let offset = (index * SPLASH_DOT_STAGGER_MS) as f32 / SPLASH_DOT_CYCLE_MS as f32;
         let dot = div()
             .rounded_full()
             .bg(gpui::rgb(SPLASH_ACCENT))
             .size(px(SPLASH_DOT_BASE_SIZE));
-        row = row.child(if animate {
+        let dot = if animate {
             dot.with_animation(
                 gpui::ElementId::Integer(index),
                 Animation::new(Duration::from_millis(SPLASH_DOT_CYCLE_MS)).repeat(),
                 move |el, delta| {
                     let intensity = splash_dot_intensity(delta, offset);
+                    let scale = SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE * intensity;
                     el.opacity(0.2 + 0.8 * intensity)
-                        .size(px(SPLASH_DOT_BASE_SIZE * (0.8 + 0.4 * intensity)))
+                        .size(px(SPLASH_DOT_BASE_SIZE * scale))
                 },
             )
             .into_any_element()
         } else {
             dot.opacity(0.6).into_any_element()
-        });
+        };
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .size(px(SPLASH_DOT_CELL_SIZE))
+                .child(dot),
+        );
     }
     row.into_any_element()
 }
