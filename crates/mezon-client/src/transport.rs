@@ -5869,12 +5869,17 @@ impl MezonTransport {
     }
 
     /// List Sd Topics.
-    pub async fn list_sd_topic(&self, clan_id: i64, limit: i32) -> Result<api::SdTopicList> {
+    pub async fn list_sd_topic(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<api::SdTopicList> {
         let cid = self.generate_cid();
         let body = api::ListSdTopicRequest {
             clan_id,
             limit,
-            page: 1,
+            page: page.max(1),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListSdTopic", body).await?;
