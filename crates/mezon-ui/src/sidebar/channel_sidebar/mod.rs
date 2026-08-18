@@ -810,11 +810,10 @@ impl Render for ChannelSidebar {
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
                 can_create_category,
-                !PermissionStore::try_global(cx).is_some_and(|store| {
-                    store
-                        .read(cx)
-                        .is_clan_owner(self.active_clan_id.unwrap_or(ClanId(0)), cx)
-                }),
+                crate::clan::clan_menu::can_leave_clan(
+                    self.active_clan_id.unwrap_or(ClanId(0)),
+                    cx,
+                ),
                 locale.clone(),
             )
         });

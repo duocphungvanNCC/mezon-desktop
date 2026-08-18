@@ -3,11 +3,8 @@ use mezon_store::{ClanId, ClanList};
 
 use super::Shell;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
-use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 
-/// Confirm-then-leave a clan — React's `ModalConfirm` as wired by `PanelClan` (clan rail
-/// context menu) and `ClanHeader` (clan name dropdown).
 pub(super) struct ConfirmLeaveClanModal {
     pub(super) focus_handle: FocusHandle,
     pub(super) clan_id: ClanId,
@@ -22,23 +19,14 @@ impl ConfirmLeaveClanModal {
     fn leave(&self, cx: &mut Context<Self>) {
         let clan_id = self.clan_id;
         let error_message = self.error_message.clone();
-        // React captures `currentClanId` at click time and only routes away when the clan it
-        // left is the one being viewed (`PanelClan.handleLeaveClan`).
-        let was_active = ClanList::global(cx).read(cx).is_active_clan(clan_id);
         let task = ClanList::global(cx).update(cx, |list, cx| list.leave_clan(clan_id, cx));
         cx.spawn(async move |_, cx| {
-            let result = task.await;
-            cx.update(|cx| match result {
-                Ok(()) => {
-                    if was_active {
-                        navigate(cx, Route::Friends);
-                    }
-                }
-                Err(error) => {
-                    tracing::error!("leave clan {clan_id} failed: {error}");
+            if let Err(error) = task.await {
+                tracing::error!("leave clan {clan_id} failed: {error}");
+                cx.update(|cx| {
                     Shell::global(cx).update(cx, |shell, cx| shell.error(error_message, cx));
-                }
-            });
+                });
+            }
         })
         .detach();
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));

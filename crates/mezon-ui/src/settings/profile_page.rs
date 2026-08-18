@@ -74,9 +74,6 @@ pub struct ProfilePage {
     fetch_error: bool,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
-    /// Clan whose profile the Clan tab edits. React keeps this as `clanIdSettingProfile`,
-    /// set by the clan-rail "Edit Clan Profile" row — it is NOT the active clan, which can
-    /// be none at all when the route sits on DM/Friends.
     clan_tab_id: Option<mezon_store::ClanId>,
     avatar_local_preview: Option<std::path::PathBuf>,
     dm_icon_menu_position: Option<Point<Pixels>>,
@@ -236,6 +233,7 @@ impl ProfilePage {
 
     pub fn show_user_profile(&mut self, cx: &mut Context<Self>) {
         self.active_tab = ProfileTab::User;
+        self.clan_tab_id = None;
         cx.notify();
     }
 
@@ -520,8 +518,6 @@ impl Render for ProfilePage {
                 .into_any_element();
         }
 
-        // The tab follows the clan the caller asked for, falling back to the active clan;
-        // a clan the user has since left drops back to the user profile.
         let clan_list = self.clan_list.read(cx);
         let active_clan_id = self
             .clan_tab_id

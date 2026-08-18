@@ -701,26 +701,20 @@ impl ClanList {
         }
     }
 
-    /// Drop a clan the current user is no longer a member of, promoting the first remaining
-    /// clan when the dropped one was active. Shared by the `UserClanRemoved` push and by
-    /// [`ClanList::leave_clan`], which cannot rely on that push reaching the leaver.
     fn drop_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let before = self.clans.len();
         self.clans.retain(|c| c.id != clan_id);
         if self.clans.len() == before {
             return;
         }
-        cx.emit(ClanEvent::Deleted(clan_id));
         if self.active_clan_id == Some(clan_id) {
-            let next = self.clans.first().map(|c| c.id);
-            self.active_clan_id = next;
-            cx.emit(ClanEvent::ActiveClanChanged(next));
+            self.active_clan_id = None;
+            cx.emit(ClanEvent::ActiveClanChanged(None));
         }
+        cx.emit(ClanEvent::Deleted(clan_id));
         cx.notify();
     }
 
-    /// Leave a clan — React `PanelClan`/`ClanHeader` -> `removeMemberClan`, which posts
-    /// `RemoveClanUsers` with the caller's own id.
     pub fn leave_clan(
         &mut self,
         clan_id: ClanId,
@@ -742,8 +736,6 @@ impl ClanList {
         })
     }
 
-    /// Delete a clan the signed-in user owns — React `ClanSettings.handleDeleteCurrentClan`
-    /// -> `deleteClan` -> `DeleteClanDesc`.
     pub fn delete_clan(
         &mut self,
         clan_id: ClanId,
@@ -2078,7 +2070,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dropping_the_active_clan_promotes_the_first_remaining_one(cx: &mut gpui::TestAppContext) {
+    fn dropping_the_active_clan_clears_the_active_clan(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let clan_list = init_clan_list(cx);
             clan_list.update(cx, |list, cx| {
@@ -2087,10 +2079,10 @@ mod tests {
 
                 list.handle_event(&removed_event(1, &[TEST_SELF]), cx);
                 assert_eq!(
-                    list.active_clan_id,
-                    Some(ClanId(2)),
-                    "leaving the clan you are viewing must fall back to a clan you are still in"
+                    list.active_clan_id, None,
+                    "leaving the clan you are viewing must not silently drop you into another one"
                 );
+                assert!(list.clan_by_id(ClanId(2)).is_some());
             });
         });
     }

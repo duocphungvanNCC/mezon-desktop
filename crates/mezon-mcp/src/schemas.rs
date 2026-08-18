@@ -95,6 +95,9 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "close_modal"
         | "member_menu_state"
         | "member_menu_close"
+        | "clan_menu_state"
+        | "clan_menu_close"
+        | "open_create_clan_modal"
         | "quit_app" => Arc::new(empty()),
         "list_banned_users" => Arc::new(object(
             json!({

@@ -5,7 +5,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use mezon_store::{ChannelList, ClanId, PermissionStore};
+use mezon_store::{ChannelList, ClanId, PERMISSION_CLAN_OWNER, PermissionStore};
 
 use crate::app::shell::Shell;
 use crate::clan::create_category_modal::CreateCategoryModal;
@@ -235,6 +235,14 @@ pub fn clan_menu_overlay(menu: ClanMenuDropdown, top: Pixels, left: Pixels) -> i
     deferred(div().absolute().top(top).left(left).child(menu))
 }
 
+pub fn can_leave_clan(clan_id: ClanId, cx: &App) -> bool {
+    !PermissionStore::try_global(cx).is_some_and(|store| {
+        store
+            .read(cx)
+            .check_permission(clan_id, PERMISSION_CLAN_OWNER, cx)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_clan_menu(
     sidebar: WeakEntity<crate::sidebar::channel_sidebar::ChannelSidebar>,
@@ -358,7 +366,6 @@ pub fn build_clan_menu(
         },
     );
 
-    // React hides Leave Clan from the owner (`ModalPanel`: `{!isClanOwner && ...}`).
     if can_leave {
         menu = menu.danger_item_icon(
             t("clanMenu.modalPanel.leaveClan"),

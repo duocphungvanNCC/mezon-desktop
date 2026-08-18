@@ -9,7 +9,7 @@ use mezon_store::notification_setting::{
 };
 use mezon_store::{ChannelList, ClanId, ClanList, NotificationSettingStore};
 
-use super::ClanSidebar;
+use super::{ClanMenuArgs, ClanSidebar};
 use crate::app::shell::Shell;
 use crate::components::primitives::{ContextMenu, SubmenuOption, mention_count_badge};
 use crate::router::{Route, Router};
@@ -83,12 +83,16 @@ const CLAN_NOTI_LEVELS: [(i32, &str); 3] = [
 
 pub(super) fn build_clan_rail_menu(
     sidebar: WeakEntity<ClanSidebar>,
-    clan_id: ClanId,
-    clan_default: Option<i32>,
-    noti_sub_open: bool,
-    can_leave: bool,
-    locale: &str,
+    args: &ClanMenuArgs,
 ) -> ContextMenu {
+    let ClanMenuArgs {
+        clan_id,
+        clan_default,
+        noti_sub_open,
+        can_leave,
+        ..
+    } = *args;
+    let locale = args.locale.as_ref();
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let locale_owned = locale.to_string();
     let sidebar_dismiss = sidebar.clone();
@@ -143,8 +147,6 @@ pub(super) fn build_clan_rail_menu(
         crate::router::navigate(cx, Route::SettingsClanProfile { clan_id });
     });
 
-    // React gates Leave Clan behind `UserRestrictionZone policy={!isOwnerOfContextClan}`:
-    // the owner has to transfer or delete the clan instead.
     if can_leave {
         let leave_locale = locale_owned;
         menu = menu.danger_item(t("contextMenu.leaveClan"), move |window, cx| {

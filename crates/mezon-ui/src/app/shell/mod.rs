@@ -875,7 +875,6 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
-    /// Confirm-then-delete a clan (React `DeleteClanModal`, opened from Clan Settings).
     pub fn confirm_delete_clan(
         &mut self,
         clan_id: mezon_store::ClanId,
@@ -883,11 +882,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let clan_name = mezon_store::ClanList::global(cx)
+        let Some(clan_name) = mezon_store::ClanList::global(cx)
             .read(cx)
             .clan_by_id(clan_id)
             .map(|clan| clan.name.clone())
-            .unwrap_or_default();
+            .filter(|name| !name.is_empty())
+        else {
+            let message = mezon_i18n::t(locale, "deleteClan.deleteClanModal.error").to_string();
+            self.error(message, cx);
+            return;
+        };
         let title: SharedString = mezon_i18n::t(locale, "clanSettings.deleteClanTitle")
             .replace("{{clanName}}", &clan_name)
             .into();
@@ -932,12 +936,11 @@ impl Shell {
                 name_matches: None,
             }
         });
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
+        let name_input = view.read(cx).name_input.clone();
+        name_input.update(cx, |input, cx| input.focus(window, cx));
         self.show_modal(view.into(), cx);
     }
 
-    /// Confirm-then-leave a clan (React `ModalConfirm` from `PanelClan` / `ClanHeader`).
     pub fn confirm_leave_clan(
         &mut self,
         clan_id: mezon_store::ClanId,
@@ -950,7 +953,6 @@ impl Shell {
             .clan_by_id(clan_id)
             .map(|clan| clan.name.clone())
             .unwrap_or_default();
-        // React renders `<span class="capitalize mr-1">{title}</span>{modalName}`.
         let title: SharedString = format!(
             "{} {}",
             mezon_i18n::t(locale, "contextMenu.leave"),

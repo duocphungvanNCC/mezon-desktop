@@ -436,6 +436,7 @@ pub struct ChannelList {
     extras_loading: HashSet<ClanId>,
     badge_seeding: HashSet<ClanId>,
     badge_seeded: HashSet<ClanId>,
+    forgotten_clans: HashSet<ClanId>,
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
@@ -611,6 +612,7 @@ impl ChannelList {
         self.extras_loading.clear();
         self.badge_seeding.clear();
         self.badge_seeded.clear();
+        self.forgotten_clans.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
         self.user_channels_loading = false;
@@ -699,6 +701,7 @@ impl ChannelList {
             extras_loading: HashSet::new(),
             badge_seeding: HashSet::new(),
             badge_seeded: HashSet::new(),
+            forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
             user_channels_loading: false,
@@ -730,14 +733,8 @@ impl ChannelList {
         }
     }
 
-    /// Forget every cache entry belonging to a clan the user is no longer in.
-    ///
-    /// React does this from the `UserClanRemoved` push (`channelsActions.removeByClanId`,
-    /// `listChannelsByUserActions.remove`, `appActions.cleanHistoryClan`); here it is driven
-    /// by [`ClanEvent::Deleted`], which `ClanList::drop_clan` emits for a leave, an owner
-    /// delete and both server pushes. Without it the clan's channels keep feeding badge
-    /// aggregation and come back stale on re-join.
     pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.forgotten_clans.insert(clan_id);
         let channel_ids: Vec<ChannelId> = self
             .cache
             .get(&clan_id)
@@ -766,6 +763,7 @@ impl ChannelList {
         }
 
         for channel_id in &channel_ids {
+            self.user_channels.remove(channel_id);
             self.topic_parent_badges.remove(channel_id);
             self.pending_channel_badges.remove(channel_id);
             self.reactivating.remove(channel_id);
@@ -779,6 +777,10 @@ impl ChannelList {
             self.channel_detail_pending.remove(channel_id);
             self.channel_detail_failed.remove(channel_id);
         }
+
+        self.user_channels_order
+            .retain(|channel_id| self.user_channels.contains_key(channel_id));
+        self.in_voice.retain(|_, info| info.clan_id != clan_id);
 
         self.invalidate_channel_index(clan_id);
         if self.active_clan_id == Some(clan_id) {
@@ -837,7 +839,10 @@ impl ChannelList {
     }
 
     pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
-        if self.badge_seeded.contains(&clan_id) || !self.badge_seeding.insert(clan_id) {
+        if self.forgotten_clans.contains(&clan_id)
+            || self.badge_seeded.contains(&clan_id)
+            || !self.badge_seeding.insert(clan_id)
+        {
             return Task::ready(());
         }
         let api = self.api.clone();
@@ -846,7 +851,9 @@ impl ChannelList {
         cx.spawn(async move |this, cx| {
             structure_ready.await;
             let still_current = this
-                .update(cx, |this, _| this.reset_generation == generation)
+                .update(cx, |this, _| {
+                    this.reset_generation == generation && !this.forgotten_clans.contains(&clan_id)
+                })
                 .unwrap_or(false);
             if !still_current {
                 return;
@@ -1190,6 +1197,9 @@ impl ChannelList {
         favorite_ids: Option<HashSet<ChannelId>>,
         cx: &mut Context<Self>,
     ) {
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         let favorites_missing = favorite_ids.is_none();
         let favorites_len = favorite_ids.as_ref().map(HashSet::len);
         if let Some(favorite_ids) = favorite_ids {
@@ -6426,8 +6436,6 @@ mod tests {
             channels
         });
 
-        // `drop_clan` -> ClanEvent::Deleted -> ChannelList::forget_clan. The emit is only
-        // delivered when effects flush, so the assertions need their own update cycle.
         cx.update(|cx| {
             crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
                 clans.handle_event(

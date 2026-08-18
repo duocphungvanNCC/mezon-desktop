@@ -786,7 +786,7 @@ pub fn create_clan_task(
         return gpui::Task::ready(Err(anyhow::anyhow!("clan store unavailable")));
     };
     let task = clan_list.update(cx, |list, cx| list.create_clan(name.clone(), logo, cx));
-    cx.background_spawn(async move {
+    cx.spawn(async move |_| {
         let clan_id = task.await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(json!({ "ok": true, "clan_id": clan_id, "name": name }))
     })

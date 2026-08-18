@@ -140,8 +140,7 @@ impl PermissionStore {
         }
     }
 
-    /// Whether the signed-in user created this clan (React `useIsClanOwner`).
-    pub fn is_clan_owner(&self, clan_id: ClanId, cx: &App) -> bool {
+    fn is_clan_owner(&self, clan_id: ClanId, cx: &App) -> bool {
         let Some(user_id) = self.current_user_id(cx) else {
             return false;
         };

@@ -8,11 +8,8 @@ use super::Shell;
 use crate::components::primitives::{
     Button, ButtonVariants, Input, InputEvent, InputState, h_flex, v_flex,
 };
-use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 
-/// Confirm-then-delete a clan — React's `DeleteClanModal`, which only enables its delete
-/// button once the typed text matches the clan name exactly.
 pub(super) struct ConfirmDeleteClanModal {
     pub(super) focus_handle: FocusHandle,
     pub(super) clan_id: ClanId,
@@ -25,8 +22,6 @@ pub(super) struct ConfirmDeleteClanModal {
     pub(super) confirm_label: SharedString,
     pub(super) error_message: SharedString,
     pub(super) name_input: Entity<InputState>,
-    /// None until the field is first touched, so the error only shows after typing —
-    /// React seeds `inputValueIsMatchClanName` as null for the same reason.
     pub(super) name_matches: Option<bool>,
     pub(super) _name_sub: Subscription,
 }
@@ -59,21 +54,14 @@ impl ConfirmDeleteClanModal {
         }
         let clan_id = self.clan_id;
         let error_message = self.error_message.clone();
-        let was_active = ClanList::global(cx).read(cx).is_active_clan(clan_id);
         let task = ClanList::global(cx).update(cx, |list, cx| list.delete_clan(clan_id, cx));
         cx.spawn(async move |_, cx| {
-            let result = task.await;
-            cx.update(|cx| match result {
-                Ok(()) => {
-                    if was_active {
-                        navigate(cx, Route::Friends);
-                    }
-                }
-                Err(error) => {
-                    tracing::error!("delete clan {clan_id} failed: {error}");
+            if let Err(error) = task.await {
+                tracing::error!("delete clan {clan_id} failed: {error}");
+                cx.update(|cx| {
                     Shell::global(cx).update(cx, |shell, cx| shell.error(error_message, cx));
-                }
-            });
+                });
+            }
         })
         .detach();
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
@@ -112,7 +100,6 @@ impl Render for ConfirmDeleteClanModal {
                             .child(self.title.clone()),
                     )
                     .child(
-                        // React: `bg-[#f0b132] text-[#30232d]` warning band.
                         div()
                             .w_full()
                             .rounded_sm()
