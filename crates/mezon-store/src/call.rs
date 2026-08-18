@@ -1135,19 +1135,20 @@ fn self_identity(cx: &App) -> Option<(i64, String, String)> {
 
 fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
     let config = AppConfig::global(cx);
-    if config.webrtc_ice_servers_url.is_empty() {
-        return Vec::new();
-    }
-    if config.webrtc_ice_servers_url.starts_with("turn")
-        && config.webrtc_ice_servers_credential.is_empty()
+    let mut servers = vec![IceServerConfig {
+        urls: vec!["stun:stun.l.google.com:19302".into()],
+        username: String::new(),
+        credential: String::new(),
+    }];
+    if !config.webrtc_ice_servers_url.is_empty() && !config.webrtc_ice_servers_credential.is_empty()
     {
-        return Vec::new();
+        servers.push(IceServerConfig {
+            urls: vec![config.webrtc_ice_servers_url.clone()],
+            username: config.webrtc_ice_servers_username.clone(),
+            credential: config.webrtc_ice_servers_credential.clone(),
+        });
     }
-    vec![IceServerConfig {
-        urls: vec![config.webrtc_ice_servers_url.clone()],
-        username: config.webrtc_ice_servers_username.clone(),
-        credential: config.webrtc_ice_servers_credential.clone(),
-    }]
+    servers
 }
 
 fn to_seconds_u32(create_time: i64) -> u32 {
