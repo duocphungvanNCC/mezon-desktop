@@ -5777,7 +5777,6 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
- "image",
  "mezon-cli",
  "mezon-client",
  "mezon-mcp",
@@ -5811,6 +5810,24 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "unsafe-libopus",
+]
+
+[[package]]
+name = "mezon-call"
+version = "2.0.14"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flate2",
+ "flume",
+ "futures",
+ "libwebrtc",
+ "mezon-voice",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5990,6 +6007,7 @@ dependencies = [
  "image",
  "keyring",
  "mezon-audio",
+ "mezon-call",
  "mezon-client",
  "mezon-i18n",
  "mezon-proto",
