@@ -1181,7 +1181,7 @@ impl VoiceStore {
         };
         let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
             msg.event_type,
-            msg.user_id,
+            msg.sender_id,
             msg.voice_channel_id,
             &msg.params,
             joined_channel,
@@ -1769,6 +1769,9 @@ impl VoiceStore {
         let Ok(receiver_id) = identity.parse::<UserId>() else {
             return;
         };
+        let Ok(receiver_i64) = identity.parse::<i64>() else {
+            return;
+        };
         let Ok(giver_i64) = local_id.parse::<i64>() else {
             return;
         };
@@ -1906,6 +1909,7 @@ impl VoiceStore {
                         clan_i64,
                         channel_i64,
                         giver_i64,
+                        receiver_i64,
                         VoiceInteractiveEventType::Gift as i32,
                         params,
                     )
