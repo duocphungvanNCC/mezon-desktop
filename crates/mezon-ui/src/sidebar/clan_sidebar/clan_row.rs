@@ -97,14 +97,19 @@ pub(super) fn build_clan_rail_menu(
     let locale_owned = locale.to_string();
     let sidebar_dismiss = sidebar.clone();
 
-    let mut menu = ContextMenu::new().on_dismiss(move |_window, cx| {
-        if let Some(view) = sidebar_dismiss.upgrade() {
-            view.update(cx, |this, cx| {
-                this.clan_menu = None;
-                cx.notify();
-            });
-        }
-    });
+    let sidebar_close = sidebar.clone();
+    let mut menu = ContextMenu::new()
+        .on_submenu_close(move |_window, cx| {
+            let _ = sidebar_close.update(cx, |this, cx| this.close_clan_submenus(cx));
+        })
+        .on_dismiss(move |_window, cx| {
+            if let Some(view) = sidebar_dismiss.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.clan_menu = None;
+                    cx.notify();
+                });
+            }
+        });
 
     menu = menu
         .item(t("contextMenu.markAsRead"), move |_window, cx| {

@@ -17,6 +17,7 @@ use crate::router::Route;
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
 mod confirm_delete_canvas_modal;
+mod confirm_delete_category_modal;
 mod confirm_delete_channel_modal;
 mod confirm_delete_clan_modal;
 mod confirm_delete_emoji_modal;
@@ -36,6 +37,7 @@ mod wallet_not_available_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
+use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
 use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
 use confirm_delete_clan_modal::ConfirmDeleteClanModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
@@ -561,6 +563,47 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             clan_id,
             channel_id,
+            locale: locale.to_string(),
+            title,
+            description,
+            cancel_label,
+            delete_label,
+            submitting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_category(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        category_id: String,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let category_name = mezon_store::ChannelList::global(cx)
+            .read(cx)
+            .category_name(clan_id, &category_id)
+            .unwrap_or_default()
+            .to_string();
+        let title: SharedString = mezon_i18n::t(locale, "common.modalConfirm.deleteCategoryTitle")
+            .replace("{{name}}", &category_name)
+            .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "clan.categoryOverview.cannotBeUndone")
+                .to_string()
+                .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "clan.categoryOverview.deleteCategoryButton")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteCategoryModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            category_id,
             locale: locale.to_string(),
             title,
             description,

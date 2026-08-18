@@ -248,6 +248,16 @@ impl McpBackend {
                 self.member_menu_pick(&arguments).await
             }
             "clan_menu_state" => self.clan_menu_state().await,
+            "list_categories" => self.list_categories(&arguments).await,
+            "create_category" => self.create_category(&arguments).await,
+            "channel_menu_state" => self.channel_menu_state().await,
+            "channel_menu_open" => self.channel_menu_open(&arguments).await,
+            "channel_menu_close" => self.channel_menu_close().await,
+            "channel_menu_pick" => self.channel_menu_pick(&arguments).await,
+            "category_menu_state" => self.category_menu_state().await,
+            "category_menu_open" => self.category_menu_open(&arguments).await,
+            "category_menu_close" => self.category_menu_close().await,
+            "category_menu_pick" => self.category_menu_pick(&arguments).await,
             "clan_menu_open" => self.clan_menu_open(&arguments).await,
             "clan_menu_close" => self.clan_menu_close().await,
             "clan_menu_pick" => {
@@ -721,6 +731,8 @@ impl McpBackend {
             id: i64,
             label: String,
             channel_type: u32,
+            category_id: i64,
+            category_name: String,
         }
         let items: Vec<ChannelSummary> = channels
             .into_iter()
@@ -728,6 +740,8 @@ impl McpBackend {
                 id: channel.channel_id,
                 label: channel.channel_label,
                 channel_type: channel.channel_type,
+                category_id: channel.category_id,
+                category_name: channel.category_name,
             })
             .collect();
         to_json(&items)
@@ -1260,6 +1274,130 @@ impl McpBackend {
             .and_then(Value::as_i64)
             .map(|value| value as i32);
         self.send_ui_result(|reply| McpCommand::ClanMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn list_categories(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("list_categories requires field clan_id"))?;
+        self.send_ui_result(|reply| McpCommand::ListCategories { clan_id, reply })
+            .await
+    }
+
+    async fn create_category(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("create_category requires field clan_id"))?;
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("create_category requires string field name"))?;
+        self.send_ui_result(|reply| McpCommand::CreateCategory {
+            clan_id,
+            name,
+            reply,
+        })
+        .await
+    }
+
+    async fn channel_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ChannelMenuState { reply })
+            .await
+    }
+
+    async fn channel_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_open requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id")
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_open requires field channel_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let in_favorites = arguments
+            .get("in_favorites")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::ChannelMenuOpen {
+            clan_id,
+            channel_id,
+            x,
+            y,
+            in_favorites,
+            reply,
+        })
+        .await
+    }
+
+    async fn channel_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ChannelMenuClose { reply })
+            .await
+    }
+
+    async fn channel_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::ChannelMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn category_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CategoryMenuState { reply })
+            .await
+    }
+
+    async fn category_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("category_menu_open requires field clan_id"))?;
+        let category_id = arguments
+            .get("category_id")
+            .and_then(|raw| {
+                raw.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| raw.as_i64().map(|id| id.to_string()))
+            })
+            .ok_or_else(|| anyhow::anyhow!("category_menu_open requires field category_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::CategoryMenuOpen {
+            clan_id,
+            category_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn category_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CategoryMenuClose { reply })
+            .await
+    }
+
+    async fn category_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("category_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::CategoryMenuPick {
             index,
             value,
             reply,

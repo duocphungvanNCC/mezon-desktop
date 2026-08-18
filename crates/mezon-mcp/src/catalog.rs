@@ -381,6 +381,127 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "list_categories",
+        description: "\
+List the categories of a clan as the channel sidebar sees them, including EMPTY ones.
+
+list_channels only reveals categories that still hold a channel, so this is the only way to find an
+empty category — which is exactly the case category_menu_pick offers Delete Category for. The clan
+must already be loaded (open one of its channels first).
+
+Parameters:
+- clan_id (required): clan snowflake id.",
+        write: false,
+    },
+    ToolSpec {
+        name: "create_category",
+        description: "\
+Create a category in a clan through the same store path the Create Category modal uses.
+
+Useful for making a throwaway empty category to exercise the category context menu rows
+(Edit Category, Delete Category) without touching a real one.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- name (required): category name (letters, digits, space, - or _; must not start with a separator).",
+        write: true,
+    },
+    ToolSpec {
+        name: "channel_menu_state",
+        description: "\
+Return the channel context menu that is currently open in the channel sidebar, if any.
+
+Reports the target channel plus is_favorite (which decides the Mark/Unmark Favorite row) and
+can_manage_channel, alongside the item list whose indexes channel_menu_pick takes.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "channel_menu_open",
+        description: "\
+Open the right-click context menu for one channel or thread in the channel sidebar.
+
+The channel must belong to the clan and be listed by list_channels. Returns the same shape as
+channel_menu_state.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- channel_id (required): channel snowflake id.
+- x, y (optional): anchor point in window points.
+- in_favorites (optional): right-click the row inside the Favorites section instead of its own
+  category; that row drops Mark As Read, exactly as React does.",
+        write: false,
+    },
+    ToolSpec {
+        name: "channel_menu_close",
+        description: "\
+Dismiss the channel context menu without running an action.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "channel_menu_pick",
+        description: "\
+Run one row of the open channel context menu (Mark As Read, Copy Link, Mute, Notification,
+Mark/Unmark Favorite, Edit Channel, Delete Channel).
+
+Mark/Unmark Favorite writes straight through to the server; Delete Channel opens a confirmation
+modal instead of deleting immediately.
+
+Parameters:
+- index (required): item index from channel_menu_open/channel_menu_state.
+- value (optional): submenu option value (mute duration seconds, notification level).",
+        write: true,
+    },
+    ToolSpec {
+        name: "category_menu_state",
+        description: "\
+Return the category context menu that is currently open in the channel sidebar, if any.
+
+Reports collapsed, can_manage_category and category_is_empty (Delete Category only shows for an
+empty category), plus the item list for category_menu_pick.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "category_menu_open",
+        description: "\
+Open the right-click context menu for one category header in the channel sidebar.
+
+The favourites pseudo-category has no menu and is rejected.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- category_id (required): category id string from list_channels.
+- x, y (optional): anchor point in window points.",
+        write: false,
+    },
+    ToolSpec {
+        name: "category_menu_close",
+        description: "\
+Dismiss the category context menu without running an action.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "category_menu_pick",
+        description: "\
+Run one row of the open category context menu (Mark As Read, Collapse Category, Collapse All
+Categories, Mute, Notification Settings, Edit Category, Delete Category).
+
+Edit Category opens a rename modal and Delete Category opens a confirmation modal; the rest apply
+immediately.
+
+Parameters:
+- index (required): item index from category_menu_open/category_menu_state.
+- value (optional): submenu option value (mute duration seconds, notification level).",
+        write: true,
+    },
+    ToolSpec {
         name: "open_create_clan_modal",
         description: "\
 Open the Create Clan modal on its template-picker step.

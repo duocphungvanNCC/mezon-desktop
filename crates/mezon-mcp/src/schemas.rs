@@ -142,6 +142,56 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["index"],
         )),
+        "list_categories" => Arc::new(object(
+            json!({ "clan_id": id("Clan snowflake id from list_clans.") }),
+            &["clan_id"],
+        )),
+        "create_category" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "name": { "type": "string", "description": "Category name (letters, digits, space, - or _; must not start with a separator)." },
+            }),
+            &["clan_id", "name"],
+        )),
+        "channel_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "channel_id": id("Channel snowflake id from list_channels."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+                "in_favorites": { "type": "boolean", "description": "Right-click the row inside the Favorites section instead of its own category (default false); the Favorites row drops Mark As Read." },
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        "channel_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from channel_menu_open/channel_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Mute and Notification rows.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "category_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "category_id": { "type": "string", "description": "Category id from list_channels." },
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["clan_id", "category_id"],
+        )),
+        "category_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from category_menu_open/category_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Mute and Notification Settings rows.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
         "create_clan" => Arc::new(object(
             json!({
                 "name": { "type": "string", "description": "Clan name (letters, digits, space, - or _; must not start with a separator)." },

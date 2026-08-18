@@ -33,6 +33,7 @@ pub const FAVOR_CATE_ID: &str = "favorCate";
 pub const CATEGORY_NAME_MAX_CHARS: usize = 64;
 const CATEGORY_EVENT_CREATED: i32 = 1;
 const CATEGORY_EVENT_UPDATED: i32 = 2;
+const CATEGORY_EVENT_DELETED: i32 = 3;
 
 const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const BADGE_SEED_MAX_ATTEMPTS: u32 = 3;
@@ -1611,14 +1612,39 @@ impl ChannelList {
         if !self.cache.contains(&clan_id) {
             return;
         }
+        let category_id = category.id.clone();
+        let category_name = category.name.clone();
         let changed = self
             .cache
             .get_mut(&clan_id)
             .is_some_and(|categories| upsert_category(categories, category));
-        if changed {
+        let names_changed = self.sync_channel_category_names(clan_id, &category_id, &category_name);
+        if changed || names_changed {
             self.invalidate_channel_index(clan_id);
             self.notify_channel_list(clan_id, cx);
         }
+    }
+
+    fn sync_channel_category_names(
+        &mut self,
+        clan_id: ClanId,
+        category_id: &str,
+        name: &str,
+    ) -> bool {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for channel in categories
+                .iter_mut()
+                .flat_map(|category| category.channels.iter_mut())
+                .filter(|channel| channel.category_id.as_deref() == Some(category_id))
+            {
+                if channel.category_name != name {
+                    channel.category_name = name.to_string();
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn channel_badge_count(&self, clan_id: ClanId, channel_id: ChannelId) -> u32 {
@@ -2186,14 +2212,198 @@ impl ChannelList {
         .detach();
     }
 
+    pub fn mark_category_as_read(
+        &mut self,
+        clan_id: ClanId,
+        category_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(category_id) = category_id.parse::<i64>() else {
+            return;
+        };
+        if category_id == 0 {
+            return;
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api.mark_as_read(0, category_id, clan_id.get()).await {
+                tracing::error!("mark category as read failed for category {category_id}: {e}");
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                this.apply_mark_as_read_category(clan_id, category_id, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn collapse_all_categories(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let Some(categories) = self.cache.get(&clan_id) else {
+            return;
+        };
+        let clan_key = clan_id.to_string();
+        let keys: Vec<(String, String)> = categories
+            .iter()
+            .map(|category| (clan_key.clone(), category.id.clone()))
+            .collect();
+        let mut changed = false;
+        for key in keys {
+            changed |= self.collapsed.insert(key);
+        }
+        if !changed {
+            return;
+        }
+        cx.notify();
+        let snapshot: Vec<(String, String)> = self.collapsed.iter().cloned().collect();
+        cx.background_executor()
+            .spawn(async move { save_collapse_state(snapshot) })
+            .detach();
+    }
+
     pub fn category_name_exists(&self, clan_id: ClanId, name: &str) -> bool {
-        let normalized = name.trim();
+        self.category_name_exists_excluding(clan_id, name, "")
+    }
+
+    pub fn category_name_exists_excluding(
+        &self,
+        clan_id: ClanId,
+        name: &str,
+        exclude_id: &str,
+    ) -> bool {
+        let normalized = name.trim().to_lowercase();
         self.cache.get(&clan_id).is_some_and(|categories| {
             categories.iter().any(|category| {
                 category.id != FAVOR_CATE_ID
-                    && category.name.trim().to_lowercase() == normalized.to_lowercase()
+                    && category.id != exclude_id
+                    && category.name.trim().to_lowercase() == normalized
             })
         })
+    }
+
+    pub fn category_name(&self, clan_id: ClanId, category_id: &str) -> Option<&str> {
+        self.cache.get(&clan_id).and_then(|categories| {
+            categories
+                .iter()
+                .find(|category| category.id == category_id)
+                .map(|category| category.name.as_str())
+        })
+    }
+
+    pub fn rename_category(
+        &mut self,
+        clan_id: ClanId,
+        category_id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), CreateCategoryError>> {
+        let trimmed = match validate_category_name(&name) {
+            Ok(trimmed) => trimmed,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        if self.category_name_exists_excluding(clan_id, &trimmed, &category_id) {
+            return Task::ready(Err(CreateCategoryError::DuplicateName));
+        }
+        let Ok(category_id_num) = category_id.parse::<i64>() else {
+            return Task::ready(Err(CreateCategoryError::Other(
+                "category is not editable".into(),
+            )));
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.update_category(clan_id.get(), category_id_num, &trimmed)
+                .await
+                .map_err(|e| CreateCategoryError::Other(e.to_string()))?;
+            this.update(cx, |this, cx| {
+                this.apply_category_rename(clan_id, &category_id, trimmed, cx);
+            })
+            .map_err(|_| CreateCategoryError::Other("store dropped".into()))?;
+            Ok(())
+        })
+    }
+
+    fn apply_category_rename(
+        &mut self,
+        clan_id: ClanId,
+        category_id: &str,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for category in categories
+                .iter_mut()
+                .filter(|category| category.id == category_id)
+            {
+                if category.name != name {
+                    category.name = name.clone();
+                    changed = true;
+                }
+            }
+        }
+        changed |= self.sync_channel_category_names(clan_id, category_id, &name);
+        if changed {
+            self.notify_channel_list(clan_id, cx);
+        }
+    }
+
+    pub fn delete_category(
+        &self,
+        clan_id: ClanId,
+        category_id: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let category_id_num = category_id
+                .parse::<i64>()
+                .map_err(|_| "category is not deletable".to_string())?;
+            api.delete_category(clan_id.get(), category_id_num)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_category_removed(clan_id, &category_id, cx);
+            });
+            Ok(())
+        })
+    }
+
+    fn apply_category_removed(
+        &mut self,
+        clan_id: ClanId,
+        category_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if category_id == FAVOR_CATE_ID {
+            return;
+        }
+        let doomed: Vec<(ChannelId, ChannelId)> = self
+            .cache
+            .get(&clan_id)
+            .into_iter()
+            .flatten()
+            .filter(|category| category.id == category_id)
+            .flat_map(|category| category.channels.iter())
+            .map(|ch| (ch.id, ch.parent_id.unwrap_or(ChannelId(0))))
+            .collect();
+        for (channel_id, parent_id) in doomed {
+            self.apply_local_delete(clan_id, channel_id, parent_id, cx);
+        }
+        let mut removed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            let before = categories.len();
+            categories.retain(|category| category.id != category_id);
+            removed = categories.len() != before;
+        }
+        self.collapsed
+            .remove(&(clan_id.to_string(), category_id.to_string()));
+        if removed {
+            self.invalidate_channel_index(clan_id);
+            self.notify_channel_list(clan_id, cx);
+        }
     }
 
     pub fn update_categories_order(
@@ -2716,11 +2926,14 @@ impl ChannelList {
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::CategoryEvent(e) => {
-                if e.id == 0 || e.category_name.trim().is_empty() {
+                if e.id == 0 {
                     return;
                 }
                 let clan_id = ClanId(e.clan_id);
                 match e.status {
+                    CATEGORY_EVENT_DELETED => {
+                        self.apply_category_removed(clan_id, &e.id.to_string(), cx);
+                    }
                     CATEGORY_EVENT_CREATED | CATEGORY_EVENT_UPDATED => {
                         let name = e.category_name.trim();
                         if name.is_empty() {
@@ -3827,6 +4040,12 @@ impl ChannelList {
         cx.background_executor()
             .spawn(async move { save_collapse_state(snapshot) })
             .detach();
+    }
+
+    pub fn is_channel_favorite(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.favorites
+            .get(&clan_id)
+            .is_some_and(|ids| ids.contains(&channel_id))
     }
 
     pub fn add_channel_favorite(
@@ -7991,6 +8210,141 @@ mod tests {
                     0,
                     "a later structure refetch must not resurrect a badge whose category was \
                      already explicitly marked as read"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn collapse_all_categories_collapses_every_category_of_the_clan(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[ChannelId(2)]),
+                    cx,
+                );
+                assert!(!channels.is_category_collapsed(ClanId(1), "1"));
+                assert!(!channels.is_category_collapsed(ClanId(1), FAVOR_CATE_ID));
+
+                channels.collapse_all_categories(ClanId(1), cx);
+
+                assert!(channels.is_category_collapsed(ClanId(1), "1"));
+                assert!(channels.is_category_collapsed(ClanId(1), FAVOR_CATE_ID));
+                assert!(!channels.is_category_collapsed(ClanId(2), "1"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn category_name_exists_excluding_ignores_the_renamed_category_itself(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                assert!(channels.category_name_exists(ClanId(1), "general"));
+                assert!(!channels.category_name_exists_excluding(ClanId(1), "general", "1"));
+                assert!(channels.category_name_exists_excluding(ClanId(1), "general", "2"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_category_removed_drops_the_category_and_its_channels(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[ChannelId(2)]),
+                    cx,
+                );
+                channels.toggle_category(ClanId(1), "1", cx);
+                assert!(channels.is_category_collapsed(ClanId(1), "1"));
+
+                channels.apply_category_removed(ClanId(1), "1", cx);
+
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .all(|category| category.id != "1")
+                );
+                assert!(channels.channel(ClanId(1), ChannelId(1)).is_none());
+                assert!(
+                    channels.channel(ClanId(1), ChannelId(2)).is_none(),
+                    "the favourites copy of a deleted channel must go too"
+                );
+                assert!(!channels.is_category_collapsed(ClanId(1), "1"));
+            });
+        });
+    }
+
+    fn category_event(clan_id: i64, id: i64, name: &str, status: i32) -> RealtimeEvent {
+        RealtimeEvent::CategoryEvent(mezon_proto::realtime::CategoryEvent {
+            clan_id,
+            id,
+            category_name: name.to_string(),
+            status,
+            ..Default::default()
+        })
+    }
+
+    #[gpui::test]
+    fn category_event_delete_drops_the_category_and_redirects_the_open_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.select_channel(ChannelId(1), cx);
+
+                channels.handle_event(&category_event(1, 1, "", CATEGORY_EVENT_DELETED), cx);
+
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .all(|category| category.id != "1")
+                );
+                assert!(channels.channel(ClanId(1), ChannelId(1)).is_none());
+                assert_eq!(
+                    channels.active_channel_id, None,
+                    "deleting the category of the open channel must clear the selection"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn category_event_update_renames_the_category_on_its_channels_too(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&category_event(1, 1, "Renamed", CATEGORY_EVENT_UPDATED), cx);
+
+                assert_eq!(
+                    channels.category_name(ClanId(1), "1"),
+                    Some("Renamed"),
+                    "the sidebar header must follow a remote rename"
+                );
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .map(|ch| ch.category_name.as_str()),
+                    Some("Renamed"),
+                    "channel.category_name is read by the channel settings tabs and mention rows"
                 );
             });
         });

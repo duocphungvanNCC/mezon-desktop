@@ -2163,6 +2163,7 @@
   "contextMenu.copyUserId": "Sao chép ID người dùng",
   "contextMenu.createThread": "Tạo chủ đề",
   "contextMenu.deleteCategory": "Xóa danh mục",
+  "contextMenu.deleteCategoryFailed": "Xóa danh mục thất bại. Vui lòng thử lại.",
   "contextMenu.deleteMessage": "Xóa tin nhắn",
   "contextMenu.editCategory": "Chỉnh sửa danh mục",
   "contextMenu.editClanProfile": "Chỉnh sửa hồ sơ Clan",

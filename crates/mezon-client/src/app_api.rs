@@ -1735,6 +1735,23 @@ impl AppApi {
         })
     }
 
+    pub async fn update_category(
+        &self,
+        clan_id: i64,
+        category_id: i64,
+        category_name: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_category(category_id, category_name, clan_id)
+            .await
+    }
+
+    pub async fn delete_category(&self, clan_id: i64, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_category_desc(category_id, clan_id)
+            .await
+    }
+
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         self.transport.add_channel_users(channel_id, user_ids).await
     }
