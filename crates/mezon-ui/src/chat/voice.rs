@@ -10,8 +10,8 @@ use gpui::{
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
     DeviceMenuKind, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL, PermissionStore,
-    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceInteractiveApp, VoiceMember,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -2884,6 +2884,37 @@ fn control_bar(
         })
     };
 
+    let interactive_app_button = {
+        let menu_position = store.interactive_app_menu_position();
+        let voice_for_click = voice.clone();
+        let button = circle_button(
+            "voice-interactive-app-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::Joystick,
+            theme.text_primary,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.openInteractiveApp",
+        )))
+        .on_click(move |event, _, cx| {
+            voice_for_click.update(cx, |store, cx| {
+                let position = event.position();
+                store.toggle_interactive_app_menu(
+                    point(position.x - px(110.), position.y - px(160.)),
+                    cx,
+                )
+            });
+        });
+        div()
+            .relative()
+            .child(button)
+            .children(menu_position.map(|position| {
+                context_menu_at(position, interactive_app_menu(voice)).into_any_element()
+            }))
+    };
+
     let leave_button = {
         let voice = voice.clone();
         circle_button(
@@ -3078,6 +3109,7 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
+        .child(interactive_app_button)
         .children(agent_button)
         .child(raise_hand_button)
         .child(leave_button);
@@ -3116,6 +3148,30 @@ fn circle_button(
         .cursor_pointer()
         .hover(move |s| s.bg(bg_hover))
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color.into()))
+}
+
+fn interactive_app_menu(voice: &Entity<VoiceStore>) -> ContextMenu {
+    let dismiss = {
+        let voice = voice.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            voice.update(cx, |store, cx| store.close_interactive_app_menu(cx));
+        }
+    };
+    [
+        ("Kahoot", VoiceInteractiveApp::Kahoot),
+        ("Blackboard", VoiceInteractiveApp::Blackboard),
+        ("Slido", VoiceInteractiveApp::Slido),
+    ]
+    .into_iter()
+    .fold(
+        ContextMenu::new().on_dismiss(dismiss),
+        |menu, (label, app)| {
+            let voice = voice.clone();
+            menu.item(label.to_string(), move |_, cx| {
+                voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
+            })
+        },
+    )
 }
 
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {

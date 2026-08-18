@@ -880,6 +880,33 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn write_voice_interactive_event(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_voice_interactive_event(
+                        clan_id,
+                        voice_channel_id,
+                        sender_id,
+                        receiver_id,
+                        event_type,
+                        params,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: &str,

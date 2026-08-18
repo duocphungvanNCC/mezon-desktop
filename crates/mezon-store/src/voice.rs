@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Subscription, Task, Window};
 use mezon_audio::{AudioPlayer, DecodedPcm};
-use mezon_client::{AppApi, RealtimeEvent};
+use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
@@ -31,6 +31,32 @@ pub enum DeviceKind {
     AudioInput,
     AudioOutput,
     VideoInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceInteractiveApp {
+    Kahoot,
+    Blackboard,
+    Slido,
+}
+
+impl VoiceInteractiveApp {
+    pub fn event_type(self) -> i32 {
+        match self {
+            Self::Kahoot => 10,
+            Self::Blackboard => 11,
+            Self::Slido => 12,
+        }
+    }
+
+    fn from_event_type(value: i32) -> Option<Self> {
+        match value {
+            10 => Some(Self::Kahoot),
+            11 => Some(Self::Blackboard),
+            12 => Some(Self::Slido),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +220,7 @@ pub struct VoiceStore {
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
+    interactive_app_menu_position: Option<gpui::Point<gpui::Pixels>>,
     device_submenu: Option<DeviceKind>,
     _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
@@ -371,6 +398,7 @@ impl VoiceStore {
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
+            interactive_app_menu_position: None,
             device_submenu: None,
             _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
@@ -707,7 +735,103 @@ impl VoiceStore {
             dispatch.on(RealtimeKind::VoiceReaction, &entity, |this, event, cx| {
                 this.handle_voice_reaction(event, cx)
             });
+            dispatch.on(
+                RealtimeKind::VoiceInteractive,
+                &entity,
+                |this, event, cx| {
+                    if let RealtimeEvent::VoiceInteractive(event) = event {
+                        tracing::info!(
+                            clan_id = event.clan_id,
+                            voice_channel_id = event.voice_channel_id,
+                            sender_id = event.sender_id,
+                            receiver_id = event.receiver_id,
+                            event_type = event.event_type,
+                            params = %event.params,
+                            "received VoiceInteractiveEvent realtime push"
+                        );
+                        this.handle_voice_interactive(event, cx);
+                    }
+                },
+            );
         });
+    }
+
+    fn handle_voice_interactive(
+        &mut self,
+        event: &mezon_proto::realtime::VoiceInteractiveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let targets_current_user = event.receiver_id == 0
+            || crate::BadgeService::try_global(cx)
+                .and_then(|badges| badges.read(cx).current_user_id(cx))
+                .is_some_and(|user_id| user_id.0 == event.receiver_id);
+        if !targets_current_user
+            || self
+                .connection
+                .active_channel_id()
+                .and_then(|id| id.parse::<i64>().ok())
+                != Some(event.voice_channel_id)
+        {
+            return;
+        }
+        let Some(app) = VoiceInteractiveApp::from_event_type(event.event_type) else {
+            return;
+        };
+        let params = (!event.params.is_empty()).then_some(event.params.as_str());
+        self.open_interactive_app_url(app, params, event.clan_id, cx);
+    }
+
+    fn open_interactive_app_url(
+        &self,
+        app: VoiceInteractiveApp,
+        params: Option<&str>,
+        clan_id: i64,
+        cx: &App,
+    ) {
+        let config = AppConfig::global(cx);
+        let base_url = match app {
+            VoiceInteractiveApp::Kahoot => &config.quiz_url,
+            VoiceInteractiveApp::Blackboard => &config.blackboard_url,
+            VoiceInteractiveApp::Slido => &config.interactive_url,
+        };
+        let clan_id_string = clan_id.to_string();
+        let clan_name = crate::ClanList::global(cx)
+            .read(cx)
+            .clan(ClanId(clan_id))
+            .map(|clan| clan.name.as_str());
+        let url = match params.filter(|params| !params.is_empty()) {
+            Some(params) => match build_channel_app_url(
+                base_url,
+                ChannelAppLaunchParams {
+                    web_app_data: params,
+                    clan_id: &clan_id_string,
+                    clan_name,
+                },
+            ) {
+                Ok(url) => url,
+                Err(error) => {
+                    tracing::warn!("failed to build voice interactive app URL: {error:#}");
+                    base_url.clone()
+                }
+            },
+            None => base_url.clone(),
+        };
+        let Some(platform) = crate::PlatformStore::try_global(cx) else {
+            tracing::warn!("voice interactive app launch skipped: platform store is unavailable");
+            return;
+        };
+        let Some(open) = platform.read(cx).app_window_opener() else {
+            tracing::warn!(
+                "voice interactive app launch skipped: app window opener is unavailable"
+            );
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(error) = open(&url) {
+                tracing::warn!("failed to open voice interactive app: {error:#}");
+            }
+        })
+        .detach();
     }
 
     fn handle_voice_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -2179,6 +2303,85 @@ impl VoiceStore {
 
     pub fn device_menu(&self) -> Option<DeviceMenuKind> {
         self.device_menu
+    }
+
+    pub fn interactive_app_menu_position(&self) -> Option<gpui::Point<gpui::Pixels>> {
+        self.interactive_app_menu_position
+    }
+
+    pub fn toggle_interactive_app_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.interactive_app_menu_position = if self.interactive_app_menu_position.is_some() {
+            None
+        } else {
+            Some(position)
+        };
+        cx.notify();
+    }
+
+    pub fn close_interactive_app_menu(&mut self, cx: &mut Context<Self>) {
+        if self.interactive_app_menu_position.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn request_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
+        self.interactive_app_menu_position = None;
+        let Some((voice_channel_id, clan_id)) = self.connection.connected_channel() else {
+            cx.notify();
+            return;
+        };
+        let (Ok(voice_channel_id), Ok(clan_id)) =
+            (voice_channel_id.parse::<i64>(), clan_id.parse::<i64>())
+        else {
+            cx.notify();
+            return;
+        };
+        let Some(user_id) = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .map(|user_id| user_id.0)
+        else {
+            tracing::warn!("VoiceInteractiveEvent skipped: current user id is unavailable");
+            self.open_interactive_app_url(app, None, clan_id, cx);
+            cx.notify();
+            return;
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            match api
+                .write_voice_interactive_event(
+                    clan_id,
+                    voice_channel_id,
+                    user_id,
+                    user_id,
+                    app.event_type(),
+                    String::new(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        clan_id,
+                        voice_channel_id,
+                        sender_id = user_id,
+                        receiver_id = user_id,
+                        event_type = app.event_type(),
+                        "VoiceInteractiveEvent acknowledged; waiting for realtime params"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!("write_voice_interactive_event failed: {error:#}");
+                    let _ = this.update(cx, |store, cx| {
+                        store.open_interactive_app_url(app, None, clan_id, cx)
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn device_submenu(&self) -> Option<DeviceKind> {

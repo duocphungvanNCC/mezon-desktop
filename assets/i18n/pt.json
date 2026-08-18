@@ -1002,6 +1002,7 @@
   "channelVoice.muteModal.mute": "Silenciar",
   "channelVoice.muteModal.title": "Silenciar membro",
   "channelVoice.noDisplay": "Não exibir canal de voz",
+  "channelVoice.openInteractiveApp": "Abrir aplicativo interativo",
   "channelVoice.permission.cameraBody": "O aplicativo não tem permissão para acessar a câmera. Por favor, ative a permissão de câmera nas configurações do sistema.",
   "channelVoice.permission.cameraTitle": "Permitir acesso à câmera",
   "channelVoice.permission.cancel": "Cancelar",

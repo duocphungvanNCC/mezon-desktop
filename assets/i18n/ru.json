@@ -1008,6 +1008,7 @@
   "channelVoice.muteModal.mute": "Заглушить",
   "channelVoice.muteModal.title": "Заглушить участника",
   "channelVoice.noDisplay": "Нет отображения голосового индикатора в канале",
+  "channelVoice.openInteractiveApp": "Открыть интерактивное приложение",
   "channelVoice.permission.cameraBody": "У нас нет доступа к Вашей камере. Пожалуйста, включите доступ к камере в настройках Вашей системы.",
   "channelVoice.permission.cameraTitle": "Предоставить разрешение к камере",
   "channelVoice.permission.cancel": "Отменить",

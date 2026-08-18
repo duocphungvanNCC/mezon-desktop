@@ -1002,6 +1002,7 @@
   "channelVoice.muteModal.mute": "Tysta",
   "channelVoice.muteModal.title": "Tysta medlem",
   "channelVoice.noDisplay": "Ingen röstkanal visning",
+  "channelVoice.openInteractiveApp": "Öppna interaktiv app",
   "channelVoice.permission.cameraBody": "Applikationen har inte kamera behörighet. Vänligen slå på kamera behörighet i systeminställningar.",
   "channelVoice.permission.cameraTitle": "Kamerabehörighet",
   "channelVoice.permission.cancel": "Avbryt",

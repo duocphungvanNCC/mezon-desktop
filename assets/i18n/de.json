@@ -1002,6 +1002,7 @@
   "channelVoice.muteModal.mute": "Stummschalten",
   "channelVoice.muteModal.title": "Mitglied stummschalten",
   "channelVoice.noDisplay": "Sprachkanal nicht anzeigen",
+  "channelVoice.openInteractiveApp": "Interaktive App öffnen",
   "channelVoice.permission.cameraBody": "Die App hat noch keine Kameraberechtigung. Bitte aktiviere die Kamera in den Systemeinstellungen.",
   "channelVoice.permission.cameraTitle": "Kameraberechtigung erteilen",
   "channelVoice.permission.cancel": "Abbrechen",

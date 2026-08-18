@@ -1065,6 +1065,7 @@
   "channelVoice.muteModal.mute": "Tắt tiếng",
   "channelVoice.muteModal.title": "Tắt tiếng thành viên",
   "channelVoice.noDisplay": "Không hiển thị kênh thoại",
+  "channelVoice.openInteractiveApp": "Mở ứng dụng tương tác",
   "channelVoice.permission.cameraBody": "Ứng dụng chưa được cấp quyền camera. Vui lòng bật quyền camera trong cài đặt hệ thống.",
   "channelVoice.permission.cameraTitle": "Cấp quyền camera",
   "channelVoice.permission.cancel": "Hủy",

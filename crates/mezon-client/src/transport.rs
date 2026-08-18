@@ -107,6 +107,7 @@ pub enum RealtimeEvent {
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
     ScreenShare(realtime::ScreenShareEvent),
+    VoiceInteractive(realtime::VoiceInteractiveEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -163,6 +164,7 @@ impl RealtimeEvent {
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::ScreenShare(_) => "ScreenShare",
+            Self::VoiceInteractive(_) => "VoiceInteractive",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -221,6 +223,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
+            realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -4388,6 +4391,57 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_voice_reaction error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn write_voice_interactive_event(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                realtime::VoiceInteractiveEvent {
+                    clan_id,
+                    voice_channel_id,
+                    sender_id,
+                    receiver_id,
+                    event_type,
+                    params,
+                },
+            )),
+        };
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            clan_id,
+            voice_channel_id,
+            event_type,
+            "sending VoiceInteractiveEvent"
+        );
+        let (code, response) = self
+            .send_with_timeout(
+                cid,
+                encode_envelope_cid_last(envelope),
+                Duration::from_millis(2000),
+            )
+            .await?;
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            code,
+            response_bytes = response.len(),
+            "received VoiceInteractiveEvent CID response"
+        );
+        if code != 0 {
+            anyhow::bail!("write_voice_interactive_event error: code={code}");
         }
         Ok(())
     }

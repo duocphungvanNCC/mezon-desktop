@@ -1002,6 +1002,7 @@
   "channelVoice.muteModal.mute": "ミュート",
   "channelVoice.muteModal.title": "メンバーをミュート",
   "channelVoice.noDisplay": "ボイスチャンネルを表示しない",
+  "channelVoice.openInteractiveApp": "インタラクティブアプリを開く",
   "channelVoice.permission.cameraBody": "アプリにカメラへのアクセス権限が付与されていません。システム設定でカメラ権限をオンにしてください。",
   "channelVoice.permission.cameraTitle": "カメラ権限を付与",
   "channelVoice.permission.cancel": "キャンセル",

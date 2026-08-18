@@ -2650,6 +2650,27 @@ impl AppApi {
             .await
     }
 
+    pub async fn write_voice_interactive_event(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        self.transport
+            .write_voice_interactive_event(
+                clan_id,
+                voice_channel_id,
+                sender_id,
+                receiver_id,
+                event_type,
+                params,
+            )
+            .await
+    }
+
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: &str,

@@ -1002,6 +1002,7 @@
   "channelVoice.muteModal.mute": "Silenzia",
   "channelVoice.muteModal.title": "Silenzia membro",
   "channelVoice.noDisplay": "Non mostra i canali vocali",
+  "channelVoice.openInteractiveApp": "Apri app interattiva",
   "channelVoice.permission.cameraBody": "L'applicazione non ha l'autorizzazione per la fotocamera. Attivala nelle impostazioni di sistema.",
   "channelVoice.permission.cameraTitle": "Autorizza fotocamera",
   "channelVoice.permission.cancel": "Annulla",

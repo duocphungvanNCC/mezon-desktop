@@ -1070,6 +1070,7 @@
   "channelVoice.muteModal.mute": "Mute",
   "channelVoice.muteModal.title": "Mute member",
   "channelVoice.noDisplay": "No display channel voice",
+  "channelVoice.openInteractiveApp": "Open interactive app",
   "channelVoice.permission.cameraBody": "We do not have access to your camera. Please enable camera access in your system settings.",
   "channelVoice.permission.cameraTitle": "Grant camera permission",
   "channelVoice.permission.cancel": "Cancel",

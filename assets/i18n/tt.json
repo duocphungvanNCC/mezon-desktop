@@ -1007,6 +1007,7 @@
   "channelVoice.muteModal.mute": "Тындыру",
   "channelVoice.muteModal.title": "Катнашучыны тындыру",
   "channelVoice.noDisplay": "Каналда тавыш күрсәткече юк",
+  "channelVoice.openInteractiveApp": "Интерактив кушымтаны ачу",
   "channelVoice.permission.cameraBody": "Безнең сезнең камерагызга керү мөмкинлегебез юк. Зинһар, система көйләнмәләрегездә камерага керү мөмкинлеген кертегез.",
   "channelVoice.permission.cameraTitle": "Камера рөхсәтен бирү",
   "channelVoice.permission.cancel": "Кире кагу",
