@@ -620,8 +620,11 @@ impl Render for CreateClanModal {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
-            .min_w(px(320.))
-            .max_w(px(480.))
+            // A definite width is what makes the header/footer `w_full` resolve: against an
+            // auto-width parent a percentage collapses to the row's own content, which left
+            // both border rules as short stubs under the close button and the Back button.
+            // React gets this from `flex-col` stretch; both steps are already pinned to 480.
+            .w(px(480.))
             .rounded(px(12.))
             .bg(theme_setting_primary)
             .shadow_lg()
