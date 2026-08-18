@@ -5,7 +5,9 @@ pub mod audio;
 pub mod audit_log;
 pub mod auto_update;
 pub mod badge;
+pub mod banned_users;
 pub mod cache;
+pub mod call;
 pub mod canvas;
 pub mod channel;
 pub mod channel_media;
@@ -88,7 +90,12 @@ pub use audit_log::{
 };
 pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
+pub use banned_users::{
+    BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC, BAN_FOR_15_MINUTES_SEC,
+    BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BannedEntry, BannedUsersEvent, BannedUsersStore,
+};
 pub use cache::{Freshness, KeyedCache};
+pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
 pub use channel_media::{

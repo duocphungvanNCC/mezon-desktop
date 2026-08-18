@@ -114,6 +114,7 @@ pub enum RealtimeEvent {
     AddClanUser(realtime::AddClanUserEvent),
     ClanEventCreated(api::CreateEventRequest),
     UserClanRemoved(realtime::UserClanRemoved),
+    BanUser(realtime::BannedUserEvent),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
     UserProfileUpdated(realtime::UserProfileUpdatedEvent),
@@ -132,6 +133,7 @@ pub enum RealtimeEvent {
     TopicInMessageEvent(realtime::TopicInMessageEvent),
     TokenSent(api::TokenSentEvent),
     GiveCoffee(api::GiveCoffeeEvent),
+    WebrtcSignaling(realtime::WebrtcSignalingFwd),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -171,6 +173,7 @@ impl RealtimeEvent {
             Self::AddClanUser(_) => "AddClanUser",
             Self::ClanEventCreated(_) => "ClanEventCreated",
             Self::UserClanRemoved(_) => "UserClanRemoved",
+            Self::BanUser(_) => "BanUser",
             Self::ClanUpdated(_) => "ClanUpdated",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
             Self::UserProfileUpdated(_) => "UserProfileUpdated",
@@ -187,6 +190,7 @@ impl RealtimeEvent {
             Self::TopicInMessageEvent(_) => "TopicInMessageEvent",
             Self::TokenSent(_) => "TokenSent",
             Self::GiveCoffee(_) => "GiveCoffee",
+            Self::WebrtcSignaling(_) => "WebrtcSignaling",
             Self::Unhandled(_) => "Unhandled",
         }
     }
@@ -232,6 +236,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::ClanEventCreated(m) => Ok(Self::ClanEventCreated(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
+            realtime::envelope::Message::BanUserEvent(m) => Ok(Self::BanUser(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
@@ -252,6 +257,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::TopicInMessageEvent(m) => Ok(Self::TopicInMessageEvent(m)),
             realtime::envelope::Message::TokenSentEvent(m) => Ok(Self::TokenSent(m)),
             realtime::envelope::Message::GiveCoffeeEvent(m) => Ok(Self::GiveCoffee(m)),
+            realtime::envelope::Message::WebrtcSignalingFwd(m) => Ok(Self::WebrtcSignaling(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -4395,11 +4401,41 @@ impl MezonTransport {
         Ok(())
     }
 
+    pub async fn forward_webrtc_signaling(
+        &self,
+        receiver_id: i64,
+        data_type: i32,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=WebrtcSignalingFwd cid={} data_type={data_type}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::WebrtcSignalingFwd(
+                realtime::WebrtcSignalingFwd {
+                    receiver_id,
+                    data_type,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("forward_webrtc_signaling error: code={code}");
+        }
+        Ok(())
+    }
+
     pub async fn write_voice_interactive(
         &self,
         clan_id: i64,
         voice_channel_id: i64,
-        user_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
         event_type: i32,
         params: String,
     ) -> Result<()> {
@@ -4415,7 +4451,8 @@ impl MezonTransport {
                 realtime::VoiceInteractiveEvent {
                     clan_id,
                     voice_channel_id,
-                    user_id,
+                    sender_id,
+                    receiver_id,
                     event_type,
                     params,
                 },
@@ -4424,6 +4461,33 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_voice_interactive error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn make_call_push(
+        &self,
+        receiver_id: i64,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=IncomingCallPush cid={} channel_id={channel_id}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::IncomingCallPush(
+                realtime::IncomingCallPush {
+                    receiver_id,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("make_call_push error: code={code}");
         }
         Ok(())
     }
@@ -8900,6 +8964,40 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    pub async fn update_channel_message_structured(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mode: i32,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = realtime::ChannelMessageUpdate {
+            clan_id,
+            channel_id,
+            message_id,
+            content: content_json,
+            mode,
+            is_public: false,
+            hide_editted: true,
+            create_time_seconds,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "UpdateChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!(
+                "update_channel_message_structured error: code={}",
+                code
+            ));
         }
         Ok(())
     }
