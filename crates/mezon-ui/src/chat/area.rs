@@ -638,14 +638,13 @@ impl ChatArea {
                 let input_visible = !send_denied;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                        if !input_visible {
+                            return;
+                        }
                         if let Some(drop_input) = drop_input.clone() {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
-                                if input_visible {
-                                    window.activate_window();
-                                    input.focus_input(window, cx);
-                                }
-                                input.add_dropped_paths(dropped, window, cx)
+                                input.accept_os_file_drop(dropped, window, cx)
                             });
                         }
                     },

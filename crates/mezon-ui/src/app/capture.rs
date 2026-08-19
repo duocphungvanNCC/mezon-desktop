@@ -632,10 +632,12 @@ pub fn composer_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<V
 
 pub fn composer_submit(cx: &mut App) -> anyhow::Result<Value> {
     let before = composer_snapshot(cx)?;
-    with_composer(cx, |composer, window, cx| {
-        composer.probe_enter(window, cx);
-    })?;
-    Ok(json!({ "ok": true, "sent": before }))
+    let submitted = with_composer(cx, |composer, window, cx| composer.probe_enter(window, cx))?;
+    if submitted {
+        Ok(json!({ "ok": true, "sent": before }))
+    } else {
+        Ok(json!({ "ok": true, "queued": true, "sent": before }))
+    }
 }
 
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);

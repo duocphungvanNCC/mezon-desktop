@@ -437,6 +437,11 @@ pub enum MentionInputEvent {
 struct ActiveComposer(gpui::WeakEntity<MentionInput>);
 impl gpui::Global for ActiveComposer {}
 
+struct QueuedImportSubmit {
+    channel: Option<ChannelId>,
+    landed: bool,
+}
+
 pub struct MentionInput {
     input: Entity<MentionInputState>,
     committed: Vec<CommittedToken>,
@@ -464,9 +469,8 @@ pub struct MentionInput {
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
-    importing_attachments: bool,
-    import_generation: u64,
-    submit_after_import: bool,
+    imports_in_flight: usize,
+    submit_after_import: Option<QueuedImportSubmit>,
     recording: Option<ActiveRecording>,
     record_generation: u64,
     encoding_recording: bool,
@@ -620,7 +624,9 @@ impl MentionInput {
             |this, _input, event: &MentionFieldEvent, window, cx| match event {
                 MentionFieldEvent::Change => this.on_change(cx),
                 MentionFieldEvent::HistoryRestored => this.on_history_restored(cx),
-                MentionFieldEvent::PressEnter => this.on_enter(window, cx),
+                MentionFieldEvent::PressEnter => {
+                    this.on_enter(window, cx);
+                }
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
                 MentionFieldEvent::Paste(text) => this.on_paste(text.clone(), window, cx),
@@ -671,9 +677,8 @@ impl MentionInput {
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
-            importing_attachments: false,
-            import_generation: 0,
-            submit_after_import: false,
+            imports_in_flight: 0,
+            submit_after_import: None,
             recording: None,
             record_generation: 0,
             encoding_recording: false,
@@ -722,16 +727,94 @@ impl MentionInput {
     fn claim_composer_focus_after_drop(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.claim_composer_focus(window, cx);
         let this = cx.entity();
-        #[cfg(target_os = "linux")]
-        {
-            let this = this.clone();
-            window.on_next_frame(move |window, cx| {
-                this.update(cx, |this, cx| this.claim_composer_focus(window, cx));
-            });
-        }
         window.defer(cx, move |window, cx| {
             this.update(cx, |this, cx| this.claim_composer_focus(window, cx));
         });
+    }
+
+    fn begin_import(&mut self, cx: &mut Context<Self>) -> Option<ChannelId> {
+        self.imports_in_flight = self.imports_in_flight.saturating_add(1);
+        cx.notify();
+        self.draft_channel
+    }
+
+    fn finish_import(
+        &mut self,
+        pending: Vec<PendingAttachment>,
+        import_channel: Option<ChannelId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let landed = if self.draft_channel == import_channel {
+            self.add_pending(pending, window, cx)
+        } else {
+            false
+        };
+        if landed && let Some(queued) = self.submit_after_import.as_mut() {
+            queued.landed = true;
+        }
+        self.imports_in_flight = self.imports_in_flight.saturating_sub(1);
+        cx.notify();
+        if self.imports_in_flight == 0 {
+            self.flush_submit_after_import(window, cx);
+        }
+    }
+
+    fn flush_submit_after_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(queued) = self.submit_after_import.take() else {
+            return;
+        };
+        if self.popup_open() {
+            self.accept(self.selected, window, cx);
+            return;
+        }
+        if queued.channel == self.draft_channel && queued.landed {
+            cx.emit(MentionInputEvent::Submit);
+        }
+    }
+
+    fn queue_submit_after_import(&mut self) {
+        if self.submit_after_import.is_none() {
+            self.submit_after_import = Some(QueuedImportSubmit {
+                channel: self.draft_channel,
+                landed: false,
+            });
+        }
+    }
+
+    fn clear_submit_after_import(&mut self) {
+        self.submit_after_import = None;
+    }
+
+    fn import_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        claim_focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let import_channel = self.begin_import(cx);
+        if claim_focus {
+            self.claim_composer_focus_after_drop(window, cx);
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .filter_map(build_pending)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.finish_import(pending, import_channel, window, cx)
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn bind_channel(
@@ -797,6 +880,7 @@ impl MentionInput {
             tokens,
             attachments,
         } = draft;
+        self.clear_submit_after_import();
         self.committed = committed_from_compose_tokens(&text, tokens);
         self.pending_attachments = attachments;
         self.reset_popup();
@@ -1033,6 +1117,12 @@ impl MentionInput {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
+            if paths.is_empty() {
+                return;
+            }
+            let Ok(import_channel) = this.update(cx, |this, cx| this.begin_import(cx)) else {
+                return;
+            };
             let pending = cx
                 .background_spawn(async move {
                     paths
@@ -1041,8 +1131,10 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.finish_import(pending, import_channel, window, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -1053,39 +1145,16 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() {
-            return;
-        }
-        self.import_generation = self.import_generation.wrapping_add(1);
-        let generation = self.import_generation;
-        self.importing_attachments = true;
-        self.claim_composer_focus_after_drop(window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let pending = cx
-                .background_spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(build_pending)
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            this.update_in(cx, |this, window, cx| {
-                if this.import_generation != generation {
-                    return;
-                }
-                this.importing_attachments = false;
-                this.add_pending(pending, window, cx);
-                this.claim_composer_focus_after_drop(window, cx);
-                if this.submit_after_import {
-                    this.submit_after_import = false;
-                    if !this.popup_open() {
-                        cx.emit(MentionInputEvent::Submit);
-                    }
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.import_paths(paths, false, window, cx);
+    }
+
+    pub fn accept_os_file_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_paths(paths, true, window, cx);
     }
 
     fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1117,23 +1186,22 @@ impl MentionInput {
 
     fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+        let import_channel = self.begin_import(cx);
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move {
                     let path = std::env::temp_dir().join(&filename);
                     if let Err(err) = std::fs::write(&path, text.as_bytes()) {
                         tracing::warn!("failed to write converted text attachment: {err}");
-                        return None;
+                        return Vec::new();
                     }
-                    build_pending(path)
+                    build_pending(path).into_iter().collect()
                 })
                 .await;
-            if let Some(pending) = pending {
-                this.update_in(cx, |this, window, cx| {
-                    this.add_pending(vec![pending], window, cx)
-                })
-                .ok();
-            }
+            this.update_in(cx, |this, window, cx| {
+                this.finish_import(pending, import_channel, window, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -1143,6 +1211,7 @@ impl MentionInput {
             return;
         }
         let base = chrono::Utc::now().timestamp_millis();
+        let import_channel = self.begin_import(cx);
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move {
@@ -1155,8 +1224,10 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.finish_import(pending, import_channel, window, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -1224,7 +1295,9 @@ impl MentionInput {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.encoding_recording = false;
                 match built {
-                    Ok(attachment) => this.add_pending(vec![attachment], window, cx),
+                    Ok(attachment) => {
+                        this.add_pending(vec![attachment], window, cx);
+                    }
                     Err(err) => tracing::warn!("voice recording failed: {err}"),
                 }
                 cx.notify();
@@ -1260,16 +1333,20 @@ impl MentionInput {
         candidates: Vec<PendingAttachment>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if candidates.is_empty() {
-            return;
+            return false;
         }
         match validate_batch(self.pending_attachments.len(), &candidates) {
             Ok(()) => {
                 self.pending_attachments.extend(candidates);
                 cx.notify();
+                true
             }
-            Err(limit) => Self::show_upload_limit(limit, window, cx),
+            Err(limit) => {
+                Self::show_upload_limit(limit, window, cx);
+                false
+            }
         }
     }
 
@@ -1424,17 +1501,17 @@ impl MentionInput {
         self.check_trigger(&content, cx);
     }
 
-    fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.popup_open() {
             self.accept(self.selected, window, cx);
-            return;
+            return false;
         }
-        if self.importing_attachments {
-            self.submit_after_import = true;
-            self.claim_composer_focus(window, cx);
-            return;
+        if self.imports_in_flight > 0 {
+            self.queue_submit_after_import();
+            return false;
         }
         cx.emit(MentionInputEvent::Submit);
+        true
     }
 
     fn on_change(&mut self, cx: &mut Context<Self>) {
@@ -2217,8 +2294,8 @@ impl MentionInput {
         true
     }
 
-    pub(crate) fn probe_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.on_enter(window, cx);
+    pub(crate) fn probe_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.on_enter(window, cx)
     }
 
     pub(crate) fn probe_panel_send(
