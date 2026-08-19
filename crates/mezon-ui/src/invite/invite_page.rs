@@ -47,14 +47,13 @@ impl InvitePage {
         let Route::Invite { invite_id } = Router::global(cx).read(cx).route() else {
             return;
         };
-        if self.invite_id == invite_id {
-            return;
+        if self.invite_id != invite_id {
+            self.invite_id = invite_id.clone();
+            self.joining = false;
+            self.error = None;
+            cx.notify();
         }
-        self.invite_id = invite_id.clone();
-        self.joining = false;
-        self.error = None;
         InviteStore::global(cx).update(cx, |store, cx| store.ensure_invite(invite_id, cx));
-        cx.notify();
     }
 
     fn on_loaded(&mut self, details: &InviteDetails, cx: &mut Context<Self>) {

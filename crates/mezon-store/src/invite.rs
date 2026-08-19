@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, MezonClient};
+use mezon_client::MezonClient;
 
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId};
@@ -35,7 +35,6 @@ pub struct InviteStore {
     invite_id: String,
     state: InviteState,
     client: Arc<MezonClient>,
-    _api: Arc<AppApi>,
     _fetch: Option<Task<()>>,
 }
 
@@ -45,12 +44,11 @@ impl Global for GlobalInviteStore {}
 impl EventEmitter<InviteEvent> for InviteStore {}
 
 impl InviteStore {
-    pub fn init(api: Arc<AppApi>, client: Arc<MezonClient>, cx: &mut App) -> Entity<Self> {
+    pub fn init(client: Arc<MezonClient>, cx: &mut App) -> Entity<Self> {
         let store = cx.new(|_| Self {
             invite_id: String::new(),
             state: InviteState::Idle,
             client,
-            _api: api,
             _fetch: None,
         });
         cx.set_global(GlobalInviteStore(store.clone()));
@@ -70,7 +68,9 @@ impl InviteStore {
     }
 
     pub fn ensure_invite(&mut self, invite_id: String, cx: &mut Context<Self>) {
-        if self.invite_id == invite_id && !matches!(self.state, InviteState::Idle) {
+        if self.invite_id == invite_id
+            && matches!(self.state, InviteState::Loading | InviteState::Loaded(_))
+        {
             return;
         }
         self.invite_id = invite_id.clone();

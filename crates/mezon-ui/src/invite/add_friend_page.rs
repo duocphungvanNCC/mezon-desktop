@@ -42,6 +42,7 @@ fn decode_contact(data: &str) -> Option<ContactData> {
 
 pub struct AddFriendPage {
     username: String,
+    data: Option<String>,
     settings: Entity<Settings>,
     target: Option<UserId>,
     display_name: SharedString,
@@ -71,6 +72,7 @@ impl AddFriendPage {
         }));
         let mut page = Self {
             username: String::new(),
+            data: None,
             settings,
             target: None,
             display_name: SharedString::default(),
@@ -87,10 +89,11 @@ impl AddFriendPage {
         let Route::AddFriend { username, data } = Router::global(cx).read(cx).route() else {
             return;
         };
-        if self.username == username {
+        if self.username == username && self.data == data {
             return;
         }
         self.username = username;
+        self.data = data.clone();
         self.load(data, cx);
         cx.notify();
     }
