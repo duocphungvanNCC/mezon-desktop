@@ -69,6 +69,8 @@ pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
 
+const API_CODE_ALREADY_EXISTS: u32 = 6;
+
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
 }
@@ -713,6 +715,25 @@ pub struct ApiSession {
     /// leaves the client reconnecting with a credential the server has already retired.
     pub session_id: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkPhoneError {
+    AlreadyLinked,
+    Api(u32),
+    Transport(String),
+}
+
+impl std::fmt::Display for LinkPhoneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyLinked => write!(f, "phone number already linked"),
+            Self::Api(code) => write!(f, "API error: code={code}"),
+            Self::Transport(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for LinkPhoneError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrationPasswordError {
@@ -9392,20 +9413,24 @@ impl MezonTransport {
     }
 
     /// Link SMS.
-    pub async fn link_sms(&self, req: api::AccountMezon) -> Result<ApiSession> {
+    pub async fn link_sms(
+        &self,
+        req: api::AccountMezon,
+    ) -> std::result::Result<api::LinkAccountConfirmRequest, LinkPhoneError> {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
-        let (code, response) = self.send_api_request(cid, "LinkSMS", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        let (code, response) = self
+            .send_api_request(cid, "LinkSMS", body)
+            .await
+            .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
+        if code == API_CODE_ALREADY_EXISTS {
+            return Err(LinkPhoneError::AlreadyLinked);
         }
-        let session = api::Session::decode(response.as_slice())?;
-        Ok(ApiSession {
-            token: session.token,
-            refresh_token: session.refresh_token,
-            user_id: session.user_id,
-            session_id: session.session_id,
-        })
+        if code != 0 {
+            return Err(LinkPhoneError::Api(code));
+        }
+        api::LinkAccountConfirmRequest::decode(response.as_slice())
+            .map_err(|error| LinkPhoneError::Transport(error.to_string()))
     }
 
     /// Unlink Mezon (SMS).

@@ -16,6 +16,7 @@ use crate::router::Route;
 
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
+mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_category_modal;
 mod confirm_delete_channel_modal;
@@ -36,6 +37,7 @@ mod upload_limit_modal;
 mod wallet_not_available_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
+use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
 use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
@@ -1118,6 +1120,25 @@ impl Shell {
         self.modal_fullscreen = false;
         self.modal = Some(host.into());
         cx.notify();
+    }
+
+    pub fn confirm_delete_account(
+        &mut self,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| ConfirmDeleteAccountModal {
+            focus_handle: cx.focus_handle(),
+            title: mezon_i18n::t(locale, "common.deleteAccount").into(),
+            description: mezon_i18n::t(locale, "common.confirmDeleteAccount").into(),
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            delete_label: mezon_i18n::t(locale, "common.delete").into(),
+            deleting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
     }
 
     pub fn confirm_disable_clan_community(
