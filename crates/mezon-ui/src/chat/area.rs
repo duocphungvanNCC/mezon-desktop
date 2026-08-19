@@ -642,6 +642,7 @@ impl ChatArea {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
                                 if input_visible {
+                                    window.activate_window();
                                     input.focus_input(window, cx);
                                 }
                                 input.add_dropped_paths(dropped, window, cx)

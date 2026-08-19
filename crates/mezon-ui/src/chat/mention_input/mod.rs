@@ -464,6 +464,9 @@ pub struct MentionInput {
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
+    importing_attachments: bool,
+    import_generation: u64,
+    submit_after_import: bool,
     recording: Option<ActiveRecording>,
     record_generation: u64,
     encoding_recording: bool,
@@ -668,6 +671,9 @@ impl MentionInput {
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
+            importing_attachments: false,
+            import_generation: 0,
+            submit_after_import: false,
             recording: None,
             record_generation: 0,
             encoding_recording: false,
@@ -706,6 +712,26 @@ impl MentionInput {
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    fn claim_composer_focus(&self, window: &mut Window, cx: &mut App) {
+        window.activate_window();
+        self.focus_input(window, cx);
+    }
+
+    fn claim_composer_focus_after_drop(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.claim_composer_focus(window, cx);
+        let this = cx.entity();
+        #[cfg(target_os = "linux")]
+        {
+            let this = this.clone();
+            window.on_next_frame(move |window, cx| {
+                this.update(cx, |this, cx| this.claim_composer_focus(window, cx));
+            });
+        }
+        window.defer(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.claim_composer_focus(window, cx));
+        });
     }
 
     pub fn bind_channel(
@@ -1030,6 +1056,10 @@ impl MentionInput {
         if paths.is_empty() {
             return;
         }
+        self.import_generation = self.import_generation.wrapping_add(1);
+        let generation = self.import_generation;
+        self.importing_attachments = true;
+        self.claim_composer_focus_after_drop(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move {
@@ -1039,8 +1069,21 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                if this.import_generation != generation {
+                    return;
+                }
+                this.importing_attachments = false;
+                this.add_pending(pending, window, cx);
+                this.claim_composer_focus_after_drop(window, cx);
+                if this.submit_after_import {
+                    this.submit_after_import = false;
+                    if !this.popup_open() {
+                        cx.emit(MentionInputEvent::Submit);
+                    }
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -1384,9 +1427,14 @@ impl MentionInput {
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.accept(self.selected, window, cx);
-        } else {
-            cx.emit(MentionInputEvent::Submit);
+            return;
         }
+        if self.importing_attachments {
+            self.submit_after_import = true;
+            self.claim_composer_focus(window, cx);
+            return;
+        }
+        cx.emit(MentionInputEvent::Submit);
     }
 
     fn on_change(&mut self, cx: &mut Context<Self>) {
