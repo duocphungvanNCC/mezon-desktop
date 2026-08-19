@@ -3310,6 +3310,15 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn is_follower(&self, follow_id: i64) -> Result<bool> {
+        let transport = self.inner.clone();
+        let response = runtime()
+            .spawn(async move { transport.is_follower(follow_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
+        Ok(response.is_follower)
+    }
+
     pub async fn delete_account(&self) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
