@@ -379,6 +379,10 @@ impl AppApi {
         self.transport.update_clan_desc(request).await
     }
 
+    pub async fn delete_clan_desc(&self, clan_desc_id: i64) -> Result<()> {
+        self.transport.delete_clan_desc(clan_desc_id).await
+    }
+
     pub async fn get_system_message_by_clan_id(
         &self,
         clan_id: i64,
@@ -1543,6 +1547,41 @@ impl AppApi {
             .await
     }
 
+    pub async fn remove_clan_users(&self, clan_id: i64, user_ids: Vec<String>) -> Result<()> {
+        self.transport.remove_clan_users(clan_id, user_ids).await
+    }
+
+    pub async fn ban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+        ban_time: i32,
+    ) -> Result<()> {
+        self.transport
+            .ban_clan_users(clan_id, channel_id, user_ids, ban_time)
+            .await
+    }
+
+    pub async fn unban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        self.transport
+            .unban_clan_users(clan_id, channel_id, user_ids)
+            .await
+    }
+
+    pub async fn list_banned_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::BannedUserList> {
+        self.transport.list_banned_users(clan_id, channel_id).await
+    }
+
     pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
         self.transport.get_clan_user_role(clan_id, 0).await
     }
@@ -1694,6 +1733,23 @@ impl AppApi {
             clan_id: category.clan_id,
             category_order: category.category_order,
         })
+    }
+
+    pub async fn update_category(
+        &self,
+        clan_id: i64,
+        category_id: i64,
+        category_name: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_category(category_id, category_name, clan_id)
+            .await
+    }
+
+    pub async fn delete_category(&self, clan_id: i64, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_category_desc(category_id, clan_id)
+            .await
     }
 
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
@@ -2639,8 +2695,9 @@ impl AppApi {
         &self,
         clan_id: &str,
         limit: i32,
+        page: i32,
     ) -> Result<Vec<crate::TopicDiscussion>> {
-        self.transport.list_sd_topics(clan_id, limit).await
+        self.transport.list_sd_topics(clan_id, limit, page).await
     }
 
     pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {
@@ -2677,6 +2734,52 @@ impl AppApi {
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
         self.transport
             .write_voice_reaction(emojis, channel_id)
+            .await
+    }
+
+    pub async fn forward_webrtc_signaling(
+        &self,
+        receiver_id: i64,
+        data_type: i32,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .forward_webrtc_signaling(receiver_id, data_type, json_data, channel_id, caller_id)
+            .await
+    }
+
+    pub async fn make_call_push(
+        &self,
+        receiver_id: i64,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .make_call_push(receiver_id, json_data, channel_id, caller_id)
+            .await
+    }
+
+    pub async fn update_channel_message_structured(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mode: i32,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_message_structured(
+                clan_id,
+                channel_id,
+                message_id,
+                content_json,
+                mode,
+                create_time_seconds,
+            )
             .await
     }
 

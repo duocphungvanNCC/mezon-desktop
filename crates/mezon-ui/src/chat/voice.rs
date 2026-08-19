@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce,
-    Rgba, ScrollHandle, SharedString, StyledImage, TransformationMatrix, Window, canvas, deferred,
-    div, img, point, prelude::*, px, radians, relative, rgb,
+    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, TransformationMatrix,
+    Window, canvas, deferred, div, img, point, prelude::*, px, radians, relative, rems, rgb,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
@@ -2987,6 +2987,13 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
 }
 
 #[allow(clippy::too_many_arguments)]
+/// gg sans gives each digit its own advance — `1` measures 392 units against
+/// `0`'s 594 — so a ticking timer re-measured the pill around it on every
+/// second. Tabular figures pin all ten to 600, which holds the whole string at
+/// one width no matter what the clock reads.
+static TABULAR_FIGURES: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
+
 fn control_bar(
     theme: &Theme,
     locale: &str,
@@ -3382,7 +3389,13 @@ fn control_bar(
             .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(LEAVE_RED)))
             .child(
                 div()
-                    .min_w(px(72.))
+                    .font_features(TABULAR_FIGURES.clone())
+                    // Linux shapes text through cosmic-text, which ignores font
+                    // features, so keep a floor above the widest the string can
+                    // measure (4.64rem) to hold the pill still there too. In
+                    // rems, because the window's rem size follows the zoom
+                    // level and the old px floor sat below the text either way.
+                    .min_w(rems(4.75))
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(gpui::rgb(LEAVE_RED))

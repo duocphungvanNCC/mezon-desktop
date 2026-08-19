@@ -35,6 +35,7 @@ pub enum RealtimeKind {
     AddClanUser,
     ClanEventCreated,
     UserClanRemoved,
+    BanUser,
     ClanProfileUpdated,
     UserProfileUpdated,
     SessionRefreshed,
@@ -65,6 +66,7 @@ pub enum RealtimeKind {
     UnblockFriend,
     TokenSent,
     RoleEvent,
+    WebrtcSignaling,
 }
 
 impl RealtimeKind {
@@ -88,6 +90,7 @@ impl RealtimeKind {
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
             RealtimeEvent::ClanEventCreated(_) => Self::ClanEventCreated,
             RealtimeEvent::UserClanRemoved(_) => Self::UserClanRemoved,
+            RealtimeEvent::BanUser(_) => Self::BanUser,
             RealtimeEvent::ClanProfileUpdated(_) => Self::ClanProfileUpdated,
             RealtimeEvent::UserProfileUpdated(_) => Self::UserProfileUpdated,
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
@@ -118,6 +121,7 @@ impl RealtimeKind {
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
+            RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             _ => return None,
         })
     }

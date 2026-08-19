@@ -5768,7 +5768,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5799,7 +5799,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "flume",
@@ -5813,8 +5813,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-call"
+version = "2.0.15"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flate2",
+ "flume",
+ "futures",
+ "libwebrtc",
+ "mezon-voice",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mezon-canvas"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5836,7 +5854,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -5852,7 +5870,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5889,14 +5907,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5917,7 +5935,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5944,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5955,7 +5973,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5978,7 +5996,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5989,6 +6007,7 @@ dependencies = [
  "image",
  "keyring",
  "mezon-audio",
+ "mezon-call",
  "mezon-client",
  "mezon-i18n",
  "mezon-proto",
@@ -6009,7 +6028,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "flume",
@@ -6027,7 +6046,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "gpui",
  "theme",
@@ -6035,7 +6054,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6077,7 +6096,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6098,7 +6117,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6120,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "block",
@@ -6154,7 +6173,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6218,7 +6237,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "base64 0.22.1",
  "bs58",

@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, anchored,
-    deferred, div, img, prelude::*, px, relative, svg,
+    Anchor, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window,
+    anchored, deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use super::icon::{Icon, IconName};
@@ -42,6 +42,7 @@ enum Item {
         sub_text: Option<SharedString>,
         options: Vec<SubmenuOption>,
         open: bool,
+        danger: bool,
         on_open: MenuHandler,
         on_select: SubmenuHandler,
         on_parent_click: Option<MenuHandler>,
@@ -69,6 +70,7 @@ pub struct ContextMenu {
     quick_reactions: Vec<QuickReaction>,
     on_quick_reaction: Option<QuickReactionHandler>,
     on_reaction_close: Option<MenuHandler>,
+    on_submenu_close: Option<MenuHandler>,
     on_dismiss: Option<DismissHandler>,
     anchor: Point<Pixels>,
 }
@@ -195,6 +197,14 @@ impl ContextMenu {
         self
     }
 
+    pub fn on_submenu_close(
+        mut self,
+        on_submenu_close: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_submenu_close = Some(Rc::new(on_submenu_close));
+        self
+    }
+
     pub fn on_dismiss(mut self, on_dismiss: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_dismiss = Some(Rc::new(on_dismiss));
         self
@@ -282,6 +292,30 @@ impl ContextMenu {
             sub_text,
             options,
             open,
+            danger: false,
+            on_open: Rc::new(on_open),
+            on_select: Rc::new(on_select),
+            on_parent_click: None,
+        });
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn danger_submenu(
+        mut self,
+        label: impl Into<SharedString>,
+        sub_text: Option<SharedString>,
+        options: Vec<SubmenuOption>,
+        open: bool,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+        on_select: impl Fn(i32, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Submenu {
+            label: label.into(),
+            sub_text,
+            options,
+            open,
+            danger: true,
             on_open: Rc::new(on_open),
             on_select: Rc::new(on_select),
             on_parent_click: None,
@@ -307,6 +341,7 @@ impl ContextMenu {
             sub_text,
             options,
             open,
+            danger: false,
             on_open: Rc::new(on_open),
             on_select: Rc::new(on_select),
             on_parent_click: Some(Rc::new(on_parent_click)),
@@ -329,6 +364,139 @@ impl ContextMenu {
     }
 }
 
+pub struct ContextMenuProbeItem {
+    pub kind: &'static str,
+    pub label: String,
+    pub disabled: bool,
+    pub options: Vec<(i32, String)>,
+}
+
+impl ContextMenu {
+    pub fn probe_items(&self) -> Vec<ContextMenuProbeItem> {
+        self.items
+            .iter()
+            .map(|item| match item {
+                Item::Separator => ContextMenuProbeItem {
+                    kind: "separator",
+                    label: String::new(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+                Item::Entry {
+                    label,
+                    danger,
+                    disabled,
+                    ..
+                } => ContextMenuProbeItem {
+                    kind: if *danger { "danger" } else { "item" },
+                    label: label.to_string(),
+                    disabled: *disabled,
+                    options: Vec::new(),
+                },
+                Item::Submenu {
+                    label,
+                    options,
+                    danger,
+                    ..
+                } => ContextMenuProbeItem {
+                    kind: if *danger { "danger_submenu" } else { "submenu" },
+                    label: label.to_string(),
+                    disabled: false,
+                    options: options
+                        .iter()
+                        .map(|option| (option.value, option.label.to_string()))
+                        .collect(),
+                },
+                Item::Checkbox { label, checked, .. } => ContextMenuProbeItem {
+                    kind: if *checked {
+                        "checkbox_on"
+                    } else {
+                        "checkbox_off"
+                    },
+                    label: label.to_string(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+                Item::ReactionSubmenu { label, .. } => ContextMenuProbeItem {
+                    kind: "reaction_submenu",
+                    label: label.to_string(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
+            })
+            .collect()
+    }
+
+    pub fn probe_activate(
+        &self,
+        index: usize,
+        value: Option<i32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        self.probe_invoke(index, value, window, cx)?;
+        if let Some(dismiss) = &self.on_dismiss {
+            dismiss(window, cx);
+        }
+        Ok(())
+    }
+
+    fn probe_invoke(
+        &self,
+        index: usize,
+        value: Option<i32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        let item = self
+            .items
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+        match item {
+            Item::Entry {
+                disabled, on_click, ..
+            } => {
+                if *disabled {
+                    anyhow::bail!("menu item at index {index} is disabled");
+                }
+                on_click(window, cx);
+                Ok(())
+            }
+            Item::Checkbox { on_click, .. } => {
+                on_click(window, cx);
+                Ok(())
+            }
+            Item::Submenu {
+                options,
+                on_open,
+                on_select,
+                on_parent_click,
+                ..
+            } => {
+                let Some(value) = value else {
+                    match on_parent_click {
+                        Some(on_parent_click) => on_parent_click(window, cx),
+                        None => on_open(window, cx),
+                    }
+                    return Ok(());
+                };
+                if !options.iter().any(|option| option.value == value) {
+                    anyhow::bail!(
+                        "submenu at index {index} has no option {value}; expected one of {:?}",
+                        options.iter().map(|o| o.value).collect::<Vec<_>>()
+                    );
+                }
+                on_select(value, window, cx);
+                Ok(())
+            }
+            Item::Separator => anyhow::bail!("menu item at index {index} is a separator"),
+            Item::ReactionSubmenu { .. } => {
+                anyhow::bail!("menu item at index {index} is the reaction submenu")
+            }
+        }
+    }
+}
+
 impl RenderOnce for ContextMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
@@ -342,6 +510,27 @@ impl RenderOnce for ContextMenu {
         let brand = theme.brand;
         let dismiss = self.on_dismiss.clone();
         let on_reaction_close = self.on_reaction_close;
+        let on_submenu_close = self.on_submenu_close;
+        let flyout_open = self.items.iter().any(|item| {
+            matches!(
+                item,
+                Item::Submenu { open: true, .. } | Item::ReactionSubmenu { open: true, .. }
+            )
+        });
+        let close_open_flyouts: Option<MenuHandler> = (flyout_open
+            && (on_reaction_close.is_some() || on_submenu_close.is_some()))
+        .then(|| {
+            let on_reaction_close = on_reaction_close.clone();
+            let on_submenu_close = on_submenu_close.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                if let Some(close) = &on_reaction_close {
+                    close(window, cx);
+                }
+                if let Some(close) = &on_submenu_close {
+                    close(window, cx);
+                }
+            }) as MenuHandler
+        });
         let on_quick_reaction = self.on_quick_reaction;
         // Flip the reaction submenu to the left of the menu when it would overflow
         // the window's right edge.
@@ -465,7 +654,7 @@ impl RenderOnce for ContextMenu {
                                     }
                                 })
                             })
-                            .when_some(on_reaction_close.clone(), |row, close| {
+                            .when_some(close_open_flyouts.clone(), |row, close| {
                                 row.on_hover(move |hovered, window, cx| {
                                     if *hovered {
                                         close(window, cx);
@@ -504,17 +693,15 @@ impl RenderOnce for ContextMenu {
                     sub_text,
                     options,
                     open,
+                    danger: is_danger,
                     on_open,
                     on_select,
                     on_parent_click,
                 } => {
                     let dismiss = dismiss.clone();
+                    let parent_label_color = if is_danger { danger_text } else { text };
                     let submenu = if open {
                         let mut sub = v_flex()
-                            .absolute()
-                            .top(px(-6.))
-                            .when(submenu_open_left, |el| el.right(relative(1.)).mr(px(4.)))
-                            .when(!submenu_open_left, |el| el.left(relative(1.)).ml(px(4.)))
                             .w(px(SUBMENU_WIDTH))
                             .p(px(6.))
                             .rounded_md()
@@ -559,7 +746,25 @@ impl RenderOnce for ContextMenu {
                                     }),
                             );
                         }
-                        Some(sub)
+                        Some(
+                            div()
+                                .absolute()
+                                .top(px(-6.))
+                                .w_0()
+                                .h_0()
+                                .when(submenu_open_left, |el| el.right(relative(1.)).mr(px(4.)))
+                                .when(!submenu_open_left, |el| el.left(relative(1.)).ml(px(4.)))
+                                .child(
+                                    anchored()
+                                        .anchor(if submenu_open_left {
+                                            Anchor::TopRight
+                                        } else {
+                                            Anchor::TopLeft
+                                        })
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(sub),
+                                ),
+                        )
                     } else {
                         None
                     };
@@ -585,12 +790,24 @@ impl RenderOnce for ContextMenu {
                             .py(px(8.))
                             .rounded(px(4.))
                             .text_sm()
-                            .text_color(text)
+                            .text_color(parent_label_color)
                             .cursor_pointer()
-                            .hover(|s| s.bg(hover))
-                            .on_hover(move |hovered, window, cx| {
-                                if *hovered {
-                                    on_open(window, cx);
+                            .hover(|s| {
+                                if is_danger {
+                                    s.bg(danger_hover_bg)
+                                } else {
+                                    s.bg(hover)
+                                }
+                            })
+                            .on_hover({
+                                let close = close_open_flyouts.clone();
+                                move |hovered, window, cx| {
+                                    if *hovered {
+                                        if !open && let Some(close) = &close {
+                                            close(window, cx);
+                                        }
+                                        on_open(window, cx);
+                                    }
                                 }
                             })
                             .when_some(on_parent_click, |row, on_parent_click| {
@@ -625,6 +842,13 @@ impl RenderOnce for ContextMenu {
                             .text_color(text)
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
+                            .when_some(close_open_flyouts.clone(), |row, close| {
+                                row.on_hover(move |hovered, window, cx| {
+                                    if *hovered {
+                                        close(window, cx);
+                                    }
+                                })
+                            })
                             .child(
                                 div()
                                     .w(px(16.))
@@ -773,9 +997,15 @@ impl RenderOnce for ContextMenu {
                             .text_color(text)
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
-                            .on_hover(move |hovered, window, cx| {
-                                if *hovered {
-                                    on_open(window, cx);
+                            .on_hover({
+                                let close = close_open_flyouts.clone();
+                                move |hovered, window, cx| {
+                                    if *hovered {
+                                        if !open && let Some(close) = &close {
+                                            close(window, cx);
+                                        }
+                                        on_open(window, cx);
+                                    }
                                 }
                             })
                             .child(div().flex_1().child(label))
