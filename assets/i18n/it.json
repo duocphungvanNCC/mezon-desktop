@@ -1173,6 +1173,7 @@
   "clanIntegrationsSetting.webhooksEdit.copy": "Copia",
   "clanIntegrationsSetting.webhooksEdit.delete": "Elimina",
   "clanIntegrationsSetting.webhooksEdit.deleteCaptionHook": "Elimina {{webhookName}}",
+  "clanIntegrationsSetting.webhooksEdit.deleteWebhook": "Elimina Webhook",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation": "Sei sicuro di voler eliminare il webhook {{webhookName}}? Questa azione non può essere annullata.",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookTitle": "Elimina {{webhookName}}",
   "clanIntegrationsSetting.webhooksEdit.name": "Nome webhook",

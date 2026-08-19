@@ -1173,6 +1173,7 @@
   "clanIntegrationsSetting.webhooksEdit.copy": "Kopiera",
   "clanIntegrationsSetting.webhooksEdit.delete": "Ta bort",
   "clanIntegrationsSetting.webhooksEdit.deleteCaptionHook": "Ta bort {{webhookName}}",
+  "clanIntegrationsSetting.webhooksEdit.deleteWebhook": "Ta bort Webhook",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation": "Är du säker på att du vill ta bort {{webhookName}}? Denna åtgärd kan inte ångras.",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookTitle": "Ta bort {{webhookName}}",
   "clanIntegrationsSetting.webhooksEdit.name": "Webhook namn",

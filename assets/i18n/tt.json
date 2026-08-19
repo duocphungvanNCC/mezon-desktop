@@ -1180,6 +1180,7 @@
   "clanIntegrationsSetting.webhooksEdit.copy": "Күчерү",
   "clanIntegrationsSetting.webhooksEdit.delete": "Бетерү",
   "clanIntegrationsSetting.webhooksEdit.deleteCaptionHook": "Башлык ачкычын бетерү",
+  "clanIntegrationsSetting.webhooksEdit.deleteWebhook": "Вебхукны бетерү",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation": "Зинһар, {{webhookName}} вебхукын бетерәсегез килүен раслагыз? Бу гамәлне кире кайтарып булмый.",
   "clanIntegrationsSetting.webhooksEdit.name": "Вебхук исеме",
   "clanIntegrationsSetting.webhooksEdit.nameLabel": "Исеме",

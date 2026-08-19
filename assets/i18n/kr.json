@@ -1166,6 +1166,7 @@
   "clanIntegrationsSetting.webhooksEdit.copy": "복사",
   "clanIntegrationsSetting.webhooksEdit.delete": "삭제",
   "clanIntegrationsSetting.webhooksEdit.deleteCaptionHook": "{{webhookName}} 삭제",
+  "clanIntegrationsSetting.webhooksEdit.deleteWebhook": "웹훅 삭제",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation": "{{webhookName}} 웹훅을 삭제하시겠습니까? 이 작업은 되돌릴 수 있습니다.",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookTitle": "{{webhookName}} 삭제",
   "clanIntegrationsSetting.webhooksEdit.name": "웹훅 이름",

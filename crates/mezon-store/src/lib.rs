@@ -236,7 +236,7 @@ pub use wallet::{
 };
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
-    WebhookStore,
+    WebhookStore, webhook_name_is_valid,
 };
 pub use winstore_update::{
     WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,

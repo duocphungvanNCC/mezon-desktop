@@ -67,6 +67,7 @@ pub enum RealtimeKind {
     TokenSent,
     RoleEvent,
     WebrtcSignaling,
+    Webhook,
 }
 
 impl RealtimeKind {
@@ -120,6 +121,7 @@ impl RealtimeKind {
             RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
+            RealtimeEvent::Webhook(_) => Self::Webhook,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             _ => return None,
@@ -322,6 +324,14 @@ mod tests {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::TokenSent(api::TokenSentEvent::default())),
             Some(RealtimeKind::TokenSent)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_webhook() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::Webhook(api::Webhook::default())),
+            Some(RealtimeKind::Webhook)
         );
     }
 

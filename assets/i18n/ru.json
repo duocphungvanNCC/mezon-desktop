@@ -1181,6 +1181,7 @@
   "clanIntegrationsSetting.webhooksEdit.copy": "Копировать",
   "clanIntegrationsSetting.webhooksEdit.delete": "Удалить",
   "clanIntegrationsSetting.webhooksEdit.deleteCaptionHook": "Удалить {{webhookName}}",
+  "clanIntegrationsSetting.webhooksEdit.deleteWebhook": "Удалить вебхук",
   "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation": "Пожалуйста, подтвердите, хотите ли Вы удалить веб-хук {{webhookName}}? Это действие не может быть отменено.",
   "clanIntegrationsSetting.webhooksEdit.name": "Название вебхука",
   "clanIntegrationsSetting.webhooksEdit.nameLabel": "Название",
