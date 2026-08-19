@@ -2761,6 +2761,7 @@
   "integrations.createClanWebhook": "Создать вебхук клана",
   "integrations.createWebhook": "Создать вебхук",
   "integrations.description": "Откастомизируйте свой клан с помощью интеграций. Управляйте вебхуками, каналами с подпиской и приложениями.",
+  "integrations.discardChangesConfirm": "Отменить изменения?",
   "integrations.learnMore": "Узнайте больше об управлении интеграциями.",
   "integrations.learnMoreWebhook": "Узнать больше",
   "integrations.newClanWebhook": "Новый вебхук клана",

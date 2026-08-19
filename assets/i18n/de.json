@@ -2753,6 +2753,7 @@
   "integrations.createClanWebhook": "Clan-Webhook erstellen",
   "integrations.createWebhook": "Webhook erstellen",
   "integrations.description": "Personalisiere deinen Clan mit Integrationsfunktionen. Verwalte Webhooks, gefolgte Kanäle und Apps, integriere externe Systeme und automatisiere Benachrichtigungsprozesse in Mezon.",
+  "integrations.discardChangesConfirm": "Änderungen verwerfen?",
   "integrations.learnMore": "Erfahre mehr über die Verwaltung von Integrationen.",
   "integrations.learnMoreWebhook": "Mehr erfahren",
   "integrations.newClanWebhook": "Neuer Clan-Webhook",

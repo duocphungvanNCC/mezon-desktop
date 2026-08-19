@@ -2753,6 +2753,7 @@
   "integrations.createClanWebhook": "Criar Webhook do Clã",
   "integrations.createWebhook": "Criar Webhook",
   "integrations.description": "Personalize seu clã com recursos de integração. Gerencie webhooks, canais e aplicativos monitorados, integre sistemas externos e automatize processos de notificação no Mezon.",
+  "integrations.discardChangesConfirm": "Descartar alterações?",
   "integrations.learnMore": "Saiba mais sobre o gerenciamento de integrações.",
   "integrations.learnMoreWebhook": "Saiba mais",
   "integrations.newClanWebhook": "Novo Webhook do Clã",

@@ -2325,6 +2325,7 @@
   "integrations.createClanWebhook": "Клан вебхукы булдыру",
   "integrations.createWebhook": "Вебхук булдыру",
   "integrations.description": "Интеграцияләр ярдәмендә кланыгызны персонализацияләгез. Вебхуклар, язылу каналлары һәм кушымталар белән идарә итегез.",
+  "integrations.discardChangesConfirm": "Үзгәрешләрне кире кагыргамы?",
   "integrations.learnMore": "Интеграцияләр белән идарә итү турында күбрәк белү.",
   "integrations.learnMoreWebhook": "Күбрәк белү",
   "integrations.newClanWebhook": "Яңа клан вебхукы",

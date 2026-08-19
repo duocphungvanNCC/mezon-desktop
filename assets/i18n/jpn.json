@@ -2753,6 +2753,7 @@
   "integrations.createClanWebhook": "クランWebhookを作成",
   "integrations.createWebhook": "Webhookを作成",
   "integrations.description": "統合機能でクランをカスタマイズしましょう。Webhook、トラッキングチャンネル、アプリを管理し、外部システムを統合し、Mezon内の通知プロセスを自動化します。",
+  "integrations.discardChangesConfirm": "変更を破棄しますか?",
   "integrations.learnMore": "統合管理について詳しく学ぶ。",
   "integrations.learnMoreWebhook": "詳しく学ぶ",
   "integrations.newClanWebhook": "新しいクランWebhook",

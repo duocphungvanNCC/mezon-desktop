@@ -2753,6 +2753,7 @@
   "integrations.createClanWebhook": "Skapa Clan Webhook",
   "integrations.createWebhook": "Skapa Webhook",
   "integrations.description": "Anpassa din clan med funktionsintegrationer. Hantera webhook, kanal-spårning och applikationer, integrera externa system och automatiska notisprocesser i Mezon.",
+  "integrations.discardChangesConfirm": "Ignorera ändringar?",
   "integrations.learnMore": "Läs mer om hantering av integrationer.",
   "integrations.learnMoreWebhook": "Läs mer",
   "integrations.newClanWebhook": "Ny Clan Webhook",

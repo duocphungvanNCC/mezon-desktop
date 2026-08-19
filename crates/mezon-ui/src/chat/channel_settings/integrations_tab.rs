@@ -3,17 +3,17 @@ use gpui::{
     Window, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ChannelWebhook, ClanId, ClanMembersStore,
-    PlatformStore, Settings, UserId, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent, WebhookStore,
-    webhook_name_is_valid,
+    AppConfig, ChannelId, ChannelList, ChannelType, ChannelWebhook, ClanId, ClanMembersEvent,
+    ClanMembersStore, PlatformStore, Settings, UserId, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
+    WebhookStore, webhook_name_is_valid,
 };
 
 use crate::app::shell::Shell;
 use crate::chat::message::format_i18n_full_date_from_seconds;
 use crate::clan::settings::{random_webhook_avatar, random_webhook_name, upload_webhook_avatar};
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size,
-    Spinner, h_flex, v_flex,
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Modal, Sizable,
+    Size, Spinner, h_flex, v_flex,
 };
 use crate::image_cache::shared_avatar_cache;
 use crate::theme::{ActiveTheme, Theme};
@@ -28,30 +28,30 @@ enum IntegrationsView {
     Webhooks,
 }
 
+enum PendingDiscard {
+    Collapse,
+    Expand(String),
+    OpenLanding,
+}
+
 #[derive(Clone)]
 struct ChannelOption {
     id: ChannelId,
     label: SharedString,
 }
 
+#[derive(Clone)]
 struct WebhookRow {
     id: String,
     name: String,
     avatar: String,
-    creator_id: UserId,
-    create_time_seconds: i64,
+    created_label: String,
 }
 
-impl WebhookRow {
-    fn from_webhook(webhook: &ChannelWebhook) -> Self {
-        Self {
-            id: webhook.id.clone(),
-            name: webhook.webhook_name.clone(),
-            avatar: webhook.avatar.clone(),
-            creator_id: webhook.creator_id,
-            create_time_seconds: webhook.create_time_seconds,
-        }
-    }
+struct EditBaseline {
+    name: String,
+    avatar: String,
+    channel_id: ChannelId,
 }
 
 pub struct IntegrationsTab {
@@ -68,6 +68,10 @@ pub struct IntegrationsTab {
     edit_input_sub: Option<Subscription>,
     channel_menu_open: bool,
     avatar_uploading: bool,
+    edit_baseline: Option<EditBaseline>,
+    rows: Vec<WebhookRow>,
+    channel_options: Vec<ChannelOption>,
+    discard_confirm: Option<PendingDiscard>,
     _subs: Vec<Subscription>,
 }
 
@@ -90,21 +94,33 @@ impl IntegrationsTab {
         let members = ClanMembersStore::global(cx);
         let channel_list = ChannelList::global(cx);
         let subs = vec![
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&channel_list, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |this, _, cx| {
+                this.rebuild_rows(cx);
+                cx.notify();
+            }),
+            cx.observe(&channel_list, |this, _, cx| {
+                this.rebuild_channel_options(cx);
+                cx.notify();
+            }),
             cx.subscribe(&webhook_store, |this, _, event, cx| {
                 if matches!(
                     event,
                     WebhookEvent::ChannelWebhooksChanged { clan_id } if *clan_id == this.clan_id
                 ) {
                     this.cleanup_stale_edit_state(cx);
+                    this.rebuild_rows(cx);
                     cx.notify();
                 }
             }),
-            cx.subscribe(&members, |_, _, _, cx| cx.notify()),
+            cx.subscribe(&members, |this, _, event: &ClanMembersEvent, cx| {
+                if event.clan_id() == this.clan_id {
+                    this.rebuild_rows(cx);
+                    cx.notify();
+                }
+            }),
         ];
 
-        Self {
+        let mut this = Self {
             clan_id,
             channel_id,
             settings,
@@ -118,21 +134,43 @@ impl IntegrationsTab {
             edit_input_sub: None,
             channel_menu_open: false,
             avatar_uploading: false,
+            edit_baseline: None,
+            rows: Vec::new(),
+            channel_options: Vec::new(),
+            discard_confirm: None,
             _subs: subs,
-        }
+        };
+        this.rebuild_rows(cx);
+        this.rebuild_channel_options(cx);
+        this
     }
 
     fn locale(&self, cx: &App) -> String {
         self.settings.read(cx).language.clone()
     }
 
-    fn webhook_rows(&self, cx: &App) -> Vec<WebhookRow> {
-        WebhookStore::global(cx)
+    fn rebuild_rows(&mut self, cx: &App) {
+        let locale = self.locale(cx);
+        self.rows = WebhookStore::global(cx)
             .read(cx)
             .channel_webhooks_for_channel(self.clan_id, self.channel_id)
             .into_iter()
-            .map(WebhookRow::from_webhook)
-            .collect()
+            .map(|webhook| {
+                let created =
+                    format_i18n_full_date_from_seconds(webhook.create_time_seconds, &locale);
+                let creator = self.creator_name(webhook.creator_id, cx);
+                let created_label =
+                    mezon_i18n::t(&locale, "clanIntegrationsSetting.webhooksItem.createdBy")
+                        .replace("{{webhookCreateTime}}", &created)
+                        .replace("{{webhookUserOwnerName}}", &creator);
+                WebhookRow {
+                    id: webhook.id.clone(),
+                    name: webhook.webhook_name.clone(),
+                    avatar: webhook.avatar.clone(),
+                    created_label,
+                }
+            })
+            .collect();
     }
 
     fn webhook_by_id(&self, webhook_id: &str, cx: &App) -> Option<ChannelWebhook> {
@@ -152,8 +190,8 @@ impl IntegrationsTab {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
-    fn channel_options(&self, cx: &App) -> Vec<ChannelOption> {
-        ChannelList::global(cx)
+    fn rebuild_channel_options(&mut self, cx: &App) {
+        self.channel_options = ChannelList::global(cx)
             .read(cx)
             .categories_for_clan(self.clan_id)
             .iter()
@@ -165,7 +203,7 @@ impl IntegrationsTab {
                 id: channel.id,
                 label: channel.name.clone().into(),
             })
-            .collect()
+            .collect();
     }
 
     fn open_webhooks(&mut self, cx: &mut Context<Self>) {
@@ -173,10 +211,8 @@ impl IntegrationsTab {
         cx.notify();
     }
 
-    fn open_landing(&mut self, cx: &mut Context<Self>) {
-        self.discard_edit_state();
-        self.view = IntegrationsView::Landing;
-        cx.notify();
+    fn open_landing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_discard(PendingDiscard::OpenLanding, window, cx);
     }
 
     fn discard_edit_state(&mut self) {
@@ -187,6 +223,54 @@ impl IntegrationsTab {
         self.edit_input_sub = None;
         self.channel_menu_open = false;
         self.avatar_uploading = false;
+        self.edit_baseline = None;
+        self.discard_confirm = None;
+    }
+
+    fn draft_matches_baseline(&self, cx: &App) -> bool {
+        let Some(baseline) = &self.edit_baseline else {
+            return false;
+        };
+        self.draft_name(cx).trim() == baseline.name.trim()
+            && self.edit_avatar.as_deref() == Some(baseline.avatar.as_str())
+            && self.edit_channel_id == Some(baseline.channel_id)
+    }
+
+    fn set_baseline_from_webhook(&mut self, webhook: &ChannelWebhook) {
+        self.edit_baseline = Some(EditBaseline {
+            name: webhook.webhook_name.clone(),
+            avatar: webhook.avatar.clone(),
+            channel_id: webhook.channel_id,
+        });
+    }
+
+    fn sync_editor_if_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(expanded_id) = self.expanded_id.clone() else {
+            return;
+        };
+        let Some(webhook) = self.webhook_by_id(&expanded_id, cx) else {
+            self.discard_edit_state();
+            return;
+        };
+        if !self.draft_matches_baseline(cx) {
+            return;
+        }
+        let already_synced = self.edit_baseline.as_ref().is_some_and(|baseline| {
+            baseline.name == webhook.webhook_name
+                && baseline.avatar == webhook.avatar
+                && baseline.channel_id == webhook.channel_id
+        });
+        if already_synced {
+            return;
+        }
+        if let Some(input) = self.edit_name.clone() {
+            input.update(cx, |state, cx| {
+                state.set_value(&webhook.webhook_name, window, cx);
+            });
+        }
+        self.edit_avatar = Some(webhook.avatar.clone());
+        self.edit_channel_id = Some(webhook.channel_id);
+        self.set_baseline_from_webhook(&webhook);
     }
 
     fn cleanup_stale_edit_state(&mut self, cx: &App) {
@@ -199,17 +283,63 @@ impl IntegrationsTab {
     }
 
     fn toggle_expand(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.expanded_id.as_ref() == Some(&id) {
-            self.discard_edit_state();
+        let pending = if self.expanded_id.as_ref() == Some(&id) {
+            PendingDiscard::Collapse
         } else {
-            self.discard_edit_state();
-            self.expanded_id = Some(id.clone());
-            self.ensure_edit_state(&id, window, cx);
-            if self.edit_name.is_none() {
+            PendingDiscard::Expand(id)
+        };
+        self.request_discard(pending, window, cx);
+    }
+
+    fn request_discard(
+        &mut self,
+        pending: PendingDiscard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_dirty(cx) {
+            self.discard_confirm = Some(pending);
+            cx.notify();
+            return;
+        }
+        self.apply_pending_discard(pending, window, cx);
+    }
+
+    fn apply_pending_discard(
+        &mut self,
+        pending: PendingDiscard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_confirm = None;
+        match pending {
+            PendingDiscard::Collapse => self.discard_edit_state(),
+            PendingDiscard::Expand(id) => {
                 self.discard_edit_state();
+                self.expanded_id = Some(id.clone());
+                self.ensure_edit_state(&id, window, cx);
+                if self.edit_name.is_none() {
+                    self.discard_edit_state();
+                }
+            }
+            PendingDiscard::OpenLanding => {
+                self.discard_edit_state();
+                self.view = IntegrationsView::Landing;
             }
         }
         cx.notify();
+    }
+
+    fn cancel_discard(&mut self, cx: &mut Context<Self>) {
+        self.discard_confirm = None;
+        cx.notify();
+    }
+
+    fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.discard_confirm.take() else {
+            return;
+        };
+        self.apply_pending_discard(pending, window, cx);
     }
 
     fn ensure_edit_state(&mut self, webhook_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -234,8 +364,9 @@ impl IntegrationsTab {
             }
         }));
         self.edit_name = Some(input);
-        self.edit_avatar = Some(webhook.avatar);
+        self.edit_avatar = Some(webhook.avatar.clone());
         self.edit_channel_id = Some(webhook.channel_id);
+        self.set_baseline_from_webhook(&webhook);
     }
 
     fn draft_name(&self, cx: &App) -> String {
@@ -283,9 +414,10 @@ impl IntegrationsTab {
                 state.set_value(&webhook.webhook_name, window, cx);
             });
         }
-        self.edit_avatar = Some(webhook.avatar);
+        self.edit_avatar = Some(webhook.avatar.clone());
         self.edit_channel_id = Some(webhook.channel_id);
         self.channel_menu_open = false;
+        self.set_baseline_from_webhook(&webhook);
         cx.notify();
     }
 
@@ -314,8 +446,17 @@ impl IntegrationsTab {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.saving = false;
-                if let Err(err) = result {
-                    Shell::global(cx).update(cx, |shell, cx| shell.error(err, cx));
+                match result {
+                    Ok(()) => {
+                        this.edit_baseline = Some(EditBaseline {
+                            name: this.draft_name(cx).trim().to_string(),
+                            avatar: this.edit_avatar.clone().unwrap_or_default(),
+                            channel_id: this.edit_channel_id.unwrap_or(this.channel_id),
+                        });
+                    }
+                    Err(err) => {
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(err, cx));
+                    }
                 }
                 cx.notify();
             });
@@ -477,6 +618,7 @@ impl IntegrationsTab {
             .rounded(px(8.0))
             .text_size(px(14.0))
             .font_weight(FontWeight::SEMIBOLD)
+            .gap_1()
             .bg(theme.brand)
             .text_color(theme.text_primary)
             .when(creating, |el| el.opacity(0.6))
@@ -511,6 +653,34 @@ impl IntegrationsTab {
                 }
             })
             .child(label)
+    }
+
+    fn render_discard_confirm(&self, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = mezon_i18n::t(locale, "integrations.discardChangesConfirm");
+        let entity = cx.entity();
+        Modal::new(title.clone())
+            .on_dismiss({
+                let entity = entity.clone();
+                move |_, cx| {
+                    entity.update(cx, |this, cx| this.cancel_discard(cx));
+                }
+            })
+            .action(
+                Button::new("channel-integrations-discard-cancel")
+                    .label(mezon_i18n::t(locale, "common.cancel"))
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.cancel_discard(cx);
+                    })),
+            )
+            .action(
+                Button::new("channel-integrations-discard-confirm")
+                    .label(title)
+                    .danger()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.confirm_discard(window, cx);
+                    })),
+            )
     }
 
     fn render_description_block(
@@ -563,9 +733,10 @@ impl IntegrationsTab {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary)
                     .when(on_webhooks, |el| {
-                        el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                            this.open_landing(cx);
-                        }))
+                        el.cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_landing(window, cx);
+                            }))
                     })
                     .child(mezon_i18n::t(locale, "integrations.title")),
             )
@@ -676,7 +847,7 @@ impl IntegrationsTab {
     }
 
     fn render_channel_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut options = self.channel_options(cx);
+        let mut options = self.channel_options.clone();
         let selected_id = self.edit_channel_id;
         if let Some(selected_id) = selected_id {
             options.sort_by_key(|option| if option.id == selected_id { 0 } else { 1 });
@@ -1035,12 +1206,7 @@ impl IntegrationsTab {
         let entity = cx.entity();
         let mut cards = Vec::new();
         for row in rows {
-            let created = format_i18n_full_date_from_seconds(row.create_time_seconds, locale);
-            let creator = self.creator_name(row.creator_id, cx);
-            let created_label =
-                mezon_i18n::t(locale, "clanIntegrationsSetting.webhooksItem.createdBy")
-                    .replace("{{webhookCreateTime}}", &created)
-                    .replace("{{webhookUserOwnerName}}", &creator);
+            let created_label = row.created_label.clone();
             let expanded = self.expanded_id.as_deref() == Some(row.id.as_str());
             let header_avatar = if expanded {
                 self.edit_avatar
@@ -1082,7 +1248,7 @@ impl IntegrationsTab {
                         .text_sm()
                         .text_color(theme.text_muted)
                         .py_4()
-                        .child(mezon_i18n::t(locale, "common.loading")),
+                        .child(mezon_i18n::t(locale, "root.loading")),
                 )
             })
             .when(!loading && rows.is_empty(), |el| {
@@ -1326,16 +1492,18 @@ pub fn render_channel_integrations_save_bar(
 }
 
 impl gpui::Render for IntegrationsTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_editor_if_clean(window, cx);
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
-        let rows = self.webhook_rows(cx);
+        let rows = self.rows.clone();
         let loading = WebhookStore::global(cx)
             .read(cx)
             .channel_webhooks_loading(self.clan_id);
 
         v_flex()
             .id("channel-integrations-tab")
+            .relative()
             .w_full()
             .when(self.should_show_save_bar(cx), |el| el.pb(px(72.0)))
             .child(self.render_title(&locale, &theme, cx))
@@ -1346,6 +1514,9 @@ impl gpui::Render for IntegrationsTab {
                 IntegrationsView::Webhooks => {
                     el.child(self.render_webhooks_list(&rows, loading, &locale, &theme, cx))
                 }
+            })
+            .when(self.discard_confirm.is_some(), |el| {
+                el.child(self.render_discard_confirm(&locale, cx))
             })
     }
 }
@@ -1387,6 +1558,34 @@ mod tests {
         assert_eq!(
             mezon_i18n::t("vi", "integrations.noWebhooks"),
             "Bạn chưa có webhook nào!"
+        );
+        for locale in [
+            "en", "vi", "ru", "es", "tt", "de", "it", "pt", "jpn", "kr", "swe",
+        ] {
+            let label = mezon_i18n::t(locale, "integrations.noWebhooks");
+            assert_ne!(label, "integrations.noWebhooks");
+            assert!(
+                !label.to_ascii_lowercase().contains("click here"),
+                "{locale} still has a create CTA: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn loading_uses_existing_root_key() {
+        assert_eq!(mezon_i18n::t("en", "root.loading"), "Loading...");
+        assert_ne!(mezon_i18n::t("vi", "root.loading"), "root.loading");
+    }
+
+    #[test]
+    fn discard_confirm_copy() {
+        assert_eq!(
+            mezon_i18n::t("vi", "integrations.discardChangesConfirm"),
+            "Bỏ thay đổi?"
+        );
+        assert_eq!(
+            mezon_i18n::t("en", "integrations.discardChangesConfirm"),
+            "Discard changes?"
         );
     }
 

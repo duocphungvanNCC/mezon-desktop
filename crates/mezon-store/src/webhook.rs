@@ -164,9 +164,13 @@ impl WebhookStore {
 
     fn refresh_after_lag(&mut self, cx: &mut Context<Self>) {
         self.invalidate();
-        let clan_ids: Vec<ClanId> = self.channel_cache.iter().map(|(id, _)| *id).collect();
-        for clan_id in clan_ids {
+        let channel_clan_ids: Vec<ClanId> = self.channel_cache.iter().map(|(id, _)| *id).collect();
+        for clan_id in channel_clan_ids {
             self.fetch_channel_webhooks(clan_id, cx);
+        }
+        let clan_webhook_ids: Vec<ClanId> = self.clan_cache.iter().map(|(id, _)| *id).collect();
+        for clan_id in clan_webhook_ids {
+            self.fetch_clan_webhooks(clan_id, cx);
         }
     }
 

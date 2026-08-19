@@ -2874,6 +2874,7 @@
   "integrations.createClanWebhook": "Tạo Webhook Clan",
   "integrations.createWebhook": "Tạo Webhook",
   "integrations.description": "Tùy chỉnh clan của bạn với các tính năng tích hợp. Quản lý webhook, các kênh và ứng dụng đã theo dõi, tích hợp các hệ thống bên ngoài và tự động hóa quy trình thông báo trong Mezon.",
+  "integrations.discardChangesConfirm": "Bỏ thay đổi?",
   "integrations.learnMore": "Tìm hiểu thêm về quản lý tích hợp.",
   "integrations.learnMoreWebhook": "Tìm hiểu thêm",
   "integrations.newClanWebhook": "Webhook Clan Mới",
