@@ -1016,6 +1016,31 @@ pub(super) fn keystroke_from_xkb(
     }
 }
 
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn key_char_from_keysym(keysym: Keysym) -> Option<String> {
+    let key_utf32 = xkb::keysym_to_utf32(keysym);
+    if key_utf32 < 32 || key_utf32 == 127 {
+        return None;
+    }
+    char::from_u32(key_utf32).map(String::from)
+}
+
+#[cfg(all(test, any(feature = "wayland", feature = "x11")))]
+mod key_char_from_keysym_tests {
+    use super::key_char_from_keysym;
+    use xkbcommon::xkb::Keysym;
+
+    #[test]
+    fn space_inserts_a_character() {
+        assert_eq!(key_char_from_keysym(Keysym::space).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn enter_is_not_a_character() {
+        assert_eq!(key_char_from_keysym(Keysym::Return), None);
+    }
+}
+
 /**
  * Returns which symbol the dead key represents
  * <https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_key_values#dead_keycodes_for_linux>

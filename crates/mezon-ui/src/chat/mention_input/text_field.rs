@@ -11,11 +11,11 @@ use blink_manager::CaretBlink;
 use gpui::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hsla, Image, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled, Subscription,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div, fill, point,
-    prelude::*, px, rgb, size,
+    FontWeight, GlobalElementId, Hsla, Image, ImeSurroundingText, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled,
+    Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div,
+    fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -30,8 +30,9 @@ use crate::components::primitives::text_actions::{
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    granularity_for_click, home_target, line_end, line_start, marked_caret_range,
+    next_word_boundary, previous_word_boundary, range_for_granularity, should_coalesce,
+    surrounding_delete_range,
 };
 
 const MASK: char = '\u{2022}';
@@ -371,6 +372,7 @@ impl MentionInputState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked_range = None;
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
@@ -1058,11 +1060,15 @@ impl EntityInputHandler for MentionInputState {
                 self.discard_ime_commit = None;
             }
         }
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        let range = if let Some(range_utf16) = range_utf16.as_ref() {
+            self.range_from_utf16(range_utf16)
+        } else if self.selected_range.start != self.selected_range.end {
+            self.selected_range.clone()
+        } else {
+            self.marked_range
+                .clone()
+                .unwrap_or_else(|| self.selected_range.clone())
+        };
         let range = self.clamp_range(range);
 
         let kind = if self.marked_range.is_some() {
@@ -1105,6 +1111,9 @@ impl EntityInputHandler for MentionInputState {
                 self.discard_ime_commit = None;
             }
         }
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -1123,11 +1132,8 @@ impl EntityInputHandler for MentionInputState {
         } else {
             self.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range =
+            marked_caret_range(range.start, new_text, new_selected_range_utf16.as_ref());
 
         self.pause_caret_blink(cx);
         cx.notify();
@@ -1183,6 +1189,41 @@ impl EntityInputHandler for MentionInputState {
     ) -> Option<usize> {
         self.last_bounds?;
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
+    }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        Some(ImeSurroundingText::from_selection(
+            &self.content,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        let range_utf16 = self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
     }
 }
 

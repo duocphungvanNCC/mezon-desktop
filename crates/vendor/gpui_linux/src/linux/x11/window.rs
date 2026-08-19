@@ -451,9 +451,7 @@ impl X11WindowState {
             None => {
                 let software = gpui_wgpu::gpu_is_software(&gpu_context);
                 if software {
-                    eprintln!(
-                        "[x11] software-only rendering detected; using the opaque visual"
-                    );
+                    eprintln!("[x11] software-only rendering detected; using the opaque visual");
                 }
                 software
             }
@@ -1213,14 +1211,18 @@ impl X11WindowStatePtr {
         }
     }
 
-    pub fn handle_ime_preedit(&self, text: String) {
+    pub fn handle_ime_preedit(
+        &self,
+        text: String,
+        new_selected_range: Option<std::ops::Range<usize>>,
+    ) {
         if self.is_blocked() {
             return;
         }
         let mut state = self.state.borrow_mut();
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
-            input_handler.replace_and_mark_text_in_range(None, &text, None);
+            input_handler.replace_and_mark_text_in_range(None, &text, new_selected_range);
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
             drop(state);
@@ -1253,6 +1255,46 @@ impl X11WindowStatePtr {
             }
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
+        }
+    }
+
+    pub fn has_text_selection(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let Some(mut input_handler) = state.input_handler.take() else {
+            return false;
+        };
+        drop(state);
+        let selected = input_handler.selected_text_range(true);
+        self.state.borrow_mut().input_handler = Some(input_handler);
+        selected.is_some_and(|selection| selection.range.start != selection.range.end)
+    }
+
+    pub fn get_ime_surrounding(&self) -> Option<gpui::ImeSurroundingText> {
+        let mut state = self.state.borrow_mut();
+        if let Some(mut input_handler) = state.input_handler.take() {
+            drop(state);
+            let surrounding = input_handler.surrounding_text();
+            self.state.borrow_mut().input_handler = Some(input_handler);
+            surrounding
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_ime_delete_surrounding(&self, before: usize, after: usize) {
+        if self.is_blocked() {
+            return;
+        }
+        let mut state = self.state.borrow_mut();
+        if let Some(mut input_handler) = state.input_handler.take() {
+            drop(state);
+            input_handler.delete_surrounding_text(before, after);
+            let mut state = self.state.borrow_mut();
+            state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
         }
     }
 
