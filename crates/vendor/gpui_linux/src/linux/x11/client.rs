@@ -44,14 +44,15 @@ use super::{
     ButtonOrScroll, ImEvent, ScrollDirection, X11Display, X11ImContext, X11WindowStatePtr,
     XcbAtoms, XimCallbackEvent, XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
-    get_reply, get_valuator_axis_index, handle_connection_error,
-    modifiers_from_state, pressed_button_from_mask, surrounding_char_delete_to_bytes, xcb_flush,
+    get_reply, get_valuator_axis_index, handle_connection_error, modifiers_from_state,
+    pressed_button_from_mask, surrounding_char_delete_to_bytes, xcb_flush,
 };
 
 use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
-    get_xkb_compose_state, is_within_click_distance, key_char_from_keysym, keystroke_from_xkb,
-    keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, open_uri_internal,
+    get_xkb_compose_state, is_within_click_distance, key_char_from_keysym, key_name_from_keysym,
+    keystroke_from_xkb, keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb,
+    open_uri_internal,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
     reveal_path_internal,
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
@@ -137,6 +138,7 @@ enum DbusImStatus {
     Live,
     Dead,
     Missing,
+    Unavailable,
 }
 
 fn shortcut_skips_ime(state: u32, keyval: u32) -> bool {
@@ -319,7 +321,7 @@ pub struct X11ClientState {
     pub(crate) xim_handler: Option<XimHandler>,
     pub(crate) im: Option<X11ImContext>,
     im_watch_token: Option<RegistrationToken>,
-    last_dbus_attempt: Option<Instant>,
+    dbus_unavailable: bool,
     dbus_im_focused: bool,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
@@ -390,7 +392,7 @@ impl X11ClientStatePtr {
             return;
         }
         let mut state = client.0.borrow_mut();
-        if state.ximc.is_none() {
+        if state.composing || state.ximc.is_none() {
             return;
         }
 
@@ -660,7 +662,7 @@ impl X11Client {
             xim_handler,
             im,
             im_watch_token: None,
-            last_dbus_attempt: None,
+            dbus_unavailable: false,
             dbus_im_focused: false,
 
             compose_state,
@@ -935,6 +937,7 @@ impl X11Client {
     }
 
     pub fn enable_ime(&self) {
+        self.0.borrow_mut().dbus_unavailable = false;
         if self.ensure_dbus_im() {
             if self.0.borrow().dbus_im_focused {
                 return;
@@ -1101,6 +1104,9 @@ impl X11Client {
         if shortcut_skips_ime(state, keyval) {
             if !is_release {
                 self.0.borrow_mut().composing = false;
+                if let Some(window) = self.get_window(window_id) {
+                    window.handle_ime_unmark();
+                }
             }
             return false;
         }
@@ -1115,7 +1121,9 @@ impl X11Client {
             return false;
         }
         if self.selection_owns_editing_key(window_id, keyval) {
-            self.0.borrow_mut().composing = false;
+            if !is_release {
+                self.reset_ime();
+            }
             return false;
         }
         let mut client_state = self.0.borrow_mut();
@@ -1195,36 +1203,24 @@ impl X11Client {
         }
     }
 
-    fn dbus_reconnect_ready(&self) -> bool {
-        const COOLDOWN: Duration = Duration::from_secs(2);
-        let state = self.0.borrow();
-        match state.last_dbus_attempt {
-            Some(at) if at.elapsed() < COOLDOWN => false,
-            _ => true,
-        }
-    }
-
     fn ensure_dbus_im(&self) -> bool {
         let status = {
             let state = self.0.borrow();
             match state.im.as_ref() {
                 Some(im) if im.is_dead() => DbusImStatus::Dead,
                 Some(_) => DbusImStatus::Live,
+                None if state.dbus_unavailable => DbusImStatus::Unavailable,
                 None => DbusImStatus::Missing,
             }
         };
         match status {
             DbusImStatus::Live => true,
+            DbusImStatus::Unavailable => false,
             DbusImStatus::Dead => {
                 self.drop_dbus_im();
                 self.reconnect_dbus_im()
             }
-            DbusImStatus::Missing => {
-                if !self.dbus_reconnect_ready() {
-                    return false;
-                }
-                self.reconnect_dbus_im()
-            }
+            DbusImStatus::Missing => self.reconnect_dbus_im(),
         }
     }
 
@@ -1240,9 +1236,9 @@ impl X11Client {
     }
 
     fn reconnect_dbus_im(&self) -> bool {
-        self.0.borrow_mut().last_dbus_attempt = Some(Instant::now());
         self.drop_dbus_im();
         let Some(im) = X11ImContext::connect() else {
+            self.0.borrow_mut().dbus_unavailable = true;
             return false;
         };
         let watch = im.watch_fd();
@@ -1253,8 +1249,10 @@ impl X11Client {
             state.im = Some(im);
         }
         if !self.install_im_watch(watch) {
+            self.0.borrow_mut().dbus_unavailable = true;
             return false;
         }
+        self.0.borrow_mut().dbus_unavailable = false;
         if self.0.borrow().keyboard_focused_window.is_some() {
             self.sync_dbus_im(None, true, false);
             self.0.borrow_mut().dbus_im_focused = true;
@@ -1321,23 +1319,12 @@ impl X11Client {
         true
     }
 
-    fn sync_surrounding_after_commit(&self, window: &X11WindowStatePtr) {
-        let mut state = self.0.borrow_mut();
-        let Some(im) = state.im.as_mut() else {
-            return;
-        };
-        if let Some(surrounding) = window.get_ime_surrounding() {
-            im.set_surrounding(&surrounding);
-        }
-    }
-
     fn apply_im_events(&self, window: &X11WindowStatePtr, events: Vec<ImEvent>) {
         for event in fold_im_events(events) {
             match event {
                 ImEvent::Commit(text) => {
                     self.0.borrow_mut().composing = false;
                     window.handle_ime_commit(text);
-                    self.sync_surrounding_after_commit(window);
                 }
                 ImEvent::HidePreedit => {
                     let composing = self.0.borrow().composing;
@@ -1381,7 +1368,7 @@ impl X11Client {
                     let keysym = xkbc::Keysym::new(keyval);
                     let keystroke = Keystroke {
                         modifiers,
-                        key: xkbc::keysym_get_name(keysym),
+                        key: key_name_from_keysym(keysym),
                         key_char: key_char_from_keysym(keysym),
                     };
                     if is_release {

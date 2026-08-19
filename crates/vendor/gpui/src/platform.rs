@@ -1515,11 +1515,14 @@ impl ImeSurroundingText {
         let mut start = floor_char_boundary(&text, cursor.saturating_sub(half));
         let mut end =
             ceil_char_boundary(&text, start.saturating_add(Self::MAX_LEN).min(text.len()));
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
+        if end - start > Self::MAX_LEN {
+            end = floor_char_boundary(&text, start.saturating_add(Self::MAX_LEN));
         }
         if end - start < Self::MAX_LEN && start > 0 {
             start = floor_char_boundary(&text, start.saturating_sub(Self::MAX_LEN - (end - start)));
+            if end - start > Self::MAX_LEN {
+                end = floor_char_boundary(&text, start.saturating_add(Self::MAX_LEN));
+            }
         }
         let cursor = cursor.saturating_sub(start).min(end - start);
         let anchor = anchor.saturating_sub(start).min(end - start);
@@ -2797,6 +2800,18 @@ mod tests {
             &surrounding.text.as_bytes()[surrounding.cursor - 3..surrounding.cursor],
             b"hoa"
         );
+    }
+
+    #[test]
+    fn ime_surrounding_window_never_exceeds_max_len_on_multibyte() {
+        let ch = "ế";
+        assert_eq!(ch.len(), 3);
+        let text = ch.repeat(2000);
+        let cursor = ch.len() * 1000;
+        let surrounding = ImeSurroundingText::from_document(&text, cursor, cursor, None);
+        assert!(surrounding.text.len() <= ImeSurroundingText::MAX_LEN);
+        assert!(surrounding.text.is_char_boundary(surrounding.cursor));
+        assert!(surrounding.text.is_char_boundary(surrounding.anchor));
     }
 
     #[test]

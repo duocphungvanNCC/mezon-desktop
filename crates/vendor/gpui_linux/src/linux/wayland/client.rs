@@ -426,7 +426,7 @@ impl WaylandClientStatePtr {
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
-        let Some(text_input) = state.text_input.take() else {
+        let Some(text_input) = state.text_input.clone() else {
             return;
         };
         let composing = state.composing || state.pre_edit_text.is_some();
@@ -452,7 +452,6 @@ impl WaylandClientStatePtr {
             );
             text_input.commit();
         }
-        client.borrow_mut().text_input = Some(text_input);
     }
 
     pub fn handle_keyboard_layout_change(&self) {

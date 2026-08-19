@@ -1139,6 +1139,9 @@ impl EntityInputHandler for InputState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<ImeSurroundingText> {
+        if self.masked {
+            return None;
+        }
         Some(ImeSurroundingText::from_selection(
             &self.content,
             self.selected_range.clone(),

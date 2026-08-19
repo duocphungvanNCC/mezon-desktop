@@ -24,6 +24,8 @@ const IBUS_DEST: &str = "org.freedesktop.IBus";
 const IBUS_PATH: &str = "/org/freedesktop/IBus";
 const IBUS_IFACE: &str = "org.freedesktop.IBus";
 const IBUS_IC_IFACE: &str = "org.freedesktop.IBus.InputContext";
+const IBUS_SERVICE_IFACE: &str = "org.freedesktop.IBus.Service";
+const DESTROY_TIMEOUT: Duration = Duration::from_millis(20);
 pub(crate) const IBUS_RELEASE_MASK: u32 = 1 << 30;
 
 const FCITX5_CAP_PREEDIT: u64 = 1 << 1;
@@ -252,8 +254,7 @@ impl X11ImContext {
                 Ok(filtered)
             }
             Err(error) => {
-                self.fail_count
-                    .set(self.fail_count.get().saturating_add(1));
+                self.fail_count.set(self.fail_count.get().saturating_add(1));
                 Err(error)
             }
         }
@@ -268,9 +269,9 @@ impl X11ImContext {
         time: u32,
     ) -> Result<bool, String> {
         match self.fcitx_key_mode.get() {
-            FcitxKeyMode::Batch => {
-                self.process_fcitx5_batch(keyval, keycode, state, is_release, time)
-            }
+            FcitxKeyMode::Batch => self
+                .process_fcitx5_batch(keyval, keycode, state, is_release, time)
+                .map_err(|error| error.to_string()),
             FcitxKeyMode::Single => {
                 self.process_fcitx5_single(keyval, keycode, state, is_release, time)
             }
@@ -280,10 +281,11 @@ impl X11ImContext {
                         self.fcitx_key_mode.set(FcitxKeyMode::Batch);
                         Ok(handled)
                     }
-                    Err(_) => {
+                    Err(error) if is_unknown_dbus_method(&error) => {
                         self.fcitx_key_mode.set(FcitxKeyMode::Single);
                         self.process_fcitx5_single(keyval, keycode, state, is_release, time)
                     }
+                    Err(error) => Err(error.to_string()),
                 }
             }
         }
@@ -296,15 +298,13 @@ impl X11ImContext {
         state: u32,
         is_release: bool,
         time: u32,
-    ) -> Result<bool, String> {
-        let (rows, handled): (Vec<(u32, Variant<Box<dyn RefArg>>)>, bool) = self
-            .proxy()
-            .method_call(
+    ) -> Result<bool, dbus::Error> {
+        let (rows, handled): (Vec<(u32, Variant<Box<dyn RefArg>>)>, bool) =
+            self.proxy().method_call(
                 FCITX5_IC_IFACE,
                 "ProcessKeyEventBatch",
                 (keyval, keycode, state, is_release, time),
-            )
-            .map_err(|error| error.to_string())?;
+            )?;
         let mut incoming = Vec::new();
         for (kind, variant) in rows {
             if let Some(event) = parse_fcitx5_batch_item(kind, variant.0.as_ref()) {
@@ -351,10 +351,15 @@ impl X11ImContext {
                 .map(|(): ()| ()),
             ImKind::IBus => self.set_ibus_surrounding(&surrounding.text, cursor, anchor),
         };
-        let _ = result;
+        self.note_result(result);
     }
 
-    fn set_ibus_surrounding(&self, text: &str, cursor: u32, anchor: u32) -> Result<(), dbus::Error> {
+    fn set_ibus_surrounding(
+        &self,
+        text: &str,
+        cursor: u32,
+        anchor: u32,
+    ) -> Result<(), dbus::Error> {
         match self.ibus_surrounding.get() {
             IbusSurroundingEnc::IBusText => self.call_ibus_surrounding_text(text, cursor, anchor),
             IbusSurroundingEnc::PlainVariant => {
@@ -366,13 +371,16 @@ impl X11ImContext {
                         self.ibus_surrounding.set(IbusSurroundingEnc::IBusText);
                         Ok(())
                     }
-                    Err(_) => {
+                    Err(error)
+                        if is_unknown_dbus_method(&error) || is_invalid_dbus_args(&error) =>
+                    {
                         let result = self.call_ibus_surrounding_plain(text, cursor, anchor);
                         if result.is_ok() {
                             self.ibus_surrounding.set(IbusSurroundingEnc::PlainVariant);
                         }
                         result
                     }
+                    Err(error) => Err(error),
                 }
             }
         }
@@ -423,15 +431,22 @@ impl X11ImContext {
     }
 
     pub(crate) fn focus_in(&self) {
-        let _ = self.call_void("FocusIn");
+        self.note_result(self.call_void("FocusIn"));
     }
 
     pub(crate) fn focus_out(&self) {
-        let _ = self.call_void("FocusOut");
+        self.note_result(self.call_void("FocusOut"));
     }
 
     pub(crate) fn reset(&self) {
-        let _ = self.call_void("Reset");
+        self.note_result(self.call_void("Reset"));
+    }
+
+    fn note_result<T, E>(&self, result: Result<T, E>) {
+        match result {
+            Ok(_) => self.fail_count.set(0),
+            Err(_) => self.fail_count.set(self.fail_count.get().saturating_add(1)),
+        }
     }
 
     fn call_void(&self, method: &str) -> Result<(), String> {
@@ -458,8 +473,26 @@ impl Drop for X11ImContext {
         for token in self.tokens.drain(..) {
             self.conn.stop_receive(token);
         }
-        let _ = self.call_void("DestroyIC");
+        let proxy = self
+            .conn
+            .with_proxy(&self.dest, self.path.clone(), DESTROY_TIMEOUT);
+        let _ = match self.kind {
+            ImKind::Fcitx5 => proxy.method_call::<(), _, _, _>(FCITX5_IC_IFACE, "DestroyIC", ()),
+            ImKind::IBus => proxy.method_call::<(), _, _, _>(IBUS_SERVICE_IFACE, "Destroy", ()),
+        };
     }
+}
+
+fn is_unknown_dbus_method(error: &dbus::Error) -> bool {
+    matches!(
+        error.name(),
+        Some("org.freedesktop.DBus.Error.UnknownMethod")
+            | Some("org.freedesktop.DBus.Error.UnknownInterface")
+    )
+}
+
+fn is_invalid_dbus_args(error: &dbus::Error) -> bool {
+    error.name() == Some("org.freedesktop.DBus.Error.InvalidArgs")
 }
 
 fn preferred_backends() -> Vec<ImKind> {
@@ -532,11 +565,8 @@ fn connect_fcitx5() -> Result<X11ImContext, String> {
         .method_call(FCITX5_IM_IFACE, "CreateInputContext", (args,))
         .map_err(|error| error.to_string())?;
     let ic = conn.with_proxy(FCITX5_DEST, path.clone(), CONNECT_TIMEOUT);
-    let _ = ic.method_call::<(), _, _, _>(
-        FCITX5_IC_IFACE,
-        "SetSupportedCapability",
-        (FCITX5_CAPS,),
-    );
+    let _ =
+        ic.method_call::<(), _, _, _>(FCITX5_IC_IFACE, "SetSupportedCapability", (FCITX5_CAPS,));
     ic.method_call::<(), _, _, _>(FCITX5_IC_IFACE, "SetCapability", (FCITX5_CAPS,))
         .map_err(|error| error.to_string())?;
     finish_context(conn, FCITX5_DEST.to_string(), path, ImKind::Fcitx5, watch)
@@ -935,10 +965,7 @@ fn parse_ibus_preedit(message: &Message) -> Option<ImEvent> {
     if !visible {
         return Some(ImEvent::HidePreedit);
     }
-    Some(ImEvent::Preedit {
-        text,
-        caret_chars,
-    })
+    Some(ImEvent::Preedit { text, caret_chars })
 }
 
 fn parse_ibus_hide_preedit(_message: &Message) -> Option<ImEvent> {
@@ -1083,10 +1110,7 @@ mod tests {
 
     #[test]
     fn env_ibus_is_tried_first_then_fcitx() {
-        assert_eq!(
-            backends_from_env_values("", "ibus", ""),
-            vec![ImKind::IBus]
-        );
+        assert_eq!(backends_from_env_values("", "ibus", ""), vec![ImKind::IBus]);
         assert_eq!(
             connect_order(&[ImKind::IBus]),
             vec![ImKind::IBus, ImKind::Fcitx5]
@@ -1131,7 +1155,10 @@ mod tests {
 
     #[test]
     fn extract_ibus_text_skips_type_names() {
-        assert_eq!(extract_ibus_string(&"hello".to_string()), Some("hello".into()));
+        assert_eq!(
+            extract_ibus_string(&"hello".to_string()),
+            Some("hello".into())
+        );
         assert_eq!(extract_ibus_string(&"IBusText".to_string()), None);
         let nested = (
             "IBusText".to_string(),
