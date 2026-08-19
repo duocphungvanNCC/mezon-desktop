@@ -14,7 +14,6 @@ use gpui::{
 use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
-mod coming_soon_modal;
 mod confirm_archive_channel_modal;
 mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
@@ -35,7 +34,6 @@ mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
-use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
@@ -315,31 +313,6 @@ impl Shell {
 
     pub fn command_palette_open(&self) -> bool {
         self.command_palette_open
-    }
-
-    /// Open a placeholder modal for a not-yet-implemented feature: the given `title` plus a
-    /// "coming soon" body and a close button.
-    pub fn show_coming_soon(
-        &mut self,
-        title: impl Into<SharedString>,
-        locale: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let message: SharedString = mezon_i18n::t(locale, "common.comingSoon")
-            .to_string()
-            .into();
-        let close_label: SharedString = mezon_i18n::t(locale, "common.close").to_string().into();
-        let title = title.into();
-        let view = cx.new(|cx| ComingSoonModal {
-            focus_handle: cx.focus_handle(),
-            title,
-            message,
-            close_label,
-        });
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        self.show_modal(view.into(), cx);
     }
 
     /// Confirm-then-delete a message (mirrors React's `ModalDeleteMess`): shown when the
