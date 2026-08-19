@@ -18,7 +18,6 @@ enum Relationship {
     Checking,
     CanChat,
     CanAdd,
-    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +76,7 @@ impl AddFriendPage {
             target: None,
             display_name: SharedString::default(),
             avatar_url: SharedString::default(),
-            relationship: Relationship::Unknown,
+            relationship: Relationship::CanAdd,
             qr_image: None,
             _subscriptions: subscriptions,
         };
@@ -135,7 +134,7 @@ impl AddFriendPage {
         );
 
         let Some(target) = self.target else {
-            self.relationship = Relationship::Unknown;
+            self.relationship = Relationship::CanAdd;
             return;
         };
         self.relationship = Relationship::Checking;
@@ -232,7 +231,6 @@ impl Render for AddFriendPage {
                 .disabled(adding)
                 .on_click(cx.listener(|this, _, _window, cx| this.add_friend(cx)))
                 .into_any_element(),
-            Relationship::Unknown => div().into_any_element(),
         };
 
         div()
