@@ -2369,6 +2369,10 @@ impl AppApi {
             .await
     }
 
+    pub async fn is_follower(&self, follow_id: i64) -> Result<bool> {
+        self.transport.is_follower(follow_id).await
+    }
+
     pub async fn delete_account(&self) -> Result<()> {
         self.transport.delete_account().await
     }

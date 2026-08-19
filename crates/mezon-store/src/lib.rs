@@ -33,6 +33,7 @@ pub mod gifts;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
+pub mod invite;
 pub mod login;
 pub mod message;
 pub mod message_search;
@@ -157,6 +158,7 @@ pub use gifts::{
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
+pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{

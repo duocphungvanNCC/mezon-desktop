@@ -976,13 +976,26 @@ fn direct_from_created(
     peer_username: &str,
 ) -> DirectChannel {
     let kind = DirectKind::from_raw(desc.channel_type);
+    let is_dm = matches!(kind, DirectKind::Dm);
     DirectChannel {
         id: ChannelId(desc.channel_id),
-        label: label.to_string(),
+        label: if is_dm {
+            label.to_string()
+        } else {
+            desc.channel_label.clone()
+        },
         kind,
-        avatar: peer_avatar.to_string(),
-        peer_user_id: Some(peer_user_id),
-        peer_username: peer_username.to_string(),
+        avatar: if is_dm {
+            peer_avatar.to_string()
+        } else {
+            String::new()
+        },
+        peer_user_id: is_dm.then_some(peer_user_id),
+        peer_username: if is_dm {
+            peer_username.to_string()
+        } else {
+            String::new()
+        },
         creator_id: if desc.creator_id == 0 {
             None
         } else {
@@ -1581,6 +1594,28 @@ mod tests {
         assert_eq!(group.member_count, 3);
         assert_eq!(group.label, "server-label");
         assert_eq!(group.creator_id, None);
+    }
+
+    #[test]
+    fn created_dm_keeps_the_caller_supplied_peer_identity() {
+        let desc = api_channel_desc(11, "server-label", 3, 2, 0);
+        let dm = direct_from_created(&desc, UserId(5), "Huy Le", "avatar.png", "huy4.dev");
+        assert_eq!(dm.kind, DirectKind::Dm);
+        assert_eq!(dm.label, "Huy Le");
+        assert_eq!(dm.avatar, "avatar.png");
+        assert_eq!(dm.peer_user_id, Some(UserId(5)));
+        assert_eq!(dm.peer_username, "huy4.dev");
+    }
+
+    #[test]
+    fn created_group_keeps_its_own_label_and_gains_no_peer() {
+        let desc = api_channel_desc(12, "thay tro cung nhau", 2, 5, 0);
+        let group = direct_from_created(&desc, UserId(5), "Huy Le", "avatar.png", "huy4.dev");
+        assert_eq!(group.kind, DirectKind::Group);
+        assert_eq!(group.label, "thay tro cung nhau");
+        assert!(group.avatar.is_empty());
+        assert_eq!(group.peer_user_id, None);
+        assert!(group.peer_username.is_empty());
     }
 
     #[test]
