@@ -2688,7 +2688,7 @@ impl AppApi {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<mezon_proto::realtime::VoiceInteractiveEvent>> {
         self.transport
             .write_voice_interactive_event(
                 clan_id,

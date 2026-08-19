@@ -78,6 +78,75 @@ struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEvent {
+    #[prost(int64, tag = "1")]
+    clan_id: i64,
+    #[prost(int64, tag = "2")]
+    voice_channel_id: i64,
+    #[prost(int64, tag = "3")]
+    user_id: i64,
+    #[prost(int32, tag = "4")]
+    event_type: i32,
+    #[prost(string, tag = "5")]
+    params: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEnvelope {
+    #[prost(int32, tag = "1")]
+    cid: i32,
+    #[prost(message, optional, tag = "100")]
+    voice_interactive_event: Option<LegacyVoiceInteractiveEvent>,
+}
+
+fn decode_realtime_envelope(payload: &[u8]) -> Result<realtime::Envelope, prost::DecodeError> {
+    match realtime::Envelope::decode(payload) {
+        Ok(envelope) => Ok(envelope),
+        Err(modern_error) => {
+            let Ok(legacy_envelope) = LegacyVoiceInteractiveEnvelope::decode(payload) else {
+                return Err(modern_error);
+            };
+            let Some(legacy) = legacy_envelope.voice_interactive_event else {
+                return Err(modern_error);
+            };
+            if legacy.event_type != 1 {
+                return Err(modern_error);
+            }
+            Ok(realtime::Envelope {
+                cid: legacy_envelope.cid,
+                message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                    realtime::VoiceInteractiveEvent {
+                        clan_id: legacy.clan_id,
+                        voice_channel_id: legacy.voice_channel_id,
+                        sender_id: legacy.user_id,
+                        receiver_id: 0,
+                        event_type: legacy.event_type,
+                        params: legacy.params,
+                    },
+                )),
+            })
+        }
+    }
+}
+
+fn decode_voice_interactive_response(
+    response: &[u8],
+) -> Result<Option<realtime::VoiceInteractiveEvent>> {
+    if response.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(envelope) = realtime::Envelope::decode(response)
+        && let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+    {
+        return Ok(Some(event));
+    }
+    if let Ok(event) = realtime::VoiceInteractiveEvent::decode(response) {
+        return Ok(Some(event));
+    }
+    anyhow::bail!("invalid VoiceInteractiveEvent CID response")
+}
+
 /// Represents real-time events pushed from the server.
 #[derive(Debug, Clone)]
 pub enum RealtimeEvent {
@@ -262,7 +331,7 @@ fn dispatch_realtime_push(
     payload: &[u8],
     on_event: &(dyn Fn(RealtimeEvent) + Send + Sync),
 ) {
-    match realtime::Envelope::decode(payload) {
+    match decode_realtime_envelope(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
@@ -4403,7 +4472,7 @@ impl MezonTransport {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<realtime::VoiceInteractiveEvent>> {
         let cid = self.generate_cid();
         tracing::debug!(
             target: "socket",
@@ -4431,13 +4500,7 @@ impl MezonTransport {
             event_type,
             "sending VoiceInteractiveEvent"
         );
-        let (code, response) = self
-            .send_with_timeout(
-                cid,
-                encode_envelope_cid_last(envelope),
-                Duration::from_millis(2000),
-            )
-            .await?;
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         tracing::info!(
             target: "socket",
             cid = i32::from(cid),
@@ -4448,7 +4511,7 @@ impl MezonTransport {
         if code != 0 {
             anyhow::bail!("write_voice_interactive_event error: code={code}");
         }
-        Ok(())
+        decode_voice_interactive_response(&response)
     }
 
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
@@ -9434,6 +9497,57 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_gift_event_keeps_original_wire_fields() {
+        let payload = LegacyVoiceInteractiveEnvelope {
+            cid: 0,
+            voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                clan_id: 10,
+                voice_channel_id: 20,
+                user_id: 30,
+                event_type: 1,
+                params: "gift-data".to_string(),
+            }),
+        }
+        .encode_to_vec();
+        let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+        let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+        else {
+            panic!("voice interactive event");
+        };
+        assert_eq!(event.sender_id, 30);
+        assert_eq!(event.receiver_id, 0);
+        assert_eq!(event.event_type, 1);
+        assert_eq!(event.params, "gift-data");
+    }
+
+    #[test]
+    fn voice_interactive_cid_response_returns_params() {
+        let expected = realtime::VoiceInteractiveEvent {
+            clan_id: 10,
+            voice_channel_id: 20,
+            sender_id: 30,
+            receiver_id: 30,
+            event_type: 10,
+            params: "signed-data".to_string(),
+        };
+        let decoded = decode_voice_interactive_response(&expected.encode_to_vec())
+            .expect("CID response")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                expected.clone(),
+            )),
+        };
+        let decoded = decode_voice_interactive_response(&envelope.encode_to_vec())
+            .expect("CID envelope")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        assert!(decode_voice_interactive_response(&[]).unwrap().is_none());
+    }
 
     #[test]
     fn a_null_blob_is_no_data_not_a_decode_error() {

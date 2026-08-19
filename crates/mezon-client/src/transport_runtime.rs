@@ -888,7 +888,7 @@ impl TransportClient {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<mezon_proto::realtime::VoiceInteractiveEvent>> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {

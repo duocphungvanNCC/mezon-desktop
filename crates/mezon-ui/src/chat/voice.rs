@@ -3,18 +3,18 @@ use std::sync::Arc;
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Entity, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage,
-    TransformationMatrix, Window, canvas, deferred, div, img, point, prelude::*, px, radians,
-    relative, rgb,
+    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce,
+    Rgba, ScrollHandle, SharedString, StyledImage, TransformationMatrix, Window, canvas, deferred,
+    div, img, point, prelude::*, px, radians, relative, rgb,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
     DeviceMenuKind, DisplayedFlower, DisplayedReaction, FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE,
     FLOWER_SPRITE_COUNT, FlowerParticle, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
     PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
-    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
-    flower_menu_blocked, flower_particle_pose,
+    VoiceInteractiveEventType, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore,
+    WalletStore, flower_menu_blocked, flower_particle_pose,
 };
 
 use crate::ChatLayout;
@@ -3125,34 +3125,24 @@ fn control_bar(
     };
 
     let interactive_app_button = {
-        let menu_position = store.interactive_app_menu_position();
-        let voice_for_click = voice.clone();
-        let button = circle_button(
-            "voice-interactive-app-btn",
-            neutral_bg,
+        let button = InteractiveAppTrigger::new(
+            neutral_bg.into(),
             neutral_hover,
-            IconName::Joystick,
-            theme.text_muted,
-        )
-        .tooltip(Tooltip::text(mezon_i18n::t(
-            locale,
-            "channelVoice.openInteractiveApp",
-        )))
-        .on_click(move |event, _, cx| {
-            voice_for_click.update(cx, |store, cx| {
-                let position = event.position();
-                store.toggle_interactive_app_menu(
-                    point(position.x - px(110.), position.y - px(160.)),
-                    cx,
-                )
-            });
-        });
-        div()
-            .relative()
-            .child(button)
-            .children(menu_position.map(|position| {
-                context_menu_at(position, interactive_app_menu(voice)).into_any_element()
-            }))
+            theme.text_muted.into(),
+            mezon_i18n::t(locale, "channelVoice.openInteractiveApp"),
+        );
+        let voice = voice.clone();
+        let locale = locale.to_string();
+        PopoverMenu::new("voice-interactive-app-popover")
+            .anchor(Anchor::BottomLeft)
+            .attach(Anchor::TopLeft)
+            .offset(point(px(0.), -px(4.)))
+            .menu(move |window, cx| {
+                Some(cx.new(|cx| {
+                    InteractiveAppPopoverPanel::new(voice.clone(), locale.clone(), window, cx)
+                }))
+            })
+            .trigger(button)
     };
 
     let record_button = can_record.then(|| {
@@ -3481,28 +3471,155 @@ fn circle_button(
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color.into()))
 }
 
-fn interactive_app_menu(voice: &Entity<VoiceStore>) -> ContextMenu {
-    let dismiss = {
-        let voice = voice.clone();
-        move |_window: &mut Window, cx: &mut App| {
-            voice.update(cx, |store, cx| store.close_interactive_app_menu(cx));
+#[derive(IntoElement)]
+struct InteractiveAppTrigger {
+    open: bool,
+    bg: Hsla,
+    bg_hover: Hsla,
+    icon_color: Hsla,
+    label: SharedString,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl InteractiveAppTrigger {
+    fn new(bg: Hsla, bg_hover: Hsla, icon_color: Hsla, label: impl Into<SharedString>) -> Self {
+        Self {
+            open: false,
+            bg,
+            bg_hover,
+            icon_color,
+            label: label.into(),
+            on_click: None,
         }
-    };
-    [
-        ("Quiz", VoiceInteractiveApp::Quiz),
-        ("Blackboard", VoiceInteractiveApp::Blackboard),
-        ("Interactive", VoiceInteractiveApp::Interactive),
-    ]
-    .into_iter()
-    .fold(
-        ContextMenu::new().on_dismiss(dismiss),
-        |menu, (label, app)| {
-            let voice = voice.clone();
-            menu.item(label.to_string(), move |_, cx| {
-                voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
-            })
-        },
-    )
+    }
+}
+
+impl Toggleable for InteractiveAppTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for InteractiveAppTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for InteractiveAppTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = div()
+            .id("voice-interactive-app-btn")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(44.))
+            .h(px(44.))
+            .rounded_full()
+            .bg(if self.open { self.bg_hover } else { self.bg })
+            .cursor_pointer()
+            .hover(move |style| style.bg(self.bg_hover))
+            .tooltip(Tooltip::text(self.label))
+            .child(
+                Icon::new(IconName::Joystick)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            );
+        if let Some(on_click) = self.on_click {
+            button = button.on_click(on_click);
+        }
+        button
+    }
+}
+
+struct InteractiveAppPopoverPanel {
+    voice: Entity<VoiceStore>,
+    locale: String,
+    focus_handle: FocusHandle,
+}
+
+impl InteractiveAppPopoverPanel {
+    fn new(
+        voice: Entity<VoiceStore>,
+        locale: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
+            .detach();
+        Self {
+            voice,
+            locale,
+            focus_handle,
+        }
+    }
+}
+
+impl Focusable for InteractiveAppPopoverPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for InteractiveAppPopoverPanel {}
+
+impl Render for InteractiveAppPopoverPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = &cx.theme().tokens;
+        let mut menu = div()
+            .key_context("menu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .flex()
+            .flex_col()
+            .w(px(240.))
+            .p(px(6.))
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .shadow_lg();
+        for (key, app) in [
+            (
+                "channelVoice.interactiveApp.quiz",
+                VoiceInteractiveEventType::AppQuiz,
+            ),
+            (
+                "channelVoice.interactiveApp.blackboard",
+                VoiceInteractiveEventType::AppBlackboard,
+            ),
+            (
+                "channelVoice.interactiveApp.interactive",
+                VoiceInteractiveEventType::AppInteractive,
+            ),
+        ] {
+            let voice = self.voice.clone();
+            menu = menu.child(
+                div()
+                    .id(key)
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(4.))
+                    .text_sm()
+                    .text_color(tokens.text_theme_message)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(tokens.bg_item_hover))
+                    .child(mezon_i18n::t(&self.locale, key).to_string())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
+                        cx.emit(DismissEvent);
+                    })),
+            );
+        }
+        menu
+    }
 }
 
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {
