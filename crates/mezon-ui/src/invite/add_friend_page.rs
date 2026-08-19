@@ -161,11 +161,8 @@ impl AddFriendPage {
         let Some(store) = DirectMessageStore::try_global(cx) else {
             return;
         };
-        let label = self.display_name.to_string();
-        let avatar = self.avatar_url.to_string();
-        let username = self.username.clone();
         let task = store.update(cx, |store, cx| {
-            store.create_dm_with_user(target, label, avatar, username, cx)
+            store.create_dm_with_user(target, String::new(), String::new(), String::new(), cx)
         });
         cx.spawn(async move |_, cx| match task.await {
             Ok((channel_id, channel_type)) => {
