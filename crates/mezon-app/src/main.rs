@@ -81,6 +81,9 @@ fn configure_linux_session() {
         return;
     }
     if std::env::var_os("DISPLAY").is_none() {
+        if linux_session_override().is_some_and(|value| value.eq_ignore_ascii_case("x11")) {
+            tracing::warn!("MEZON_LINUX_SESSION=x11 ignored: DISPLAY is unset");
+        }
         return;
     }
     ensure_linux_ui_scale_factor();

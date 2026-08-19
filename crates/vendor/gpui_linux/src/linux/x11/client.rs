@@ -1050,7 +1050,7 @@ impl X11Client {
     }
 
     fn try_dbus_im_event(&self, event: &Event) -> bool {
-        let (keyval, keycode, state, is_release, time, window_id) = match event {
+        let (keyval, keycode, state, is_release, time, window_id, is_modifier) = match event {
             Event::KeyPress(key) => {
                 if self.0.borrow().im.is_none() && !self.ensure_dbus_im() {
                     return false;
@@ -1061,9 +1061,6 @@ impl X11Client {
                 }
                 let code = key.detail.into();
                 let keysym = client_state.xkb.key_get_one_sym(code);
-                if keysym.is_modifier_key() {
-                    return false;
-                }
                 (
                     keysym.raw(),
                     u32::from(key.detail),
@@ -1071,6 +1068,7 @@ impl X11Client {
                     false,
                     key.time,
                     key.event,
+                    keysym.is_modifier_key(),
                 )
             }
             Event::KeyRelease(key) => {
@@ -1083,9 +1081,6 @@ impl X11Client {
                 }
                 let code = key.detail.into();
                 let keysym = client_state.xkb.key_get_one_sym(code);
-                if keysym.is_modifier_key() {
-                    return false;
-                }
                 (
                     keysym.raw(),
                     u32::from(key.detail),
@@ -1093,6 +1088,7 @@ impl X11Client {
                     true,
                     key.time,
                     key.event,
+                    keysym.is_modifier_key(),
                 )
             }
             _ => return false,
@@ -1111,7 +1107,7 @@ impl X11Client {
             return false;
         }
         let composing = self.0.borrow().composing;
-        if is_release && !composing {
+        if is_release && !composing && !is_modifier {
             return false;
         }
         if navigation_skips_ime(keyval) && !composing {
@@ -1300,13 +1296,19 @@ impl X11Client {
         }
         let window = window_id.and_then(|id| self.get_window(id));
         if let Some(bounds) = bounds {
-            let scaled = bounds.scale(scale);
-            im.set_cursor_rect(
-                scaled.origin.x.0.round() as i32,
-                scaled.origin.y.0.round() as i32,
-                scaled.size.width.0.round().max(1.0) as i32,
-                scaled.size.height.0.round().max(1.0) as i32,
-            );
+            if let Some(window) = window.as_ref()
+                && let Some((x, y, width, height)) = window.ime_cursor_root_rect_from_bounds(bounds)
+            {
+                im.set_cursor_rect(x, y, width, height);
+            } else {
+                let scaled = bounds.scale(scale);
+                im.set_cursor_rect(
+                    scaled.origin.x.0.round() as i32,
+                    scaled.origin.y.0.round() as i32,
+                    scaled.size.width.0.round().max(1.0) as i32,
+                    scaled.size.height.0.round().max(1.0) as i32,
+                );
+            }
         }
         if sync_surrounding
             && !composing
@@ -1388,15 +1390,10 @@ impl X11Client {
                 im.set_surrounding(&surrounding);
             }
         }
-        if let Some(area) = window.get_ime_area()
+        if let Some((x, y, width, height)) = window.ime_cursor_root_rect()
             && let Some(im) = self.0.borrow_mut().im.as_mut()
         {
-            im.set_cursor_rect(
-                area.origin.x.0.round() as i32,
-                area.origin.y.0.round() as i32,
-                area.size.width.0.round().max(1.0) as i32,
-                area.size.height.0.round().max(1.0) as i32,
-            );
+            im.set_cursor_rect(x, y, width, height);
         }
     }
 
@@ -1617,8 +1614,9 @@ impl X11Client {
                     state.restore_xim(ximc, xim_handler);
                 }
                 drop(state);
+                self.drain_dbus_im();
                 self.reset_ime();
-                window.handle_ime_delete();
+                window.handle_ime_unmark();
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
                 let mut state = self.0.borrow_mut();
@@ -2103,7 +2101,7 @@ impl X11Client {
         let mut state = self.0.borrow_mut();
         state.composing = false;
         if let Some(handler) = state.xim_handler.as_mut() {
-            handler.remember_applied(&text);
+            handler.clear_applied();
         }
         drop(state);
         window.handle_ime_commit(text);

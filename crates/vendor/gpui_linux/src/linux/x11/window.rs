@@ -1311,6 +1311,51 @@ impl X11WindowStatePtr {
         None
     }
 
+    pub fn ime_cursor_root_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        let area = self.get_ime_area()?;
+        self.translate_scaled_origin_to_root(
+            area.origin.x.0,
+            area.origin.y.0,
+            area.size.width.0,
+            area.size.height.0,
+        )
+    }
+
+    pub fn ime_cursor_root_rect_from_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let scale = self.state.borrow().scale_factor;
+        self.translate_scaled_origin_to_root(
+            f32::from(bounds.origin.x) * scale,
+            f32::from(bounds.origin.y) * scale,
+            f32::from(bounds.size.width) * scale,
+            f32::from(bounds.size.height) * scale,
+        )
+    }
+
+    fn translate_scaled_origin_to_root(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let root = self.state.borrow().x_root_window;
+        let reply = get_reply(
+            || "X11 TranslateCoordinates for IME cursor failed.",
+            self.xcb
+                .translate_coordinates(self.x_window, root, x.round() as i16, y.round() as i16),
+        )
+        .ok()?;
+        Some((
+            i32::from(reply.dst_x),
+            i32::from(reply.dst_y),
+            width.round().max(1.0) as i32,
+            height.round().max(1.0) as i32,
+        ))
+    }
+
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
         let (is_resize, content_size, scale_factor) = {
             let mut state = self.state.borrow_mut();

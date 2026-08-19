@@ -25,9 +25,9 @@ use crate::text_actions::{
 };
 use crate::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, marked_caret_range,
-    next_word_boundary, previous_word_boundary, range_for_granularity, should_coalesce,
-    surrounding_delete_range,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
+    should_coalesce, surrounding_delete_range,
 };
 
 const MASK: char = '\u{2022}';
@@ -994,12 +994,8 @@ impl EntityInputHandler for InputState {
     ) {
         let range = if let Some(range_utf16) = range_utf16.as_ref() {
             self.range_from_utf16(range_utf16)
-        } else if self.selected_range.start != self.selected_range.end {
-            self.selected_range.clone()
         } else {
-            self.marked_range
-                .clone()
-                .unwrap_or_else(|| self.selected_range.clone())
+            ime_replace_range(&self.selected_range, self.marked_range.as_ref())
         };
 
         let candidate =

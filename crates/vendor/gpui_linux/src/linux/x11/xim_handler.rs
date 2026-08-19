@@ -164,6 +164,10 @@ impl XimHandler {
         self.last_applied = Some(text.to_string());
     }
 
+    pub fn clear_applied(&mut self) {
+        self.last_applied = None;
+    }
+
     pub fn try_reopen_next_locale<C: Client>(&mut self, client: &mut C) -> bool {
         if self.opened {
             return false;
@@ -329,17 +333,11 @@ impl<C: Client<XEvent = xproto::KeyPressEvent>> ClientHandler<C> for XimHandler 
         _client: &mut C,
         _input_method_id: u16,
         _input_context_id: u16,
-        preedit_text: &str,
+        _preedit_text: &str,
     ) -> Result<(), ClientError> {
         self.clear_preedit();
-        if preedit_text.is_empty() {
-            self.emit_preedit(String::new(), 0);
-        } else {
-            self.push_callback(XimCallbackEvent::XimCommitEvent(
-                self.window,
-                preedit_text.to_string(),
-            ));
-        }
+        self.clear_applied();
+        self.emit_preedit(String::new(), 0);
         Ok(())
     }
 }

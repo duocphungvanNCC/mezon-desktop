@@ -91,6 +91,7 @@ pub(crate) struct X11ImContext {
     fail_count: Cell<u8>,
     ibus_surrounding: Cell<IbusSurroundingEnc>,
     fcitx_key_mode: Cell<FcitxKeyMode>,
+    drop_late: Cell<bool>,
     watch: RawFd,
 }
 
@@ -213,7 +214,14 @@ impl X11ImContext {
     pub(crate) fn take_events(&self) -> Vec<ImEvent> {
         self.events
             .lock()
-            .map(|mut events| std::mem::take(&mut *events))
+            .map(|mut events| {
+                if self.drop_late.get() {
+                    events.clear();
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut *events)
+                }
+            })
             .unwrap_or_default()
     }
 
@@ -225,6 +233,7 @@ impl X11ImContext {
         is_release: bool,
         time: u32,
     ) -> Result<bool, String> {
+        self.drop_late.set(false);
         let result = match self.kind {
             ImKind::Fcitx5 => self.process_fcitx5_key(keyval, keycode, state, is_release, time),
             ImKind::IBus => self
@@ -232,7 +241,11 @@ impl X11ImContext {
                 .method_call(
                     IBUS_IC_IFACE,
                     "ProcessKeyEvent",
-                    (keyval, keycode, ibus_key_state(state, is_release)),
+                    (
+                        keyval,
+                        keycode.saturating_sub(8),
+                        ibus_key_state(state, is_release),
+                    ),
                 )
                 .map(|(handled,): (bool,)| handled)
                 .map_err(|error| error.to_string()),
@@ -255,6 +268,10 @@ impl X11ImContext {
             }
             Err(error) => {
                 self.fail_count.set(self.fail_count.get().saturating_add(1));
+                self.drop_late.set(true);
+                if let Ok(mut events) = self.events.lock() {
+                    events.clear();
+                }
                 Err(error)
             }
         }
@@ -815,6 +832,7 @@ fn finish_context(
         fail_count: Cell::new(0),
         ibus_surrounding: Cell::new(IbusSurroundingEnc::Unknown),
         fcitx_key_mode: Cell::new(FcitxKeyMode::Unknown),
+        drop_late: Cell::new(false),
         watch,
     })
 }
