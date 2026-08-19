@@ -13,8 +13,8 @@ use mezon_store::{
     DeviceMenuKind, DisplayedFlower, DisplayedReaction, FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE,
     FLOWER_SPRITE_COUNT, FlowerParticle, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
     PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
-    VoiceInteractiveEventType, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore,
-    WalletStore, flower_menu_blocked, flower_particle_pose,
+    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
+    flower_menu_blocked, flower_particle_pose,
 };
 
 use crate::ChatLayout;
@@ -3527,23 +3527,14 @@ impl Clickable for InteractiveAppTrigger {
 
 impl RenderOnce for InteractiveAppTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut button = div()
-            .id("voice-interactive-app-btn")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(44.))
-            .h(px(44.))
-            .rounded_full()
-            .bg(if self.open { self.bg_hover } else { self.bg })
-            .cursor_pointer()
-            .hover(move |style| style.bg(self.bg_hover))
-            .tooltip(Tooltip::text(self.label))
-            .child(
-                Icon::new(IconName::Joystick)
-                    .size(px(20.))
-                    .text_color(self.icon_color),
-            );
+        let mut button = circle_button(
+            "voice-interactive-app-btn",
+            if self.open { self.bg_hover } else { self.bg },
+            self.bg_hover,
+            IconName::Joystick,
+            self.icon_color,
+        )
+        .tooltip(Tooltip::text(self.label));
         if let Some(on_click) = self.on_click {
             button = button.on_click(on_click);
         }
@@ -3590,6 +3581,8 @@ impl Render for InteractiveAppPopoverPanel {
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _, cx| cx.emit(DismissEvent)))
+            .occlude()
             .flex()
             .flex_col()
             .w(px(240.))
@@ -3602,15 +3595,15 @@ impl Render for InteractiveAppPopoverPanel {
         for (key, app) in [
             (
                 "channelVoice.interactiveApp.quiz",
-                VoiceInteractiveEventType::AppQuiz,
+                VoiceInteractiveApp::Quiz,
             ),
             (
                 "channelVoice.interactiveApp.blackboard",
-                VoiceInteractiveEventType::AppBlackboard,
+                VoiceInteractiveApp::Blackboard,
             ),
             (
                 "channelVoice.interactiveApp.interactive",
-                VoiceInteractiveEventType::AppInteractive,
+                VoiceInteractiveApp::Interactive,
             ),
         ] {
             let voice = self.voice.clone();

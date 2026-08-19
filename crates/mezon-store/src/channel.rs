@@ -597,20 +597,14 @@ impl ChannelList {
                 tracing::warn!("generate_hash_channel_apps returned empty web_app_data");
                 return None;
             }
-            match build_channel_app_url(
+            Some(build_channel_app_url(
                 &app_url,
                 ChannelAppLaunchParams {
                     web_app_data: &hash.web_app_data,
                     clan_id: &clan_id.0.to_string(),
                     clan_name: Some(&clan_name),
                 },
-            ) {
-                Ok(url) => Some(url),
-                Err(error) => {
-                    tracing::warn!("build_channel_app_url failed: {error:#}");
-                    None
-                }
-            }
+            ))
         })
     }
 

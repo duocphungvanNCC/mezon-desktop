@@ -100,6 +100,16 @@ struct LegacyVoiceInteractiveEnvelope {
     voice_interactive_event: Option<LegacyVoiceInteractiveEvent>,
 }
 
+fn is_supported_voice_interactive_event_type(event_type: i32) -> bool {
+    matches!(event_type, 1 | 2 | 10 | 11 | 12)
+}
+
+fn is_valid_voice_interactive_event(event: &realtime::VoiceInteractiveEvent) -> bool {
+    event.clan_id != 0
+        && event.voice_channel_id != 0
+        && is_supported_voice_interactive_event_type(event.event_type)
+}
+
 fn decode_realtime_envelope(payload: &[u8]) -> Result<realtime::Envelope, prost::DecodeError> {
     match realtime::Envelope::decode(payload) {
         Ok(envelope) => Ok(envelope),
@@ -110,7 +120,7 @@ fn decode_realtime_envelope(payload: &[u8]) -> Result<realtime::Envelope, prost:
             let Some(legacy) = legacy_envelope.voice_interactive_event else {
                 return Err(modern_error);
             };
-            if legacy.event_type != 1 {
+            if !is_supported_voice_interactive_event_type(legacy.event_type) {
                 return Err(modern_error);
             }
             Ok(realtime::Envelope {
@@ -139,12 +149,14 @@ fn decode_voice_interactive_response(
     if let Ok(envelope) = realtime::Envelope::decode(response)
         && let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
     {
+        return Ok(is_valid_voice_interactive_event(&event).then_some(event));
+    }
+    if let Ok(event) = realtime::VoiceInteractiveEvent::decode(response)
+        && is_valid_voice_interactive_event(&event)
+    {
         return Ok(Some(event));
     }
-    if let Ok(event) = realtime::VoiceInteractiveEvent::decode(response) {
-        return Ok(Some(event));
-    }
-    anyhow::bail!("invalid VoiceInteractiveEvent CID response")
+    Ok(None)
 }
 
 /// Represents real-time events pushed from the server.
@@ -4540,7 +4552,6 @@ impl MezonTransport {
             target: "socket",
             cid = i32::from(cid),
             code,
-            response_bytes = response.len(),
             "received VoiceInteractiveEvent CID response"
         );
         if code != 0 {
@@ -9624,6 +9635,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_voice_interactive_accepts_supported_app_types() {
+        for event_type in [2, 10, 11, 12] {
+            let payload = LegacyVoiceInteractiveEnvelope {
+                cid: 0,
+                voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                    clan_id: 10,
+                    voice_channel_id: 20,
+                    user_id: 30,
+                    event_type,
+                    params: "event-data".to_string(),
+                }),
+            }
+            .encode_to_vec();
+            let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+            let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+            else {
+                panic!("voice interactive event");
+            };
+            assert_eq!(event.event_type, event_type);
+            assert_eq!(event.params, "event-data");
+        }
+    }
+
+    #[test]
     fn voice_interactive_cid_response_returns_params() {
         let expected = realtime::VoiceInteractiveEvent {
             clan_id: 10,
@@ -9648,6 +9683,30 @@ mod tests {
             .expect("event");
         assert_eq!(decoded, expected);
         assert!(decode_voice_interactive_response(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn voice_interactive_cid_only_or_invalid_payload_is_no_event() {
+        let cid_only = realtime::Envelope {
+            cid: 7,
+            message: None,
+        }
+        .encode_to_vec();
+        assert!(
+            decode_voice_interactive_response(&cid_only)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(&[0x08, 0x07])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(b"not protobuf")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

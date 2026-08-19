@@ -124,9 +124,9 @@ impl AppConfig {
             stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
-            blackboard_url: "https://blackboard.mezon.vn".into(),
-            quiz_url: "https://quiz.mezon.vn".into(),
-            interactive_url: "https://interactive.mezon.vn".into(),
+            blackboard_url: "https://blackboard.mezon.ai".into(),
+            quiz_url: "https://quiz.mezon.ai".into(),
+            interactive_url: "https://interactive.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
             oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
