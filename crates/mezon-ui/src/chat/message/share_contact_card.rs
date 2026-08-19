@@ -124,8 +124,9 @@ pub fn render_share_contact_card(
     );
 
     let target_user = user_id.parse::<i64>().ok().map(UserId);
-    let dm_error: SharedString = mezon_i18n::t(ctx.locale, "shareContact.card.messageError").into();
-    let message_error = dm_error.clone();
+    let message_error: SharedString =
+        mezon_i18n::t(ctx.locale, "shareContact.card.messageError").into();
+    let call_error: SharedString = mezon_i18n::t(ctx.locale, "shareContact.card.callError").into();
     let is_self = user_id.as_ref() == ctx.current_user_id;
     let call_label = name.clone();
     let call_avatar = avatar.clone();
@@ -154,7 +155,7 @@ pub fn render_share_contact_card(
             avatar: call_avatar.clone(),
             username: call_username.clone(),
         };
-        call_user(target, false, dm_error.clone(), cx);
+        call_user(target, false, call_error.clone(), cx);
     };
 
     let on_message = move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {

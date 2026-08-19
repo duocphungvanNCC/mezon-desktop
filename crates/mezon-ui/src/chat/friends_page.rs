@@ -1018,7 +1018,7 @@ impl FriendsPage {
                     return;
                 };
                 let error =
-                    SharedString::from(mezon_i18n::t(&locale, "shareContact.card.messageError"));
+                    SharedString::from(mezon_i18n::t(&locale, "shareContact.card.callError"));
                 call_user(target, video, error, cx);
             }
         };
