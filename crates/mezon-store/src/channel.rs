@@ -2978,6 +2978,9 @@ impl ChannelList {
                 if self.is_locally_archived(channel_id) {
                     return;
                 }
+                if e.parent_id != 0 {
+                    return;
+                }
                 if self.cache.contains(&clan_id) {
                     let channel = Channel {
                         id: ChannelId(e.channel_id),
@@ -6828,6 +6831,20 @@ mod tests {
         })
     }
 
+    fn channel_created_event(channel_id: i64, parent_id: i64, channel_type: i32) -> RealtimeEvent {
+        RealtimeEvent::ChannelCreated(mezon_proto::realtime::ChannelCreatedEvent {
+            clan_id: 1,
+            channel_id,
+            parent_id,
+            channel_type,
+            channel_label: "created".into(),
+            channel_private: 0,
+            creator_id: 99,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
     fn added_to_channel(channel_id: i64, parent_id: i64, user_ids: &[i64]) -> RealtimeEvent {
         RealtimeEvent::UserChannelAdded(mezon_proto::realtime::UserChannelAdded {
             channel_desc: Some(mezon_proto::api::ChannelDescription {
@@ -6907,6 +6924,45 @@ mod tests {
                     .expect("reactivated thread");
                 assert!(!joined.is_archived());
                 assert_eq!(joined.active, CHANNEL_ACTIVE_JOINED);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_created_does_not_put_unjoined_thread_on_sidebar(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(42)));
+
+                channels.handle_event(
+                    &channel_created_event(42, 1, crate::threads::CHANNEL_TYPE_THREAD as i32),
+                    cx,
+                );
+
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(42)),
+                    "ChannelCreated must not insert a thread the viewer has not joined"
+                );
+                assert!(channels.user_channel(ChannelId(42)).is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_created_still_inserts_top_level_public_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+
+                channels.handle_event(
+                    &channel_created_event(20, 0, ChannelType::Text.as_raw() as i32),
+                    cx,
+                );
+
+                assert!(channels.channel_in_clan(ClanId(1), ChannelId(20)));
             });
         });
     }
