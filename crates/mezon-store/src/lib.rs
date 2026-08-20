@@ -346,6 +346,10 @@ pub struct Settings {
     pub zoom_factor: f32,
     /// Last window bounds [x, y, width, height]
     pub window_bounds: Option<[i32; 4]>,
+    /// Conversation ids the signed-in user pinned to the top of the DM list.
+    /// Cleared on logout so the next account does not inherit them.
+    #[serde(default)]
+    pub pinned_dms: Vec<i64>,
     /// UI theme key: "purple_haze" (default) | "dark" | "light" | "sunrise" | "redDark"
     /// | "abyss_dark" | "berrynade" | "cisher" | "sunset"
     pub theme: String,
@@ -388,6 +392,7 @@ impl Default for Settings {
             hardware_acceleration: true,
             zoom_factor: 1.0,
             window_bounds: None,
+            pinned_dms: Vec::new(),
             theme: "purple_haze".to_string(),
             language: "en".to_string(),
             notifications_enabled: true,
