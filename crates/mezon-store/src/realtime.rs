@@ -67,6 +67,7 @@ pub enum RealtimeKind {
     TokenSent,
     RoleEvent,
     WebrtcSignaling,
+    IncomingCallPush,
 }
 
 impl RealtimeKind {
@@ -122,6 +123,7 @@ impl RealtimeKind {
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
+            RealtimeEvent::IncomingCallPush(_) => Self::IncomingCallPush,
             _ => return None,
         })
     }

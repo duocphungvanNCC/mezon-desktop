@@ -136,6 +136,7 @@ pub enum RealtimeEvent {
     TokenSent(api::TokenSentEvent),
     GiveCoffee(api::GiveCoffeeEvent),
     WebrtcSignaling(realtime::WebrtcSignalingFwd),
+    IncomingCallPush(realtime::IncomingCallPush),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -193,6 +194,7 @@ impl RealtimeEvent {
             Self::TokenSent(_) => "TokenSent",
             Self::GiveCoffee(_) => "GiveCoffee",
             Self::WebrtcSignaling(_) => "WebrtcSignaling",
+            Self::IncomingCallPush(_) => "IncomingCallPush",
             Self::Unhandled(_) => "Unhandled",
         }
     }
@@ -260,6 +262,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::TokenSentEvent(m) => Ok(Self::TokenSent(m)),
             realtime::envelope::Message::GiveCoffeeEvent(m) => Ok(Self::GiveCoffee(m)),
             realtime::envelope::Message::WebrtcSignalingFwd(m) => Ok(Self::WebrtcSignaling(m)),
+            realtime::envelope::Message::IncomingCallPush(m) => Ok(Self::IncomingCallPush(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
