@@ -223,6 +223,28 @@ pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>)
     marked.cloned().unwrap_or_else(|| selected.clone())
 }
 
+pub fn swallow_discarded_ime_commit(
+    discard: &mut Option<String>,
+    range_utf16: Option<&Range<usize>>,
+    has_marked: bool,
+    new_text: &str,
+) -> bool {
+    if range_utf16.is_some() || has_marked {
+        return false;
+    }
+    let Some(expected) = discard.as_deref() else {
+        return false;
+    };
+    if new_text == expected {
+        *discard = None;
+        return true;
+    }
+    if !new_text.is_empty() {
+        *discard = None;
+    }
+    false
+}
+
 pub fn surrounding_delete_range(
     text: &str,
     selected_range: &Range<usize>,
@@ -443,6 +465,30 @@ mod tests {
     #[test]
     fn ime_replace_uses_marked_when_preedit_is_present() {
         assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn discarded_ime_commit_swallows_the_echoed_preedit() {
+        let mut discard = Some("hoa".to_string());
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "hoa"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn discarded_ime_commit_clears_on_a_different_insert() {
+        let mut discard = Some("hoa".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "h"
+        ));
+        assert!(discard.is_none());
     }
 
     #[test]

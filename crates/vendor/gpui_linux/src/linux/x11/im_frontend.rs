@@ -261,7 +261,11 @@ impl X11ImContext {
                 .map_err(|error| error.to_string()),
         };
         self.process_io();
-        if !is_release && !modifier && result.as_ref().is_ok_and(|filtered| *filtered) {
+        if !is_release
+            && !modifier
+            && keyval != 0xff1b
+            && result.as_ref().is_ok_and(|filtered| *filtered)
+        {
             if !self.has_events() {
                 self.wait_for_events(SIGNAL_WAIT);
                 self.process_io();

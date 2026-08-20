@@ -162,6 +162,27 @@ fn is_editing_key(keyval: u32) -> bool {
     matches!(keyval, BACKSPACE | DELETE)
 }
 
+fn ime_mode_modifier(keyval: u32) -> bool {
+    matches!(
+        keyval,
+        0xffe1 | 0xffe2 | 0xffe5 | 0xffe6 | 0xfe03 | 0xfe11 | 0xff7e
+    )
+}
+
+fn rewrite_escape_cancel(events: &mut [ImEvent]) {
+    if events.iter().any(im_event_has_text) {
+        return;
+    }
+    for event in events {
+        if matches!(event, ImEvent::HidePreedit) {
+            *event = ImEvent::Preedit {
+                text: String::new(),
+                caret_chars: 0,
+            };
+        }
+    }
+}
+
 fn navigation_skips_ime(keyval: u32) -> bool {
     const TAB: u32 = 0xff09;
     const ISO_LEFT_TAB: u32 = 0xfe20;
@@ -322,6 +343,7 @@ pub struct X11ClientState {
     pub(crate) im: Option<X11ImContext>,
     im_watch_token: Option<RegistrationToken>,
     dbus_unavailable: bool,
+    dbus_retry_at: Instant,
     dbus_im_focused: bool,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
@@ -663,6 +685,7 @@ impl X11Client {
             im,
             im_watch_token: None,
             dbus_unavailable: false,
+            dbus_retry_at: Instant::now(),
             dbus_im_focused: false,
 
             compose_state,
@@ -937,7 +960,11 @@ impl X11Client {
     }
 
     pub fn enable_ime(&self) {
-        self.0.borrow_mut().dbus_unavailable = false;
+        {
+            let mut state = self.0.borrow_mut();
+            state.dbus_unavailable = false;
+            state.dbus_retry_at = Instant::now();
+        }
         if self.ensure_dbus_im() {
             if self.0.borrow().dbus_im_focused {
                 return;
@@ -1103,7 +1130,11 @@ impl X11Client {
                 if let Some(window) = self.get_window(window_id) {
                     window.handle_ime_unmark();
                 }
+                self.reset_ime();
             }
+            return false;
+        }
+        if is_modifier && !ime_mode_modifier(keyval) {
             return false;
         }
         let composing = self.0.borrow().composing;
@@ -1139,6 +1170,9 @@ impl X11Client {
                 };
                 if kind == super::im_frontend::ImKind::Fcitx5 && !is_release && filtered {
                     maybe_append_fcitx_space(keyval, &mut events);
+                }
+                if keyval == 0xff1b && !is_release {
+                    rewrite_escape_cancel(&mut events);
                 }
                 if !events.is_empty() {
                     self.apply_im_events(&window, events);
@@ -1205,7 +1239,9 @@ impl X11Client {
             match state.im.as_ref() {
                 Some(im) if im.is_dead() => DbusImStatus::Dead,
                 Some(_) => DbusImStatus::Live,
-                None if state.dbus_unavailable => DbusImStatus::Unavailable,
+                None if state.dbus_unavailable && Instant::now() < state.dbus_retry_at => {
+                    DbusImStatus::Unavailable
+                }
                 None => DbusImStatus::Missing,
             }
         };
@@ -1234,7 +1270,9 @@ impl X11Client {
     fn reconnect_dbus_im(&self) -> bool {
         self.drop_dbus_im();
         let Some(im) = X11ImContext::connect() else {
-            self.0.borrow_mut().dbus_unavailable = true;
+            let mut state = self.0.borrow_mut();
+            state.dbus_unavailable = true;
+            state.dbus_retry_at = Instant::now() + Duration::from_secs(2);
             return false;
         };
         let watch = im.watch_fd();
@@ -1245,7 +1283,9 @@ impl X11Client {
             state.im = Some(im);
         }
         if !self.install_im_watch(watch) {
-            self.0.borrow_mut().dbus_unavailable = true;
+            let mut state = self.0.borrow_mut();
+            state.dbus_unavailable = true;
+            state.dbus_retry_at = Instant::now() + Duration::from_secs(2);
             return false;
         }
         self.0.borrow_mut().dbus_unavailable = false;

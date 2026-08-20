@@ -3,10 +3,10 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    ImeSurroundingText, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString,
-    Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, div, fill, point, prelude::*, px, size,
+    ImeSurroundingText, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
+    SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -25,7 +25,7 @@ use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
-    should_coalesce, surrounding_delete_range,
+    should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const DEFAULT_MAX_VISIBLE_LINES: usize = 8;
@@ -96,6 +96,7 @@ pub struct TextArea {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    discard_ime_commit: Option<String>,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -146,6 +147,7 @@ impl TextArea {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            discard_ime_commit: None,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
@@ -710,6 +712,10 @@ impl TextArea {
         self.replace_text_in_range(None, &sanitized, window, cx);
     }
 
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.discard_ime_commit = None;
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -868,6 +874,11 @@ impl EntityInputHandler for TextArea {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            self.discard_ime_commit = self.content.get(marked).map(str::to_string);
+        }
         self.marked_range = None;
     }
 
@@ -878,6 +889,14 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
         let range = if let Some(range_utf16) = range_utf16.as_ref() {
             self.range_from_utf16(range_utf16)
         } else {
@@ -912,6 +931,14 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
         if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
             return;
         }
@@ -1045,6 +1072,7 @@ impl Render for TextArea {
             .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))

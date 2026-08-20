@@ -32,7 +32,7 @@ use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
-    should_coalesce, surrounding_delete_range,
+    should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -1052,17 +1052,13 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range_utf16.is_none()
-            && self.marked_range.is_none()
-            && let Some(expected) = self.discard_ime_commit.as_deref()
-        {
-            if new_text == expected {
-                self.discard_ime_commit = None;
-                return;
-            }
-            if !new_text.is_empty() {
-                self.discard_ime_commit = None;
-            }
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
         }
         let range = if let Some(range_utf16) = range_utf16.as_ref() {
             self.range_from_utf16(range_utf16)
@@ -1099,17 +1095,13 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range_utf16.is_none()
-            && self.marked_range.is_none()
-            && let Some(expected) = self.discard_ime_commit.as_deref()
-        {
-            if new_text == expected {
-                self.discard_ime_commit = None;
-                return;
-            }
-            if !new_text.is_empty() {
-                self.discard_ime_commit = None;
-            }
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
         }
         if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
             return;
