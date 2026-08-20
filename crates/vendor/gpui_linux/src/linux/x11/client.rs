@@ -2462,8 +2462,8 @@ fn xdnd_get_supported_atom(
 }
 
 // mezon vendor edit: XDND does not transfer keyboard focus. Request
-// _NET_ACTIVE_WINDOW with the drop timestamp (XdndDrop data.l[2]), not
-// CurrentTime — WMs reject timestamp 0 as focus-stealing.
+// _NET_ACTIVE_WINDOW with the drop timestamp (XdndDrop data.l[2]). Skip
+// when the timestamp is 0 — CurrentTime is also 0 and WMs reject it.
 fn xdnd_request_activation(
     xcb_connection: &XCBConnection,
     atoms: &XcbAtoms,
@@ -2471,16 +2471,14 @@ fn xdnd_request_activation(
     root: xproto::Window,
     timestamp: u32,
 ) {
-    let time = if timestamp == 0 {
-        xproto::Time::CURRENT_TIME.into()
-    } else {
-        timestamp
-    };
+    if timestamp == 0 {
+        return;
+    }
     let message = ClientMessageEvent {
         format: 32,
         window,
         type_: atoms._NET_ACTIVE_WINDOW,
-        data: ClientMessageData::from([1, time, 0, 0, 0]),
+        data: ClientMessageData::from([1, timestamp, 0, 0, 0]),
         sequence: 0,
         response_type: xproto::CLIENT_MESSAGE_EVENT,
     };
@@ -2494,12 +2492,41 @@ fn xdnd_request_activation(
         ),
     )
     .log_err();
-    check_reply(
-        || "Failed to set input focus for XDnD",
-        xcb_connection.set_input_focus(xproto::InputFocus::POINTER_ROOT, window, time),
-    )
-    .log_err();
+    if !xdnd_net_active_window_supported(xcb_connection, atoms, root) {
+        check_reply(
+            || "Failed to set input focus for XDnD",
+            xcb_connection.set_input_focus(xproto::InputFocus::PARENT, window, timestamp),
+        )
+        .log_err();
+    }
     xcb_connection.flush().log_err();
+}
+
+fn xdnd_net_active_window_supported(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    root: xproto::Window,
+) -> bool {
+    let Some(supported_atoms) = get_reply(
+        || "Failed to get _NET_SUPPORTED",
+        xcb_connection.get_property(
+            false,
+            root,
+            atoms._NET_SUPPORTED,
+            xproto::AtomEnum::ATOM,
+            0,
+            1024,
+        ),
+    )
+    .log_with_level(Level::Debug) else {
+        return true;
+    };
+
+    supported_atoms
+        .value
+        .chunks_exact(4)
+        .filter_map(|chunk| chunk.try_into().ok().map(u32::from_ne_bytes))
+        .any(|id| id == atoms._NET_ACTIVE_WINDOW)
 }
 
 fn xdnd_send_finished(

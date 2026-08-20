@@ -1046,6 +1046,9 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    // mezon vendor edit: XDND-equivalent on Wayland also does not focus.
+    // xdg_activation_v1 with the data-device (drag Enter) serial — still
+    // rejected by some compositors without a token from the drag source.
     pub fn request_dnd_activation(&self) {
         let state = self.state.borrow();
         let Some(activation) = state.globals.activation.clone() else {
