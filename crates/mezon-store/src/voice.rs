@@ -66,10 +66,6 @@ const SOUND_CACHE_CAP: usize = 8;
 const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
 const INTERACTIVE_LAUNCH_DEDUP_TTL: Duration = Duration::from_secs(10);
 
-fn interactive_event_targets_user(receiver_id: i64, user_id: Option<i64>) -> bool {
-    receiver_id == 0 || user_id == Some(receiver_id)
-}
-
 fn is_duplicate_interactive_launch(
     launches: &mut HashMap<(VoiceInteractiveApp, u64), Instant>,
     key: (VoiceInteractiveApp, u64),
@@ -910,32 +906,21 @@ impl VoiceStore {
             .active_channel_id()
             .and_then(|id| id.parse::<i64>().ok())
             != Some(event.voice_channel_id)
-        // || event.params.is_empty()
         {
             return;
         }
-        let current_user_id = (event.receiver_id != 0)
-            .then(|| {
-                crate::BadgeService::try_global(cx)
-                    .and_then(|badges| badges.read(cx).current_user_id(cx))
-                    .map(|user_id| user_id.0)
-            })
-            .flatten();
-        if !interactive_event_targets_user(event.receiver_id, current_user_id) {
-            return;
-        }
-        self.open_interactive_app(app, &event.params, event.clan_id, cx);
+        self.open_interactive_app(app, event.sender_id, event.clan_id, cx);
     }
 
     fn open_interactive_app(
         &mut self,
         app: VoiceInteractiveApp,
-        params: &str,
+        sender_id: i64,
         clan_id: i64,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) {
         let mut hasher = DefaultHasher::new();
-        (app, params).hash(&mut hasher);
+        (sender_id, clan_id).hash(&mut hasher);
         let fingerprint = hasher.finish();
         let now = Instant::now();
         let launch_key = (app, fingerprint);
@@ -960,16 +945,15 @@ impl VoiceStore {
         let url = build_channel_app_url(
             &base_url,
             ChannelAppLaunchParams {
-                web_app_data: params,
+                web_app_data: "",
                 clan_id: &clan_id_string,
                 clan_name: clan_name.as_deref(),
             },
         );
-        self.interactive_launches.insert(launch_key, now);
         tracing::info!(
             url = %redact_interactive_app_url(&url),
             event_type = app.event_type() as i32,
-            "opening voice interactive app"
+            "opening built-in voice interactive app"
         );
         crate::PlatformStore::open_app_window(url, cx);
     }
@@ -2810,7 +2794,7 @@ impl VoiceStore {
             return;
         };
         let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_this, _cx| {
             match api
                 .write_voice_interactive_event(
                     clan_id,
@@ -2822,7 +2806,7 @@ impl VoiceStore {
                 )
                 .await
             {
-                Ok(Some(event)) => {
+                Ok(Some(_event)) => {
                     tracing::info!(
                         clan_id,
                         voice_channel_id,
@@ -2831,14 +2815,6 @@ impl VoiceStore {
                         event_type = app.event_type() as i32,
                         "VoiceInteractiveEvent acknowledged with CID payload"
                     );
-                    if !event.params.is_empty() {
-                        let _ = this.update(cx, |store, cx| {
-                            store.handle_voice_interactive(
-                                &RealtimeEvent::VoiceInteractive(event),
-                                cx,
-                            )
-                        });
-                    }
                 }
                 Ok(None) => tracing::info!(
                     clan_id,
@@ -3409,8 +3385,8 @@ mod tests {
 
     use super::parse_raise_token;
     use super::{
-        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, interactive_event_targets_user,
-        is_duplicate_interactive_launch, redact_interactive_app_url, validate_sound_file,
+        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, is_duplicate_interactive_launch,
+        redact_interactive_app_url, validate_sound_file,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
@@ -3438,16 +3414,6 @@ mod tests {
     }
 
     #[test]
-    fn interactive_event_accepts_broadcast_or_exact_receiver() {
-        let user_id = 42;
-        assert!(interactive_event_targets_user(user_id, Some(user_id)));
-        assert!(interactive_event_targets_user(0, Some(user_id)));
-        assert!(interactive_event_targets_user(0, None));
-        assert!(!interactive_event_targets_user(7, Some(user_id)));
-        assert!(!interactive_event_targets_user(user_id, None));
-    }
-
-    #[test]
     fn interactive_app_log_url_redacts_signed_data() {
         assert_eq!(
             redact_interactive_app_url(
@@ -3468,7 +3434,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_launch_dedup_is_keyed_by_app_and_params() {
+    fn interactive_launch_dedup_is_keyed_by_app_and_initiator() {
         let now = std::time::Instant::now();
         let mut launches = std::collections::HashMap::new();
         let quiz = (VoiceInteractiveApp::Quiz, 1);
