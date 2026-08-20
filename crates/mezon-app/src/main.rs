@@ -54,8 +54,8 @@ impl tracing_tracy::Config for TracyConfig {
 #[cfg(target_os = "linux")]
 fn prefers_native_wayland(wayland_display: Option<&str>, session_override: Option<&str>) -> bool {
     let has_wayland = wayland_display.is_some_and(|display| !display.is_empty());
-    let force_x11 = session_override.is_some_and(|value| value.eq_ignore_ascii_case("x11"));
-    has_wayland && !force_x11
+    let force_wayland = session_override.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
+    has_wayland && force_wayland
 }
 
 #[cfg(target_os = "linux")]
@@ -1435,15 +1435,16 @@ mod tests {
         };
 
         #[test]
-        fn native_wayland_when_wayland_display_is_set() {
-            assert!(prefers_native_wayland(Some("wayland-0"), None));
-            assert!(prefers_native_wayland(Some("wayland-1"), Some("wayland")));
+        fn xwayland_default_when_wayland_display_is_set() {
+            assert!(!prefers_native_wayland(Some("wayland-0"), None));
+            assert!(!prefers_native_wayland(Some("wayland-0"), Some("x11")));
+            assert!(!prefers_native_wayland(Some("wayland-0"), Some("X11")));
         }
 
         #[test]
-        fn x11_override_wins_even_when_wayland_display_is_set() {
-            assert!(!prefers_native_wayland(Some("wayland-0"), Some("x11")));
-            assert!(!prefers_native_wayland(Some("wayland-0"), Some("X11")));
+        fn native_wayland_only_when_session_override_is_wayland() {
+            assert!(prefers_native_wayland(Some("wayland-0"), Some("wayland")));
+            assert!(prefers_native_wayland(Some("wayland-1"), Some("Wayland")));
         }
 
         #[test]

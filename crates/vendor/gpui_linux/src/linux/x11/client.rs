@@ -222,6 +222,8 @@ fn event_has_space(event: &ImEvent) -> bool {
 }
 
 fn maybe_append_fcitx_space(keyval: u32, events: &mut Vec<ImEvent>) {
+    // Vietnamese Unikey/Bamboo on Fcitx5 often filter Space without a space commit.
+    // CJK candidate-select engines can get a trailing space from this. Keep for VN.
     const SPACE: u32 = 32;
     const KP_SPACE: u32 = 0xff80;
     if !matches!(keyval, SPACE | KP_SPACE) {
@@ -343,8 +345,8 @@ pub struct X11ClientState {
     pub(crate) im: Option<X11ImContext>,
     im_watch_token: Option<RegistrationToken>,
     dbus_unavailable: bool,
-    dbus_retry_at: Instant,
     dbus_im_focused: bool,
+    escape_cancel_pending: bool,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     // TODO: Can the other updates to `modifiers` be removed so that this is unnecessary?
@@ -685,8 +687,8 @@ impl X11Client {
             im,
             im_watch_token: None,
             dbus_unavailable: false,
-            dbus_retry_at: Instant::now(),
             dbus_im_focused: false,
+            escape_cancel_pending: false,
 
             compose_state,
             pre_edit_text: None,
@@ -960,11 +962,7 @@ impl X11Client {
     }
 
     pub fn enable_ime(&self) {
-        {
-            let mut state = self.0.borrow_mut();
-            state.dbus_unavailable = false;
-            state.dbus_retry_at = Instant::now();
-        }
+        self.0.borrow_mut().dbus_unavailable = false;
         if self.ensure_dbus_im() {
             if self.0.borrow().dbus_im_focused {
                 return;
@@ -1062,6 +1060,7 @@ impl X11Client {
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
         state.composing = false;
+        state.escape_cancel_pending = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
             return;
@@ -1124,6 +1123,9 @@ impl X11Client {
             self.0.borrow_mut().dbus_im_focused = true;
             self.drain_dbus_im();
         }
+        if !is_release {
+            self.0.borrow_mut().escape_cancel_pending = keyval == 0xff1b;
+        }
         if shortcut_skips_ime(state, keyval) && !is_modifier {
             if !is_release {
                 self.0.borrow_mut().composing = false;
@@ -1170,9 +1172,6 @@ impl X11Client {
                 };
                 if kind == super::im_frontend::ImKind::Fcitx5 && !is_release && filtered {
                     maybe_append_fcitx_space(keyval, &mut events);
-                }
-                if keyval == 0xff1b && !is_release {
-                    rewrite_escape_cancel(&mut events);
                 }
                 if !events.is_empty() {
                     self.apply_im_events(&window, events);
@@ -1239,9 +1238,7 @@ impl X11Client {
             match state.im.as_ref() {
                 Some(im) if im.is_dead() => DbusImStatus::Dead,
                 Some(_) => DbusImStatus::Live,
-                None if state.dbus_unavailable && Instant::now() < state.dbus_retry_at => {
-                    DbusImStatus::Unavailable
-                }
+                None if state.dbus_unavailable => DbusImStatus::Unavailable,
                 None => DbusImStatus::Missing,
             }
         };
@@ -1270,9 +1267,7 @@ impl X11Client {
     fn reconnect_dbus_im(&self) -> bool {
         self.drop_dbus_im();
         let Some(im) = X11ImContext::connect() else {
-            let mut state = self.0.borrow_mut();
-            state.dbus_unavailable = true;
-            state.dbus_retry_at = Instant::now() + Duration::from_secs(2);
+            self.0.borrow_mut().dbus_unavailable = true;
             return false;
         };
         let watch = im.watch_fd();
@@ -1283,9 +1278,7 @@ impl X11Client {
             state.im = Some(im);
         }
         if !self.install_im_watch(watch) {
-            let mut state = self.0.borrow_mut();
-            state.dbus_unavailable = true;
-            state.dbus_retry_at = Instant::now() + Duration::from_secs(2);
+            self.0.borrow_mut().dbus_unavailable = true;
             return false;
         }
         self.0.borrow_mut().dbus_unavailable = false;
@@ -1361,7 +1354,15 @@ impl X11Client {
         true
     }
 
-    fn apply_im_events(&self, window: &X11WindowStatePtr, events: Vec<ImEvent>) {
+    fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
+        if self.0.borrow().escape_cancel_pending {
+            if events.iter().any(im_event_has_text) {
+                self.0.borrow_mut().escape_cancel_pending = false;
+            } else if !events.is_empty() {
+                rewrite_escape_cancel(&mut events);
+                self.0.borrow_mut().escape_cancel_pending = false;
+            }
+        }
         for event in fold_im_events(events) {
             match event {
                 ImEvent::Commit(text) => {

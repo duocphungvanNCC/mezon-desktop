@@ -1412,6 +1412,10 @@ impl ImeSurroundingText {
     /// Wayland text-input-v3 surrounding-text size limit.
     pub const MAX_LEN: usize = 4000;
 
+    /// Build a surrounding-text window from the current selection.
+    ///
+    /// `exclude` is a preedit range in the document that must not be sent to the IME.
+    /// When `reversed` is true the caret is at `selected_range.start`.
     pub fn from_selection(
         document: &str,
         selected_range: Range<usize>,
@@ -1487,6 +1491,7 @@ impl ImeSurroundingText {
         Self::window(text, cursor, anchor)
     }
 
+    /// Caret offset in Unicode scalar values for IBus/Fcitx5 `SetSurroundingText`.
     pub fn cursor_chars(&self) -> u32 {
         self.text
             .get(..self.cursor.min(self.text.len()))
@@ -1494,6 +1499,7 @@ impl ImeSurroundingText {
             .unwrap_or(0)
     }
 
+    /// Selection-anchor offset in Unicode scalar values for IBus/Fcitx5 `SetSurroundingText`.
     pub fn anchor_chars(&self) -> u32 {
         self.text
             .get(..self.anchor.min(self.text.len()))
