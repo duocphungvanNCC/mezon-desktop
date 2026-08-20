@@ -12,10 +12,10 @@ use gpui::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, Hsla, Image, ImeSurroundingText, InspectorElementId, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled,
-    Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div,
-    fill, point, prelude::*, px, rgb, size,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement,
+    Styled, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    div, fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -783,6 +783,10 @@ impl MentionInputState {
         self.replace_text_in_range(None, text, window, cx);
     }
 
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.discard_ime_commit = None;
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -1289,6 +1293,7 @@ impl Render for MentionInputState {
             .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))
