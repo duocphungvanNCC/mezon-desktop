@@ -30,10 +30,10 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny,
-    VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
-    flower_event_from_payload, flower_particles, flower_price, format_flower_amount,
-    is_uncertain_transfer_error, serialize_flower_interactive_params,
+    FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveEventType,
+    build_flower_transfer, can_give_flower, flower_effect_key, flower_event_from_payload,
+    flower_price, format_flower_amount, is_uncertain_transfer_error,
+    serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -281,14 +281,8 @@ pub struct DisplayedReaction {
 
 pub struct DisplayedFlower {
     pub key: String,
-    pub giver_id: String,
-    pub receiver_id: String,
-    pub giver_name: String,
-    pub receiver_name: String,
-    pub timestamp: i64,
-    pub particles: Arc<Vec<FlowerParticle>>,
     pub started_at: Instant,
-    pub label: SharedString,
+    pub caption: SharedString,
     _remove_timer: Task<()>,
 }
 
@@ -1169,6 +1163,10 @@ impl VoiceStore {
         &self.displayed_flowers
     }
 
+    pub fn flower_caption(&self) -> Option<&SharedString> {
+        self.displayed_flowers.last().map(|flower| &flower.caption)
+    }
+
     fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::VoiceInteractive(msg) = event else {
             return;
@@ -1219,14 +1217,24 @@ impl VoiceStore {
         let locale = Settings::try_global(cx)
             .map(|settings| settings.read(cx).language.clone())
             .unwrap_or_default();
-        let label = SharedString::from(
-            mezon_i18n::t(&locale, "channelVoice.giveFlowerGiven")
-                .replace("{{giver}}", &giver_name)
-                .replace("{{receiver}}", &receiver_name),
-        );
+        let local_is_receiver = self.local_user_id().as_deref() == Some(receiver_id.as_str());
+        let label = SharedString::from(if local_is_receiver {
+            format!(
+                "{} {}",
+                mezon_i18n::t(&locale, "token.flowers.received"),
+                giver_name
+            )
+        } else {
+            format!(
+                "{} {} {}",
+                giver_name,
+                mezon_i18n::t(&locale, "token.flowers.someoneReceived"),
+                receiver_name
+            )
+        });
         let expire_key = key.clone();
         let remove_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FLOWER_ANIMATION_TTL).await;
+            cx.background_executor().timer(FLOWER_SCENE_TTL).await;
             this.update(cx, |this, cx| {
                 this.displayed_flowers
                     .retain(|flower| flower.key != expire_key);
@@ -1236,14 +1244,8 @@ impl VoiceStore {
         });
         self.displayed_flowers.push(DisplayedFlower {
             key,
-            giver_id,
-            receiver_id,
-            giver_name,
-            receiver_name,
-            timestamp,
-            particles: Arc::new(flower_particles(timestamp.unsigned_abs())),
             started_at: Instant::now(),
-            label,
+            caption: label,
             _remove_timer: remove_timer,
         });
         if play_sound {
