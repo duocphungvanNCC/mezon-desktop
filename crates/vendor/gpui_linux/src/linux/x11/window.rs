@@ -290,6 +290,7 @@ pub struct X11WindowState {
     pub handle: AnyWindowHandle,
     last_insets: [u32; 4],
     accesskit_adapter: Option<accesskit_unix::Adapter>,
+    ime_root_origin: Option<(i32, i32)>,
 }
 
 impl X11WindowState {
@@ -837,6 +838,7 @@ impl X11WindowState {
                 accesskit_adapter: None,
                 counter_id: sync_request_counter,
                 last_sync_counter: None,
+                ime_root_origin: None,
             })
         });
 
@@ -1334,6 +1336,21 @@ impl X11WindowStatePtr {
         )
     }
 
+    fn window_origin_in_root(&self) -> Option<(i32, i32)> {
+        if let Some(origin) = self.state.borrow().ime_root_origin {
+            return Some(origin);
+        }
+        let root = self.state.borrow().x_root_window;
+        let reply = get_reply(
+            || "X11 TranslateCoordinates for IME cursor failed.",
+            self.xcb.translate_coordinates(self.x_window, root, 0, 0),
+        )
+        .ok()?;
+        let origin = (i32::from(reply.dst_x), i32::from(reply.dst_y));
+        self.state.borrow_mut().ime_root_origin = Some(origin);
+        Some(origin)
+    }
+
     fn translate_scaled_origin_to_root(
         &self,
         x: f32,
@@ -1341,16 +1358,10 @@ impl X11WindowStatePtr {
         width: f32,
         height: f32,
     ) -> Option<(i32, i32, i32, i32)> {
-        let root = self.state.borrow().x_root_window;
-        let reply = get_reply(
-            || "X11 TranslateCoordinates for IME cursor failed.",
-            self.xcb
-                .translate_coordinates(self.x_window, root, x.round() as i16, y.round() as i16),
-        )
-        .ok()?;
+        let (ox, oy) = self.window_origin_in_root()?;
         Some((
-            i32::from(reply.dst_x),
-            i32::from(reply.dst_y),
+            ox + x.round() as i32,
+            oy + y.round() as i32,
             width.round().max(1.0) as i32,
             height.round().max(1.0) as i32,
         ))
@@ -1371,6 +1382,7 @@ impl X11WindowStatePtr {
             } else {
                 state.bounds = bounds;
             }
+            state.ime_root_origin = None;
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
             state.renderer.update_drawable_size(gpu_size);

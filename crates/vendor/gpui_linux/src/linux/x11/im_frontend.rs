@@ -13,6 +13,7 @@ use gpui::ImeSurroundingText;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const KEY_TIMEOUT: Duration = Duration::from_millis(80);
+const MODIFIER_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_WAIT: Duration = Duration::from_millis(16);
 const COMMIT_WAIT: Duration = Duration::from_millis(40);
 const DEAD_AFTER_FAILS: u8 = 3;
@@ -217,6 +218,7 @@ impl X11ImContext {
             .map(|mut events| {
                 if self.drop_late.get() {
                     events.clear();
+                    self.drop_late.set(false);
                     Vec::new()
                 } else {
                     std::mem::take(&mut *events)
@@ -234,10 +236,18 @@ impl X11ImContext {
         time: u32,
     ) -> Result<bool, String> {
         self.drop_late.set(false);
+        let modifier = is_modifier_keyval(keyval);
+        let timeout = if modifier {
+            MODIFIER_TIMEOUT
+        } else {
+            KEY_TIMEOUT
+        };
         let result = match self.kind {
-            ImKind::Fcitx5 => self.process_fcitx5_key(keyval, keycode, state, is_release, time),
+            ImKind::Fcitx5 => {
+                self.process_fcitx5_key(keyval, keycode, state, is_release, time, timeout)
+            }
             ImKind::IBus => self
-                .proxy()
+                .proxy_with(timeout)
                 .method_call(
                     IBUS_IC_IFACE,
                     "ProcessKeyEvent",
@@ -251,7 +261,7 @@ impl X11ImContext {
                 .map_err(|error| error.to_string()),
         };
         self.process_io();
-        if !is_release && result.as_ref().is_ok_and(|filtered| *filtered) {
+        if !is_release && !modifier && result.as_ref().is_ok_and(|filtered| *filtered) {
             if !self.has_events() {
                 self.wait_for_events(SIGNAL_WAIT);
                 self.process_io();
@@ -267,10 +277,12 @@ impl X11ImContext {
                 Ok(filtered)
             }
             Err(error) => {
-                self.fail_count.set(self.fail_count.get().saturating_add(1));
-                self.drop_late.set(true);
-                if let Ok(mut events) = self.events.lock() {
-                    events.clear();
+                if !modifier {
+                    self.fail_count.set(self.fail_count.get().saturating_add(1));
+                    self.drop_late.set(true);
+                    if let Ok(mut events) = self.events.lock() {
+                        events.clear();
+                    }
                 }
                 Err(error)
             }
@@ -284,23 +296,26 @@ impl X11ImContext {
         state: u32,
         is_release: bool,
         time: u32,
+        timeout: Duration,
     ) -> Result<bool, String> {
         match self.fcitx_key_mode.get() {
             FcitxKeyMode::Batch => self
-                .process_fcitx5_batch(keyval, keycode, state, is_release, time)
+                .process_fcitx5_batch(keyval, keycode, state, is_release, time, timeout)
                 .map_err(|error| error.to_string()),
             FcitxKeyMode::Single => {
-                self.process_fcitx5_single(keyval, keycode, state, is_release, time)
+                self.process_fcitx5_single(keyval, keycode, state, is_release, time, timeout)
             }
             FcitxKeyMode::Unknown => {
-                match self.process_fcitx5_batch(keyval, keycode, state, is_release, time) {
+                match self.process_fcitx5_batch(keyval, keycode, state, is_release, time, timeout) {
                     Ok(handled) => {
                         self.fcitx_key_mode.set(FcitxKeyMode::Batch);
                         Ok(handled)
                     }
                     Err(error) if is_unknown_dbus_method(&error) => {
                         self.fcitx_key_mode.set(FcitxKeyMode::Single);
-                        self.process_fcitx5_single(keyval, keycode, state, is_release, time)
+                        self.process_fcitx5_single(
+                            keyval, keycode, state, is_release, time, timeout,
+                        )
                     }
                     Err(error) => Err(error.to_string()),
                 }
@@ -315,9 +330,10 @@ impl X11ImContext {
         state: u32,
         is_release: bool,
         time: u32,
+        timeout: Duration,
     ) -> Result<bool, dbus::Error> {
         let (rows, handled): (Vec<(u32, Variant<Box<dyn RefArg>>)>, bool) =
-            self.proxy().method_call(
+            self.proxy_with(timeout).method_call(
                 FCITX5_IC_IFACE,
                 "ProcessKeyEventBatch",
                 (keyval, keycode, state, is_release, time),
@@ -339,8 +355,9 @@ impl X11ImContext {
         state: u32,
         is_release: bool,
         time: u32,
+        timeout: Duration,
     ) -> Result<bool, String> {
-        self.proxy()
+        self.proxy_with(timeout)
             .method_call(
                 FCITX5_IC_IFACE,
                 "ProcessKeyEvent",
@@ -480,8 +497,11 @@ impl X11ImContext {
     }
 
     fn proxy(&self) -> Proxy<'_, &Connection> {
-        self.conn
-            .with_proxy(&self.dest, self.path.clone(), KEY_TIMEOUT)
+        self.proxy_with(KEY_TIMEOUT)
+    }
+
+    fn proxy_with(&self, timeout: Duration) -> Proxy<'_, &Connection> {
+        self.conn.with_proxy(&self.dest, self.path.clone(), timeout)
     }
 }
 
@@ -498,6 +518,10 @@ impl Drop for X11ImContext {
             ImKind::IBus => proxy.method_call::<(), _, _, _>(IBUS_SERVICE_IFACE, "Destroy", ()),
         };
     }
+}
+
+fn is_modifier_keyval(keyval: u32) -> bool {
+    matches!(keyval, 0xffe1..=0xffee | 0xfe03 | 0xfe11 | 0xff7e)
 }
 
 fn is_unknown_dbus_method(error: &dbus::Error) -> bool {

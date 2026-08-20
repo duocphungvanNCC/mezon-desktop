@@ -1097,7 +1097,7 @@ impl X11Client {
             self.0.borrow_mut().dbus_im_focused = true;
             self.drain_dbus_im();
         }
-        if shortcut_skips_ime(state, keyval) {
+        if shortcut_skips_ime(state, keyval) && !is_modifier {
             if !is_release {
                 self.0.borrow_mut().composing = false;
                 if let Some(window) = self.get_window(window_id) {
@@ -1597,7 +1597,6 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
-                state.keyboard_focused_window = None;
                 if let Some(compose_state) = state.compose_state.as_mut() {
                     compose_state.reset();
                 }
@@ -1615,6 +1614,7 @@ impl X11Client {
                 }
                 drop(state);
                 self.drain_dbus_im();
+                self.0.borrow_mut().keyboard_focused_window = None;
                 self.reset_ime();
                 window.handle_ime_unmark();
             }

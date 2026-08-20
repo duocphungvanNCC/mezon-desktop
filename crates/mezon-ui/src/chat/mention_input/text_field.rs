@@ -1033,6 +1033,11 @@ impl EntityInputHandler for MentionInputState {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            self.discard_ime_commit = self.content.get(marked).map(str::to_string);
+        }
         self.marked_range = None;
     }
 

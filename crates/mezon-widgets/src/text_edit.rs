@@ -220,15 +220,6 @@ pub fn ceil_char_boundary(text: &str, index: usize) -> usize {
 }
 
 pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>) -> Range<usize> {
-    if selected.start != selected.end {
-        if let Some(marked) = marked
-            && selected.start >= marked.start
-            && selected.end <= marked.end
-        {
-            return marked.clone();
-        }
-        return selected.clone();
-    }
     marked.cloned().unwrap_or_else(|| selected.clone())
 }
 
@@ -450,8 +441,8 @@ mod tests {
     }
 
     #[test]
-    fn ime_replace_uses_selection_when_it_is_not_inside_preedit() {
-        assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 0..6);
+    fn ime_replace_uses_marked_when_preedit_is_present() {
+        assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
     }
 
     #[test]
