@@ -748,12 +748,16 @@ impl ChannelList {
         }
     }
 
-    fn unforget_clan(&mut self, clan_id: ClanId) {
+    fn unforget_clan(&mut self, clan_id: ClanId, cx: &App) {
+        if ClanList::global(cx).read(cx).clan(clan_id).is_none() {
+            return;
+        }
         self.forgotten_clans.remove(&clan_id);
     }
 
     pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.forgotten_clans.insert(clan_id);
+        self.user_channels_loaded = false;
         let channel_ids: Vec<ChannelId> = self
             .cache
             .get(&clan_id)
@@ -1012,7 +1016,10 @@ impl ChannelList {
     }
 
     pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.unforget_clan(clan_id);
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         self.want_extras.insert(clan_id);
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.ensure_extras(clan_id, cx);
@@ -1022,7 +1029,10 @@ impl ChannelList {
     }
 
     pub fn load_structure_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.unforget_clan(clan_id);
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             return;
         }
@@ -1057,7 +1067,10 @@ impl ChannelList {
     }
 
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.unforget_clan(clan_id);
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
         self.fetch_clan(clan_id, cx);
@@ -6691,6 +6704,8 @@ mod tests {
             });
             channels.update(cx, |channels, cx| {
                 channels.seed_clan_channels_for_test(ClanId(1), categories());
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                channels.user_channels_loaded = true;
                 channels.show_empty_categories.insert(ClanId(1));
                 channels
                     .remembered_channels
@@ -6722,6 +6737,8 @@ mod tests {
             assert!(!channels.remembered_channels.contains_key(&ClanId(1)));
             assert_eq!(channels.active_channel_id, None);
             assert!(channels.forgotten_clans.contains(&ClanId(1)));
+            assert!(!channels.user_channels_loaded);
+            assert!(channels.user_channel(ChannelId(10)).is_none());
         });
     }
 
@@ -6758,6 +6775,21 @@ mod tests {
                     "a late structure fetch after leave must not restore the clan"
                 );
 
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.forgotten_clans.contains(&ClanId(1)),
+                    "a leftover route load after leave must not clear the forgotten guard"
+                );
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(channels.cache.get(&ClanId(1)).is_none());
+            });
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, cx| {
                 channels.load_for_clan(ClanId(1), cx);
                 assert!(
                     !channels.forgotten_clans.contains(&ClanId(1)),
