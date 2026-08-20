@@ -67,6 +67,7 @@ pub enum RealtimeKind {
     TokenSent,
     RoleEvent,
     WebrtcSignaling,
+    IncomingCallPush,
     Webhook,
 }
 
@@ -124,6 +125,7 @@ impl RealtimeKind {
             RealtimeEvent::Webhook(_) => Self::Webhook,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
+            RealtimeEvent::IncomingCallPush(_) => Self::IncomingCallPush,
             _ => return None,
         })
     }
