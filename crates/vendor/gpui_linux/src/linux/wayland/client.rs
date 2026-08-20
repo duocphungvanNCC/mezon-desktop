@@ -2444,6 +2444,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     position: state.drag.position,
                 });
                 drop(state);
+                drag_window.request_dnd_activation();
                 drag_window.handle_input(input);
             }
             _ => {}

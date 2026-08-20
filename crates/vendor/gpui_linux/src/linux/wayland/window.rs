@@ -1046,6 +1046,23 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn request_dnd_activation(&self) {
+        let state = self.state.borrow();
+        let Some(activation) = state.globals.activation.clone() else {
+            return;
+        };
+        let Some(app_id) = state.app_id.clone() else {
+            return;
+        };
+        state.client.set_pending_activation(state.surface.id());
+        let token = activation.get_activation_token(&state.globals.qh, ());
+        let serial = state.client.get_serial(SerialKind::DataDevice);
+        token.set_app_id(app_id);
+        token.set_serial(serial, &state.globals.seat);
+        token.set_surface(&state.surface);
+        token.commit();
+    }
+
     pub fn handle_input(&self, input: PlatformInput) {
         if self.is_blocked() {
             return;
