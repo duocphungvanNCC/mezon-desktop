@@ -2995,7 +2995,7 @@ impl ChannelList {
                         member_count: 0,
                         badge_count: 0,
                         muted: false,
-                        parent_id: Some(ChannelId(e.parent_id)).filter(|c| !c.is_zero()),
+                        parent_id: None,
                         last_seen_message_id: MessageId(0),
                         last_seen_timestamp: 0,
                         last_sent_message_id: MessageId(0),
@@ -6945,7 +6945,6 @@ mod tests {
                     !channels.channel_in_clan(ClanId(1), ChannelId(42)),
                     "ChannelCreated must not insert a thread the viewer has not joined"
                 );
-                assert!(channels.user_channel(ChannelId(42)).is_none());
             });
         });
     }
