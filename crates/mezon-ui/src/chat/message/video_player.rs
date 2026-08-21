@@ -153,9 +153,12 @@ impl VideoPlayerView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_theater(
         player: Rc<VideoPlayer>,
         shared: Shared,
+        url: SharedString,
+        filename: SharedString,
         poster: SharedString,
         locale: SharedString,
         width: f32,
@@ -168,8 +171,12 @@ impl VideoPlayerView {
             fullscreen_mode: VideoFullscreenMode::ShellModal,
             layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
-            url: SharedString::default(),
-            filename: SharedString::default(),
+            // The theater plays a player that is already open, so it never needed
+            // the source — until decoding fails mid-playback and the error card
+            // offers Download and Open externally, which have nothing to act on
+            // without it.
+            url,
+            filename,
             poster,
             locale,
             width,
@@ -382,6 +389,8 @@ impl VideoPlayerView {
                     Self::open_theater(
                         player,
                         self.shared.clone(),
+                        self.url.clone(),
+                        self.filename.clone(),
                         self.poster.clone(),
                         self.locale.clone(),
                         self.width,

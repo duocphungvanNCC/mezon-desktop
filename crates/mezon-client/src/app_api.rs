@@ -2314,7 +2314,15 @@ impl AppApi {
         let filename = sanitize_upload_filename(&thumbnail.filename);
         let size = clamp_i32(thumbnail.data.len());
         match self
-            .upload_bytes(&filename, "image/jpeg", size, 0, 0, thumbnail.data)
+            .upload_bytes(
+                &filename,
+                "image/jpeg",
+                "image/jpeg",
+                size,
+                0,
+                0,
+                thumbnail.data,
+            )
             .await
         {
             Ok(url) => url,
@@ -2325,10 +2333,17 @@ impl AppApi {
         }
     }
 
+    /// `filetype` is what the attachment is registered as; `content_type` is the
+    /// MIME the object is stored under. They are the same for a caller that knows
+    /// the real type, but not for one that only has a category ("image"), and S3
+    /// serves the Content-Type of the PUT back forever after — so a category here
+    /// would leave the CDN handing out an unusable type for the file's whole life.
+    #[allow(clippy::too_many_arguments)]
     async fn upload_bytes(
         &self,
         filename: &str,
         filetype: &str,
+        content_type: &str,
         size: i32,
         width: i32,
         height: i32,
@@ -2338,7 +2353,8 @@ impl AppApi {
             .transport
             .upload_attachment_file(filename, filetype, size, width, height)
             .await?;
-        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, content_type)
+            .await?;
         attachment_cdn_url(&self.base_img_url, &upload.filename)
     }
 
@@ -2376,7 +2392,15 @@ impl AppApi {
 
         let upload_type = upload_attachment_type(&filetype);
         let url = self
-            .upload_bytes(&upload_name, upload_type, size, width, height, data)
+            .upload_bytes(
+                &upload_name,
+                upload_type,
+                &filetype,
+                size,
+                width,
+                height,
+                data,
+            )
             .await?;
 
         Ok(mezon_proto::api::MessageAttachment {
@@ -2544,7 +2568,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, size, width, height, data)
+            .upload_bytes(&filename, filetype, filetype, size, width, height, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);

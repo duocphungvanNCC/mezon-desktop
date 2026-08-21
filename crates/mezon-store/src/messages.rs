@@ -994,6 +994,14 @@ impl MessagesStore {
         self.last_typing_sent = None;
         self.buzz_player = None;
         self.buzz_sound_loading = false;
+        // A probe round outlives the session it was started for: dropping the task
+        // stops it from spending requests on the previous account's CDN objects,
+        // and clearing the flag is what lets the next session arm a probe at all
+        // (the scheduler treats a set flag as "a round is already in flight").
+        self.presign_probe.clear();
+        self.presign_probe_task = None;
+        self.presign_probe_running = false;
+        self.presign_expiry_task = None;
         cx.notify();
     }
 
@@ -3829,11 +3837,10 @@ impl MessagesStore {
     /// Urls whose turn it is, with their backoff already advanced so a slow
     /// probe cannot be started twice.
     ///
-    /// Capped: the round runs the requests one after another, so a channel that
-    /// somehow has many stuck attachments would otherwise queue every HEAD (each
-    /// able to burn the probe timeout) behind the first. Whatever is left over
-    /// stays due and the next round — scheduled the moment this one lands —
-    /// picks it up.
+    /// Capped: the round fires its requests together, so a channel that somehow
+    /// has many stuck attachments would otherwise open a connection per
+    /// attachment at once. Whatever is left over stays due and the next round —
+    /// scheduled the moment this one lands — picks it up.
     fn take_due_probe_urls(&mut self) -> Vec<String> {
         let now = std::time::Instant::now();
         let mut due = Vec::new();
@@ -3911,17 +3918,26 @@ impl MessagesStore {
             let due = this
                 .update(cx, |this, _| this.take_due_probe_urls())
                 .unwrap_or_default();
-            let mut found = Vec::new();
-            for (index, url) in due.into_iter().enumerate() {
+            // Together, not one after another: a HEAD that goes unanswered burns the
+            // full probe timeout, and a serial round would stack one timeout per
+            // attachment before the next round — and before a channel the user has
+            // since switched to — gets a turn.
+            let probes = due.into_iter().enumerate().map(|(index, url)| {
                 let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
-                let exists =
-                    mezon_client::transport_runtime::object_exists(&presign_probe_url(&url, nonce))
-                        .await;
-                tracing::debug!(url = %url, exists, "presign probe");
-                if exists {
-                    found.push(url);
+                async move {
+                    let exists = mezon_client::transport_runtime::object_exists(
+                        &presign_probe_url(&url, nonce),
+                    )
+                    .await;
+                    tracing::debug!(url = %url, exists, "presign probe");
+                    exists.then_some(url)
                 }
-            }
+            });
+            let found: Vec<String> = futures::future::join_all(probes)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
             let _ = this.update(cx, |this, cx| {
                 this.presign_probe_running = false;
                 this.settle_presign_probes(&found, cx);
@@ -7308,7 +7324,7 @@ fn apply_presign_gate(
 /// second or two after the message — costs no requests at all.
 const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
 
-/// How many objects one probe round asks about, since it asks in sequence.
+/// How many objects one probe round asks about at once.
 const PRESIGN_PROBE_BATCH: usize = 6;
 
 /// One attachment's probe schedule.
@@ -11630,11 +11646,11 @@ mod tests {
     }
 
     #[test]
-    fn presign_probe_batch_is_bounded_so_one_round_cannot_serialise_every_head() {
-        // The round awaits its requests one at a time, so the cap is what keeps a
-        // channel full of stuck attachments from queueing them all behind the first.
-        assert!(PRESIGN_PROBE_BATCH > 0);
-        assert!(PRESIGN_PROBE_BATCH <= 8);
+    fn presign_probe_batch_is_bounded_so_one_round_cannot_flood_the_cdn() {
+        // The round fires its requests together, so the cap is what keeps a channel
+        // full of stuck attachments from opening a connection per attachment.
+        const { assert!(PRESIGN_PROBE_BATCH > 0) };
+        const { assert!(PRESIGN_PROBE_BATCH <= 8) };
     }
 
     #[test]
