@@ -17,6 +17,7 @@ pub mod create_topic_panel;
 pub mod edit_group_modal;
 pub mod file_type_icon;
 pub mod files_popover;
+pub mod flower_celebration;
 pub mod friends_page;
 pub mod gif_sticker_emoji;
 pub mod grouping;
