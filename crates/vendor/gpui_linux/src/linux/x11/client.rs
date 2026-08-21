@@ -169,18 +169,31 @@ fn ime_mode_modifier(keyval: u32) -> bool {
     )
 }
 
-fn rewrite_escape_cancel(events: &mut [ImEvent]) {
+fn rewrite_escape_cancel(events: &mut [ImEvent]) -> bool {
     if events.iter().any(im_event_has_text) {
-        return;
+        return false;
     }
+    let mut converted = false;
     for event in events {
         if matches!(event, ImEvent::HidePreedit) {
             *event = ImEvent::Preedit {
                 text: String::new(),
                 caret_chars: 0,
             };
+            converted = true;
         }
     }
+    converted
+}
+
+fn consume_escape_cancel_pending(events: &mut [ImEvent], pending: bool) -> bool {
+    if !pending {
+        return false;
+    }
+    if events.iter().any(im_event_has_text) {
+        return true;
+    }
+    rewrite_escape_cancel(events)
 }
 
 fn navigation_skips_ime(keyval: u32) -> bool {
@@ -1355,13 +1368,9 @@ impl X11Client {
     }
 
     fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
-        if self.0.borrow().escape_cancel_pending {
-            if events.iter().any(im_event_has_text) {
-                self.0.borrow_mut().escape_cancel_pending = false;
-            } else if !events.is_empty() {
-                rewrite_escape_cancel(&mut events);
-                self.0.borrow_mut().escape_cancel_pending = false;
-            }
+        let pending = self.0.borrow().escape_cancel_pending;
+        if consume_escape_cancel_pending(&mut events, pending) {
+            self.0.borrow_mut().escape_cancel_pending = false;
         }
         for event in fold_im_events(events) {
             match event {
@@ -3806,5 +3815,40 @@ mod tests {
 
         // Assert pressing space while on the Czech layout still types a space.
         assert_eq!(key_event_state.key_get_utf8(space), " ");
+    }
+
+    #[test]
+    fn escape_cancel_keeps_latch_when_first_drain_has_no_hide() {
+        let mut first = vec![ImEvent::ForwardKey {
+            keyval: 0xff1b,
+            state: 0,
+            is_release: false,
+        }];
+        assert!(!consume_escape_cancel_pending(&mut first, true));
+        assert!(matches!(first[0], ImEvent::ForwardKey { .. }));
+
+        let mut second = vec![ImEvent::HidePreedit];
+        assert!(consume_escape_cancel_pending(&mut second, true));
+        assert!(matches!(
+            second[0],
+            ImEvent::Preedit {
+                text: ref t,
+                caret_chars: 0
+            } if t.is_empty()
+        ));
+    }
+
+    #[test]
+    fn escape_cancel_clears_latch_on_text_commit() {
+        let mut events = vec![ImEvent::Commit("hoa".into())];
+        assert!(consume_escape_cancel_pending(&mut events, true));
+        assert!(matches!(events[0], ImEvent::Commit(_)));
+    }
+
+    #[test]
+    fn escape_cancel_is_noop_when_latch_is_off() {
+        let mut events = vec![ImEvent::HidePreedit];
+        assert!(!consume_escape_cancel_pending(&mut events, false));
+        assert!(matches!(events[0], ImEvent::HidePreedit));
     }
 }
