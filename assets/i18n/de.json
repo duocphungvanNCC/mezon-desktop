@@ -2997,6 +2997,7 @@
   "message.actions.topicDiscussion": "Themen-Diskussion",
   "message.actions.unPinMessage": "Anpinnen aufheben",
   "message.addAMessage": "Eine Nachricht hinzufügen (optional)",
+  "message.attachment.uploading": "Wird hochgeladen...",
   "message.attachments.attachment": "Anhang",
   "message.attachments.audio": "Sprachnachricht",
   "message.attachments.contact": "Visitenkarte",

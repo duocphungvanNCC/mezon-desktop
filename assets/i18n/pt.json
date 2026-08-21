@@ -2997,6 +2997,7 @@
   "message.actions.topicDiscussion": "Discussão de tópico",
   "message.actions.unPinMessage": "Desafixar mensagem",
   "message.addAMessage": "Adicionar uma mensagem (Opcional)",
+  "message.attachment.uploading": "Enviando...",
   "message.attachments.attachment": "Anexo",
   "message.attachments.audio": "Mensagem de voz",
   "message.attachments.contact": "Contato",

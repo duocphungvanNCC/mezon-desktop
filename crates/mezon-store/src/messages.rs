@@ -616,6 +616,12 @@ pub struct MessagesStore {
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
     presign_expiry_task: Option<Task<()>>,
+    /// Per-attachment-url backoff for the CDN existence probe. Keyed by url
+    /// because that is what uniquely identifies an object across the message
+    /// copies the caches may hold.
+    presign_probe: HashMap<String, PresignProbe>,
+    presign_probe_task: Option<Task<()>>,
+    presign_probe_running: bool,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
@@ -1050,6 +1056,9 @@ impl MessagesStore {
             embed_form: HashMap::new(),
             forward_task: None,
             presign_expiry_task: None,
+            presign_probe: HashMap::new(),
+            presign_probe_task: None,
+            presign_probe_running: false,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
@@ -3765,6 +3774,145 @@ impl MessagesStore {
             cx.notify();
         }
         self.schedule_presign_expiry(cx);
+        self.schedule_presign_probe(cx);
+    }
+
+    /// Buckets a probe may look at: whatever the user is actually looking at.
+    /// Probing the whole cache would turn every scrollback message into CDN
+    /// traffic, and an attachment nobody can see does not need healing.
+    fn probe_buckets(&self) -> Vec<ChannelId> {
+        [self.active_channel_id, self.active_topic_id]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Refresh the probe table from what is currently pending, then report how
+    /// long until the next attachment is due. `None` means nothing to probe.
+    fn refresh_presign_probes(&mut self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let mut pending: Vec<String> = Vec::new();
+        for bucket in self.probe_buckets() {
+            let Some(channel) = self.cache.get(&bucket) else {
+                continue;
+            };
+            for message in channel.messages.items.iter() {
+                for att in message.attachments.iter() {
+                    // `uploading` means this client is still PUTting the bytes; it
+                    // knows the answer already and asking the CDN would only add
+                    // traffic to every message we send ourselves.
+                    if att.presign_pending && !att.uploading && !att.url.is_empty() {
+                        pending.push(att.url.clone());
+                    }
+                }
+            }
+        }
+        self.presign_probe.retain(|url, _| pending.contains(url));
+        for url in pending {
+            self.presign_probe.entry(url).or_insert(PresignProbe {
+                attempts: 0,
+                next_at: now + presign_probe_delay(0),
+            });
+        }
+        self.presign_probe
+            .values()
+            .map(|probe| probe.next_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Urls whose turn it is, with their backoff already advanced so a slow
+    /// probe cannot be started twice.
+    fn take_due_probe_urls(&mut self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        for (url, probe) in self.presign_probe.iter_mut() {
+            if probe.next_at <= now {
+                probe.attempts = probe.attempts.saturating_add(1);
+                probe.next_at = now + presign_probe_delay(probe.attempts);
+                due.push(url.clone());
+            }
+        }
+        due
+    }
+
+    /// The object answered, so the attachment can render even though the
+    /// presign_finish patch never reached us.
+    fn settle_presign_probes(&mut self, found: &[String], cx: &mut Context<Self>) {
+        if found.is_empty() {
+            return;
+        }
+        let mut touched: Vec<MessageId> = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                let mut hit = false;
+                for att in message.attachments.iter_mut() {
+                    if att.presign_pending && found.iter().any(|url| url == &att.url) {
+                        att.presign_pending = false;
+                        hit = true;
+                    }
+                }
+                if hit {
+                    touched.push(message.id);
+                }
+            }
+        }
+        for url in found {
+            self.presign_probe.remove(url);
+        }
+        if !touched.is_empty() {
+            tracing::info!(
+                count = found.len(),
+                "presign probe cleared pending attachments"
+            );
+            // The message list repaints on MessagesEvent, not on a bare notify: an
+            // Updated event per row is what re-measures and re-renders it, so the
+            // placeholder gives way to the image without waiting for some unrelated
+            // change to force a frame.
+            for message_id in touched {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    /// Ask the CDN whether the objects exist yet, for attachments still waiting
+    /// on a presign_finish that may never arrive. Runs only while something is
+    /// pending in the open channel or topic.
+    fn schedule_presign_probe(&mut self, cx: &mut Context<Self>) {
+        if self.presign_probe_running {
+            // A probe is in flight; it re-schedules itself when it lands. Restarting
+            // here would cancel it, and the busy callers below fire on every message.
+            return;
+        }
+        let Some(delay) = self.refresh_presign_probes() else {
+            self.presign_probe_task = None;
+            return;
+        };
+        self.presign_probe_running = true;
+        self.presign_probe_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let due = this
+                .update(cx, |this, _| this.take_due_probe_urls())
+                .unwrap_or_default();
+            let mut found = Vec::new();
+            for (index, url) in due.into_iter().enumerate() {
+                let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
+                let exists =
+                    mezon_client::transport_runtime::object_exists(&presign_probe_url(&url, nonce))
+                        .await;
+                tracing::debug!(url = %url, exists, "presign probe");
+                if exists {
+                    found.push(url);
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.presign_probe_running = false;
+                this.settle_presign_probes(&found, cx);
+                this.schedule_presign_probe(cx);
+            });
+        }));
     }
 
     fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
@@ -5086,6 +5234,7 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                self.schedule_presign_probe(cx);
                 if is_current && self.messages().is_empty() {
                     self.mark_empty_channel_seen(channel_id, cx);
                 }
@@ -5300,6 +5449,7 @@ impl MessagesStore {
         self.set_last_message(storage_id, last_id);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
@@ -5353,6 +5503,7 @@ impl MessagesStore {
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
@@ -6339,6 +6490,9 @@ impl MessagesStore {
             });
             cx.notify();
         }
+        // Our own upload just finished, so the row is now pending on nothing but the
+        // presign_finish patch — which is exactly what can go missing.
+        self.schedule_presign_probe(cx);
     }
 
     pub fn apply_topic_attachment_outcome(
@@ -6355,6 +6509,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
+        self.schedule_presign_probe(cx);
     }
 
     fn resync(&mut self, cx: &mut Context<Self>) {
@@ -7133,6 +7288,32 @@ fn apply_presign_gate(
 /// sweep would not touch it. It must agree with `sweep_expired_presign`: a
 /// message the sweep skips but this counts would be rescheduled at zero delay
 /// forever.
+/// Backoff between CDN existence probes for one attachment. The first wait is
+/// long enough that the normal path — the presign_finish update arriving a
+/// second or two after the message — costs no requests at all.
+const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
+
+/// One attachment's probe schedule.
+#[derive(Debug, Clone, Copy)]
+struct PresignProbe {
+    attempts: u32,
+    next_at: std::time::Instant,
+}
+
+fn presign_probe_delay(attempts: u32) -> std::time::Duration {
+    let last = PRESIGN_PROBE_BACKOFF_SECS.len() - 1;
+    let idx = (attempts as usize).min(last);
+    std::time::Duration::from_secs(PRESIGN_PROBE_BACKOFF_SECS[idx])
+}
+
+/// The probe URL carries a nonce so that a not-found answer is cached under a
+/// key nothing renders from. Without it an early probe could pin a 404 onto the
+/// very URL the message is about to use.
+fn presign_probe_url(url: &str, nonce: u64) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}probe={nonce:x}")
+}
+
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
     if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
         return None;
@@ -11412,6 +11593,37 @@ mod tests {
         // counting it here would re-arm the timer at zero delay forever.
         pending.content = r#"{"t":"hi"}"#.to_string();
         assert_eq!(presign_expiry_deadline(&pending), None);
+    }
+
+    #[test]
+    fn presign_probe_backoff_stretches_then_holds_at_thirty_seconds() {
+        let secs = |attempts| presign_probe_delay(attempts).as_secs();
+        // The first wait outlasts a healthy presign_finish, so the normal path
+        // never spends a request.
+        assert_eq!(secs(0), 8);
+        assert_eq!(secs(1), 15);
+        assert_eq!(secs(2), 30);
+        assert_eq!(secs(3), 30);
+        // A genuinely slow upload must not turn into a request storm: the delay
+        // stops growing but never shrinks back down.
+        assert_eq!(secs(4), 30);
+        assert_eq!(secs(50), 30);
+        assert_eq!(secs(u32::MAX), 30);
+    }
+
+    #[test]
+    fn presign_probe_url_never_reuses_the_clean_url() {
+        // A 404 must be cached under a key nothing renders from, otherwise an
+        // early probe poisons the URL the message is about to use.
+        let probed = presign_probe_url("https://cdn.mezon.ai/a/b.png", 0xdead);
+        assert_eq!(probed, "https://cdn.mezon.ai/a/b.png?probe=dead");
+        assert!(probed.starts_with("https://cdn.mezon.ai/a/b.png?"));
+
+        // An url that already carries a query keeps it.
+        assert_eq!(
+            presign_probe_url("https://cdn.mezon.ai/a/b.png?v=2", 1),
+            "https://cdn.mezon.ai/a/b.png?v=2&probe=1"
+        );
     }
 
     #[test]

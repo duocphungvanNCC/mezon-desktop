@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit, Pixels,
+    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
@@ -759,26 +759,32 @@ struct Uploader {
     avatar: SharedString,
 }
 
-fn attachment_spinner(size: Pixels, theme: &Theme) -> impl IntoElement {
-    div()
-        .size(size)
-        .rounded_full()
-        .border_2()
-        .border_color(theme.text_secondary)
-}
+/// Width below which the label is dropped: an album tile can be ~100px and the
+/// text would spill out of it. The spinner alone still reads as "working".
+const SENDING_LABEL_MIN_WIDTH: f32 = 160.;
 
-fn attachment_sending_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_sending_overlay(theme: &Theme, locale: &str, box_width: f32) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
+        .gap_2()
         .child(
             Spinner::new()
                 .with_size(Size::Large)
                 .color(theme.text_secondary.into()),
         )
+        .when(box_width >= SENDING_LABEL_MIN_WIDTH, |d| {
+            d.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.text_secondary)
+                    .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+            )
+        })
 }
 
 fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
@@ -812,11 +818,18 @@ fn render_audio(
     sending: bool,
 ) -> AnyElement {
     let duration = att.duration.max(0) as f64;
+    // `uploading` only ever covers OUR OWN outgoing message. A recipient sees
+    // the message the moment it is posted, with `presign_pending` set until the
+    // sender's upload lands — play it then and the player fetches an object the
+    // CDN does not have yet, and the not-found is what gets cached. React drops
+    // pending audio from the list entirely; the pill says the same thing and
+    // keeps the row's height.
+    let sending = sending || att.presign_pending;
     if att.upload_failed {
         return audio_failed_pill(duration);
     }
     if sending {
-        return audio_sending_pill(duration);
+        return audio_sending_pill(duration, ctx.locale);
     }
     if let Some(view) = ctx.active_audios.get(&(msg_id, index)) {
         return div().w_full().child(view.clone()).into_any_element();
@@ -933,7 +946,7 @@ fn render_album(
                 tile.height,
             ));
         } else if att.presign_pending {
-            tile_element = presign_child(tile_element, att, theme);
+            tile_element = presign_child(tile_element, att, theme, ctx.locale, tile.width);
         } else {
             let selection = ctx.selection.clone();
             let src = album_tile_src(cfg, att, tile.width, tile.height);
@@ -964,7 +977,8 @@ fn render_album(
         if att.upload_failed {
             tile_element = tile_element.child(attachment_failed_overlay(theme));
         } else if att.uploading {
-            tile_element = tile_element.child(attachment_sending_overlay(theme));
+            tile_element =
+                tile_element.child(attachment_sending_overlay(theme, ctx.locale, tile.width));
         }
         container = container.child(tile_element);
     }
@@ -1021,15 +1035,22 @@ fn presign_child(
     parent: gpui::Stateful<gpui::Div>,
     att: &MessageAttachment,
     theme: &Theme,
+    locale: &str,
+    box_width: f32,
 ) -> gpui::Stateful<gpui::Div> {
+    // A recipient never sees `uploading` — only `presign_pending` — so without
+    // this the whole upload window is a bare spinner on their side while the
+    // sender gets a labelled one.
     if att.thumbnail.is_empty() {
-        parent.child(attachment_spinner(px(30.), theme))
+        parent.child(attachment_sending_overlay(theme, locale, box_width))
     } else {
-        parent.child(
-            img(SharedString::from(att.thumbnail.clone()))
-                .size_full()
-                .object_fit(ObjectFit::Cover),
-        )
+        parent
+            .child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .child(attachment_sending_overlay(theme, locale, box_width))
     }
 }
 
@@ -1117,7 +1138,11 @@ fn render_photo(
         if att.upload_failed {
             el = el.child(attachment_failed_overlay(theme));
         } else if sending {
-            el = el.child(attachment_sending_overlay(theme));
+            el = el.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+            ));
         }
         return el.into_any_element();
     }
@@ -1133,11 +1158,15 @@ fn render_photo(
             .items_center()
             .justify_center()
             .bg(theme.bg_tertiary);
-        placeholder = presign_child(placeholder, att, theme);
+        placeholder = presign_child(placeholder, att, theme, ctx.locale, att.display_width);
         if att.upload_failed {
             placeholder = placeholder.child(attachment_failed_overlay(theme));
         } else if sending {
-            placeholder = placeholder.child(attachment_sending_overlay(theme));
+            placeholder = placeholder.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+            ));
         }
         return placeholder.into_any_element();
     }
@@ -1166,7 +1195,10 @@ fn render_photo(
         .h(px(att.display_height))
         .rounded_md()
         .overflow_hidden();
-    el = el.when(!is_sticker && !att.upload_failed, |d| {
+    // `render_album` already refuses to open a tile that is still uploading;
+    // the single-image path is the same picture with the same half-written
+    // object behind it.
+    el = el.when(!is_sticker && !att.upload_failed && !sending, |d| {
         d.cursor_pointer().on_click(move |_, window, cx| {
             if !selection.borrow().has_selection() {
                 open_viewer_from_message(
@@ -1205,7 +1237,11 @@ fn render_photo(
     if att.upload_failed {
         el = el.child(attachment_failed_overlay(theme));
     } else if sending {
-        el = el.child(attachment_sending_overlay(theme));
+        el = el.child(attachment_sending_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+        ));
     }
     el.into_any_element()
 }
@@ -1246,6 +1282,7 @@ fn render_video_poster(
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
+    let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
     let container = div()
         .id(("msg-video", index))
@@ -1273,11 +1310,16 @@ fn render_video_poster(
     }
     if sending {
         return container
-            .child(attachment_sending_overlay(theme))
+            .child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+            ))
             .into_any_element();
     }
     if att.presign_pending {
-        return presign_child(container, att, theme).into_any_element();
+        return presign_child(container, att, theme, ctx.locale, att.display_width)
+            .into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1327,6 +1369,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {
                 host.activate_video((msg_id, index), activation, window, cx);
@@ -1379,7 +1422,11 @@ fn render_file_box(
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let sending = att.uploading;
+    // Same reason as `render_audio`: a recipient's copy is never `uploading`,
+    // only `presign_pending`, and every button in this box (download, open PDF)
+    // hits the object URL directly. React filters pending documents out of the
+    // list; the spinner state already disables all of them.
+    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
     let is_owner = ctx.current_user_id == msg.sender_id.as_str();
     let filename = if att.filename.is_empty() {
@@ -1390,7 +1437,14 @@ fn render_file_box(
     let is_pdf =
         att.filetype == "application/pdf" || att.filename.to_ascii_lowercase().ends_with(".pdf");
     let url = SharedString::from(att.url.clone());
-    let size_line = SharedString::from(format!("size: {}", att.size_label));
+    // While the object is not on the CDN yet the size we have is the sender's
+    // claim about a file nobody can fetch, so say what is actually happening
+    // instead — the spinner alone reads as a stuck row.
+    let size_line = if sending {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
+    } else {
+        SharedString::from(format!("size: {}", att.size_label))
+    };
     let group_name = SharedString::from(format!("file-box-{}-{}", msg.id.0, index));
 
     let download_url = url.clone();

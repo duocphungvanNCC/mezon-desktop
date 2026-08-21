@@ -3118,6 +3118,7 @@
   "message.actions.topicDiscussion": "Thảo luận chủ đề",
   "message.actions.unPinMessage": "Bỏ ghim tin nhắn",
   "message.addAMessage": "Thêm một tin nhắn (Không bắt buộc)",
+  "message.attachment.uploading": "Đang tải lên...",
   "message.attachments.attachment": "Tệp đính kèm",
   "message.attachments.audio": "Tin nhắn thoại",
   "message.attachments.contact": "Danh thiếp",

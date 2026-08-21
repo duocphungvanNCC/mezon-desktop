@@ -108,6 +108,13 @@ const MULTIPART_PART_SIZE: u64 = 10 * 1024 * 1024;
 const MULTIPART_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 const MULTIPART_PART_CONCURRENCY: usize = 2;
 const ATTACHMENT_UPLOAD_CONCURRENCY: usize = 4;
+/// Delay AFTER each failed presign_finish attempt; the last entry is zero
+/// because there is no attempt left to wait for.
+const PRESIGN_SYNC_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+    std::time::Duration::ZERO,
+];
 const PRESIGN_EDIT_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -136,6 +143,7 @@ enum UploadPlan {
     Single {
         put_url: String,
         path: PathBuf,
+        content_type: String,
     },
     Multipart {
         upload_id: String,
@@ -1859,6 +1867,7 @@ impl AppApi {
                 UploadPlan::Single {
                     put_url: upload.url,
                     path,
+                    content_type: filetype,
                 },
             )
         };
@@ -1890,9 +1899,19 @@ impl AppApi {
 
     pub async fn execute_upload(&self, presigned: PresignedAttachment) -> Result<()> {
         match presigned.plan {
-            UploadPlan::Single { put_url, path } => {
+            UploadPlan::Single {
+                put_url,
+                path,
+                content_type,
+            } => {
                 let data = crate::transport_runtime::read_file(path).await?;
-                crate::transport_runtime::put_bytes_to_url(&put_url, data).await?;
+                // S3 stores whatever Content-Type the PUT carries and the CDN
+                // serves it back forever after, so sending the placeholder here
+                // is how every attachment under MULTIPART_MIN_FILE_SIZE ended up
+                // as application/octet-stream — the multipart arm always got
+                // this right.
+                crate::transport_runtime::put_bytes_to_content_type(&put_url, data, &content_type)
+                    .await?;
                 Ok(())
             }
             UploadPlan::Multipart {
@@ -2137,16 +2156,16 @@ impl AppApi {
                     let _ = on_complete.send(AttachmentUploadOutcome::Failed(key));
                 }
             }
-            if finished.len() - synced >= PRESIGN_EDIT_BATCH_SIZE {
-                if let Err(e) = self
-                    .update_presign_finish(
+            if finished.len() - synced >= PRESIGN_EDIT_BATCH_SIZE
+                && self
+                    .sync_presign_finish_with_retry(
                         clan_id,
                         channel_id,
                         message_id,
                         content,
-                        mentions.clone(),
-                        hashtags.clone(),
-                        emojis.clone(),
+                        &mentions,
+                        &hashtags,
+                        &emojis,
                         finished.clone(),
                         create_time_seconds,
                         mode,
@@ -2155,24 +2174,62 @@ impl AppApi {
                         is_update_msg_topic,
                     )
                     .await
-                {
-                    tracing::error!("presign_finish sync failed: {e}");
-                } else {
-                    synced = finished.len();
-                }
+            {
+                synced = finished.len();
             }
         }
-        if finished.len() > synced
-            && let Err(e) = self
+        if finished.len() > synced {
+            self.sync_presign_finish_with_retry(
+                clan_id,
+                channel_id,
+                message_id,
+                content,
+                &mentions,
+                &hashtags,
+                &emojis,
+                finished,
+                create_time_seconds,
+                mode,
+                is_public,
+                topic_id,
+                is_update_msg_topic,
+            )
+            .await;
+        }
+    }
+
+    /// One lost presign_finish patch leaves the attachment loading on EVERY
+    /// recipient until the 10-minute expiry, so a single socket hiccup here is
+    /// worth a few retries. Each call re-sends the cumulative key list, so a
+    /// late success still carries everything an earlier attempt would have.
+    #[allow(clippy::too_many_arguments)]
+    async fn sync_presign_finish_with_retry(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        mentions: &[crate::transport::OutgoingMention],
+        hashtags: &[crate::transport::OutgoingHashtag],
+        emojis: &[crate::transport::OutgoingEmoji],
+        finished: Vec<String>,
+        create_time_seconds: u32,
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+    ) -> bool {
+        for (attempt, backoff) in PRESIGN_SYNC_BACKOFF.iter().enumerate() {
+            match self
                 .update_presign_finish(
                     clan_id,
                     channel_id,
                     message_id,
                     content,
-                    mentions,
-                    hashtags,
-                    emojis,
-                    finished,
+                    mentions.to_vec(),
+                    hashtags.to_vec(),
+                    emojis.to_vec(),
+                    finished.clone(),
                     create_time_seconds,
                     mode,
                     is_public,
@@ -2180,9 +2237,21 @@ impl AppApi {
                     is_update_msg_topic,
                 )
                 .await
-        {
-            tracing::error!("presign_finish final sync failed: {e}");
+            {
+                Ok(_) => return true,
+                Err(e) => {
+                    tracing::error!(
+                        "presign_finish sync failed (attempt {}/{}): {e}",
+                        attempt + 1,
+                        PRESIGN_SYNC_BACKOFF.len()
+                    );
+                    if !backoff.is_zero() {
+                        crate::transport_runtime::sleep(*backoff).await;
+                    }
+                }
+            }
         }
+        false
     }
 
     pub async fn send_message_with_attachment_urls(
@@ -2257,23 +2326,6 @@ impl AppApi {
     }
 
     async fn upload_bytes(
-        &self,
-        filename: &str,
-        filetype: &str,
-        size: i32,
-        width: i32,
-        height: i32,
-        data: Vec<u8>,
-    ) -> Result<String> {
-        let upload = self
-            .transport
-            .upload_attachment_file(filename, filetype, size, width, height)
-            .await?;
-        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
-        attachment_cdn_url(&self.base_img_url, &upload.filename)
-    }
-
-    async fn upload_avatar_bytes(
         &self,
         filename: &str,
         filetype: &str,
@@ -2492,7 +2544,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_avatar_bytes(&filename, filetype, size, width, height, data)
+            .upload_bytes(&filename, filetype, size, width, height, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
