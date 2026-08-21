@@ -118,12 +118,12 @@ impl SingleInstance {
     /// with `InvalidInput` rather than an OS errno, which is easy to mistake
     /// for a bug in the caller.
     #[cfg(unix)]
-    const MAX_SOCKET_PATH: usize = 103;
+    pub(crate) const MAX_SOCKET_PATH: usize = 103;
 
     /// Stable across processes and runs: `DefaultHasher::new` is seeded with a
     /// fixed key, unlike `RandomState`.
     #[cfg(unix)]
-    fn user_digest(user: &str) -> u64 {
+    pub(crate) fn user_digest(user: &str) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
