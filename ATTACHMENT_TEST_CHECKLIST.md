@@ -90,7 +90,11 @@ regresses independently of the channel path. Test it separately, every time.
 
 - [ ] Single image into a topic → `kind="local-file"`
 - [ ] **Album (3 images) into a topic** → three `local-file` lines. This is the
-      case that exercises the index-aligned `local_source` guard
+      case that exercises the name-matched `local_source` guard
+- [ ] Album into a topic where the **socket echo beats the ack** (the common case
+      for a batch): the paths land on the row the socket already created, and the
+      topic list has to be told — check the rendered row, not the store, since a
+      store that is right behind a stale view looks like a pass
 - [ ] Image + document together → both settle, only the image renders locally
 - [ ] Receiver sees the topic reply and its reply-count badge on the parent
 
@@ -223,8 +227,11 @@ Video:
 ## 7. Reading the numbers
 
 The `img_render` lines come from a temporary instrumentation in
-`MessageImageLoader` (`crates/mezon-ui/src/image_cache.rs`) — **not committed**.
-Re-add it when a run needs render sources, drop it before committing.
+`MessageImageLoader` (`crates/mezon-ui/src/image_cache.rs`) — **not committed**,
+and it must stay that way: it logs the absolute local path and the full remote
+url of every image the app loads, on the hot path. Add it for a measuring run,
+then `git checkout origin/develop -- crates/mezon-ui/src/image_cache.rs` before
+committing anything.
 
 Healthy ranges measured on a working build:
 

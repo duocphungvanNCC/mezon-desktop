@@ -2080,19 +2080,6 @@ impl Asset for MessageImageLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
-            // TEMP DEBUG (img-render): not for commit.
-            let render_started = std::time::Instant::now();
-            let render_kind = match &source {
-                Resource::Path(_) => "local-file",
-                Resource::Uri(uri) if uri.contains("imgproxy") => "imgproxy",
-                Resource::Uri(_) => "cdn-direct",
-                Resource::Embedded(_) => "embedded",
-            };
-            let render_src = match &source {
-                Resource::Path(p) => p.to_string_lossy().into_owned(),
-                Resource::Uri(uri) => uri.to_string(),
-                Resource::Embedded(p) => p.to_string(),
-            };
             let _permit = acquire_image_pipeline_permit().await?;
             let bytes = match source.clone() {
                 Resource::Path(uri) => {
@@ -2100,15 +2087,10 @@ impl Asset for MessageImageLoader {
                         && let Some(decoded) =
                             decode_scaled_dynamic_path(uri.as_ref(), MESSAGE_STATIC_MAX_PX)
                     {
-                        let frame = downscaled_static_frame(decoded, MESSAGE_STATIC_MAX_PX);
-                        tracing::info!(
-                            target: "img_render",
-                            kind = render_kind,
-                            ms = render_started.elapsed().as_millis() as u64,
-                            src = %render_src,
-                            "message image ready"
-                        );
-                        return Ok(Arc::new(RenderImage::new(vec![frame])));
+                        return Ok(Arc::new(RenderImage::new(vec![downscaled_static_frame(
+                            decoded,
+                            MESSAGE_STATIC_MAX_PX,
+                        )])));
                     }
                     std::fs::read(uri.as_ref())?
                 }
@@ -2142,8 +2124,7 @@ impl Asset for MessageImageLoader {
                 },
             };
 
-            let fetched = bytes.len();
-            let out = if image::guess_format(&bytes).is_ok() {
+            if image::guess_format(&bytes).is_ok() {
                 decode_message_image(
                     &bytes,
                     MESSAGE_ANIMATION_MAX_PX,
@@ -2154,17 +2135,7 @@ impl Asset for MessageImageLoader {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
                     .map_err(Into::into)
-            };
-            tracing::info!(
-                target: "img_render",
-                kind = render_kind,
-                ms = render_started.elapsed().as_millis() as u64,
-                bytes = fetched,
-                ok = out.is_ok(),
-                src = %render_src,
-                "message image ready"
-            );
-            out
+            }
         }
     }
 }
