@@ -104,38 +104,65 @@ impl SingleInstance {
         let error = last_bind_error
             .unwrap_or_else(|| std::io::Error::other("no Unix socket path candidates available"));
 
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            tracing::warn!(
-                "Single instance lock disabled because Unix socket binding is not permitted: {error}"
-            );
-            return Ok(Some(Self {
-                socket_path: None,
-                _listener: None,
-            }));
-        }
+        // Losing the lock must never stop the app from starting: a second copy
+        // running is a far smaller problem than a window that never appears.
+        tracing::warn!("Single instance lock disabled because no socket could be bound: {error}");
+        Ok(Some(Self {
+            socket_path: None,
+            _listener: None,
+        }))
+    }
 
-        Err(error.into())
+    /// `sockaddr_un::sun_path` holds 104 bytes including the NUL terminator, so
+    /// a bindable socket path is at most 103 bytes. Longer paths fail `bind`
+    /// with `InvalidInput` rather than an OS errno, which is easy to mistake
+    /// for a bug in the caller.
+    #[cfg(unix)]
+    const MAX_SOCKET_PATH: usize = 103;
+
+    /// Stable across processes and runs: `DefaultHasher::new` is seeded with a
+    /// fixed key, unlike `RandomState`.
+    #[cfg(unix)]
+    fn user_digest(user: &str) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user.hash(&mut hasher);
+        hasher.finish()
     }
 
     #[cfg(unix)]
     fn socket_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        if let Some(runtime_dir) = dirs::runtime_dir() {
-            paths.push(runtime_dir.join("mezon.sock"));
-        }
-
         let user = std::env::var("USER")
             .ok()
             .filter(|user| !user.is_empty())
             .unwrap_or_else(|| "user".to_owned());
 
-        paths.push(
-            std::env::temp_dir()
-                .join(format!("mezon-desktop-{user}"))
-                .join("mezon.sock"),
-        );
+        Self::socket_paths_for(dirs::runtime_dir().as_deref(), &std::env::temp_dir(), &user)
+    }
 
+    #[cfg(unix)]
+    fn socket_paths_for(
+        runtime_dir: Option<&std::path::Path>,
+        tmp: &std::path::Path,
+        user: &str,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Some(runtime_dir) = runtime_dir {
+            paths.push(runtime_dir.join("mezon.sock"));
+        }
+
+        paths.push(tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock"));
+
+        // A sandboxed (App Store) build gets a container `$TMPDIR` under
+        // `~/Library/Containers/<bundle id>/Data/tmp/`, which already eats ~66
+        // bytes before the user name. The readable path above then overruns
+        // `sun_path` for anything but a short login name, so keep a
+        // fixed-width per-user fallback that always fits.
+        paths.push(tmp.join(format!("mezon-{:08x}.sock", Self::user_digest(user) as u32)));
+
+        paths.retain(|path| path.as_os_str().len() <= Self::MAX_SOCKET_PATH);
         paths
     }
 
@@ -390,5 +417,102 @@ impl Drop for SingleInstance {
         if let Some(socket_path) = &self.socket_path {
             let _ = std::fs::remove_file(socket_path);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::SingleInstance;
+    use std::path::{Path, PathBuf};
+
+    /// The container `$TMPDIR` a sandboxed macOS build actually runs with.
+    fn container_tmp(user: &str) -> PathBuf {
+        PathBuf::from(format!(
+            "/Users/{user}/Library/Containers/app.mezon.ai/Data/tmp"
+        ))
+    }
+
+    #[test]
+    fn candidates_always_fit_sun_path() {
+        for user in ["a", "ngoc", "hoangphuongnguyen", &"x".repeat(64)] {
+            for tmp in [
+                container_tmp(user),
+                PathBuf::from("/var/folders/ml/53wfzsjn4n1cx3lmty3p8npw0000gn/T"),
+                PathBuf::from("/tmp"),
+            ] {
+                for path in SingleInstance::socket_paths_for(None, &tmp, user) {
+                    assert!(
+                        path.as_os_str().len() <= SingleInstance::MAX_SOCKET_PATH,
+                        "{} is {} bytes",
+                        path.display(),
+                        path.as_os_str().len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The regression: a long login name plus a sandbox container `$TMPDIR`
+    /// pushed the only candidate past `sun_path`, so `bind` failed and the app
+    /// exited before opening a window.
+    #[test]
+    fn long_user_in_sandbox_container_still_has_a_candidate() {
+        let user = "hoangphuongnguyen";
+        let tmp = container_tmp(user);
+
+        let readable = tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock");
+        assert!(
+            readable.as_os_str().len() > SingleInstance::MAX_SOCKET_PATH,
+            "expected the readable path to overrun sun_path"
+        );
+
+        let paths = SingleInstance::socket_paths_for(None, &tmp, user);
+        assert!(!paths.is_empty(), "no bindable candidate left");
+        assert!(!paths.contains(&readable));
+    }
+
+    /// The fallback has to survive realistic login names, not just the one that
+    /// triggered the bug — `bind` failing again would silently drop the guard.
+    #[test]
+    fn sandbox_container_leaves_a_candidate_for_realistic_user_names() {
+        for len in 1..=30 {
+            let user = "u".repeat(len);
+            let paths = SingleInstance::socket_paths_for(None, &container_tmp(&user), &user);
+            assert!(
+                !paths.is_empty(),
+                "no candidate for a {len}-char login name"
+            );
+        }
+    }
+
+    #[test]
+    fn short_user_keeps_the_readable_path_first() {
+        let user = "ngoc";
+        let tmp = container_tmp(user);
+
+        let paths = SingleInstance::socket_paths_for(None, &tmp, user);
+        assert_eq!(
+            paths.first(),
+            Some(&tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock"))
+        );
+    }
+
+    #[test]
+    fn runtime_dir_is_dropped_when_it_cannot_fit() {
+        let long = PathBuf::from(format!("/run/user/1000/{}", "d".repeat(120)));
+        let paths = SingleInstance::socket_paths_for(Some(&long), Path::new("/tmp"), "ngoc");
+        assert!(paths.iter().all(|path| !path.starts_with(&long)));
+    }
+
+    #[test]
+    fn user_digest_is_stable_and_per_user() {
+        assert_eq!(
+            SingleInstance::user_digest("ngoc"),
+            SingleInstance::user_digest("ngoc")
+        );
+        assert_ne!(
+            SingleInstance::user_digest("ngoc"),
+            SingleInstance::user_digest("hoangphuongnguyen")
+        );
     }
 }
