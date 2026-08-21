@@ -8,14 +8,40 @@ use crate::wallet::SendTokenRequest;
 pub const FLOWER_PRICE: i64 = 50_000;
 pub const FLOWER_GIFT_TYPE: &str = "flower";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum VoiceInteractiveEventType {
     Gift = 1,
     Recording = 2,
-    AppKahoot = 10,
+    AppQuiz = 10,
     AppBlackboard = 11,
-    AppSlido = 12,
+    AppInteractive = 12,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VoiceInteractiveApp {
+    Quiz,
+    Blackboard,
+    Interactive,
+}
+
+impl VoiceInteractiveApp {
+    pub fn event_type(self) -> VoiceInteractiveEventType {
+        match self {
+            Self::Quiz => VoiceInteractiveEventType::AppQuiz,
+            Self::Blackboard => VoiceInteractiveEventType::AppBlackboard,
+            Self::Interactive => VoiceInteractiveEventType::AppInteractive,
+        }
+    }
+
+    pub fn from_event_type(value: i32) -> Option<Self> {
+        match VoiceInteractiveEventType::from_i32(value) {
+            Some(VoiceInteractiveEventType::AppQuiz) => Some(Self::Quiz),
+            Some(VoiceInteractiveEventType::AppBlackboard) => Some(Self::Blackboard),
+            Some(VoiceInteractiveEventType::AppInteractive) => Some(Self::Interactive),
+            _ => None,
+        }
+    }
 }
 
 impl VoiceInteractiveEventType {
@@ -23,9 +49,9 @@ impl VoiceInteractiveEventType {
         match value {
             1 => Some(Self::Gift),
             2 => Some(Self::Recording),
-            10 => Some(Self::AppKahoot),
+            10 => Some(Self::AppQuiz),
             11 => Some(Self::AppBlackboard),
-            12 => Some(Self::AppSlido),
+            12 => Some(Self::AppInteractive),
             _ => None,
         }
     }
@@ -292,10 +318,11 @@ mod tests {
     use super::{
         FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT, FLOWER_PRICE,
         FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerParticle, GiveFlowerDeny,
-        VoiceInteractiveEventType, build_flower_transfer, can_afford, can_give_flower,
-        flower_effect_key, flower_event_from_payload, flower_menu_blocked, flower_particle_pose,
-        flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
-        parse_flower_interactive_params, serialize_flower_interactive_params,
+        VoiceInteractiveApp, VoiceInteractiveEventType, build_flower_transfer, can_afford,
+        can_give_flower, flower_effect_key, flower_event_from_payload, flower_menu_blocked,
+        flower_particle_pose, flower_particles, flower_price, format_flower_amount,
+        is_uncertain_transfer_error, parse_flower_interactive_params,
+        serialize_flower_interactive_params,
     };
     use mmn_client::{DECIMALS, TRANSFER_TYPE_TRANSFER_TOKEN, scale_amount_to_decimals};
     use std::time::{Duration, Instant};
@@ -444,7 +471,7 @@ mod tests {
         );
         assert!(
             flower_event_from_payload(
-                VoiceInteractiveEventType::AppKahoot as i32,
+                VoiceInteractiveEventType::AppQuiz as i32,
                 10,
                 2,
                 &params,
@@ -458,14 +485,26 @@ mod tests {
     fn voice_interactive_event_type_matches_js_enum() {
         assert_eq!(VoiceInteractiveEventType::Gift as i32, 1);
         assert_eq!(VoiceInteractiveEventType::Recording as i32, 2);
-        assert_eq!(VoiceInteractiveEventType::AppKahoot as i32, 10);
+        assert_eq!(VoiceInteractiveEventType::AppQuiz as i32, 10);
         assert_eq!(VoiceInteractiveEventType::AppBlackboard as i32, 11);
-        assert_eq!(VoiceInteractiveEventType::AppSlido as i32, 12);
+        assert_eq!(VoiceInteractiveEventType::AppInteractive as i32, 12);
         assert_eq!(
             VoiceInteractiveEventType::from_i32(1),
             Some(VoiceInteractiveEventType::Gift)
         );
         assert_eq!(VoiceInteractiveEventType::from_i32(3), None);
+        assert_eq!(
+            VoiceInteractiveApp::Quiz.event_type(),
+            VoiceInteractiveEventType::AppQuiz
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Blackboard.event_type(),
+            VoiceInteractiveEventType::AppBlackboard
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Interactive.event_type(),
+            VoiceInteractiveEventType::AppInteractive
+        );
     }
 
     #[test]

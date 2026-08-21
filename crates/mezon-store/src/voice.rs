@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -11,7 +13,7 @@ use gpui::{
     Subscription, Task, Window,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
-use mezon_client::{AppApi, RealtimeEvent};
+use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
@@ -30,7 +32,7 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny,
+    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny, VoiceInteractiveApp,
     VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
     flower_event_from_payload, flower_particles, flower_price, format_flower_amount,
     is_uncertain_transfer_error, serialize_flower_interactive_params,
@@ -62,6 +64,36 @@ const SOUND_REACTION_TAIL: Duration = Duration::from_millis(300);
 const SOUND_REACTION_THROTTLE: Duration = Duration::from_millis(500);
 const SOUND_CACHE_CAP: usize = 8;
 const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
+const INTERACTIVE_LAUNCH_DEDUP_TTL: Duration = Duration::from_secs(10);
+
+fn is_duplicate_interactive_launch(
+    launches: &mut HashMap<(VoiceInteractiveApp, u64), Instant>,
+    key: (VoiceInteractiveApp, u64),
+    now: Instant,
+) -> bool {
+    launches
+        .retain(|_, launched_at| now.duration_since(*launched_at) < INTERACTIVE_LAUNCH_DEDUP_TTL);
+    launches.contains_key(&key)
+}
+
+fn redact_interactive_app_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return "<invalid interactive app URL>".to_string();
+    };
+    let pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if key == "data" && !value.is_empty() {
+                "REDACTED".to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect::<Vec<_>>();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
+}
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
 const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
@@ -215,6 +247,7 @@ pub struct VoiceStore {
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
+    interactive_launches: HashMap<(VoiceInteractiveApp, u64), Instant>,
     device_submenu: Option<DeviceKind>,
     _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
@@ -483,6 +516,7 @@ impl VoiceStore {
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
+            interactive_launches: HashMap::new(),
             device_submenu: None,
             _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
@@ -833,6 +867,97 @@ impl VoiceStore {
         });
     }
 
+    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::VoiceInteractive(event) = event else {
+            return;
+        };
+        tracing::debug!(
+            clan_id = event.clan_id,
+            voice_channel_id = event.voice_channel_id,
+            sender_id = event.sender_id,
+            receiver_id = event.receiver_id,
+            event_type = event.event_type,
+            "received VoiceInteractiveEvent"
+        );
+        if event.event_type == VoiceInteractiveEventType::Gift as i32 {
+            let Some((channel_id, _)) = self.connection.connected_channel() else {
+                return;
+            };
+            let Ok(joined_channel) = channel_id.parse::<i64>() else {
+                return;
+            };
+            let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
+                event.event_type,
+                event.sender_id,
+                event.voice_channel_id,
+                &event.params,
+                joined_channel,
+            ) else {
+                return;
+            };
+            self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
+            return;
+        }
+        let Some(app) = VoiceInteractiveApp::from_event_type(event.event_type) else {
+            return;
+        };
+        if self
+            .connection
+            .active_channel_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            != Some(event.voice_channel_id)
+        {
+            return;
+        }
+        self.open_interactive_app(app, event.sender_id, event.clan_id, cx);
+    }
+
+    fn open_interactive_app(
+        &mut self,
+        app: VoiceInteractiveApp,
+        sender_id: i64,
+        clan_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let mut hasher = DefaultHasher::new();
+        (sender_id, clan_id).hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let now = Instant::now();
+        let launch_key = (app, fingerprint);
+        if is_duplicate_interactive_launch(&mut self.interactive_launches, launch_key, now) {
+            return;
+        }
+        self.interactive_launches.insert(launch_key, now);
+        let config = AppConfig::global(cx);
+        let base_url = match app {
+            VoiceInteractiveApp::Quiz => config.quiz_url.clone(),
+            VoiceInteractiveApp::Blackboard => config.blackboard_url.clone(),
+            VoiceInteractiveApp::Interactive => config.interactive_url.clone(),
+        };
+        let clan_id_string = clan_id.to_string();
+        let clan_list = crate::ClanList::try_global(cx);
+        let clan_name = clan_list.as_ref().and_then(|clans| {
+            clans
+                .read(cx)
+                .clan(ClanId(clan_id))
+                .map(|clan| clan.name.clone())
+        });
+        let url = build_channel_app_url(
+            &base_url,
+            ChannelAppLaunchParams {
+                web_app_data: "",
+                clan_id: &clan_id_string,
+                clan_name: clan_name.as_deref(),
+            },
+        );
+        tracing::info!(
+            url = %redact_interactive_app_url(&url),
+            event_type = app.event_type() as i32,
+            "opening built-in voice interactive app"
+        );
+        crate::PlatformStore::open_app_window(url, cx);
+    }
+
     fn handle_voice_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::VoiceReaction(msg) = event else {
             return;
@@ -1167,28 +1292,6 @@ impl VoiceStore {
 
     pub fn displayed_flowers(&self) -> &[DisplayedFlower] {
         &self.displayed_flowers
-    }
-
-    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::VoiceInteractive(msg) = event else {
-            return;
-        };
-        let Some((channel_id, _)) = self.connection.connected_channel() else {
-            return;
-        };
-        let Ok(joined_channel) = channel_id.parse::<i64>() else {
-            return;
-        };
-        let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
-            msg.event_type,
-            msg.sender_id,
-            msg.voice_channel_id,
-            &msg.params,
-            joined_channel,
-        ) else {
-            return;
-        };
-        self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
     }
 
     fn show_flower_effect(
@@ -1905,7 +2008,7 @@ impl VoiceStore {
                 })
                 .ok();
                 if let Err(error) = api
-                    .write_voice_interactive(
+                    .write_voice_interactive_event(
                         clan_i64,
                         channel_i64,
                         giver_i64,
@@ -1915,7 +2018,7 @@ impl VoiceStore {
                     )
                     .await
                 {
-                    tracing::warn!("write_voice_interactive failed: {error}");
+                    tracing::warn!("write_voice_interactive_event failed: {error}");
                 }
             }
             wallet_weak
@@ -2674,6 +2777,59 @@ impl VoiceStore {
         self.device_menu
     }
 
+    pub fn request_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
+        let Some((voice_channel_id, clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        let (Ok(voice_channel_id), Ok(clan_id)) =
+            (voice_channel_id.parse::<i64>(), clan_id.parse::<i64>())
+        else {
+            return;
+        };
+        let Some(user_id) = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .map(|user_id| user_id.0)
+        else {
+            tracing::warn!("VoiceInteractiveEvent skipped: current user id is unavailable");
+            return;
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            match api
+                .write_voice_interactive_event(
+                    clan_id,
+                    voice_channel_id,
+                    user_id,
+                    0,
+                    app.event_type() as i32,
+                    String::new(),
+                )
+                .await
+            {
+                Ok(Some(_event)) => {
+                    tracing::info!(
+                        clan_id,
+                        voice_channel_id,
+                        sender_id = user_id,
+                        receiver_id = 0,
+                        event_type = app.event_type() as i32,
+                        "VoiceInteractiveEvent acknowledged with CID payload"
+                    );
+                }
+                Ok(None) => tracing::info!(
+                    clan_id,
+                    voice_channel_id,
+                    event_type = app.event_type() as i32,
+                    "VoiceInteractiveEvent acknowledged; waiting for realtime event"
+                ),
+                Err(error) => {
+                    tracing::warn!("write_voice_interactive_event failed: {error:#}");
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn device_submenu(&self) -> Option<DeviceKind> {
         self.device_submenu
     }
@@ -3123,6 +3279,7 @@ impl VoiceStore {
         self.device_menu = None;
         self.device_submenu = None;
         self.participant_menu = None;
+        self.interactive_launches.clear();
         self.pending_kick = None;
         self.pending_removals.clear();
         self.moderation_error = None;
@@ -3227,9 +3384,81 @@ mod tests {
     use std::sync::Arc;
 
     use super::parse_raise_token;
-    use super::{MAX_SOUND_BYTES, validate_sound_file};
+    use super::{
+        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, is_duplicate_interactive_launch,
+        redact_interactive_app_url, validate_sound_file,
+    };
+    use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use parking_lot::Mutex;
+
+    #[test]
+    fn interactive_app_type_maps_only_app_events() {
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppQuiz as i32),
+            Some(VoiceInteractiveApp::Quiz)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppBlackboard as i32),
+            Some(VoiceInteractiveApp::Blackboard)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppInteractive as i32),
+            Some(VoiceInteractiveApp::Interactive)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::Gift as i32),
+            None
+        );
+        assert_eq!(VoiceInteractiveApp::from_event_type(999), None);
+    }
+
+    #[test]
+    fn interactive_app_log_url_redacts_signed_data() {
+        assert_eq!(
+            redact_interactive_app_url(
+                "https://quiz.mezon.ai/?data=signed-secret&clanId=42&clanName=Class"
+            ),
+            "https://quiz.mezon.ai/?data=REDACTED&clanId=42&clanName=Class"
+        );
+        assert_eq!(
+            redact_interactive_app_url(
+                "https://quiz.mezon.ai/?appdata=keep-data%3D&data=signed-secret&clanId=42"
+            ),
+            "https://quiz.mezon.ai/?appdata=keep-data%3D&data=REDACTED&clanId=42"
+        );
+        assert_eq!(
+            redact_interactive_app_url("not a URL?data=signed-secret"),
+            "<invalid interactive app URL>"
+        );
+    }
+
+    #[test]
+    fn interactive_launch_dedup_is_keyed_by_app_and_initiator() {
+        let now = std::time::Instant::now();
+        let mut launches = std::collections::HashMap::new();
+        let quiz = (VoiceInteractiveApp::Quiz, 1);
+        let blackboard = (VoiceInteractiveApp::Blackboard, 2);
+        assert!(!is_duplicate_interactive_launch(&mut launches, quiz, now));
+        launches.insert(quiz, now);
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            blackboard,
+            now
+        ));
+        launches.insert(blackboard, now);
+        assert!(is_duplicate_interactive_launch(&mut launches, quiz, now));
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            (VoiceInteractiveApp::Quiz, 3),
+            now
+        ));
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            quiz,
+            now + INTERACTIVE_LAUNCH_DEDUP_TTL
+        ));
+    }
 
     #[test]
     fn validate_sound_file_rejects_mismatched_extension() {
