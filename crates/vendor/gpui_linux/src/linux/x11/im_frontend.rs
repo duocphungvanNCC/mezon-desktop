@@ -16,6 +16,10 @@ const KEY_TIMEOUT: Duration = Duration::from_millis(80);
 const MODIFIER_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_WAIT: Duration = Duration::from_millis(16);
 const COMMIT_WAIT: Duration = Duration::from_millis(40);
+const KEY_BUDGET: Duration = Duration::from_millis(80);
+const SLOW_RESPONSE: Duration = Duration::from_millis(24);
+const QUARANTINE_WINDOW: Duration = Duration::from_millis(30);
+const QUARANTINE_RESET_TIMEOUT: Duration = Duration::from_millis(8);
 const DEAD_AFTER_FAILS: u8 = 3;
 const FCITX5_DEST: &str = "org.fcitx.Fcitx5";
 const FCITX5_IM_PATH: &str = "/org/freedesktop/portal/inputmethod";
@@ -92,7 +96,8 @@ pub(crate) struct X11ImContext {
     fail_count: Cell<u8>,
     ibus_surrounding: Cell<IbusSurroundingEnc>,
     fcitx_key_mode: Cell<FcitxKeyMode>,
-    drop_late: Cell<bool>,
+    quarantine_until: Cell<Option<Instant>>,
+    slow_daemon: Cell<bool>,
     watch: RawFd,
 }
 
@@ -215,8 +220,25 @@ impl X11ImContext {
     pub(crate) fn take_events(&self) -> Vec<ImEvent> {
         self.events
             .lock()
-            .map(|mut events| drain_events_with_quarantine(&mut events, &self.drop_late))
+            .map(|mut events| {
+                drain_events_with_quarantine(&mut events, &self.quarantine_until, Instant::now())
+            })
             .unwrap_or_default()
+    }
+
+    fn discard_queued_events(&self) {
+        if let Ok(mut events) = self.events.lock() {
+            events.clear();
+        }
+    }
+
+    fn begin_quarantine(&self) {
+        self.quarantine_until
+            .set(Some(Instant::now() + QUARANTINE_WINDOW));
+        self.discard_queued_events();
+        let _ = self
+            .proxy_with(QUARANTINE_RESET_TIMEOUT)
+            .method_call::<(), _, _, _>(self.ic_iface(), "Reset", ());
     }
 
     pub(crate) fn process_key(
@@ -227,12 +249,9 @@ impl X11ImContext {
         is_release: bool,
         time: u32,
     ) -> Result<bool, String> {
-        if self.drop_late.get() {
+        if self.quarantine_until.get().is_some() {
             self.process_io();
-            if let Ok(mut events) = self.events.lock() {
-                events.clear();
-            }
-            self.drop_late.set(false);
+            self.discard_queued_events();
         }
         let modifier = is_modifier_keyval(keyval);
         let timeout = if modifier {
@@ -240,6 +259,7 @@ impl X11ImContext {
         } else {
             KEY_TIMEOUT
         };
+        let started = Instant::now();
         let result = match self.kind {
             ImKind::Fcitx5 => {
                 self.process_fcitx5_key(keyval, keycode, state, is_release, time, timeout)
@@ -258,19 +278,30 @@ impl X11ImContext {
                 .map(|(handled,): (bool,)| handled)
                 .map_err(|error| error.to_string()),
         };
+        let call_elapsed = started.elapsed();
+        if !modifier {
+            self.slow_daemon.set(call_elapsed >= SLOW_RESPONSE);
+        }
         self.process_io();
         if !is_release
             && !modifier
             && keyval != 0xff1b
+            && !self.slow_daemon.get()
             && result.as_ref().is_ok_and(|filtered| *filtered)
         {
             if !self.has_events() {
-                self.wait_for_events(SIGNAL_WAIT);
-                self.process_io();
+                let budget = remaining_key_budget(started.elapsed(), SIGNAL_WAIT);
+                if !budget.is_zero() {
+                    self.wait_for_events(budget);
+                    self.process_io();
+                }
             }
             if self.only_clears_preedit() {
-                self.wait_for_text_event(COMMIT_WAIT);
-                self.process_io();
+                let budget = remaining_key_budget(started.elapsed(), COMMIT_WAIT);
+                if !budget.is_zero() {
+                    self.wait_for_text_event(budget);
+                    self.process_io();
+                }
             }
         }
         match result {
@@ -281,10 +312,7 @@ impl X11ImContext {
             Err(error) => {
                 if !modifier {
                     self.fail_count.set(self.fail_count.get().saturating_add(1));
-                    self.drop_late.set(true);
-                    if let Ok(mut events) = self.events.lock() {
-                        events.clear();
-                    }
+                    self.begin_quarantine();
                 }
                 Err(error)
             }
@@ -858,7 +886,8 @@ fn finish_context(
         fail_count: Cell::new(0),
         ibus_surrounding: Cell::new(IbusSurroundingEnc::Unknown),
         fcitx_key_mode: Cell::new(FcitxKeyMode::Unknown),
-        drop_late: Cell::new(false),
+        quarantine_until: Cell::new(None),
+        slow_daemon: Cell::new(false),
         watch,
     })
 }
@@ -1109,17 +1138,24 @@ pub(crate) fn surrounding_char_delete_to_bytes(
     (0, 0)
 }
 
-fn drain_events_with_quarantine(events: &mut Vec<ImEvent>, drop_late: &Cell<bool>) -> Vec<ImEvent> {
-    if drop_late.get() {
-        if events.is_empty() {
-            Vec::new()
-        } else {
+fn remaining_key_budget(elapsed: Duration, wait: Duration) -> Duration {
+    KEY_BUDGET.saturating_sub(elapsed).min(wait)
+}
+
+fn drain_events_with_quarantine(
+    events: &mut Vec<ImEvent>,
+    quarantine_until: &Cell<Option<Instant>>,
+    now: Instant,
+) -> Vec<ImEvent> {
+    match quarantine_until.get() {
+        Some(deadline) => {
             events.clear();
-            drop_late.set(false);
+            if now >= deadline {
+                quarantine_until.set(None);
+            }
             Vec::new()
         }
-    } else {
-        std::mem::take(events)
+        None => std::mem::take(events),
     }
 }
 
@@ -1192,16 +1228,51 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_keeps_drop_late_until_a_late_event_arrives() {
-        let drop_late = Cell::new(true);
+    fn quarantine_drops_late_events_across_the_next_key() {
+        let start = Instant::now();
+        let quarantine = Cell::new(Some(start + QUARANTINE_WINDOW));
         let mut events = Vec::new();
-        assert!(drain_events_with_quarantine(&mut events, &drop_late).is_empty());
-        assert!(drop_late.get());
+
+        assert!(drain_events_with_quarantine(&mut events, &quarantine, start).is_empty());
+        assert!(quarantine.get().is_some());
 
         events.push(ImEvent::Commit("a".into()));
-        assert!(drain_events_with_quarantine(&mut events, &drop_late).is_empty());
-        assert!(!drop_late.get());
-        assert!(events.is_empty());
+        assert!(
+            drain_events_with_quarantine(&mut events, &quarantine, start).is_empty(),
+            "a late commit from the timed-out key must be discarded"
+        );
+        assert!(quarantine.get().is_some());
+
+        events.push(ImEvent::Commit("b".into()));
+        assert!(
+            drain_events_with_quarantine(
+                &mut events,
+                &quarantine,
+                start + QUARANTINE_WINDOW + Duration::from_millis(1)
+            )
+            .is_empty(),
+            "the queue is emptied while quarantined, so the window expires with no events"
+        );
+        assert!(quarantine.get().is_none());
+
+        events.push(ImEvent::Commit("c".into()));
+        assert_eq!(
+            drain_events_with_quarantine(&mut events, &quarantine, Instant::now()).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn key_budget_caps_total_blocking_time() {
+        assert_eq!(
+            remaining_key_budget(Duration::ZERO, SIGNAL_WAIT),
+            SIGNAL_WAIT
+        );
+        assert_eq!(
+            remaining_key_budget(KEY_BUDGET - Duration::from_millis(4), COMMIT_WAIT),
+            Duration::from_millis(4)
+        );
+        assert!(remaining_key_budget(KEY_TIMEOUT, COMMIT_WAIT).is_zero());
     }
 
     #[test]

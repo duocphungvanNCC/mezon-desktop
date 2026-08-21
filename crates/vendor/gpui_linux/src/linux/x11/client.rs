@@ -1094,7 +1094,7 @@ impl X11Client {
                 if self.0.borrow().im.is_none() && !self.ensure_dbus_im() {
                     return false;
                 }
-                let mut client_state = self.0.borrow_mut();
+                let client_state = self.0.borrow();
                 if client_state.im.is_none() {
                     return false;
                 }
@@ -1114,7 +1114,7 @@ impl X11Client {
                 if self.0.borrow().im.is_none() && !self.ensure_dbus_im() {
                     return false;
                 }
-                let mut client_state = self.0.borrow_mut();
+                let client_state = self.0.borrow();
                 if client_state.im.is_none() {
                     return false;
                 }
