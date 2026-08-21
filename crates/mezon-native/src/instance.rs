@@ -1,6 +1,17 @@
 #[cfg(unix)]
 use std::path::PathBuf;
 
+/// Outcome of trying to take ownership of one socket path.
+#[cfg(unix)]
+enum Claim {
+    /// We bound the socket and now hold the lock.
+    Ours(std::os::unix::net::UnixListener),
+    /// Another live instance owns it; the stream reaches that instance.
+    Taken(std::os::unix::net::UnixStream),
+    /// Unusable path — try the next candidate.
+    Failed(std::io::Error),
+}
+
 /// Ensures only one instance of the app runs at a time.
 ///
 /// Unix (macOS / Linux): Unix domain socket at `$XDG_RUNTIME_DIR/mezon.sock`.
@@ -69,33 +80,24 @@ impl SingleInstance {
                 continue;
             }
 
-            if socket_path.exists() {
-                match std::os::unix::net::UnixStream::connect(&socket_path) {
-                    Ok(mut stream) => {
-                        tracing::info!("Another instance is already running");
-                        if let Some(url) = forward_url {
-                            let _ = stream.write_all(url.as_bytes());
-                            let safe = url.split(['?', '#']).next().unwrap_or_default();
-                            tracing::debug!("Forwarded URL to running instance: {safe}");
-                        }
-                        return Ok(None);
-                    }
-                    Err(_) => {
-                        // Stale socket — clean up
-                        let _ = std::fs::remove_file(&socket_path);
-                    }
-                }
-            }
-
-            match std::os::unix::net::UnixListener::bind(&socket_path) {
-                Ok(listener) => {
+            match Self::claim(&socket_path) {
+                Claim::Ours(listener) => {
                     tracing::debug!("Single instance lock acquired at {}", socket_path.display());
                     return Ok(Some(Self {
                         socket_path: Some(socket_path),
                         _listener: Some(listener),
                     }));
                 }
-                Err(e) => {
+                Claim::Taken(mut stream) => {
+                    tracing::info!("Another instance is already running");
+                    if let Some(url) = forward_url {
+                        let _ = stream.write_all(url.as_bytes());
+                        let safe = url.split(['?', '#']).next().unwrap_or_default();
+                        tracing::debug!("Forwarded URL to running instance: {safe}");
+                    }
+                    return Ok(None);
+                }
+                Claim::Failed(e) => {
                     last_bind_error = Some(e);
                 }
             }
@@ -111,6 +113,42 @@ impl SingleInstance {
             socket_path: None,
             _listener: None,
         }))
+    }
+
+    /// Try to become the owner of `socket_path`.
+    #[cfg(unix)]
+    fn claim(socket_path: &std::path::Path) -> Claim {
+        // A peer that answers owns the lock; a refused connection means the
+        // file outlived the process that made it and can be cleared.
+        if socket_path.exists() {
+            match std::os::unix::net::UnixStream::connect(socket_path) {
+                Ok(stream) => return Claim::Taken(stream),
+                Err(_) => {
+                    let _ = std::fs::remove_file(socket_path);
+                }
+            }
+        }
+
+        Self::bind_or_detect(socket_path)
+    }
+
+    /// `bind` half of [`Self::claim`], split out so the lost-race branch can be
+    /// tested directly.
+    #[cfg(unix)]
+    fn bind_or_detect(socket_path: &std::path::Path) -> Claim {
+        match std::os::unix::net::UnixListener::bind(socket_path) {
+            Ok(listener) => Claim::Ours(listener),
+            // Somebody claimed the path between the probe above and this bind.
+            // Ask who: a live peer means we are the second instance after all,
+            // and must not wander off to bind a different candidate.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                match std::os::unix::net::UnixStream::connect(socket_path) {
+                    Ok(stream) => Claim::Taken(stream),
+                    Err(_) => Claim::Failed(e),
+                }
+            }
+            Err(e) => Claim::Failed(e),
+        }
     }
 
     /// `sockaddr_un::sun_path` holds 104 bytes including the NUL terminator, so
@@ -422,7 +460,7 @@ impl Drop for SingleInstance {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::SingleInstance;
+    use super::{Claim, SingleInstance};
     use std::path::{Path, PathBuf};
 
     /// The container `$TMPDIR` a sandboxed macOS build actually runs with.
@@ -502,6 +540,60 @@ mod tests {
         let long = PathBuf::from(format!("/run/user/1000/{}", "d".repeat(120)));
         let paths = SingleInstance::socket_paths_for(Some(&long), Path::new("/tmp"), "ngoc");
         assert!(paths.iter().all(|path| !path.starts_with(&long)));
+    }
+
+    /// Short-lived unique path: `sun_path` leaves no room for long temp names.
+    fn scratch_socket() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static N: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "mz-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn claims_a_free_path() {
+        let path = scratch_socket();
+        assert!(matches!(SingleInstance::claim(&path), Claim::Ours(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detects_a_live_owner() {
+        let path = scratch_socket();
+        let _owner = std::os::unix::net::UnixListener::bind(&path).expect("bind owner");
+
+        assert!(matches!(SingleInstance::claim(&path), Claim::Taken(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Losing the race between the `exists` probe and `bind` must report the
+    /// winner, not fall through to a different candidate — that would leave two
+    /// instances running with the guard silently gone.
+    #[test]
+    fn a_lost_bind_race_reports_the_winner() {
+        let path = scratch_socket();
+        let _winner = std::os::unix::net::UnixListener::bind(&path).expect("bind winner");
+
+        // `bind_or_detect` is what the loser reaches once the probe has already
+        // decided the path was free.
+        assert!(matches!(
+            SingleInstance::bind_or_detect(&path),
+            Claim::Taken(_)
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_stale_socket_file_is_cleared() {
+        let path = scratch_socket();
+        std::fs::write(&path, b"not a socket").expect("write stale file");
+
+        assert!(matches!(SingleInstance::claim(&path), Claim::Ours(_)));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
