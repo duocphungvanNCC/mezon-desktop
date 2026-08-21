@@ -1159,6 +1159,19 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "topic_drop_paths",
+        description: "\
+Drop local files onto the TOPIC panel's composer; send them with topic_submit.
+
+composer_drop_paths always targets the channel composer even while the topic
+panel is open, so use this one for attachments meant for a topic. Call
+open_topic first.
+
+Parameters:
+- paths (required): array of local file paths.",
+        write: true,
+    },
+    ToolSpec {
         name: "composer_drop_paths",
         description: "\
 Drop local files onto the composer, like a drag-and-drop. They become pending

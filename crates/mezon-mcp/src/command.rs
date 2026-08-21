@@ -117,6 +117,10 @@ pub enum McpCommand {
         text: String,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    TopicDropPaths {
+        paths: Vec<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     TopicSubmit {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },

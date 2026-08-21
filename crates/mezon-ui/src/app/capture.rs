@@ -638,6 +638,28 @@ pub fn composer_submit(cx: &mut App) -> anyhow::Result<Value> {
     Ok(json!({ "ok": true, "sent": before }))
 }
 
+/// Same as [`composer_drop_paths`] but onto the topic panel's own composer.
+/// `with_composer` resolves the ACTIVE composer, which stays the channel's even
+/// while the topic panel is open, so without this an attachment aimed at a topic
+/// silently lands in the parent channel instead.
+pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Value> {
+    if let Some(path) = paths
+        .iter()
+        .find(|path| !std::path::Path::new(path).is_file())
+    {
+        anyhow::bail!("file not found: {path}");
+    }
+    let count = paths.len();
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| {
+            composer.add_dropped_paths(paths.into_iter().map(Into::into).collect(), window, cx);
+        });
+    })?;
+    Ok(json!({ "ok": true, "dropped": count }))
+}
+
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 pub const WHEEL_MAX_TICKS: u32 = 500;
 
@@ -1000,6 +1022,16 @@ pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
             "sender": m.sender_name,
             "send_failed": m.send_failed,
             "content": m.content.chars().take(60).collect::<String>(),
+            // Attachment delivery state, so a test can tell "still uploading" apart
+            // from "rendered" without reading pixels.
+            "attachments": m.attachments.iter().map(|a| json!({
+                "filetype": a.filetype,
+                "name": a.filename,
+                "uploading": a.uploading,
+                "presign_pending": a.presign_pending,
+                "upload_failed": a.upload_failed,
+                "url": a.url,
+            })).collect::<Vec<_>>(),
         })
     };
     let head: Vec<Value> = rows.iter().take(limit).map(row_json).collect();

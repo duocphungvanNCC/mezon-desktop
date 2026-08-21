@@ -483,6 +483,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["kind", "url"],
         )),
+        "topic_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the topic composer."
+                }),
+            }),
+            &["paths"],
+        )),
         "composer_drop_paths" => Arc::new(object(
             json!({
                 "paths": json!({
