@@ -166,6 +166,7 @@ pub struct Xdnd {
     drag_type: u32,
     retrieved: bool,
     position: Point<Pixels>,
+    timestamp: u32,
 }
 
 #[derive(Debug)]
@@ -983,6 +984,9 @@ impl X11Client {
                         state.xdnd_state.position =
                             Point::new(px(pos.win_x as f32), px(pos.win_y as f32));
                     }
+                    if arg3 != 0 {
+                        state.xdnd_state.timestamp = arg3;
+                    }
                     if !state.xdnd_state.retrieved {
                         check_reply(
                             || "Failed to convert selection for drag and drop",
@@ -1008,11 +1012,24 @@ impl X11Client {
                     window
                         .handle_input(PlatformInput::FileDrop(FileDropEvent::Pending { position }));
                 } else if event.type_ == state.atoms.XdndDrop {
+                    let drop_time = if arg2 != 0 {
+                        arg2
+                    } else {
+                        state.xdnd_state.timestamp
+                    };
                     xdnd_send_finished(
                         &state.xcb_connection,
                         &state.atoms,
                         event.window,
                         state.xdnd_state.other_window,
+                    );
+                    let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+                    xdnd_request_activation(
+                        &state.xcb_connection,
+                        &state.atoms,
+                        event.window,
+                        root,
+                        drop_time,
                     );
                     let position = state.xdnd_state.position;
                     drop(state);
@@ -2442,6 +2459,74 @@ fn xdnd_get_supported_atom(
         }
     }
     0
+}
+
+// mezon vendor edit: XDND does not transfer keyboard focus. Request
+// _NET_ACTIVE_WINDOW with the drop timestamp (XdndDrop data.l[2]). Skip
+// when the timestamp is 0 — CurrentTime is also 0 and WMs reject it.
+fn xdnd_request_activation(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    window: xproto::Window,
+    root: xproto::Window,
+    timestamp: u32,
+) {
+    if timestamp == 0 {
+        return;
+    }
+    let message = ClientMessageEvent {
+        format: 32,
+        window,
+        type_: atoms._NET_ACTIVE_WINDOW,
+        data: ClientMessageData::from([1, timestamp, 0, 0, 0]),
+        sequence: 0,
+        response_type: xproto::CLIENT_MESSAGE_EVENT,
+    };
+    check_reply(
+        || "Failed to send _NET_ACTIVE_WINDOW for XDnD",
+        xcb_connection.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            message,
+        ),
+    )
+    .log_err();
+    if !xdnd_net_active_window_supported(xcb_connection, atoms, root) {
+        check_reply(
+            || "Failed to set input focus for XDnD",
+            xcb_connection.set_input_focus(xproto::InputFocus::PARENT, window, timestamp),
+        )
+        .log_err();
+    }
+    xcb_connection.flush().log_err();
+}
+
+fn xdnd_net_active_window_supported(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    root: xproto::Window,
+) -> bool {
+    let Some(supported_atoms) = get_reply(
+        || "Failed to get _NET_SUPPORTED",
+        xcb_connection.get_property(
+            false,
+            root,
+            atoms._NET_SUPPORTED,
+            xproto::AtomEnum::ATOM,
+            0,
+            1024,
+        ),
+    )
+    .log_with_level(Level::Debug) else {
+        return true;
+    };
+
+    supported_atoms
+        .value
+        .chunks_exact(4)
+        .filter_map(|chunk| chunk.try_into().ok().map(u32::from_ne_bytes))
+        .any(|id| id == atoms._NET_ACTIVE_WINDOW)
 }
 
 fn xdnd_send_finished(
