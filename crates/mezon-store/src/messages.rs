@@ -3744,10 +3744,6 @@ impl MessagesStore {
     /// channel happened to arrive.
     fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
-        let base_img = config
-            .as_ref()
-            .map(|c| c.base_img_url.clone())
-            .unwrap_or_default();
         let now = now_unix_seconds();
         let mut changed = false;
         for channel in self.cache.values_mut() {
@@ -3755,17 +3751,20 @@ impl MessagesStore {
                 if !message.attachments.iter().any(|a| a.presign_pending) {
                     continue;
                 }
-                let Some(keys) = presign::parse_presign_finish_keys(&message.content) else {
+                // `presign_pending` is the gate's own verdict, already applied by
+                // whoever built or updated this row. Re-deriving it here from
+                // `message.content` was the bug: that field holds the display text,
+                // never the content JSON, so the parse returned None for every row
+                // and the sweep skipped all of them — leaving an attachment whose
+                // upload died pending forever, and the CDN probe polling it every
+                // 30s for as long as the channel stayed open.
+                if message.create_time <= 0
+                    || now - message.create_time < presign::PRESIGN_PENDING_MAX_AGE_SEC
+                {
                     continue;
-                };
+                }
                 let before = message.attachments.len();
-                apply_presign_gate_at(
-                    &mut message.attachments,
-                    &keys,
-                    &base_img,
-                    message.create_time,
-                    now,
-                );
+                message.attachments.retain(|a| !a.presign_pending);
                 if message.attachments.len() != before {
                     // The album layout and the viewer list are built from the
                     // attachments, so dropping one leaves them describing tiles
@@ -7348,11 +7347,14 @@ fn presign_probe_url(url: &str, nonce: u64) -> String {
     format!("{url}{sep}probe={nonce:x}")
 }
 
+/// When this row's pending attachments stop being worth waiting for. Reads the
+/// gate's verdict off the attachments rather than re-parsing the content: the
+/// row's `content` is display text, so a parse here answers None for every
+/// message and the timer is never armed at all.
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
     if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
         return None;
     }
-    presign::parse_presign_finish_keys(&message.content)?;
     Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
 }
 
@@ -11616,17 +11618,52 @@ mod tests {
         pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         pending.attachments[0].presign_pending = true;
 
-        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
         assert_eq!(
             presign_expiry_deadline(&pending),
             Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
-            "a pending message the sweep can act on arms the timer"
+            "a pending attachment arms the timer"
         );
 
-        // The sweep skips a message whose content no longer carries the field, so
-        // counting it here would re-arm the timer at zero delay forever.
-        pending.content = r#"{"t":"hi"}"#.to_string();
+        // What the sweep does when it fires: everything still pending goes. With
+        // nothing left pending there is no deadline, so the timer is not re-armed
+        // at zero delay — which is what would spin.
+        pending.attachments.retain(|a| !a.presign_pending);
         assert_eq!(presign_expiry_deadline(&pending), None);
+
+        // An optimistic row has no server timestamp yet; waiting on it would mean
+        // a deadline in 1970.
+        let mut no_time = pending.clone();
+        no_time.create_time = 0;
+        no_time.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        no_time.attachments[0].presign_pending = true;
+        assert_eq!(presign_expiry_deadline(&no_time), None);
+    }
+
+    #[test]
+    fn expiry_deadline_does_not_depend_on_the_row_carrying_content_json() {
+        // The row's `content` is display text — the content JSON with
+        // `presign_finish` never reaches it. Deriving the deadline from a parse of
+        // that field armed no timer at all, so a dead upload stayed pending
+        // forever and the probe polled it every 30s until the channel closed.
+        let mut msg = Message::new(MessageId(1), "just some text", "", "", 1000);
+        msg.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/uploads/photo.png".into(),
+            presign_pending: true,
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending attachment arms the timer whatever the text says"
+        );
+
+        msg.attachments[0].presign_pending = false;
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            None,
+            "nothing pending, nothing to wait for"
+        );
     }
 
     #[test]

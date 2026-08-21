@@ -1050,6 +1050,10 @@ pub fn list_loaded_messages(cx: &App, limit: usize, topic: bool) -> anyhow::Resu
             "sort_id": m.sort_id,
             "sender": m.sender_name,
             "send_failed": m.send_failed,
+            // Unix seconds as the row holds them. The presign expiry is computed
+            // from this, so a row that shows 0 here is one the sweep can never act
+            // on however old it gets.
+            "create_time": m.create_time,
             "content": m.content.chars().take(60).collect::<String>(),
             // Attachment delivery state, so a test can tell "still uploading" apart
             // from "rendered" without reading pixels.
