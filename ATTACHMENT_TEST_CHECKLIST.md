@@ -98,20 +98,65 @@ regresses independently of the channel path. Test it separately, every time.
 
 ## 3. File types
 
-Send in one message: `png jpg gif mp4 mp3 webm pdf txt`.
+Not "does it upload" — every type below takes a **different branch**, and the
+branches are what break. Send them in batches and check the row, not just the
+state flags.
 
-- [ ] All settle to `uploading=0 presign_pending=0 upload_failed=0`
+### Renders inline
+
+| File | Path it exercises | Row must show |
+|---|---|---|
+| `png` `jpg` | static decode, capped to 1024 px | the picture |
+| `gif` | animation path (`message_path_maybe_animated`, frame budget) | plays, does not freeze on frame 1 |
+| `webp` | animation path too — animated webp is decoded frame by frame | the picture |
+| `heic` | ImageIO on macOS; the `image` crate cannot read it | the picture (verified on macOS) |
+| `mp4` | platform demuxer + generated poster | poster, then plays on click |
+| `mp3` | audio player | duration and a play control |
+| `webm` **audio** (voice message) | symphonia in-app — deliberately exempt from the Matroska block | plays |
+
+### Must fall back to a named file box, never a broken tile
+
+| File | Why |
+|---|---|
+| `bmp` `tiff` `psd` | in both blocklists; imgproxy cannot read them |
+| `avi` `wmv` `flv` `mkv` `rmvb` | in both blocklists |
+| `svg` | web excludes `svg+xml` from images on purpose |
+| `webm` **video** on macOS/Windows | AVFoundation and Media Foundation have no Matroska demuxer |
+| `wma` `ra` | blocked audio |
+
+- [ ] Renders-inline set: all settle to `uploading=0 presign_pending=0 upload_failed=0`
+- [ ] Fallback set: every one shows a file box with name and size — no broken
+      image, no play button that does nothing
 - [ ] Every object on the CDN carries its **real** Content-Type:
       ```bash
       curl -sSI "<url>" | grep -i content-type
       ```
-      `image/png`, `image/jpeg`, `image/gif`, `audio/mpeg`, `video/mp4`,
-      `video/webm`, `application/pdf`, `text/plain`
-- [ ] The video renders as a poster with a play control on both clients
+      `image/png`, `image/jpeg`, `image/gif`, `image/bmp`, `image/heic`,
+      `image/svg+xml`, `audio/mpeg`, `video/mp4`, `video/webm`,
+      `application/pdf`, `text/plain`
+- [ ] A type the sender cannot identify uploads as `application/octet-stream`
+      (measured for `.avi`) — the row still has to be a file box
 - [ ] The extra `.jpg` object with no matching filename is the video poster the
-      desktop generates — it has no local file, so one proxy request for it is
+      desktop generates; it has no local file, so one proxy request for it is
       expected
-- [ ] Documents show a named box while uploading, not an empty row
+- [ ] Documents show a named box **while uploading**, not an empty row
+
+### Names and sizes
+
+- [ ] A non-ASCII filename (`ảnh-tiếng-việt.png`) uploads and fetches back
+      — `sanitize_upload_filename` rewrites the object key, the display name keeps
+      its accents
+- [ ] A zero-byte file
+- [ ] A name long enough to wrap the file box
+
+### Still untested — carry these forward
+
+- [ ] `webp` (macOS `sips` cannot write one; produce it another way)
+- [ ] `avif` — known undecodable on desktop for avatars, unverified for messages
+- [ ] `mov` / QuickTime — the web has a probe path specifically for it
+- [ ] PDF preview on web (`PDFViewerModal`), not just the download box
+- [ ] A Tenor GIF — a url attachment, never uploaded, different code path
+- [ ] Voice message recorded in-app, as opposed to a `.webm` picked from disk
 
 ---
 
