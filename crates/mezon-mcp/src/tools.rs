@@ -224,8 +224,16 @@ impl McpBackend {
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .clamp(1, 500) as usize;
-                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
-                    .await
+                let topic = arguments
+                    .get("topic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages {
+                    limit,
+                    topic,
+                    reply,
+                })
+                .await
             }
             "jump_to_message" => {
                 self.require_write_mode("jump_to_message")?;
@@ -518,6 +526,25 @@ impl McpBackend {
                     reply,
                 })
                 .await
+            }
+            "topic_drop_paths" => {
+                self.require_write_mode("topic_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("topic_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::TopicDropPaths { paths, reply })
+                    .await
             }
             "composer_drop_paths" => {
                 self.require_write_mode("composer_drop_paths")?;

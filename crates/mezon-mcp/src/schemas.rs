@@ -483,6 +483,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["kind", "url"],
         )),
+        "topic_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the topic composer."
+                }),
+            }),
+            &["paths"],
+        )),
         "composer_drop_paths" => Arc::new(object(
             json!({
                 "paths": json!({
@@ -542,6 +552,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         "list_loaded_messages" => Arc::new(object(
             json!({
                 "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+                "topic": bool("Read the open topic panel's buffer instead of the channel's. Default false."),
             }),
             &[],
         )),

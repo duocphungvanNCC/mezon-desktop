@@ -324,6 +324,9 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
     let (popup_open, selected, suggestions) = composer.probe_suggestions();
     Ok(json!({
         "text": composer.probe_text(cx).to_string(),
+        // Staged, not dropped: a dropped file is read on a background task, so
+        // submitting before it lands here sends the message without it.
+        "attachments": composer.probe_attachments(),
         "popup_open": popup_open,
         "selected": selected,
         "suggestions": suggestions,
@@ -443,6 +446,9 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
     let (item_count, first_visible, at_bottom) = topic_panel(cx)
         .map(|(_, timeline)| timeline.read(cx).viewport_state())
         .unwrap_or((0, 0, false));
+    let attachments = topic_panel(cx)
+        .map(|(composer, _)| composer.read(cx).probe_attachments())
+        .unwrap_or_default();
     Ok(json!({
         "panel_open": topics.is_panel_open(),
         "topic_id": topic_id.map(|id| id.to_string()),
@@ -455,6 +461,9 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         "item_count": item_count,
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
+        // Same reason as composer_state: topic_drop_paths returns before the file
+        // is read, so this is what says the next topic_submit will carry it.
+        "attachments": attachments,
     }))
 }
 
@@ -636,6 +645,31 @@ pub fn composer_submit(cx: &mut App) -> anyhow::Result<Value> {
         composer.probe_enter(window, cx);
     })?;
     Ok(json!({ "ok": true, "sent": before }))
+}
+
+/// Same as [`composer_drop_paths`] but onto the topic panel's own composer.
+/// `with_composer` resolves the ACTIVE composer, which stays the channel's even
+/// while the topic panel is open, so without this an attachment aimed at a topic
+/// silently lands in the parent channel instead.
+pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Value> {
+    if let Some(path) = paths
+        .iter()
+        .find(|path| !std::path::Path::new(path).is_file())
+    {
+        anyhow::bail!("file not found: {path}");
+    }
+    let count = paths.len();
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| {
+            composer.add_dropped_paths(paths.into_iter().map(Into::into).collect(), window, cx);
+        });
+    })?;
+    // Staging is asynchronous: this reports what was handed over, not what is
+    // ready. Poll topic_state until `attachments` lists the files before calling
+    // topic_submit, or the reply goes out without them.
+    Ok(json!({ "ok": true, "dropped": count, "staged": false }))
 }
 
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
@@ -988,10 +1022,27 @@ pub fn set_user_status(
     }))
 }
 
-pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
+/// `topic` reads the open topic panel's buffer instead of the channel's. The
+/// two are separate buckets and the channel stays "active" while a topic is
+/// open, so without the switch a reply just sent into a topic is invisible here
+/// — the caller would be looking at the parent channel and see nothing arrive.
+pub fn list_loaded_messages(cx: &App, limit: usize, topic: bool) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     let store = store.read(cx);
-    let rows = store.messages();
+    let topic_id = topic
+        .then(|| {
+            mezon_store::TopicsStore::global(cx)
+                .read(cx)
+                .active_topic_id()
+        })
+        .flatten();
+    if topic && topic_id.is_none() {
+        anyhow::bail!("no topic is open; call open_topic first");
+    }
+    let rows = match topic_id {
+        Some(id) => store.messages_in_channel(mezon_store::ChannelId(id)),
+        None => store.messages(),
+    };
     let row_json = |m: &mezon_store::Message| {
         json!({
             "message_id": m.id.to_string(),
@@ -1000,6 +1051,16 @@ pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
             "sender": m.sender_name,
             "send_failed": m.send_failed,
             "content": m.content.chars().take(60).collect::<String>(),
+            // Attachment delivery state, so a test can tell "still uploading" apart
+            // from "rendered" without reading pixels.
+            "attachments": m.attachments.iter().map(|a| json!({
+                "filetype": a.filetype,
+                "name": a.filename,
+                "uploading": a.uploading,
+                "presign_pending": a.presign_pending,
+                "upload_failed": a.upload_failed,
+                "url": a.url,
+            })).collect::<Vec<_>>(),
         })
     };
     let head: Vec<Value> = rows.iter().take(limit).map(row_json).collect();
@@ -1009,9 +1070,17 @@ pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
         .map(row_json)
         .collect();
     Ok(json!({
-        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "channel_id": match topic_id {
+            Some(id) => Some(id.to_string()),
+            None => store.active_channel_id().map(|id| id.to_string()),
+        },
+        "bucket": if topic_id.is_some() { "topic" } else { "channel" },
         "loaded_count": rows.len(),
-        "has_more_bottom": store.has_more_bottom(),
+        "has_more_bottom": if topic_id.is_some() {
+            store.topic_has_more_bottom()
+        } else {
+            store.has_more_bottom()
+        },
         "oldest": head,
         "newest": tail,
     }))

@@ -227,6 +227,11 @@ impl McpRuntime {
                         let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
                         let _ = reply.send(result);
                     }
+                    McpCommand::TopicDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::topic_drop_paths(cx, paths));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::TopicSubmit { reply } => {
                         let result = cx.update(mezon_ui::app::capture::topic_submit);
                         let _ = reply.send(result);
@@ -324,9 +329,14 @@ impl McpRuntime {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
                     }
-                    McpCommand::ListLoadedMessages { limit, reply } => {
-                        let result =
-                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                    McpCommand::ListLoadedMessages {
+                        limit,
+                        topic,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_loaded_messages(cx, limit, topic)
+                        });
                         let _ = reply.send(result);
                     }
                     McpCommand::JumpToMessage { message_id, reply } => {
