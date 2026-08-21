@@ -175,6 +175,30 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     })
 }
 
+fn request_dm_close(channel_id: ChannelId, window: &mut Window, cx: &mut App) {
+    let Some(store) = DirectMessageStore::try_global(cx) else {
+        return;
+    };
+    let Some((is_group, group_name)) = store.read(cx).find(channel_id).map(|dm| {
+        (
+            dm.kind == DirectKind::Group,
+            SharedString::from(dm.label.clone()),
+        )
+    }) else {
+        return;
+    };
+    let locale = Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default();
+    Shell::global(cx).update(cx, |shell, cx| {
+        if is_group {
+            shell.confirm_leave_dm_group(channel_id, &group_name, &locale, window, cx);
+        } else {
+            shell.confirm_close_dm(channel_id, &locale, window, cx);
+        }
+    });
+}
+
 fn render_dm_row(
     item: &DmItem,
     theme: &Theme,
@@ -182,7 +206,6 @@ fn render_dm_row(
     suppress_hover: bool,
     image_cache: &Entity<crate::image_cache::LruImageCache>,
     in_voice_label: &SharedString,
-    locale: &SharedString,
     sidebar: WeakEntity<DirectSidebar>,
 ) -> gpui::AnyElement {
     let mut row = DmRow::with_ids(
@@ -200,21 +223,7 @@ fn render_dm_row(
     .avatar_raw(item.avatar_raw.clone())
     .suppress_hover(suppress_hover)
     .image_cache(image_cache.clone())
-    .on_close({
-        let is_group = item.kind == DirectKind::Group;
-        let channel_id = item.channel_id;
-        let group_name = item.label.clone();
-        let locale = locale.clone();
-        move |window: &mut Window, cx: &mut App| {
-            Shell::global(cx).update(cx, |shell, cx| {
-                if is_group {
-                    shell.confirm_leave_dm_group(channel_id, &group_name, &locale, window, cx);
-                } else {
-                    shell.confirm_close_dm(channel_id, &locale, window, cx);
-                }
-            });
-        }
-    });
+    .on_close(item.channel_id, request_dm_close);
     if item.in_voice {
         row = row.in_voice_label(in_voice_label.clone());
     }
@@ -791,7 +800,6 @@ impl Render for DirectSidebar {
         let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
-        let row_locale: SharedString = locale.clone().into();
         let menu_sidebar = cx.entity().downgrade();
 
         let pinned_rows = (pinned_count > 0).then(|| {
@@ -799,7 +807,6 @@ impl Render for DirectSidebar {
             let items = self.dm_items.clone();
             let image_cache = self.image_cache.clone();
             let in_voice_label = in_voice_label.clone();
-            let row_locale = row_locale.clone();
             let sidebar = menu_sidebar.clone();
             let pinned_scroll_inner = pinned_scroll.clone();
             div()
@@ -820,7 +827,6 @@ impl Render for DirectSidebar {
                             suppress_hover,
                             &image_cache,
                             &in_voice_label,
-                            &row_locale,
                             sidebar.clone(),
                         )
                     })
@@ -839,7 +845,6 @@ impl Render for DirectSidebar {
                         suppress_hover,
                         &image_cache,
                         &in_voice_label,
-                        &row_locale,
                         menu_sidebar.clone(),
                     ),
                     None => div().into_any_element(),

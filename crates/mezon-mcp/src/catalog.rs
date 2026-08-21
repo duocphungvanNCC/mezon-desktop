@@ -285,7 +285,8 @@ Parameters: none.",
 Return the member-list context menu that is currently open, if any.
 
 Includes the target user, the resolved permission/relationship flags that decide which rows show
-(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread,
+show_remove_from_group), and the item list
 with the index to pass to member_menu_pick.
 
 Parameters: none.",

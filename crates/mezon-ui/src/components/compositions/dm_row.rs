@@ -1,9 +1,11 @@
-use gpui::{AnyElement, ElementId, Pixels, SharedString, div, prelude::*, px};
-use mezon_store::{DirectKind, DmAvatarPresence};
+use gpui::{AnyElement, App, ElementId, Pixels, SharedString, Window, div, prelude::*, px};
+use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
+
+pub type CloseHandler = fn(ChannelId, &mut Window, &mut App);
 
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
@@ -24,7 +26,7 @@ pub struct DmRow {
     suppress_hover: bool,
     in_voice_label: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
-    on_close: Option<Box<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_close: Option<(ChannelId, CloseHandler)>,
 }
 
 impl DmRow {
@@ -108,11 +110,8 @@ impl DmRow {
         self
     }
 
-    pub fn on_close(
-        mut self,
-        handler: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
-    ) -> Self {
-        self.on_close = Some(Box::new(handler));
+    pub fn on_close(mut self, channel_id: ChannelId, handler: CloseHandler) -> Self {
+        self.on_close = Some((channel_id, handler));
         self
     }
 
@@ -133,27 +132,27 @@ impl DmRow {
         let suppress_hover = self.suppress_hover;
         let on_close = self.on_close;
 
-        let close_btn = div()
-            .id(self.close_id.clone())
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(20.))
-            .text_size(px(24.))
-            .opacity(0.)
-            .text_color(muted)
-            .cursor_pointer()
-            .when(!suppress_hover, |this| {
-                this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
-                    .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
-            })
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                if let Some(handler) = on_close.as_ref() {
-                    handler(window, cx);
-                }
-            })
-            .child("×");
+        let close_btn = (!suppress_hover).then(|| {
+            div()
+                .id(self.close_id.clone())
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(20.))
+                .text_size(px(24.))
+                .opacity(0.)
+                .text_color(muted)
+                .cursor_pointer()
+                .group_hover(self.group_name.clone(), |this| this.opacity(1.))
+                .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    if let Some((channel_id, handler)) = on_close {
+                        handler(channel_id, window, cx);
+                    }
+                })
+                .child("×")
+        });
 
         div()
             .id(self.elem_id.clone())
@@ -220,7 +219,7 @@ impl DmRow {
                     None => name_el.flex_1().min_w_0().into_any_element(),
                 }
             })
-            .child(close_btn)
+            .children(close_btn)
     }
 
     fn render_avatar(&self, theme: &Theme) -> AnyElement {

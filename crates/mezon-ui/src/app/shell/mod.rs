@@ -4,6 +4,7 @@
 //! Any view can surface a toast or a modal from anywhere via [`Shell::global`], instead of each
 //! page wiring its own local toast/dialog state.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -15,7 +16,6 @@ use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
 mod confirm_archive_channel_modal;
-mod confirm_close_dm_modal;
 mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_category_modal;
@@ -28,16 +28,15 @@ mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
 mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
+mod confirm_destructive_modal;
 mod confirm_kick_member_modal;
 mod confirm_leave_clan_modal;
-mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
-use confirm_close_dm_modal::ConfirmCloseDmModal;
 use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
@@ -50,9 +49,9 @@ use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
+use confirm_destructive_modal::ConfirmDestructiveModal;
 use confirm_kick_member_modal::ConfirmKickMemberModal;
 use confirm_leave_clan_modal::ConfirmLeaveClanModal;
-use confirm_leave_dm_group_modal::ConfirmLeaveDmGroupModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -1116,15 +1115,49 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = cx.new(|cx| ConfirmCloseDmModal {
+        self.confirm_destructive(
+            "confirm-close-dm",
+            mezon_i18n::t(locale, "dmMessage.closeDmConfirm.title").into(),
+            mezon_i18n::t(locale, "dmMessage.closeDmConfirm.content").into(),
+            mezon_i18n::t(locale, "common.cancel").into(),
+            mezon_i18n::t(locale, "dmMessage.closeDmConfirm.confirmText").into(),
+            mezon_i18n::t(locale, "dmMessage.closeDmConfirm.error").into(),
+            Rc::new(move |cx: &mut App| {
+                mezon_store::DirectMessageStore::global(cx)
+                    .update(cx, |store, cx| store.close_conversation(channel_id, cx))
+            }),
+            Rc::new(move |cx: &mut App| leave_open_conversation(channel_id, cx)),
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn confirm_destructive(
+        &mut self,
+        id: &'static str,
+        title: SharedString,
+        description: SharedString,
+        cancel_label: SharedString,
+        confirm_label: SharedString,
+        failed_message: SharedString,
+        action: confirm_destructive_modal::ConfirmAction,
+        after_success: confirm_destructive_modal::ConfirmEpilogue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| ConfirmDestructiveModal {
             focus_handle: cx.focus_handle(),
-            channel_id,
-            title: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.title").into(),
-            description: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.content").into(),
-            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
-            confirm_label: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.confirmText").into(),
-            failed_message: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.error").into(),
-            closing: false,
+            cancel_id: SharedString::from(format!("{id}-cancel")),
+            confirm_id: SharedString::from(format!("{id}-confirm")),
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+            failed_message,
+            action,
+            after_success,
+            running: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -1141,21 +1174,23 @@ impl Shell {
     ) {
         let description =
             mezon_i18n::t(locale, "leaveGroup.confirmMessage").replace("{{groupName}}", group_name);
-        let view = cx.new(|cx| ConfirmLeaveDmGroupModal {
-            focus_handle: cx.focus_handle(),
-            channel_id,
-            title: mezon_i18n::t(locale, "leaveGroup.title")
+        self.confirm_destructive(
+            "confirm-leave-dm-group",
+            mezon_i18n::t(locale, "leaveGroup.title")
                 .replace("{{groupName}}", group_name)
                 .into(),
-            description: description.into(),
-            cancel_label: mezon_i18n::t(locale, "leaveGroup.cancel").into(),
-            confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
-            failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
-            leaving: false,
-        });
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        self.show_modal(view.into(), cx);
+            description.into(),
+            mezon_i18n::t(locale, "leaveGroup.cancel").into(),
+            mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
+            mezon_i18n::t(locale, "common.somethingWentWrong").into(),
+            Rc::new(move |cx: &mut App| {
+                mezon_store::DirectMessageStore::global(cx)
+                    .update(cx, |store, cx| store.leave_group(channel_id, cx))
+            }),
+            Rc::new(move |cx: &mut App| leave_open_conversation(channel_id, cx)),
+            window,
+            cx,
+        );
     }
 
     pub fn confirm_delete_account(
@@ -1243,6 +1278,22 @@ impl Shell {
         self.command_palette_open = false;
         self.modal_fullscreen = false;
         cx.notify();
+    }
+
+    pub fn close_modal_if_current(&mut self, owner: gpui::EntityId, cx: &mut Context<Self>) {
+        if self.modal.as_ref().map(AnyView::entity_id) == Some(owner) {
+            self.close_modal(cx);
+            return;
+        }
+        if self
+            .modal_underlay
+            .as_ref()
+            .map(|(view, ..)| view.entity_id())
+            == Some(owner)
+        {
+            self.modal_underlay = None;
+            cx.notify();
+        }
     }
 
     pub fn has_modal(&self) -> bool {
@@ -1392,6 +1443,53 @@ mod tests {
             clan_id: ClanId(7),
             channel_id: ChannelId(42),
         }
+    }
+
+    #[gpui::test]
+    fn closing_the_conversation_you_are_reading_returns_to_friends(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::router::Router::init(cx);
+            crate::router::replace(
+                cx,
+                Route::DirectMessage {
+                    direct_id: ChannelId(42),
+                    message_type: "3".into(),
+                },
+            );
+            leave_open_conversation(ChannelId(42), cx);
+            assert_eq!(
+                crate::router::Router::global(cx).read(cx).route(),
+                Route::Friends
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_conversation_you_are_not_reading_leaves_the_route_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::router::Router::init(cx);
+            crate::router::replace(cx, conversation_route());
+            leave_open_conversation(ChannelId(42), cx);
+            assert_eq!(
+                crate::router::Router::global(cx).read(cx).route(),
+                conversation_route()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_late_request_cannot_close_the_modal_that_replaced_it(cx: &mut TestAppContext) {
+        let shell = open_shell_with_modal(cx);
+        let stale = cx.update(|cx| cx.new(|_| StubModal).entity_id());
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| shell.close_modal_if_current(stale, cx));
+        });
+
+        assert!(
+            shell.read_with(cx, |shell, _| shell.has_modal()),
+            "a request that outlived its dismissed modal must not close whichever modal took              its place"
+        );
     }
 
     #[gpui::test]

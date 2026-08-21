@@ -1,25 +1,32 @@
-use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelId, DirectMessageStore};
+use std::rc::Rc;
 
-use super::{Shell, leave_open_conversation};
+use gpui::{App, Context, FocusHandle, SharedString, Task, Window, div, prelude::*, px};
+
+use super::Shell;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
-pub(super) struct ConfirmCloseDmModal {
+pub(super) type ConfirmAction = Rc<dyn Fn(&mut App) -> Task<anyhow::Result<()>>>;
+pub(super) type ConfirmEpilogue = Rc<dyn Fn(&mut App)>;
+
+pub(super) struct ConfirmDestructiveModal {
     pub(super) focus_handle: FocusHandle,
-    pub(super) channel_id: ChannelId,
+    pub(super) cancel_id: SharedString,
+    pub(super) confirm_id: SharedString,
     pub(super) title: SharedString,
     pub(super) description: SharedString,
     pub(super) cancel_label: SharedString,
     pub(super) confirm_label: SharedString,
     pub(super) failed_message: SharedString,
-    pub(super) closing: bool,
+    pub(super) action: ConfirmAction,
+    pub(super) after_success: ConfirmEpilogue,
+    pub(super) running: bool,
 }
 
-impl Render for ConfirmCloseDmModal {
+impl Render for ConfirmDestructiveModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let closing = self.closing;
+        let running = self.running;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -53,7 +60,7 @@ impl Render for ConfirmCloseDmModal {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("confirm-close-dm-cancel")
+                        Button::new(self.cancel_id.clone())
                             .label(self.cancel_label.clone())
                             .ghost()
                             .on_click(|_, _window, cx| {
@@ -61,41 +68,35 @@ impl Render for ConfirmCloseDmModal {
                             }),
                     )
                     .child(
-                        Button::new("confirm-close-dm-confirm")
+                        Button::new(self.confirm_id.clone())
                             .label(self.confirm_label.clone())
                             .danger()
-                            .disabled(closing)
+                            .disabled(running)
                             .on_click(cx.listener(|this, _, _window, cx| {
-                                if this.closing {
+                                if this.running {
                                     return;
                                 }
-                                this.closing = true;
+                                this.running = true;
                                 cx.notify();
-                                let channel_id = this.channel_id;
                                 let failed = this.failed_message.clone();
-                                let task = DirectMessageStore::global(cx)
-                                    .update(cx, |store, cx| {
-                                        store.close_conversation(channel_id, cx)
-                                    });
+                                let after_success = this.after_success.clone();
+                                let task = (this.action)(cx);
                                 cx.spawn(async move |this, cx| {
                                     let result = task.await;
-                                    let still_mounted = this
-                                        .update(cx, |this, cx| {
-                                            this.closing = false;
-                                            cx.notify();
-                                        })
-                                        .is_ok();
+                                    let owner = this.entity_id();
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.running = false;
+                                        cx.notify();
+                                    });
                                     cx.update(|cx| {
                                         Shell::global(cx).update(cx, |shell, cx| {
-                                            if still_mounted {
-                                                shell.close_modal(cx);
-                                            }
+                                            shell.close_modal_if_current(owner, cx);
                                             if result.is_err() {
                                                 shell.error(failed, cx);
                                             }
                                         });
                                         if result.is_ok() {
-                                            leave_open_conversation(channel_id, cx);
+                                            after_success(cx);
                                         }
                                     });
                                 })

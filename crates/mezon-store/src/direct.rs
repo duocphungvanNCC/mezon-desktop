@@ -960,25 +960,15 @@ impl DirectMessageStore {
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
-        if self.channels.find(channel_id).is_none() {
-            return Task::ready(Err(anyhow::anyhow!("group not found")));
-        }
-        let api = self.api.clone();
         let me = crate::badge::BadgeService::try_global(cx)
             .and_then(|badge| badge.read(cx).current_user_id(cx));
-        cx.spawn(async move |this, cx| {
+        let api = self.api.clone();
+        self.forget_once(channel_id, cx, move |channel_id| async move {
             let Some(me) = me else {
                 return Err(anyhow::anyhow!("no signed-in user"));
             };
-            let result = api
-                .remove_channel_users(channel_id.get(), vec![me.to_string()])
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if result.is_ok() {
-                    this.forget_conversation(channel_id, cx);
-                }
-            });
-            result
+            api.remove_channel_users(channel_id.get(), vec![me.to_string()])
+                .await
         })
     }
 
@@ -987,12 +977,34 @@ impl DirectMessageStore {
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
-        if self.channels.find(channel_id).is_none() {
-            return Task::ready(Err(anyhow::anyhow!("conversation not found")));
-        }
         let api = self.api.clone();
+        self.forget_once(channel_id, cx, move |channel_id| async move {
+            api.close_dm_by_channel_id(channel_id.get()).await
+        })
+    }
+
+    pub fn group_owned_by_me(&self, channel_id: ChannelId, cx: &App) -> bool {
+        let me = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx));
+        self.channels
+            .find(channel_id)
+            .is_some_and(|dm| dm.kind == DirectKind::Group && me.is_some() && dm.creator_id == me)
+    }
+
+    fn forget_once<Fut>(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+        request: impl FnOnce(ChannelId) -> Fut + 'static,
+    ) -> Task<anyhow::Result<()>>
+    where
+        Fut: Future<Output = anyhow::Result<()>> + 'static,
+    {
+        if self.channels.find(channel_id).is_none() {
+            return Task::ready(Err(anyhow::anyhow!("conversation {channel_id} not found")));
+        }
         cx.spawn(async move |this, cx| {
-            let result = api.close_dm_by_channel_id(0, channel_id.get()).await;
+            let result = request(channel_id).await;
             let _ = this.update(cx, |this, cx| {
                 if result.is_ok() {
                     this.forget_conversation(channel_id, cx);
@@ -2502,6 +2514,64 @@ mod tests {
                 assert!(!channel.is_unread());
                 store.note_message(ChannelId(1), 200, false, true, cx);
                 assert_eq!(unread_of(store, 1), 1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn a_successful_close_forgets_the_conversation_and_frees_its_pin(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, settings) = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            (dm_store(cx), settings)
+        });
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.toggle_pin(ChannelId(1), cx);
+                store.set_current(ChannelId(1), DirectKind::Dm.channel_type());
+                store.forget_once(ChannelId(1), cx, |_| async { Ok(()) })
+            })
+        });
+
+        task.await.expect("close succeeds");
+
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(store.find(ChannelId(1)).is_none());
+                assert!(store.find(ChannelId(2)).is_some());
+                assert!(!store.is_pinned(ChannelId(1)));
+                assert_eq!(store.current().map(|(id, _)| id), None);
+            });
+            assert!(
+                settings.read(cx).pinned_dms.is_empty(),
+                "a closed conversation must free its pinned slot on disk too"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_close_keeps_the_conversation_in_the_list(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(dm_store);
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10)]);
+                store.forget_once(ChannelId(1), cx, |_| async {
+                    Err(anyhow::anyhow!("server said no"))
+                })
+            })
+        });
+
+        assert!(task.await.is_err());
+
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(
+                    store.find(ChannelId(1)).is_some(),
+                    "a rejected close must not drop the conversation locally"
+                );
             });
         });
     }

@@ -2983,11 +2983,11 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn close_dm_by_channel_id(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+    pub async fn close_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
         let transport = self.inner.clone();
 
         runtime()
-            .spawn(async move { transport.close_dm_by_channel_id(clan_id, channel_id).await })
+            .spawn(async move { transport.close_dm_by_channel_id(0, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
