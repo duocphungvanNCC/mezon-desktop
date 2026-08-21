@@ -3606,16 +3606,7 @@ impl MessagesStore {
         let masked = anonymous && anonymize_sender(&mut msg, cfg);
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
-        // Only when they line up: a mismatch means this echo is not the one those
-        // files belong to, and pointing a row at the wrong local file is worse than
-        // going to the network for it.
-        if local_sources.len() == msg.attachments.len() {
-            for (att, path) in msg.attachments.iter_mut().zip(local_sources) {
-                if att.local_source.is_none() {
-                    att.local_source = path;
-                }
-            }
-        }
+        apply_local_sources(&mut msg.attachments, &local_sources);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
             msg.create_time
@@ -3625,6 +3616,14 @@ impl MessagesStore {
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
+                    // The socket delivered this reply before its own ack came back —
+                    // with a batch of attachments it usually does. Dropping the paths
+                    // here is what sent the sender to the proxy for files it is
+                    // holding: the row that survives is the socket's, and that one
+                    // never had them.
+                    if let Some(existing) = channel.messages.get_mut_by_id(msg.id) {
+                        apply_local_sources(&mut existing.attachments, &local_sources);
+                    }
                     return TopicAppend::default();
                 }
                 channel.messages.push_grouped(msg);
@@ -6694,6 +6693,23 @@ fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
         .and_then(|content| content.tp)
         .and_then(|tp| tp.parse::<i64>().ok())
         .is_some_and(|id| id != 0)
+}
+
+/// Point a row's attachments at the sender's own copies, by position. Only when
+/// the counts line up: a mismatch means these paths belong to a different send,
+/// and aiming a row at the wrong local file is worse than going to the network.
+fn apply_local_sources(
+    attachments: &mut [MessageAttachment],
+    local_sources: &[Option<std::path::PathBuf>],
+) {
+    if local_sources.len() != attachments.len() {
+        return;
+    }
+    for (att, path) in attachments.iter_mut().zip(local_sources) {
+        if att.local_source.is_none() {
+            att.local_source = path.clone();
+        }
+    }
 }
 
 fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
