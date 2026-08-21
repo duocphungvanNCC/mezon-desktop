@@ -65,11 +65,9 @@ fn surface_recording_toast(
     let (kind, message) = match toast {
         mezon_store::RecordingToast::Saved(path) => {
             // Hand the finished file straight to the system player — the desktop can do what the
-            // web app cannot. An encoder that bailed can still leave a zero-byte container behind,
-            // and launching a player on that only surfaces its "cannot play" dialog, so skip those.
-            if std::fs::metadata(&path).is_ok_and(|file| file.len() > 0) {
-                cx.open_with_system(&path);
-            }
+            // web app cannot. `Saved` already means playable: the recorder only reports it after
+            // `container::is_playable`, so there is nothing left to check here.
+            cx.open_with_system(&path);
             (
                 crate::components::primitives::ToastKind::Success,
                 format!(
