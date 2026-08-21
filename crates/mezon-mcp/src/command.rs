@@ -182,6 +182,7 @@ pub enum McpCommand {
     },
     ListLoadedMessages {
         limit: usize,
+        topic: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     JumpToMessage {

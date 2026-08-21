@@ -552,6 +552,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         "list_loaded_messages" => Arc::new(object(
             json!({
                 "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+                "topic": bool("Read the open topic panel's buffer instead of the channel's. Default false."),
             }),
             &[],
         )),

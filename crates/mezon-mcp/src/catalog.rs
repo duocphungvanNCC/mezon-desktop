@@ -220,7 +220,10 @@ list_messages (which reads the server) to tell a delivery failure apart from a m
 the server accepted but the list never rendered.
 
 Parameters:
-- limit (optional, default 50): return at most this many rows from each end of the buffer.",
+- limit (optional, default 50): return at most this many rows from each end of the buffer.
+- topic (optional, default false): read the open topic panel's buffer instead. The topic is
+  a bucket of its own and the parent channel stays active while it is open, so a reply sent
+  into a topic only shows up here with this set.",
         write: false,
     },
     ToolSpec {
@@ -1167,6 +1170,10 @@ composer_drop_paths always targets the channel composer even while the topic
 panel is open, so use this one for attachments meant for a topic. Call
 open_topic first.
 
+Staging is asynchronous: this returns as soon as the paths are handed over, so
+poll topic_state until its `attachments` lists the files before topic_submit —
+submitting earlier sends the reply without them.
+
 Parameters:
 - paths (required): array of local file paths.",
         write: true,
@@ -1176,6 +1183,9 @@ Parameters:
         description: "\
 Drop local files onto the composer, like a drag-and-drop. They become pending
 attachments; send them with composer_submit.
+
+The file is read on a background task, so poll composer_state until its
+`attachments` lists it before composer_submit.
 
 Parameters:
 - paths (required): array of local file paths.",

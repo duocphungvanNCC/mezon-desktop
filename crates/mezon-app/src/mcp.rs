@@ -329,9 +329,14 @@ impl McpRuntime {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
                     }
-                    McpCommand::ListLoadedMessages { limit, reply } => {
-                        let result =
-                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                    McpCommand::ListLoadedMessages {
+                        limit,
+                        topic,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_loaded_messages(cx, limit, topic)
+                        });
                         let _ = reply.send(result);
                     }
                     McpCommand::JumpToMessage { message_id, reply } => {

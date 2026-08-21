@@ -224,8 +224,16 @@ impl McpBackend {
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .clamp(1, 500) as usize;
-                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
-                    .await
+                let topic = arguments
+                    .get("topic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages {
+                    limit,
+                    topic,
+                    reply,
+                })
+                .await
             }
             "jump_to_message" => {
                 self.require_write_mode("jump_to_message")?;
