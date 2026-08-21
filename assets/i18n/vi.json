@@ -1054,6 +1054,7 @@
   "channelVoice.disconnectModal.content.removed": "Bạn đã bị xóa khỏi kênh thoại",
   "channelVoice.disconnectModal.title": "Mất kết nối thoại",
   "channelVoice.giveFlowerGiven": "{{giver}} vừa tặng hoa cho {{receiver}}",
+  "channelVoice.giveFlowerReceived": "Bạn vừa nhận được hoa từ {{giver}}",
   "channelVoice.giveFlowerInsufficient": "Không đủ token để tặng hoa",
   "channelVoice.giveFlowerRateLimited": "Vui lòng đợi trước khi tặng hoa lần nữa",
   "channelVoice.giveFlowerSuccess": "Đã tặng hoa thành công!",

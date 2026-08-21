@@ -3,7 +3,7 @@ use std::time::Instant;
 use gpui::{
     App, Bounds, Corners, Element, ElementId, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, PathBuilder, Pixels, Point, SharedString, Style,
-    TextAlign, Window, black, fill, point, px, relative, rgb, size, white,
+    TextAlign, TruncateFrom, Window, black, fill, point, px, relative, rgb, size, white,
 };
 
 const MAX_PARTICLES: usize = 420;
@@ -47,6 +47,9 @@ const ISO_DX: f32 = 36.0;
 const ISO_DY: f32 = -24.0;
 const LID_LIP: f32 = 20.0;
 const FACE_RADIUS: f32 = 12.0;
+const REF_FRAME_MS: f32 = 16.0;
+const CAPTION_MAX_WIDTH_FRACTION: f32 = 0.85;
+const CAPTION_ELLIPSIS: &str = "…";
 
 #[derive(Clone, Copy)]
 enum ParticleShape {
@@ -1177,30 +1180,36 @@ fn draw_ribbon_stroke(window: &mut Window, xf: Xf, p: &Particle, color: Hsla) {
     paint_path(window, b, color);
 }
 
-fn update_and_draw_particles(window: &mut Window, particles: &mut Vec<Particle>, height: f32) {
+fn update_and_draw_particles(
+    window: &mut Window,
+    particles: &mut Vec<Particle>,
+    height: f32,
+    dt_ms: f32,
+) {
+    let scale = (dt_ms / REF_FRAME_MS).max(0.0);
     let mut i = particles.len();
     while i > 0 {
         i -= 1;
         let p = &mut particles[i];
-        p.pop = (p.pop + 0.08).min(1.0);
-        p.vx *= p.drag;
-        p.vy *= p.drag;
+        p.pop = (p.pop + 0.08 * scale).min(1.0);
+        p.vx *= p.drag.powf(scale);
+        p.vy *= p.drag.powf(scale);
         if p.vy < 0.0 {
-            p.vy += p.gravity;
+            p.vy += p.gravity * scale;
         } else {
-            p.vy += p.fall_gravity;
-            p.vy *= 0.986;
+            p.vy += p.fall_gravity * scale;
+            p.vy *= 0.986f32.powf(scale);
         }
-        p.flutter += p.flutter_speed;
+        p.flutter += p.flutter_speed * scale;
         let flutter_x = p.flutter.sin()
             * match p.shape {
                 ParticleShape::Ribbon | ParticleShape::Streamer => 3.2,
                 _ => 1.2,
             };
-        p.x += p.vx + flutter_x;
-        p.y += p.vy;
-        p.rotation += p.rot_speed;
-        p.life -= p.decay;
+        p.x += (p.vx + flutter_x) * scale;
+        p.y += p.vy * scale;
+        p.rotation += p.rot_speed * scale;
+        p.life -= p.decay * scale;
         if p.life <= 0.0 || p.y > height + 80.0 {
             particles.swap_remove(i);
             continue;
@@ -1300,7 +1309,7 @@ fn step_runtime(runtime: &mut CelebrationRuntime, bounds: Bounds<Pixels>, window
             runtime.scene = None;
         }
     }
-    update_and_draw_particles(window, &mut runtime.particles, origin_y + height);
+    update_and_draw_particles(window, &mut runtime.particles, origin_y + height, dt);
 }
 
 fn paint_caption(
@@ -1320,14 +1329,32 @@ fn paint_caption(
     let line_height = px(20.);
     let pad_x = px(12.);
     let pad_y = px(8.);
-    let mut run = window.text_style().to_run(label.len());
+    let max_pill_w = bounds.size.width * CAPTION_MAX_WIDTH_FRACTION;
+    let max_text_w = (max_pill_w - pad_x * 2.).max(px(0.));
+    let mut measure_run = window.text_style().to_run(label.len());
+    measure_run.color = white().opacity(slide);
+    measure_run.font.weight = FontWeight::SEMIBOLD;
+    let (display, _) = cx
+        .text_system()
+        .line_wrapper(measure_run.font.clone(), font_size)
+        .truncate_line(
+            label.clone(),
+            max_text_w,
+            CAPTION_ELLIPSIS,
+            std::slice::from_ref(&measure_run),
+            TruncateFrom::End,
+        );
+    if display.is_empty() {
+        return;
+    }
+    let mut run = window.text_style().to_run(display.len());
     run.color = white().opacity(slide);
     run.font.weight = FontWeight::SEMIBOLD;
     let line =
         window
             .text_system()
-            .shape_line(label.clone(), font_size, std::slice::from_ref(&run), None);
-    let pill_w = line.width() + pad_x * 2.;
+            .shape_line(display, font_size, std::slice::from_ref(&run), None);
+    let pill_w = (line.width() + pad_x * 2.).min(max_pill_w);
     let pill_h = line_height + pad_y * 2.;
     let x = bounds.origin.x + (bounds.size.width - pill_w) / 2.;
     let rest_y = bounds.origin.y + bounds.size.height - px(70.) - pill_h;

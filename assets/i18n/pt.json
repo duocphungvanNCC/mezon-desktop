@@ -993,6 +993,7 @@
   "channelVoice.disconnectModal.content.removed": "Você foi removido do canal de voz",
   "channelVoice.disconnectModal.title": "Desconexão de voz",
   "channelVoice.giveFlowerGiven": "{{giver}} acabou de dar flores para {{receiver}}",
+  "channelVoice.giveFlowerReceived": "Você acabou de receber uma flor de {{giver}}",
   "channelVoice.giveFlowerInsufficient": "Tokens insuficientes para dar uma flor",
   "channelVoice.giveFlowerRateLimited": "Aguarde antes de enviar outra flor",
   "channelVoice.giveFlowerSuccess": "Flor enviada com sucesso!",

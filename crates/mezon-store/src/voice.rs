@@ -1219,18 +1219,12 @@ impl VoiceStore {
             .unwrap_or_default();
         let local_is_receiver = self.local_user_id().as_deref() == Some(receiver_id.as_str());
         let label = SharedString::from(if local_is_receiver {
-            format!(
-                "{} {}",
-                mezon_i18n::t(&locale, "token.flowers.received"),
-                giver_name
-            )
+            mezon_i18n::t(&locale, "channelVoice.giveFlowerReceived")
+                .replace("{{giver}}", &giver_name)
         } else {
-            format!(
-                "{} {} {}",
-                giver_name,
-                mezon_i18n::t(&locale, "token.flowers.someoneReceived"),
-                receiver_name
-            )
+            mezon_i18n::t(&locale, "channelVoice.giveFlowerGiven")
+                .replace("{{giver}}", &giver_name)
+                .replace("{{receiver}}", &receiver_name)
         });
         let expire_key = key.clone();
         let remove_timer = cx.spawn(async move |this, cx| {

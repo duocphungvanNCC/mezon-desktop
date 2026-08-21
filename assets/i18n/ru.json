@@ -999,6 +999,7 @@
   "channelVoice.disconnectModal.content.removed": "Вы были удалены из голосового канала",
   "channelVoice.disconnectModal.title": "Голосовая связь отключена",
   "channelVoice.giveFlowerGiven": "{{giver}} только что подарил цветы {{receiver}}",
+  "channelVoice.giveFlowerReceived": "Вы только что получили цветок от {{giver}}",
   "channelVoice.giveFlowerInsufficient": "Недостаточно токенов, чтобы подарить цветок",
   "channelVoice.giveFlowerRateLimited": "Подождите, прежде чем дарить цветок снова",
   "channelVoice.giveFlowerSuccess": "Цветок успешно отправлен!",

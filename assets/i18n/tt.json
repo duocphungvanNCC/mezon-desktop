@@ -999,6 +999,7 @@
   "channelVoice.disconnectModal.content.removed": "Сез тавыш каналыннан бетерелдегез",
   "channelVoice.disconnectModal.title": "Тавыш бәйләнеше өзелде",
   "channelVoice.giveFlowerGiven": "{{giver}} әле генә {{receiver}} өчен чәчәкләр бүләк итте",
+  "channelVoice.giveFlowerReceived": "Сез яңа гына {{giver}} дан чәчәк алдыгыз",
   "channelVoice.giveFlowerInsufficient": "Чәчәк бүләк итәр өчен токен җитми",
   "channelVoice.giveFlowerRateLimited": "Яңадан чәчәк җибәрү алдыннан бераз көтегез",
   "channelVoice.giveFlowerSuccess": "Чәчәк уңышлы җибәрелде!",

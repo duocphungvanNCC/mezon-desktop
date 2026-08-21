@@ -993,6 +993,7 @@
   "channelVoice.disconnectModal.content.removed": "ボイスチャンネルから削除されました",
   "channelVoice.disconnectModal.title": "ボイス切断",
   "channelVoice.giveFlowerGiven": "{{giver}} が {{receiver}} に花を贈りました",
+  "channelVoice.giveFlowerReceived": "{{giver}} から花を受け取りました",
   "channelVoice.giveFlowerInsufficient": "花を贈るトークンが不足しています",
   "channelVoice.giveFlowerRateLimited": "次の花を送る前に少し待ってください",
   "channelVoice.giveFlowerSuccess": "花を送信しました！",

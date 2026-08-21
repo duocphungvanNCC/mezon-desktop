@@ -1059,6 +1059,7 @@
   "channelVoice.disconnectModal.content.removed": "You have been removed from the voice channel",
   "channelVoice.disconnectModal.title": "Voice Disconnected",
   "channelVoice.giveFlowerGiven": "{{giver}} has just given flowers to {{receiver}}",
+  "channelVoice.giveFlowerReceived": "You just received a flower from {{giver}}",
   "channelVoice.giveFlowerInsufficient": "Not enough tokens to give a flower",
   "channelVoice.giveFlowerRateLimited": "Please wait before sending another flower",
   "channelVoice.giveFlowerSuccess": "Flower sent successfully!",

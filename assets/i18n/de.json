@@ -993,6 +993,7 @@
   "channelVoice.disconnectModal.content.removed": "Du wurdest aus dem Sprachkanal entfernt.",
   "channelVoice.disconnectModal.title": "Sprachverbindung verloren",
   "channelVoice.giveFlowerGiven": "{{giver}} hat gerade {{receiver}} Blumen geschenkt",
+  "channelVoice.giveFlowerReceived": "Du hast gerade eine Blume von {{giver}} erhalten",
   "channelVoice.giveFlowerInsufficient": "Nicht genug Token, um eine Blume zu schenken",
   "channelVoice.giveFlowerRateLimited": "Bitte warte, bevor du eine weitere Blume sendest",
   "channelVoice.giveFlowerSuccess": "Blume erfolgreich gesendet!",
