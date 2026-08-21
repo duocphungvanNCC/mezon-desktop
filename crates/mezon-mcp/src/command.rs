@@ -185,6 +185,10 @@ pub enum McpCommand {
         topic: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ReplyBegin {
+        message_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     JumpToMessage {
         message_id: i64,
         reply: oneshot::Sender<anyhow::Result<Value>>,

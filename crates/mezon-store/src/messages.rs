@@ -3586,11 +3586,17 @@ impl MessagesStore {
         true
     }
 
+    /// `local_sources` is the sender's own copy of each attachment, in the order
+    /// they were sent — empty for a reply arriving from anyone else. A topic reply
+    /// has no optimistic row: it is built from the server's echo, which carries no
+    /// path, so without this the sender would fetch a proxied copy of the file
+    /// still sitting on their disk.
     pub fn append_topic_message(
         &mut self,
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<Option<std::path::PathBuf>>,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3600,6 +3606,16 @@ impl MessagesStore {
         let masked = anonymous && anonymize_sender(&mut msg, cfg);
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
+        // Only when they line up: a mismatch means this echo is not the one those
+        // files belong to, and pointing a row at the wrong local file is worse than
+        // going to the network for it.
+        if local_sources.len() == msg.attachments.len() {
+            for (att, path) in msg.attachments.iter_mut().zip(local_sources) {
+                if att.local_source.is_none() {
+                    att.local_source = path;
+                }
+            }
+        }
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
             msg.create_time

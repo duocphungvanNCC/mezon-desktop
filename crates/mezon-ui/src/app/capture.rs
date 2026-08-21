@@ -322,11 +322,22 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
     let composer = composer.read(cx);
     let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    let reply_target = mezon_store::MessagesStore::global(cx)
+        .read(cx)
+        .reply_target()
+        .map(|draft| {
+            json!({
+                "message_id": draft.message_ref_id.get().to_string(),
+                "sender": draft.sender_name,
+            })
+        });
     Ok(json!({
         "text": composer.probe_text(cx).to_string(),
         // Staged, not dropped: a dropped file is read on a background task, so
         // submitting before it lands here sends the message without it.
         "attachments": composer.probe_attachments(),
+        // What the next submit will answer, if anything.
+        "reply_target": reply_target,
         "popup_open": popup_open,
         "selected": selected,
         "suggestions": suggestions,
@@ -670,6 +681,29 @@ pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Valu
     // ready. Poll topic_state until `attachments` lists the files before calling
     // topic_submit, or the reply goes out without them.
     Ok(json!({ "ok": true, "dropped": count, "staged": false }))
+}
+
+/// Aim the composer at a message without sending anything, the way the row's
+/// "Reply" action does. `reply_to_message` posts a text reply in one shot, so it
+/// cannot carry a staged attachment — this is what lets a caller build a reply
+/// that has one.
+pub fn reply_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| {
+        store.set_reply_to(mezon_store::MessageId::new(message_id), cx)
+    });
+    let target = store.read(cx).reply_target().map(|draft| {
+        json!({
+            "message_id": draft.message_ref_id.get().to_string(),
+            "sender": draft.sender_name,
+        })
+    });
+    let Some(target) = target else {
+        anyhow::bail!(
+            "message {message_id} is not in the open channel's loaded history; open_channel and load_more_messages first"
+        );
+    };
+    Ok(json!({ "ok": true, "reply_target": target }))
 }
 
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
