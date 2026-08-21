@@ -29,7 +29,7 @@ TMPDIR=/tmp/mz2 ./target/debug/mezon mcp call open_channel \
 - [ ] A second instance needs a *different* `TMPDIR` (e.g. `/tmp/mz3`), otherwise
       the single-instance guard kills it and MCP answers from the old process.
 - [ ] `RUST_LOG` includes `img_render` only if the build carries the temporary
-      render instrumentation (see §6). `mezon_store=debug` is what prints
+      render instrumentation (see §7). `mezon_store=debug` is what prints
       `presign probe` and `presign gate`.
 
 ### Web
@@ -137,13 +137,37 @@ Send in one message: `png jpg gif mp4 mp3 webm pdf txt`.
 
 ---
 
-## 5. Other paths
+## 5. Opening the viewer, pressing play
+
+A tile is inert until its bytes are up. The row gates the click on
+`!sending && !upload_failed && !presign_pending && !url.is_empty()`
+(`parts.rs`), and `open_image_viewer` refuses on the same conditions — a tool
+that opened a viewer the user cannot open would report a pass for nothing.
+
+Image viewer:
+
+- [ ] Sender clicks their **own image while it is uploading** → nothing opens
+      (`open_image_viewer` answers `still uploading`)
+- [ ] Sender clicks after it settles → viewer opens on the CDN url
+- [ ] Receiver clicks → viewer opens, and paging walks the channel's other media
+- [ ] A failed upload's tile does not open the viewer
+- [ ] Web: `canOpenViewer` checks only `isPresignPending` — confirm a row that is
+      merely *sending* is inert there too
+
+Video:
+
+- [ ] Sender presses play while uploading → nothing happens
+- [ ] Sender presses play after it settles → plays
+- [ ] Receiver presses play: `readyState=4`, `error=none`, `currentTime`
+      advances. The video streams straight from the CDN; only the poster goes
+      through imgproxy
+
+---
+
+## 6. Other paths
 
 - [ ] Reply carrying an attachment (`reply_begin` → drop → `composer_submit`):
       the reply reference survives the presign patch — check the *receiver's* UI
-- [ ] Receiver presses play on a video: `readyState=4`, `error=none`,
-      `currentTime` advances. The video streams straight from the CDN; only the
-      poster goes through imgproxy
 - [ ] Large file — desktop ≥16 MB takes the multipart path (etag ends `-N`);
       web ~9 MB single PUT
 - [ ] Reload the page: the sender's local preview is gone, so the row must fall
@@ -151,7 +175,7 @@ Send in one message: `png jpg gif mp4 mp3 webm pdf txt`.
 
 ---
 
-## 6. Reading the numbers
+## 7. Reading the numbers
 
 The `img_render` lines come from a temporary instrumentation in
 `MessageImageLoader` (`crates/mezon-ui/src/image_cache.rs`) — **not committed**.
@@ -171,7 +195,7 @@ Healthy ranges measured on a working build:
 
 ---
 
-## 7. Known open issues to check against
+## 8. Known open issues to check against
 
 - [ ] Web keeps showing "Uploading…" long past the 10-minute expiry for an
       attachment whose upload died (suspect: `getMessageCreateTimeSeconds`

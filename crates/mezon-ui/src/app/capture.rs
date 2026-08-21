@@ -1158,11 +1158,30 @@ pub fn open_message_image_viewer(
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
         })?;
+        // Mirror the row's own click gate (`parts.rs`): the tile is inert while the
+        // bytes are still going up, after they failed, or before the url exists.
+        // Without these the tool opens a viewer on an empty url and answers ok,
+        // which is a pass for something a user cannot do.
+        if attachment.uploading {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is still uploading; the row \
+                 does not open the viewer yet"
+            );
+        }
+        if attachment.upload_failed {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} failed to upload, so there \
+                 is nothing to view"
+            );
+        }
         if attachment.presign_pending {
             anyhow::bail!(
                 "attachment {attachment_index} of message {message_id} is still waiting for its \
                  presign to finish, so its url does not resolve yet"
             );
+        }
+        if attachment.url.is_empty() {
+            anyhow::bail!("attachment {attachment_index} of message {message_id} has no url yet");
         }
         (
             mezon_store::AttachmentSeedInput::from_message(attachment),
