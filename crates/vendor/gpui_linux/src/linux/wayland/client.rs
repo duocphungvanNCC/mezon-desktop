@@ -232,6 +232,7 @@ pub(crate) struct WaylandClientState {
     pending_commit: Option<String>,
     pending_delete: Option<(u32, u32)>,
     composing: bool,
+    text_input_commit_count: u32,
     // Surface to Window mapping
     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
     // Output to scale mapping
@@ -328,6 +329,14 @@ fn sync_text_input(
     }
 }
 
+fn commit_text_input(
+    state: &mut WaylandClientState,
+    text_input: &zwp_text_input_v3::ZwpTextInputV3,
+) {
+    text_input.commit();
+    state.text_input_commit_count = state.text_input_commit_count.wrapping_add(1);
+}
+
 /// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
 /// window to GPUI.
 #[derive(Clone)]
@@ -399,12 +408,11 @@ impl WaylandClientStatePtr {
         text_input.enable();
         text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
         let window = state.keyboard_focused_window.clone();
-        drop(state);
-        if let Some(window) = window {
-            sync_text_input(&text_input, &window, ChangeCause::Other);
+        if let Some(window) = window.as_ref() {
+            sync_text_input(&text_input, window, ChangeCause::Other);
         }
-        text_input.commit();
-        client.borrow_mut().text_input = Some(text_input);
+        commit_text_input(&mut state, &text_input);
+        state.text_input = Some(text_input);
     }
 
     pub fn disable_ime(&self) {
@@ -412,9 +420,9 @@ impl WaylandClientStatePtr {
         let mut state = client.borrow_mut();
         state.ime_enabled = Some(false);
         state.composing = false;
-        if let Some(text_input) = &state.text_input {
+        if let Some(text_input) = state.text_input.clone() {
             text_input.disable();
-            text_input.commit();
+            commit_text_input(&mut state, &text_input);
         }
     }
 
@@ -431,7 +439,6 @@ impl WaylandClientStatePtr {
         };
         let composing = state.composing || state.pre_edit_text.is_some();
         let window = state.keyboard_focused_window.clone();
-        drop(state);
 
         if composing {
             text_input.set_cursor_rectangle(
@@ -440,9 +447,10 @@ impl WaylandClientStatePtr {
                 bounds.size.width.as_f32() as i32,
                 bounds.size.height.as_f32() as i32,
             );
+            commit_text_input(&mut state, &text_input);
         } else if let Some(window) = window {
             sync_text_input(&text_input, &window, ChangeCause::Other);
-            text_input.commit();
+            commit_text_input(&mut state, &text_input);
         } else {
             text_input.set_cursor_rectangle(
                 bounds.origin.x.as_f32() as i32,
@@ -450,7 +458,7 @@ impl WaylandClientStatePtr {
                 bounds.size.width.as_f32() as i32,
                 bounds.size.height.as_f32() as i32,
             );
-            text_input.commit();
+            commit_text_input(&mut state, &text_input);
         }
     }
 
@@ -759,6 +767,7 @@ impl WaylandClient {
             pending_commit: None,
             pending_delete: None,
             composing: false,
+            text_input_commit_count: 0,
             outputs: HashMap::default(),
             in_progress_outputs,
             wl_outputs,
@@ -1795,8 +1804,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 state.pending_delete = Some((before_length, after_length));
             }
             zwp_text_input_v3::Event::Done { serial } => {
-                let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
-                state.serial_tracker.update(SerialKind::InputMethod, serial);
+                let commit_count = state.text_input_commit_count;
                 let Some(window) = state.keyboard_focused_window.clone() else {
                     state.pending_preedit = None;
                     state.pending_commit = None;
@@ -1851,8 +1859,9 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 }
 
                 sync_text_input(text_input, &window, ChangeCause::InputMethod);
-                if last_serial == serial {
-                    text_input.commit();
+                if serial == commit_count {
+                    let mut state = client.borrow_mut();
+                    commit_text_input(&mut state, text_input);
                 }
             }
             _ => {}

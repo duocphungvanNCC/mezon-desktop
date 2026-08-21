@@ -2171,11 +2171,11 @@ impl X11Client {
 
         let mut state = self.0.borrow_mut();
         if let Some(handler) = state.xim_handler.as_mut() {
-            if handler.should_skip_apply(&text) {
+            if handler.should_skip_apply(&text, caret.as_ref()) {
                 state.composing = !text.is_empty();
                 return Some(());
             }
-            handler.remember_applied(&text);
+            handler.remember_applied(&text, caret.clone());
         }
         let (mut ximc, xim_handler) = state.take_xim()?;
         state.composing = !text.is_empty();

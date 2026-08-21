@@ -215,15 +215,7 @@ impl X11ImContext {
     pub(crate) fn take_events(&self) -> Vec<ImEvent> {
         self.events
             .lock()
-            .map(|mut events| {
-                if self.drop_late.get() {
-                    events.clear();
-                    self.drop_late.set(false);
-                    Vec::new()
-                } else {
-                    std::mem::take(&mut *events)
-                }
-            })
+            .map(|mut events| drain_events_with_quarantine(&mut events, &self.drop_late))
             .unwrap_or_default()
     }
 
@@ -235,7 +227,13 @@ impl X11ImContext {
         is_release: bool,
         time: u32,
     ) -> Result<bool, String> {
-        self.drop_late.set(false);
+        if self.drop_late.get() {
+            self.process_io();
+            if let Ok(mut events) = self.events.lock() {
+                events.clear();
+            }
+            self.drop_late.set(false);
+        }
         let modifier = is_modifier_keyval(keyval);
         let timeout = if modifier {
             MODIFIER_TIMEOUT
@@ -901,10 +899,8 @@ fn parse_fcitx5_preedit(message: &Message) -> Option<ImEvent> {
     if text.is_empty() {
         return Some(ImEvent::HidePreedit);
     }
-    Some(ImEvent::Preedit {
-        text,
-        caret_chars: caret,
-    })
+    let caret_chars = fcitx_byte_caret_to_chars(&text, caret);
+    Some(ImEvent::Preedit { text, caret_chars })
 }
 
 fn parse_fcitx5_batch_item(kind: u32, arg: &dyn RefArg) -> Option<ImEvent> {
@@ -925,10 +921,8 @@ fn parse_fcitx5_batch_preedit(arg: &dyn RefArg) -> Option<ImEvent> {
     if text.is_empty() {
         return Some(ImEvent::HidePreedit);
     }
-    Some(ImEvent::Preedit {
-        text,
-        caret_chars: caret,
-    })
+    let caret_chars = fcitx_byte_caret_to_chars(&text, caret);
+    Some(ImEvent::Preedit { text, caret_chars })
 }
 
 fn parse_fcitx5_batch_forward(arg: &dyn RefArg) -> Option<ImEvent> {
@@ -1100,9 +1094,44 @@ pub(crate) fn surrounding_char_delete_to_bytes(
     let end_chars = start_chars.saturating_add(nchars as usize);
     let start_bytes = char_index_to_byte(text, start_chars);
     let end_bytes = char_index_to_byte(text, end_chars);
-    let before = cursor.saturating_sub(start_bytes);
-    let after = end_bytes.saturating_sub(cursor);
-    (before, after)
+    if start_bytes >= end_bytes {
+        return (0, 0);
+    }
+    if end_bytes == cursor {
+        return (cursor - start_bytes, 0);
+    }
+    if start_bytes == cursor {
+        return (0, end_bytes - cursor);
+    }
+    if start_bytes < cursor && end_bytes > cursor {
+        return (cursor - start_bytes, end_bytes - cursor);
+    }
+    (0, 0)
+}
+
+fn drain_events_with_quarantine(events: &mut Vec<ImEvent>, drop_late: &Cell<bool>) -> Vec<ImEvent> {
+    if drop_late.get() {
+        if events.is_empty() {
+            Vec::new()
+        } else {
+            events.clear();
+            drop_late.set(false);
+            Vec::new()
+        }
+    } else {
+        std::mem::take(events)
+    }
+}
+
+fn fcitx_byte_caret_to_chars(text: &str, caret_bytes: i32) -> i32 {
+    if caret_bytes < 0 {
+        return -1;
+    }
+    let mut bytes = usize::try_from(caret_bytes).unwrap_or(0).min(text.len());
+    while bytes > 0 && !text.is_char_boundary(bytes) {
+        bytes -= 1;
+    }
+    text[..bytes].chars().count() as i32
 }
 
 fn char_index_to_byte(text: &str, index: usize) -> usize {
@@ -1123,12 +1152,56 @@ mod tests {
     }
 
     #[test]
+    fn delete_one_char_after_caret() {
+        assert_eq!(surrounding_char_delete_to_bytes("abcd", 0, 0, 1), (0, 1));
+    }
+
+    #[test]
+    fn delete_range_spanning_caret() {
+        assert_eq!(surrounding_char_delete_to_bytes("abcd", 2, -1, 2), (1, 1));
+    }
+
+    #[test]
+    fn delete_disjoint_before_caret_is_rejected() {
+        assert_eq!(surrounding_char_delete_to_bytes("abcd", 4, -4, 1), (0, 0));
+    }
+
+    #[test]
+    fn delete_disjoint_after_caret_is_rejected() {
+        assert_eq!(surrounding_char_delete_to_bytes("abcd", 0, 2, 1), (0, 0));
+    }
+
+    #[test]
     fn delete_spans_a_vietnamese_vowel() {
         let text = "hoá";
         let cursor = text.len();
         let (before, after) = surrounding_char_delete_to_bytes(text, cursor, -1, 1);
         assert_eq!(after, 0);
         assert_eq!(&text[cursor - before..cursor], "á");
+    }
+
+    #[test]
+    fn fcitx_byte_caret_mid_vietnamese_preedit() {
+        let text = "hóa";
+        assert_eq!(fcitx_byte_caret_to_chars(text, 3), 2);
+        assert_eq!(
+            caret_utf16_range(text, fcitx_byte_caret_to_chars(text, 3)),
+            Some(2..2)
+        );
+        assert_eq!(fcitx_byte_caret_to_chars(text, text.len() as i32), 3);
+    }
+
+    #[test]
+    fn quarantine_keeps_drop_late_until_a_late_event_arrives() {
+        let drop_late = Cell::new(true);
+        let mut events = Vec::new();
+        assert!(drain_events_with_quarantine(&mut events, &drop_late).is_empty());
+        assert!(drop_late.get());
+
+        events.push(ImEvent::Commit("a".into()));
+        assert!(drain_events_with_quarantine(&mut events, &drop_late).is_empty());
+        assert!(!drop_late.get());
+        assert!(events.is_empty());
     }
 
     #[test]

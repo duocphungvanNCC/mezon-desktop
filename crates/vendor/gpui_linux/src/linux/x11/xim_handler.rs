@@ -115,7 +115,7 @@ pub struct XimHandler {
     pub callback_events: Vec<XimCallbackEvent>,
     pub needs_spot_refresh: bool,
     preedit: Vec<char>,
-    last_applied: Option<String>,
+    last_applied: Option<(String, Option<std::ops::Range<usize>>)>,
 }
 
 impl XimHandler {
@@ -156,12 +156,16 @@ impl XimHandler {
         self.preedit.clear();
     }
 
-    pub fn should_skip_apply(&self, text: &str) -> bool {
-        self.last_applied.as_deref() == Some(text)
+    pub fn should_skip_apply(&self, text: &str, caret: Option<&std::ops::Range<usize>>) -> bool {
+        self.last_applied
+            .as_ref()
+            .is_some_and(|(applied, applied_caret)| {
+                applied == text && applied_caret.as_ref() == caret
+            })
     }
 
-    pub fn remember_applied(&mut self, text: &str) {
-        self.last_applied = Some(text.to_string());
+    pub fn remember_applied(&mut self, text: &str, caret: Option<std::ops::Range<usize>>) {
+        self.last_applied = Some((text.to_string(), caret));
     }
 
     pub fn clear_applied(&mut self) {
@@ -408,5 +412,14 @@ mod tests {
         assert_eq!(caret_utf16_range("hóa", 3), Some(3..3));
         assert_eq!(caret_utf16_range("", 0), None);
         assert_eq!(caret_utf16_range("á", -1), Some(1..1));
+    }
+
+    #[test]
+    fn skip_apply_requires_same_text_and_caret() {
+        let mut handler = super::XimHandler::new();
+        handler.remember_applied("hoa", Some(2..2));
+        assert!(handler.should_skip_apply("hoa", Some(&(2..2))));
+        assert!(!handler.should_skip_apply("hoa", Some(&(3..3))));
+        assert!(!handler.should_skip_apply("hoas", Some(&(2..2))));
     }
 }
