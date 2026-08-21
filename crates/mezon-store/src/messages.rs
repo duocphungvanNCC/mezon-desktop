@@ -3791,7 +3791,7 @@ impl MessagesStore {
     /// long until the next attachment is due. `None` means nothing to probe.
     fn refresh_presign_probes(&mut self) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
-        let mut pending: Vec<String> = Vec::new();
+        let mut pending: HashSet<String> = HashSet::new();
         for bucket in self.probe_buckets() {
             let Some(channel) = self.cache.get(&bucket) else {
                 continue;
@@ -3800,9 +3800,15 @@ impl MessagesStore {
                 for att in message.attachments.iter() {
                     // `uploading` means this client is still PUTting the bytes; it
                     // knows the answer already and asking the CDN would only add
-                    // traffic to every message we send ourselves.
-                    if att.presign_pending && !att.uploading && !att.url.is_empty() {
-                        pending.push(att.url.clone());
+                    // traffic to every message we send ourselves. `upload_failed`
+                    // means the bytes never left, so the object will never appear
+                    // and probing for it just burns requests until the expiry.
+                    if att.presign_pending
+                        && !att.uploading
+                        && !att.upload_failed
+                        && !att.url.is_empty()
+                    {
+                        pending.insert(att.url.clone());
                     }
                 }
             }
@@ -3822,10 +3828,19 @@ impl MessagesStore {
 
     /// Urls whose turn it is, with their backoff already advanced so a slow
     /// probe cannot be started twice.
+    ///
+    /// Capped: the round runs the requests one after another, so a channel that
+    /// somehow has many stuck attachments would otherwise queue every HEAD (each
+    /// able to burn the probe timeout) behind the first. Whatever is left over
+    /// stays due and the next round — scheduled the moment this one lands —
+    /// picks it up.
     fn take_due_probe_urls(&mut self) -> Vec<String> {
         let now = std::time::Instant::now();
         let mut due = Vec::new();
         for (url, probe) in self.presign_probe.iter_mut() {
+            if due.len() >= PRESIGN_PROBE_BATCH {
+                break;
+            }
             if probe.next_at <= now {
                 probe.attempts = probe.attempts.saturating_add(1);
                 probe.next_at = now + presign_probe_delay(probe.attempts);
@@ -7292,6 +7307,9 @@ fn apply_presign_gate(
 /// long enough that the normal path — the presign_finish update arriving a
 /// second or two after the message — costs no requests at all.
 const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
+
+/// How many objects one probe round asks about, since it asks in sequence.
+const PRESIGN_PROBE_BATCH: usize = 6;
 
 /// One attachment's probe schedule.
 #[derive(Debug, Clone, Copy)]
@@ -11609,6 +11627,14 @@ mod tests {
         assert_eq!(secs(4), 30);
         assert_eq!(secs(50), 30);
         assert_eq!(secs(u32::MAX), 30);
+    }
+
+    #[test]
+    fn presign_probe_batch_is_bounded_so_one_round_cannot_serialise_every_head() {
+        // The round awaits its requests one at a time, so the cap is what keeps a
+        // channel full of stuck attachments from queueing them all behind the first.
+        assert!(PRESIGN_PROBE_BATCH > 0);
+        assert!(PRESIGN_PROBE_BATCH <= 8);
     }
 
     #[test]
