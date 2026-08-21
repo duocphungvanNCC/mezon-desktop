@@ -3596,7 +3596,7 @@ impl MessagesStore {
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
-        local_sources: Vec<Option<std::path::PathBuf>>,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -6695,18 +6695,32 @@ fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
         .is_some_and(|id| id != 0)
 }
 
-/// Point a row's attachments at the sender's own copies, by position. Only when
-/// the counts line up: a mismatch means these paths belong to a different send,
-/// and aiming a row at the wrong local file is worse than going to the network.
+/// Point a row's attachments at the sender's own copies. Matched by filename,
+/// because the echo is the server's list and nothing promises it comes back in
+/// the order it was sent — an index would then aim a row at the wrong picture.
+/// The same name twice in one message keeps its order within that name.
+///
+/// The count check stays as the outer guard: a different length means this echo
+/// is not the send those files belong to at all.
 fn apply_local_sources(
     attachments: &mut [MessageAttachment],
-    local_sources: &[Option<std::path::PathBuf>],
+    local_sources: &[(String, Option<std::path::PathBuf>)],
 ) {
     if local_sources.len() != attachments.len() {
         return;
     }
-    for (att, path) in attachments.iter_mut().zip(local_sources) {
-        if att.local_source.is_none() {
+    let mut by_name: HashMap<&str, std::collections::VecDeque<&Option<std::path::PathBuf>>> =
+        HashMap::new();
+    for (name, path) in local_sources {
+        by_name.entry(name.as_str()).or_default().push_back(path);
+    }
+    for att in attachments.iter_mut() {
+        if att.local_source.is_some() {
+            continue;
+        }
+        if let Some(queue) = by_name.get_mut(att.filename.as_str())
+            && let Some(path) = queue.pop_front()
+        {
             att.local_source = path.clone();
         }
     }

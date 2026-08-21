@@ -794,9 +794,14 @@ impl TopicsStore {
         // the file on this disk. Keep the paths so the sender sees the picture they
         // just sent instead of fetching a proxied copy of it back — the same thing
         // `MessageAttachment::optimistic_local` does for a channel send.
-        let local_sources: Vec<Option<std::path::PathBuf>> = attachments
+        let local_sources: Vec<(String, Option<std::path::PathBuf>)> = attachments
             .iter()
-            .map(|att| att.filetype.starts_with("image/").then(|| att.path.clone()))
+            .map(|att| {
+                (
+                    att.filename.clone(),
+                    att.filetype.starts_with("image/").then(|| att.path.clone()),
+                )
+            })
             .collect();
         let reply_ref =
             self.reply_target
@@ -1106,7 +1111,7 @@ impl TopicsStore {
         generation: u64,
         ack: mezon_client::transport::ApiMessage,
         anonymous: bool,
-        local_sources: Vec<Option<std::path::PathBuf>>,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) {
         if self.compose_generation != generation {

@@ -1146,14 +1146,29 @@ pub fn open_message_image_viewer(
     cx: &mut App,
 ) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
+    let topic_id = mezon_store::TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id();
     let (seed, id, create_time, uploader_id) = {
         let store = store.read(cx);
+        // A reply lives in the topic's own bucket, not the channel's, so looking
+        // only at the channel makes every topic attachment unreachable from here.
         let message = store
             .messages()
             .iter()
             .find(|message| message.id.0 == message_id)
+            .or_else(|| {
+                topic_id.and_then(|id| {
+                    store
+                        .messages_in_channel(mezon_store::ChannelId(id))
+                        .iter()
+                        .find(|message| message.id.0 == message_id)
+                })
+            })
             .ok_or_else(|| {
-                anyhow::anyhow!("message {message_id} is not in the open channel's loaded history")
+                anyhow::anyhow!(
+                    "message {message_id} is not in the open channel's loaded history, nor in the open topic's"
+                )
             })?;
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
