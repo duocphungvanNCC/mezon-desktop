@@ -461,7 +461,12 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         .map(|(composer, _)| composer.read(cx).probe_attachments())
         .unwrap_or_default();
     Ok(json!({
+        // The store's flag and the mounted view are two different things: an
+        // occluded window drops the panel entity while the store still says the
+        // topic is open, and every write tool then fails with "no topic panel is
+        // mounted". Report both so a caller can tell those apart.
         "panel_open": topics.is_panel_open(),
+        "panel_mounted": topic_panel(cx).is_ok(),
         "topic_id": topic_id.map(|id| id.to_string()),
         "origin_message_id": topics.origin_message().map(|m| m.id.get().to_string()),
         "loaded_count": loaded,
