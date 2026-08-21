@@ -762,8 +762,17 @@ struct Uploader {
 /// Width below which the label is dropped: an album tile can be ~100px and the
 /// text would spill out of it. The spinner alone still reads as "working".
 const SENDING_LABEL_MIN_WIDTH: f32 = 160.;
+/// The spinner is 32px and the caption another ~16 above the gap. In a box
+/// shorter than this the stack does not fit and spills out of the tile, which is
+/// what makes a wide, short picture look broken rather than busy.
+const SENDING_LABEL_MIN_HEIGHT: f32 = 92.;
 
-fn attachment_sending_overlay(theme: &Theme, locale: &str, box_width: f32) -> impl IntoElement {
+fn attachment_sending_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -771,20 +780,24 @@ fn attachment_sending_overlay(theme: &Theme, locale: &str, box_width: f32) -> im
         .flex_col()
         .items_center()
         .justify_center()
+        .overflow_hidden()
         .gap_2()
         .child(
             Spinner::new()
                 .with_size(Size::Large)
                 .color(theme.text_secondary.into()),
         )
-        .when(box_width >= SENDING_LABEL_MIN_WIDTH, |d| {
-            d.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.text_secondary)
-                    .child(mezon_i18n::t(locale, "message.attachment.uploading")),
-            )
-        })
+        .when(
+            box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT,
+            |d| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.text_secondary)
+                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                )
+            },
+        )
 }
 
 fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
@@ -946,7 +959,14 @@ fn render_album(
                 tile.height,
             ));
         } else if att.presign_pending {
-            tile_element = presign_child(tile_element, att, theme, ctx.locale, tile.width);
+            tile_element = presign_child(
+                tile_element,
+                att,
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            );
         } else {
             let selection = ctx.selection.clone();
             let src = album_tile_src(cfg, att, tile.width, tile.height);
@@ -977,8 +997,12 @@ fn render_album(
         if att.upload_failed {
             tile_element = tile_element.child(attachment_failed_overlay(theme));
         } else if att.uploading {
-            tile_element =
-                tile_element.child(attachment_sending_overlay(theme, ctx.locale, tile.width));
+            tile_element = tile_element.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         }
         container = container.child(tile_element);
     }
@@ -1037,12 +1061,15 @@ fn presign_child(
     theme: &Theme,
     locale: &str,
     box_width: f32,
+    box_height: f32,
 ) -> gpui::Stateful<gpui::Div> {
     // A recipient never sees `uploading` — only `presign_pending` — so without
     // this the whole upload window is a bare spinner on their side while the
     // sender gets a labelled one.
     if att.thumbnail.is_empty() {
-        parent.child(attachment_sending_overlay(theme, locale, box_width))
+        parent.child(attachment_sending_overlay(
+            theme, locale, box_width, box_height,
+        ))
     } else {
         parent
             .child(
@@ -1050,7 +1077,9 @@ fn presign_child(
                     .size_full()
                     .object_fit(ObjectFit::Cover),
             )
-            .child(attachment_sending_overlay(theme, locale, box_width))
+            .child(attachment_sending_overlay(
+                theme, locale, box_width, box_height,
+            ))
     }
 }
 
@@ -1142,6 +1171,7 @@ fn render_photo(
                 theme,
                 ctx.locale,
                 att.display_width,
+                att.display_height,
             ));
         }
         return el.into_any_element();
@@ -1158,7 +1188,14 @@ fn render_photo(
             .items_center()
             .justify_center()
             .bg(theme.bg_tertiary);
-        placeholder = presign_child(placeholder, att, theme, ctx.locale, att.display_width);
+        placeholder = presign_child(
+            placeholder,
+            att,
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        );
         if att.upload_failed {
             placeholder = placeholder.child(attachment_failed_overlay(theme));
         } else if sending {
@@ -1166,6 +1203,7 @@ fn render_photo(
                 theme,
                 ctx.locale,
                 att.display_width,
+                att.display_height,
             ));
         }
         return placeholder.into_any_element();
@@ -1241,6 +1279,7 @@ fn render_photo(
             theme,
             ctx.locale,
             att.display_width,
+            att.display_height,
         ));
     }
     el.into_any_element()
@@ -1314,12 +1353,20 @@ fn render_video_poster(
                 theme,
                 ctx.locale,
                 att.display_width,
+                att.display_height,
             ))
             .into_any_element();
     }
     if att.presign_pending {
-        return presign_child(container, att, theme, ctx.locale, att.display_width)
-            .into_any_element();
+        return presign_child(
+            container,
+            att,
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        )
+        .into_any_element();
     }
     let overlay = div()
         .absolute()
