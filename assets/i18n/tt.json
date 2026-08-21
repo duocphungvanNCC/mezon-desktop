@@ -2575,6 +2575,7 @@
   "message.actions.topicDiscussion": "Топикта дискуссия",
   "message.actions.unPinMessage": "Хәбәрне төяп куюдан алу",
   "message.addAMessage": "Хәбәр өстәү (мәҗбүри түгел)",
+  "message.attachment.uploading": "Йөкләү...",
   "message.attachments.attachment": "Кушымта",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",

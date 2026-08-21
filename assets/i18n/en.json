@@ -3137,6 +3137,7 @@
   "message.actions.topicDiscussion": "Topic Discussion",
   "message.actions.unPinMessage": "Unpin Message",
   "message.addAMessage": "Add a message (Optional)",
+  "message.attachment.uploading": "Uploading...",
   "message.attachments.attachment": "Attachment",
   "message.attachments.audio": "Voice",
   "message.attachments.contact": "Contact",

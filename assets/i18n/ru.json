@@ -3012,6 +3012,7 @@
   "message.actions.topicDiscussion": "Дискуссия в топике",
   "message.actions.unPinMessage": "Открепить сообщение",
   "message.addAMessage": "Добавить сообщение (опционально)",
+  "message.attachment.uploading": "Загрузка...",
   "message.attachments.attachment": "Вложение",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",
