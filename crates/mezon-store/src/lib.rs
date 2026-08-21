@@ -148,10 +148,10 @@ pub use gallery::{
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
     FLOWER_GIFT_TYPE, FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, FlowerInteractiveParams,
-    GiveFlowerDeny, VoiceInteractiveEventType, build_flower_transfer, can_afford, can_give_flower,
-    flower_effect_key, flower_event_from_payload, flower_menu_blocked, flower_price,
-    format_flower_amount, is_uncertain_transfer_error, parse_flower_interactive_params,
-    serialize_flower_interactive_params,
+    GiveFlowerDeny, VoiceInteractiveApp, VoiceInteractiveEventType, build_flower_transfer,
+    can_afford, can_give_flower, flower_effect_key, flower_event_from_payload, flower_menu_blocked,
+    flower_price, format_flower_amount, is_uncertain_transfer_error,
+    parse_flower_interactive_params, serialize_flower_interactive_params,
 };
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
@@ -236,7 +236,7 @@ pub use wallet::{
 };
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
-    WebhookStore,
+    WebhookStore, webhook_name_is_valid,
 };
 pub use winstore_update::{
     WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
@@ -344,6 +344,10 @@ pub struct Settings {
     pub zoom_factor: f32,
     /// Last window bounds [x, y, width, height]
     pub window_bounds: Option<[i32; 4]>,
+    /// Conversation ids the signed-in user pinned to the top of the DM list.
+    /// Cleared on logout so the next account does not inherit them.
+    #[serde(default)]
+    pub pinned_dms: Vec<i64>,
     /// UI theme key: "purple_haze" (default) | "dark" | "light" | "sunrise" | "redDark"
     /// | "abyss_dark" | "berrynade" | "cisher" | "sunset"
     pub theme: String,
@@ -386,6 +390,7 @@ impl Default for Settings {
             hardware_acceleration: true,
             zoom_factor: 1.0,
             window_bounds: None,
+            pinned_dms: Vec::new(),
             theme: "purple_haze".to_string(),
             language: "en".to_string(),
             notifications_enabled: true,

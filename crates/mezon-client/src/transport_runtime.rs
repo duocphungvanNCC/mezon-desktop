@@ -1008,7 +1008,7 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn write_voice_interactive(
+    pub async fn write_voice_interactive_event(
         &self,
         clan_id: i64,
         voice_channel_id: i64,
@@ -1016,12 +1016,12 @@ impl TransportClient {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<mezon_proto::realtime::VoiceInteractiveEvent>> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
-                    .write_voice_interactive(
+                    .write_voice_interactive_event(
                         clan_id,
                         voice_channel_id,
                         sender_id,

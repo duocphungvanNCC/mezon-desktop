@@ -3,15 +3,17 @@ use std::sync::{Arc, LazyLock};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Entity, FontFeatures, FontWeight, Hsla, Image, ImageFormat, IntoElement,
-    MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString,
-    StyledImage, Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems,
+    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred,
+    div, img, point, prelude::*, px, relative, rems,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
     DeviceMenuKind, DisplayedFlower, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
     PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
-    VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
+    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
+    flower_menu_blocked,
 };
 
 use crate::ChatLayout;
@@ -2969,6 +2971,27 @@ fn control_bar(
         })
     };
 
+    let interactive_app_button = {
+        let button = InteractiveAppTrigger::new(
+            neutral_bg.into(),
+            neutral_hover,
+            theme.text_muted.into(),
+            mezon_i18n::t(locale, "channelVoice.openInteractiveApp"),
+        );
+        let voice = voice.clone();
+        let locale = locale.to_string();
+        PopoverMenu::new("voice-interactive-app-popover")
+            .anchor(Anchor::BottomLeft)
+            .attach(Anchor::TopLeft)
+            .offset(point(px(0.), -px(4.)))
+            .menu(move |window, cx| {
+                Some(cx.new(|cx| {
+                    InteractiveAppPopoverPanel::new(voice.clone(), locale.clone(), window, cx)
+                }))
+            })
+            .trigger(button)
+    };
+
     let record_button = can_record.then(|| {
         let voice = voice.clone();
         let active = matches!(recording, RecordingState::Recording);
@@ -3248,6 +3271,7 @@ fn control_bar(
         .gap_3()
         .child(emoji_button)
         .child(sound_button)
+        .child(interactive_app_button)
         .children(record_button)
         .children(record_badge);
 
@@ -3298,6 +3322,150 @@ fn circle_button(
         .cursor_pointer()
         .hover(move |s| s.bg(bg_hover))
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color.into()))
+}
+
+#[derive(IntoElement)]
+struct InteractiveAppTrigger {
+    open: bool,
+    bg: Hsla,
+    bg_hover: Hsla,
+    icon_color: Hsla,
+    label: SharedString,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl InteractiveAppTrigger {
+    fn new(bg: Hsla, bg_hover: Hsla, icon_color: Hsla, label: impl Into<SharedString>) -> Self {
+        Self {
+            open: false,
+            bg,
+            bg_hover,
+            icon_color,
+            label: label.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for InteractiveAppTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for InteractiveAppTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for InteractiveAppTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = circle_button(
+            "voice-interactive-app-btn",
+            if self.open { self.bg_hover } else { self.bg },
+            self.bg_hover,
+            IconName::Joystick,
+            self.icon_color,
+        )
+        .tooltip(Tooltip::text(self.label));
+        if let Some(on_click) = self.on_click {
+            button = button.on_click(on_click);
+        }
+        button
+    }
+}
+
+struct InteractiveAppPopoverPanel {
+    voice: Entity<VoiceStore>,
+    locale: String,
+    focus_handle: FocusHandle,
+}
+
+impl InteractiveAppPopoverPanel {
+    fn new(
+        voice: Entity<VoiceStore>,
+        locale: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
+            .detach();
+        Self {
+            voice,
+            locale,
+            focus_handle,
+        }
+    }
+}
+
+impl Focusable for InteractiveAppPopoverPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for InteractiveAppPopoverPanel {}
+
+impl Render for InteractiveAppPopoverPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = &cx.theme().tokens;
+        let mut menu = div()
+            .key_context("menu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _, cx| cx.emit(DismissEvent)))
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(240.))
+            .p(px(6.))
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .shadow_lg();
+        for (key, app) in [
+            (
+                "channelVoice.interactiveApp.quiz",
+                VoiceInteractiveApp::Quiz,
+            ),
+            (
+                "channelVoice.interactiveApp.blackboard",
+                VoiceInteractiveApp::Blackboard,
+            ),
+            (
+                "channelVoice.interactiveApp.interactive",
+                VoiceInteractiveApp::Interactive,
+            ),
+        ] {
+            let voice = self.voice.clone();
+            menu = menu.child(
+                div()
+                    .id(key)
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(4.))
+                    .text_sm()
+                    .text_color(tokens.text_theme_message)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(tokens.bg_item_hover))
+                    .child(mezon_i18n::t(&self.locale, key).to_string())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
+                        cx.emit(DismissEvent);
+                    })),
+            );
+        }
+        menu
+    }
 }
 
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {

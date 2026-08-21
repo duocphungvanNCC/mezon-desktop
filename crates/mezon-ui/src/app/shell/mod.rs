@@ -29,6 +29,7 @@ mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_kick_member_modal;
 mod confirm_leave_clan_modal;
+mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
@@ -49,6 +50,7 @@ use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 use confirm_kick_member_modal::ConfirmKickMemberModal;
 use confirm_leave_clan_modal::ConfirmLeaveClanModal;
+use confirm_leave_dm_group_modal::ConfirmLeaveDmGroupModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -1093,6 +1095,33 @@ impl Shell {
         self.modal_fullscreen = false;
         self.modal = Some(host.into());
         cx.notify();
+    }
+
+    pub fn confirm_leave_dm_group(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        group_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description =
+            mezon_i18n::t(locale, "leaveGroup.confirmMessage").replace("{{groupName}}", group_name);
+        let view = cx.new(|cx| ConfirmLeaveDmGroupModal {
+            focus_handle: cx.focus_handle(),
+            channel_id,
+            title: mezon_i18n::t(locale, "leaveGroup.title")
+                .replace("{{groupName}}", group_name)
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "leaveGroup.cancel").into(),
+            confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
+            failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
+            leaving: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
     }
 
     pub fn confirm_delete_account(

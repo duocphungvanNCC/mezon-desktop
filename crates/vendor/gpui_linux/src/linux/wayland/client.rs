@@ -2444,6 +2444,9 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     position: state.drag.position,
                 });
                 drop(state);
+                // mezon vendor edit: request activation with the drag serial
+                // before dispatching the drop (see request_dnd_activation).
+                drag_window.request_dnd_activation();
                 drag_window.handle_input(input);
             }
             _ => {}
