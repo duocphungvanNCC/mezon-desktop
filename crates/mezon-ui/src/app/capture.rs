@@ -322,11 +322,22 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
     let composer = composer.read(cx);
     let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    let reply_target = mezon_store::MessagesStore::global(cx)
+        .read(cx)
+        .reply_target()
+        .map(|draft| {
+            json!({
+                "message_id": draft.message_ref_id.get().to_string(),
+                "sender": draft.sender_name,
+            })
+        });
     Ok(json!({
         "text": composer.probe_text(cx).to_string(),
         // Staged, not dropped: a dropped file is read on a background task, so
         // submitting before it lands here sends the message without it.
         "attachments": composer.probe_attachments(),
+        // What the next submit will answer, if anything.
+        "reply_target": reply_target,
         "popup_open": popup_open,
         "selected": selected,
         "suggestions": suggestions,
@@ -450,7 +461,12 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         .map(|(composer, _)| composer.read(cx).probe_attachments())
         .unwrap_or_default();
     Ok(json!({
+        // The store's flag and the mounted view are two different things: an
+        // occluded window drops the panel entity while the store still says the
+        // topic is open, and every write tool then fails with "no topic panel is
+        // mounted". Report both so a caller can tell those apart.
         "panel_open": topics.is_panel_open(),
+        "panel_mounted": topic_panel(cx).is_ok(),
         "topic_id": topic_id.map(|id| id.to_string()),
         "origin_message_id": topics.origin_message().map(|m| m.id.get().to_string()),
         "loaded_count": loaded,
@@ -670,6 +686,29 @@ pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Valu
     // ready. Poll topic_state until `attachments` lists the files before calling
     // topic_submit, or the reply goes out without them.
     Ok(json!({ "ok": true, "dropped": count, "staged": false }))
+}
+
+/// Aim the composer at a message without sending anything, the way the row's
+/// "Reply" action does. `reply_to_message` posts a text reply in one shot, so it
+/// cannot carry a staged attachment — this is what lets a caller build a reply
+/// that has one.
+pub fn reply_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| {
+        store.set_reply_to(mezon_store::MessageId::new(message_id), cx)
+    });
+    let target = store.read(cx).reply_target().map(|draft| {
+        json!({
+            "message_id": draft.message_ref_id.get().to_string(),
+            "sender": draft.sender_name,
+        })
+    });
+    let Some(target) = target else {
+        anyhow::bail!(
+            "message {message_id} is not in the open channel's loaded history; open_channel and load_more_messages first"
+        );
+    };
+    Ok(json!({ "ok": true, "reply_target": target }))
 }
 
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
@@ -1107,23 +1146,57 @@ pub fn open_message_image_viewer(
     cx: &mut App,
 ) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
+    let topic_id = mezon_store::TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id();
     let (seed, id, create_time, uploader_id) = {
         let store = store.read(cx);
+        // A reply lives in the topic's own bucket, not the channel's, so looking
+        // only at the channel makes every topic attachment unreachable from here.
         let message = store
             .messages()
             .iter()
             .find(|message| message.id.0 == message_id)
+            .or_else(|| {
+                topic_id.and_then(|id| {
+                    store
+                        .messages_in_channel(mezon_store::ChannelId(id))
+                        .iter()
+                        .find(|message| message.id.0 == message_id)
+                })
+            })
             .ok_or_else(|| {
-                anyhow::anyhow!("message {message_id} is not in the open channel's loaded history")
+                anyhow::anyhow!(
+                    "message {message_id} is not in the open channel's loaded history, nor in the open topic's"
+                )
             })?;
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
         })?;
+        // Mirror the row's own click gate (`parts.rs`): the tile is inert while the
+        // bytes are still going up, after they failed, or before the url exists.
+        // Without these the tool opens a viewer on an empty url and answers ok,
+        // which is a pass for something a user cannot do.
+        if attachment.uploading {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is still uploading; the row \
+                 does not open the viewer yet"
+            );
+        }
+        if attachment.upload_failed {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} failed to upload, so there \
+                 is nothing to view"
+            );
+        }
         if attachment.presign_pending {
             anyhow::bail!(
                 "attachment {attachment_index} of message {message_id} is still waiting for its \
                  presign to finish, so its url does not resolve yet"
             );
+        }
+        if attachment.url.is_empty() {
+            anyhow::bail!("attachment {attachment_index} of message {message_id} has no url yet");
         }
         (
             mezon_store::AttachmentSeedInput::from_message(attachment),

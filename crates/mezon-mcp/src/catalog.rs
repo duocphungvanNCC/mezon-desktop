@@ -227,6 +227,20 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "reply_begin",
+        description: "\
+Aim the composer at a message, the way the row's Reply action does. Nothing is sent.
+
+Use this when the reply must carry something the composer holds — an attachment from
+composer_drop_paths, a mention picked with composer_pick. `reply_to_message` posts a
+text-only reply in one call and cannot carry either. Send with composer_submit;
+composer_state reports the pending target under `reply_target`.
+
+Parameters:
+- message_id (required): must be in the open channel's loaded history.",
+        write: true,
+    },
+    ToolSpec {
         name: "jump_to_present",
         description: "\
 Return the open channel's message list to the live tail after a jump_to_message.

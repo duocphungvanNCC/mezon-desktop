@@ -339,6 +339,11 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::ReplyBegin { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::reply_begin(cx, message_id));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::JumpToMessage { message_id, reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::jump_to_message(cx, message_id));

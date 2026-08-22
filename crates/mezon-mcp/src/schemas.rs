@@ -556,6 +556,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &[],
         )),
+        "reply_begin" => Arc::new(object(
+            json!({
+                "message_id": id("Message to reply to; must be in the open channel's loaded history."),
+            }),
+            &["message_id"],
+        )),
         "jump_to_message" => Arc::new(object(
             json!({
                 "message_id": id("Message snowflake id to centre the window on."),

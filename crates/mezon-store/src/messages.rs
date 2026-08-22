@@ -3586,11 +3586,17 @@ impl MessagesStore {
         true
     }
 
+    /// `local_sources` is the sender's own copy of each attachment, in the order
+    /// they were sent — empty for a reply arriving from anyone else. A topic reply
+    /// has no optimistic row: it is built from the server's echo, which carries no
+    /// path, so without this the sender would fetch a proxied copy of the file
+    /// still sitting on their disk.
     pub fn append_topic_message(
         &mut self,
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3600,6 +3606,7 @@ impl MessagesStore {
         let masked = anonymous && anonymize_sender(&mut msg, cfg);
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
+        apply_local_sources(&mut msg.attachments, &local_sources);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
             msg.create_time
@@ -3609,6 +3616,26 @@ impl MessagesStore {
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
+                    // The socket delivered this reply before its own ack came back —
+                    // with a batch of attachments it usually does. Dropping the paths
+                    // here is what sent the sender to the proxy for files it is
+                    // holding: the row that survives is the socket's, and that one
+                    // never had them.
+                    let mut changed = false;
+                    if let Some(existing) = channel.messages.get_mut_by_id(msg.id) {
+                        changed = apply_local_sources(&mut existing.attachments, &local_sources);
+                    }
+                    if changed {
+                        // The topic list renders from a clone it only refreshes on
+                        // an event, so a silent change here is a store that is
+                        // right behind a view that is not. Measured, the row still
+                        // comes out right — it is uploading at this point, so
+                        // nothing is fetched, and the presign patch that follows
+                        // refreshes the view in time. This is here so that stays
+                        // true when the order those two arrive in changes.
+                        cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                        cx.notify();
+                    }
                     return TopicAppend::default();
                 }
                 channel.messages.push_grouped(msg);
@@ -6680,6 +6707,43 @@ fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
         .is_some_and(|id| id != 0)
 }
 
+/// Point a row's attachments at the sender's own copies. Matched by filename,
+/// because the echo is the server's list and nothing promises it comes back in
+/// the order it was sent — an index would then aim a row at the wrong picture.
+/// The same name twice in one message keeps its order within that name.
+///
+/// The count check stays as the outer guard: a different length means this echo
+/// is not the send those files belong to at all.
+/// Returns whether any attachment actually gained a path — the caller has to
+/// know, because a row that changed under a view holding its own clone is only
+/// redrawn if the store says so.
+fn apply_local_sources(
+    attachments: &mut [MessageAttachment],
+    local_sources: &[(String, Option<std::path::PathBuf>)],
+) -> bool {
+    if local_sources.len() != attachments.len() {
+        return false;
+    }
+    let mut by_name: HashMap<&str, std::collections::VecDeque<&Option<std::path::PathBuf>>> =
+        HashMap::new();
+    for (name, path) in local_sources {
+        by_name.entry(name.as_str()).or_default().push_back(path);
+    }
+    let mut changed = false;
+    for att in attachments.iter_mut() {
+        if att.local_source.is_some() {
+            continue;
+        }
+        if let Some(queue) = by_name.get_mut(att.filename.as_str())
+            && let Some(path) = queue.pop_front()
+        {
+            changed |= path.is_some();
+            att.local_source = path.clone();
+        }
+    }
+    changed
+}
+
 fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
     for att in attachments.iter_mut() {
         if att.presign_pending {
@@ -8497,6 +8561,109 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    fn attachment(filename: &str) -> MessageAttachment {
+        MessageAttachment {
+            filename: filename.into(),
+            ..Default::default()
+        }
+    }
+
+    fn source(filename: &str, path: &str) -> (String, Option<std::path::PathBuf>) {
+        (filename.into(), Some(std::path::PathBuf::from(path)))
+    }
+
+    #[test]
+    fn local_sources_follow_the_filename_not_the_position() {
+        // The echo is the server's ordering of the batch, and nothing promises it
+        // matches the order they were handed to the upload.
+        let mut attachments = vec![
+            attachment("c.png"),
+            attachment("a.png"),
+            attachment("b.png"),
+        ];
+        let changed = apply_local_sources(
+            &mut attachments,
+            &[
+                source("a.png", "/disk/a.png"),
+                source("b.png", "/disk/b.png"),
+                source("c.png", "/disk/c.png"),
+            ],
+        );
+
+        assert!(changed);
+        let got: Vec<_> = attachments
+            .iter()
+            .map(|a| {
+                a.local_source
+                    .as_ref()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(got, vec!["/disk/c.png", "/disk/a.png", "/disk/b.png"]);
+    }
+
+    #[test]
+    fn repeated_filenames_keep_their_order_within_the_name() {
+        // Two files of the same name are indistinguishable, so the only sane rule
+        // is first-come inside that name.
+        let mut attachments = vec![attachment("shot.png"), attachment("shot.png")];
+        apply_local_sources(
+            &mut attachments,
+            &[
+                source("shot.png", "/disk/one/shot.png"),
+                source("shot.png", "/disk/two/shot.png"),
+            ],
+        );
+
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/one/shot.png")
+        );
+        assert_eq!(
+            attachments[1].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/two/shot.png")
+        );
+    }
+
+    #[test]
+    fn a_short_echo_applies_nothing_and_reports_no_change() {
+        let mut attachments = vec![attachment("a.png"), attachment("b.png")];
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/a.png")]);
+
+        assert!(
+            !changed,
+            "a count mismatch means the batch cannot be trusted"
+        );
+        assert!(attachments.iter().all(|a| a.local_source.is_none()));
+    }
+
+    #[test]
+    fn applying_paths_that_are_already_there_reports_no_change() {
+        // The caller redraws on `true`; saying so when nothing moved would repaint
+        // the topic list on every echo.
+        let mut attachments = vec![attachment("a.png")];
+        attachments[0].local_source = Some(std::path::PathBuf::from("/disk/a.png"));
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/other.png")]);
+
+        assert!(!changed);
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/a.png"),
+            "a path already on the row wins over a late one"
+        );
+    }
+
+    #[test]
+    fn a_url_attachment_with_no_file_behind_it_is_not_a_change() {
+        let mut attachments = vec![attachment("tenor.gif")];
+        let changed = apply_local_sources(&mut attachments, &[("tenor.gif".into(), None)]);
+
+        assert!(!changed);
+        assert!(attachments[0].local_source.is_none());
+    }
 
     #[test]
     fn thread_send_joins_sender_when_not_a_member() {

@@ -235,6 +235,12 @@ impl McpBackend {
                 })
                 .await
             }
+            "reply_begin" => {
+                self.require_write_mode("reply_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::ReplyBegin { message_id, reply })
+                    .await
+            }
             "jump_to_message" => {
                 self.require_write_mode("jump_to_message")?;
                 let message_id = parse_i64_field(&arguments, "message_id")?;
@@ -2031,12 +2037,28 @@ fn parse_search_content(raw: &str) -> String {
 struct MessageDetail {
     id: i64,
     content: String,
+    /// The content JSON as the server stored it. This is where `presign_finish`
+    /// lives, and comparing its keys against the attachment urls below is the
+    /// only way to see why a receiver still treats an attachment as pending.
+    content_raw: String,
     sender_id: i64,
     sender_name: String,
     create_time: i64,
     has_attachments: bool,
+    attachments: Vec<AttachmentSummary>,
     embeds: Vec<EmbedSummary>,
     components: Vec<ComponentRowSummary>,
+}
+
+#[derive(Serialize)]
+struct AttachmentSummary {
+    filename: String,
+    filetype: String,
+    size: i32,
+    url: String,
+    thumbnail: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Serialize)]
@@ -2097,10 +2119,24 @@ fn message_detail(message: &ApiMessage) -> MessageDetail {
     MessageDetail {
         id: message.message_id,
         content: message.content.clone(),
+        content_raw: message.content_raw.clone(),
         sender_id: message.sender_id,
         sender_name: message.sender_name.clone(),
         create_time: message.create_time,
         has_attachments: !message.attachments.is_empty(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|a| AttachmentSummary {
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                size: a.size,
+                url: a.url.clone(),
+                thumbnail: a.thumbnail.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect(),
         embeds: message
             .content_tokens
             .embed
