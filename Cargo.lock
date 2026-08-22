@@ -3874,6 +3874,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "collections",
+ "dbus",
  "filedescriptor",
  "futures",
  "gpui",
