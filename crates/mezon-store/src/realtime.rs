@@ -309,6 +309,63 @@ mod tests {
         );
     }
 
+    /// The seven kinds added for the React parity pass all arrive wrapped in
+    /// `RealtimeEvent::Unhandled`, so a missing arm here is silent: the event would be dropped
+    /// exactly as it was before, with nothing to observe. Pin every one of them.
+    #[test]
+    fn kind_of_maps_every_envelope_only_kind() {
+        use realtime::envelope::Message;
+        let cases: Vec<(Message, RealtimeKind)> = vec![
+            (
+                Message::PermissionSetEvent(realtime::PermissionSetEvent::default()),
+                RealtimeKind::PermissionSet,
+            ),
+            (
+                Message::PermissionChangedEvent(realtime::PermissionChangedEvent::default()),
+                RealtimeKind::PermissionChanged,
+            ),
+            (
+                Message::StickerCreateEvent(realtime::StickerCreateEvent::default()),
+                RealtimeKind::StickerCreate,
+            ),
+            (
+                Message::StickerUpdateEvent(realtime::StickerUpdateEvent::default()),
+                RealtimeKind::StickerUpdate,
+            ),
+            (
+                Message::StickerDeleteEvent(realtime::StickerDeleteEvent::default()),
+                RealtimeKind::StickerDelete,
+            ),
+            (
+                Message::CanvasEvent(realtime::ChannelCanvas::default()),
+                RealtimeKind::CanvasEvent,
+            ),
+            (
+                Message::ListActivity(realtime::ListActivity::default()),
+                RealtimeKind::ListActivity,
+            ),
+            (
+                Message::RoleEvent(realtime::RoleEvent::default()),
+                RealtimeKind::RoleEvent,
+            ),
+        ];
+        for (message, expected) in cases {
+            let event = RealtimeEvent::Unhandled(message);
+            assert_eq!(
+                RealtimeKind::of(&event),
+                Some(expected),
+                "{expected:?} is no longer routed; the store subscribed to it would go deaf"
+            );
+        }
+    }
+
+    #[test]
+    fn an_envelope_kind_no_store_wants_is_still_skipped() {
+        let event =
+            RealtimeEvent::Unhandled(realtime::envelope::Message::Ping(realtime::Ping::default()));
+        assert_eq!(RealtimeKind::of(&event), None);
+    }
+
     #[test]
     fn kind_of_maps_mark_as_read() {
         assert_eq!(
