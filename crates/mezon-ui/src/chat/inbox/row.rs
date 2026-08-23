@@ -15,6 +15,7 @@ use mezon_store::{
 };
 
 use crate::chat::file_type_icon::file_type_icon_for;
+use crate::chat::message::code_block_copy_overlay;
 use crate::chat::message::parts::FILE_NAME_COLOR;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
@@ -1159,6 +1160,7 @@ fn render_inbox_message_spans(
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
+    notification_id: &str,
 ) -> gpui::AnyElement {
     if body_spans.is_empty() {
         return div().into_any_element();
@@ -1173,6 +1175,7 @@ fn render_inbox_message_spans(
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     let mut inline_batch: Vec<MessageSpan> = Vec::new();
     let mut offset = 0usize;
+    let mut code_key = 0usize;
 
     for span in body_spans {
         if matches!(span, MessageSpan::CodeBlock { .. }) {
@@ -1192,7 +1195,10 @@ fn render_inbox_message_spans(
                 if let Some(rel) = text[offset..].find(code_text.as_ref()) {
                     offset += rel + code_text.len();
                 }
-                children.push(render_inbox_code_block(theme, code_text));
+                let copy_id =
+                    SharedString::from(format!("inbox-code-copy-{notification_id}-{code_key}"));
+                code_key += 1;
+                children.push(render_inbox_code_block(theme, code_text, copy_id));
             }
             continue;
         }
@@ -1223,6 +1229,7 @@ fn render_message_content(
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
+    notification_id: &str,
 ) -> impl IntoElement {
     let text_str = text.to_string();
     if text_str.is_empty() {
@@ -1239,6 +1246,7 @@ fn render_message_content(
             body_link_ranges,
             body_inline_span_ranges,
             body_spans,
+            notification_id,
         );
     }
     let highlights = inbox_content_highlights(
@@ -1251,8 +1259,13 @@ fn render_message_content(
     render_inbox_styled_body(theme, &text_str, highlights)
 }
 
-fn render_inbox_code_block(theme: &Theme, text: &SharedString) -> gpui::AnyElement {
+fn render_inbox_code_block(
+    theme: &Theme,
+    text: &SharedString,
+    copy_id: SharedString,
+) -> gpui::AnyElement {
     div()
+        .relative()
         .w_full()
         .min_w_0()
         .my_1()
@@ -1264,6 +1277,7 @@ fn render_inbox_code_block(theme: &Theme, text: &SharedString) -> gpui::AnyEleme
         .text_size(px(14.))
         .text_color(theme.tokens.text_theme_message)
         .child(text.clone())
+        .child(code_block_copy_overlay(copy_id, text.clone(), theme))
         .into_any_element()
 }
 
@@ -1783,6 +1797,7 @@ pub fn render_notification_body(
                                         &view.body_link_ranges,
                                         &view.body_inline_span_ranges,
                                         &view.body_spans,
+                                        &notification.id,
                                     ))
                                 })
                                 .when(!view.attachment_link.is_empty(), |c| {

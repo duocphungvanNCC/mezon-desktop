@@ -23,7 +23,7 @@ use super::selection::{
 };
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{CopyButton, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
@@ -763,6 +763,7 @@ fn render_selectable_segmented_spans(
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
                 row = row.child(
                     div()
+                        .relative()
                         .flex_basis(relative(1.))
                         .w_full()
                         .min_w_0()
@@ -774,7 +775,12 @@ fn render_selectable_segmented_spans(
                         .bg(ctx.theme.tokens.bg_markdown_code)
                         .text_size(px(14.))
                         .text_color(ctx.theme.tokens.text_theme_message)
-                        .child(styled),
+                        .child(styled)
+                        .child(code_block_copy_overlay(
+                            SharedString::from(format!("code-copy-{}-{base}", msg.id.0)),
+                            text.clone(),
+                            ctx.theme,
+                        )),
                 );
                 base = end;
             }
@@ -1097,6 +1103,38 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+/// Copy affordance pinned to the top-right of a markdown code block, matching
+/// React `TripleBackticks`. Callers own the element id: it has to stay unique
+/// across every code block alive on screen, because a duplicate id kills the
+/// click and makes two blocks share one copied state.
+pub(crate) fn code_block_copy_button(
+    id: impl Into<gpui::ElementId>,
+    text: SharedString,
+    theme: &Theme,
+) -> CopyButton {
+    CopyButton::new(
+        id,
+        text,
+        theme.tokens.text_theme_message,
+        theme.tokens.bg_item_theme_hover,
+    )
+    .size(px(14.))
+}
+
+/// Absolutely-positioned wrapper for [`code_block_copy_button`]; the code block
+/// itself must be `relative()`.
+pub(crate) fn code_block_copy_overlay(
+    id: impl Into<gpui::ElementId>,
+    text: SharedString,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(4.))
+        .right(px(4.))
+        .child(code_block_copy_button(id, text, theme))
 }
 
 fn append_selectable_section(text: &mut String, section: &str) {
