@@ -50,7 +50,6 @@ pub struct ClanMembersPage {
     role_picker_open: Option<UserId>,
     member_menu_open: Option<MemberMenu>,
     can_manage_clan: bool,
-    is_clan_owner: bool,
     role_options: Vec<RoleOption>,
     role_options_dirty: bool,
     _permission_sub: Option<Subscription>,
@@ -142,7 +141,6 @@ impl ClanMembersPage {
             role_picker_open: None,
             member_menu_open: None,
             can_manage_clan: false,
-            is_clan_owner: false,
             role_options: Vec::new(),
             role_options_dirty: true,
             _permission_sub: permission_sub,
@@ -282,7 +280,6 @@ impl ClanMembersPage {
         self.role_options_dirty = false;
         self.role_options.clear();
         self.can_manage_clan = false;
-        self.is_clan_owner = false;
         let Some(permission_store) = PermissionStore::try_global(cx) else {
             return;
         };
@@ -290,7 +287,6 @@ impl ClanMembersPage {
         let permissions = permission_store.read(cx);
         let clan_permissions = permissions.clan_settings_permissions(clan_id, cx);
         self.can_manage_clan = clan_permissions.has_manage_clan;
-        self.is_clan_owner = clan_permissions.is_clan_owner;
         if !self.can_manage_clan {
             return;
         }
@@ -990,6 +986,7 @@ impl ClanMembersPage {
             .read(cx)
             .clan_by_id(clan_id)
             .map(|clan| clan.creator_id);
+        let is_clan_owner = current_user_id.is_some() && creator_id == current_user_id;
         let member_name = menu_state.username.clone();
 
         let mut menu = ContextMenu::new().on_dismiss({
@@ -1016,15 +1013,24 @@ impl ClanMembersPage {
                 }
             });
         }
-        if self.is_clan_owner && !is_self {
+        if is_clan_owner && !is_self {
             menu = menu.danger_item(t("memberTable.transferOwnership"), {
                 let close = close.clone();
                 let locale = SharedString::from(locale.to_string());
+                let member_name = member_name.clone();
                 move |window: &mut Window, cx: &mut App| {
                     close(cx);
                     let locale = locale.clone();
+                    let member_name = member_name.clone();
                     Shell::global(cx).update(cx, |shell, cx| {
-                        shell.confirm_transfer_ownership(clan_id, user_id, &locale, window, cx);
+                        shell.confirm_transfer_ownership(
+                            clan_id,
+                            user_id,
+                            &member_name,
+                            &locale,
+                            window,
+                            cx,
+                        );
                     });
                 }
             });

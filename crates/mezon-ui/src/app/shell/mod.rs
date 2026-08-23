@@ -877,6 +877,7 @@ impl Shell {
         &mut self,
         clan_id: mezon_store::ClanId,
         new_owner_id: mezon_store::UserId,
+        new_owner_name: &str,
         locale: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -887,26 +888,41 @@ impl Shell {
             .map(|clan| clan.name.clone())
             .unwrap_or_default();
         let members = mezon_store::ClanMembersStore::global(cx);
-        let party = |user_id: mezon_store::UserId| {
-            members
-                .read(cx)
-                .member(clan_id, user_id)
-                .map(|member| TransferOwnerParty {
-                    name: member.name().to_string().into(),
-                    avatar: member.avatar().to_string().into(),
-                })
-                .unwrap_or_else(|| TransferOwnerParty {
-                    name: SharedString::default(),
+        let party = |user_id: mezon_store::UserId, fallback_name: &str| {
+            let known =
+                members
+                    .read(cx)
+                    .member(clan_id, user_id)
+                    .map(|member| TransferOwnerParty {
+                        name: member.name().to_string().into(),
+                        avatar: member.avatar().to_string().into(),
+                    });
+            match known {
+                Some(party) if !party.name.is_empty() => party,
+                Some(party) => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
+                    ..party
+                },
+                None => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
                     avatar: SharedString::default(),
-                })
+                },
+            }
         };
         let Some(current_user_id) = mezon_store::BadgeService::try_global(cx)
             .and_then(|badges| badges.read(cx).current_user_id(cx))
         else {
+            tracing::error!("transfer ownership of {clan_id}: no signed-in user");
+            let message = mezon_i18n::t(
+                locale,
+                "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+            )
+            .to_string();
+            self.error(message, cx);
             return;
         };
-        let current_owner = party(current_user_id);
-        let new_owner = party(new_owner_id);
+        let current_owner = party(current_user_id, "");
+        let new_owner = party(new_owner_id, new_owner_name);
         let title: SharedString = mezon_i18n::t(locale, "transferOwner.title")
             .to_string()
             .into();

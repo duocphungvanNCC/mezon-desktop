@@ -539,6 +539,7 @@ impl ClanList {
             for kind in [
                 RealtimeKind::ClanUpdated,
                 RealtimeKind::ClanDeleted,
+                RealtimeKind::TransferOwnership,
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
             ] {
@@ -667,6 +668,9 @@ impl ClanList {
         match event {
             RealtimeEvent::ClanDeleted(e) => {
                 self.drop_clan(ClanId(e.clan_id), cx);
+            }
+            RealtimeEvent::TransferOwnership(e) => {
+                self.set_clan_creator(ClanId(e.clan_id), UserId(e.curr_owner), cx);
             }
             RealtimeEvent::ClanUpdated(e) => {
                 let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
@@ -2082,6 +2086,30 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
+    #[gpui::test]
+    fn a_pushed_transfer_ownership_event_updates_the_creator(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+
+                list.handle_event(
+                    &RealtimeEvent::TransferOwnership(
+                        mezon_proto::realtime::TransferOwnershipEvent {
+                            clan_id: 1,
+                            prev_owner: 0,
+                            curr_owner: 77,
+                        },
+                    ),
+                    cx,
+                );
+
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(77));
+                assert_eq!(list.clan_by_id(ClanId(2)).unwrap().creator_id, UserId(0));
+            });
+        });
+    }
+
     #[gpui::test]
     fn transferring_ownership_moves_creator_id_and_emits_once(cx: &mut gpui::TestAppContext) {
         let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -124,7 +124,10 @@ impl Render for TransferOwnerModal {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.pending {
+                    return;
+                }
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
             .w(px(520.))
@@ -204,6 +207,7 @@ impl Render for TransferOwnerModal {
                         Button::new("transfer-owner-cancel")
                             .label(self.cancel_label.clone())
                             .ghost()
+                            .disabled(self.pending)
                             .on_click(|_, _window, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             }),
