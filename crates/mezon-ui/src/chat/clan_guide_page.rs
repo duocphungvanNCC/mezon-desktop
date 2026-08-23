@@ -21,6 +21,12 @@ const CHIP_BORDER_LIGHT: u32 = 0xe5e7eb;
 const CHIP_BORDER_DARK: u32 = 0x374151;
 const LOGO_PLACEHOLDER: u32 = 0x09090b;
 
+enum ContentState {
+    Loading,
+    Failed,
+    Ready,
+}
+
 pub struct ClanGuidePage {
     clan_id: ClanId,
     settings: Entity<Settings>,
@@ -50,6 +56,18 @@ impl ClanGuidePage {
         self.clan_id = clan_id;
         OnboardingStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         cx.notify();
+    }
+
+    fn content_state(&self, cx: &App) -> ContentState {
+        let store = OnboardingStore::global(cx);
+        let store = store.read(cx);
+        if store.onboarding(self.clan_id).is_some() {
+            return ContentState::Ready;
+        }
+        if store.load_failed(self.clan_id) {
+            return ContentState::Failed;
+        }
+        ContentState::Loading
     }
 
     fn clan_name(&self, locale: &str, cx: &App) -> String {
@@ -412,7 +430,7 @@ impl ClanGuidePage {
                 theme,
                 Icon::new(IconName::RuleIcon)
                     .size(px(24.))
-                    .text_color(theme.tokens.bg_icon_theme)
+                    .text_color(theme.tokens.text_theme_primary)
                     .into_any_element(),
                 rule.title.clone().into(),
                 div()
@@ -481,7 +499,7 @@ impl ClanGuidePage {
                     theme,
                     Icon::new(IconName::TargetIcon)
                         .size(px(24.))
-                        .text_color(theme.tokens.bg_icon_theme)
+                        .text_color(theme.tokens.text_theme_primary)
                         .into_any_element(),
                     mission.title.clone().into(),
                     description,
@@ -495,6 +513,52 @@ impl ClanGuidePage {
             );
         }
         section.into_any_element()
+    }
+
+    fn render_load_failure(&self, theme: &Theme, locale: &str) -> AnyElement {
+        let clan_id = self.clan_id;
+        h_flex()
+            .gap_2()
+            .h(px(80.))
+            .p_4()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .rounded(px(8.))
+            .bg(theme.tokens.bg_active_member_channel)
+            .child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(mezon_i18n::t(locale, "guide.loadFailed")),
+            )
+            .child(
+                div()
+                    .id("clan-guide-retry")
+                    .h(px(36.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.tokens.border_primary)
+                    .bg(theme.tokens.bg_tertiary)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(theme.tokens.bg_secondary_button_hover)
+                            .text_color(theme.tokens.text_secondary)
+                    })
+                    .child(mezon_i18n::t(locale, "guide.retry"))
+                    .on_click(move |_, _, cx| {
+                        OnboardingStore::global(cx)
+                            .update(cx, |store, cx| store.reload(clan_id, cx));
+                    }),
+            )
+            .into_any_element()
     }
 
     fn render_about(theme: &Theme, locale: &str) -> AnyElement {
@@ -665,15 +729,18 @@ impl Render for ClanGuidePage {
                         .w_full()
                         .items_start()
                         .gap_6()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_2()
-                                .child(self.render_questions(theme, &locale, cx))
-                                .child(self.render_resources(theme, &locale, cx))
-                                .child(self.render_missions(theme, &locale, cx)),
-                        )
+                        .child(v_flex().flex_1().min_w_0().gap_2().map(|column| {
+                            match self.content_state(cx) {
+                                ContentState::Failed => {
+                                    column.child(self.render_load_failure(theme, &locale))
+                                }
+                                ContentState::Loading => column,
+                                ContentState::Ready => column
+                                    .child(self.render_questions(theme, &locale, cx))
+                                    .child(self.render_resources(theme, &locale, cx))
+                                    .child(self.render_missions(theme, &locale, cx)),
+                            }
+                        }))
                         .child(Self::render_about(theme, &locale)),
                 ),
             )

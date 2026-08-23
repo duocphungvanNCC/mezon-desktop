@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global};
-use mezon_client::AppApi;
+use gpui::{App, AppContext, Context, Entity, Global, Task};
+use mezon_client::{AppApi, ConnectionStatus};
 
 use crate::clan::OnboardingItem;
 use crate::ids::ClanId;
@@ -65,6 +65,7 @@ pub struct OnboardingStore {
     mission_done: HashMap<ClanId, usize>,
     answers: HashMap<ClanId, HashSet<(i64, usize)>>,
     api: Arc<AppApi>,
+    _connection_watch: Task<()>,
 }
 
 struct GlobalOnboardingStore(Entity<OnboardingStore>);
@@ -72,12 +73,13 @@ impl Global for GlobalOnboardingStore {}
 
 impl OnboardingStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
-        let entity = cx.new(|_| Self::new(api));
+        let entity = cx.new(|cx| Self::new(api, cx));
         cx.set_global(GlobalOnboardingStore(entity.clone()));
         entity
     }
 
-    fn new(api: Arc<AppApi>) -> Self {
+    fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             clans: HashMap::new(),
             loading: HashSet::new(),
@@ -89,7 +91,44 @@ impl OnboardingStore {
             mission_done: HashMap::new(),
             answers: HashMap::new(),
             api,
+            _connection_watch: connection_watch,
         }
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status = api.status();
+            let mut connected_before = *status.borrow() == ConnectionStatus::Connected;
+            loop {
+                if status.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status.borrow() == ConnectionStatus::Connected;
+                if connected
+                    && !connected_before
+                    && this.update(cx, |this, cx| this.refresh_loaded(cx)).is_err()
+                {
+                    break;
+                }
+                connected_before = connected;
+            }
+        })
+    }
+
+    fn refresh_loaded(&mut self, cx: &mut Context<Self>) {
+        let clans: HashSet<ClanId> = self
+            .clans
+            .keys()
+            .copied()
+            .chain(self.failed_at.keys().copied())
+            .collect();
+        if clans.is_empty() {
+            return;
+        }
+        for clan_id in clans {
+            self.refetch(clan_id, cx);
+        }
+        cx.notify();
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -120,6 +159,10 @@ impl OnboardingStore {
 
     pub fn is_loading(&self, clan_id: ClanId) -> bool {
         self.loading.contains(&clan_id)
+    }
+
+    pub fn load_failed(&self, clan_id: ClanId) -> bool {
+        !self.clans.contains_key(&clan_id) && self.failed_at.contains_key(&clan_id)
     }
 
     pub fn mission_done(&self, clan_id: ClanId) -> usize {
@@ -177,7 +220,6 @@ impl OnboardingStore {
 
     pub fn complete_mission(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if !self.advance_mission(clan_id) {
-            cx.notify();
             return;
         }
         cx.notify();
@@ -237,10 +279,16 @@ impl OnboardingStore {
         cx.notify();
     }
 
-    pub fn invalidate(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+    pub fn reload(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.refetch(clan_id, cx);
+        cx.notify();
+    }
+
+    fn refetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.fetched_at.remove(&clan_id);
         self.failed_at.remove(&clan_id);
-        cx.notify();
+        self.steps_fetched_at.remove(&clan_id);
+        self.ensure_loaded(clan_id, cx);
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -350,10 +398,22 @@ mod tests {
     }
 
     fn test_store() -> OnboardingStore {
-        OnboardingStore::new(Arc::new(AppApi::new(
-            Arc::new(mezon_client::TransportClient::new(String::new())),
-            String::new(),
-        )))
+        OnboardingStore {
+            clans: HashMap::new(),
+            loading: HashSet::new(),
+            fetched_at: HashMap::new(),
+            failed_at: HashMap::new(),
+            steps: HashMap::new(),
+            steps_loading: HashSet::new(),
+            steps_fetched_at: HashMap::new(),
+            mission_done: HashMap::new(),
+            answers: HashMap::new(),
+            api: Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            )),
+            _connection_watch: Task::ready(()),
+        }
     }
 
     const CLAN: ClanId = ClanId(7);
@@ -409,6 +469,19 @@ mod tests {
         assert_eq!(store.mission_done(CLAN), 2);
         assert!(store.can_start_mission(CLAN, 1));
         assert!(!store.advance_mission(CLAN));
+    }
+
+    #[test]
+    fn load_failure_only_reports_while_no_data_is_cached() {
+        let mut store = test_store();
+        assert!(!store.load_failed(CLAN));
+        store.failed_at.insert(CLAN, Instant::now());
+        assert!(store.load_failed(CLAN));
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_RULE, 0)]),
+        );
+        assert!(!store.load_failed(CLAN));
     }
 
     #[test]
