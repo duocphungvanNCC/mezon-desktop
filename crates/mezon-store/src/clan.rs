@@ -26,6 +26,7 @@ pub const MAX_COMMUNITY_BANNER_URL_BYTES: usize = 2048;
 pub struct OnboardingAnswer {
     pub title: String,
     pub description: String,
+    pub emoji: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -56,6 +57,7 @@ impl From<api::OnboardingAnswer> for OnboardingAnswer {
         Self {
             title: answer.title,
             description: answer.description,
+            emoji: answer.emoji,
         }
     }
 }
@@ -65,6 +67,7 @@ impl From<OnboardingAnswer> for api::OnboardingAnswer {
         Self {
             title: answer.title,
             description: answer.description,
+            emoji: answer.emoji,
             ..Default::default()
         }
     }
