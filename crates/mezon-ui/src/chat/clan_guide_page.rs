@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement, ObjectFit, Render,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, img, prelude::*, px, relative,
-    rgb,
+    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, InteractiveElement, ObjectFit,
+    Render, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, img,
+    prelude::*, px, relative, rgb,
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, MISSION_DO_SOMETHING,
@@ -50,12 +50,19 @@ impl ClanGuidePage {
     }
 
     pub fn set_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if self.clan_id == clan_id {
-            return;
-        }
+        let switched = self.clan_id != clan_id;
         self.clan_id = clan_id;
-        OnboardingStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
-        cx.notify();
+        let store = OnboardingStore::global(cx);
+        let needs_load = {
+            let store = store.read(cx);
+            !store.has_onboarding(clan_id) && !store.is_loading(clan_id)
+        };
+        if switched || needs_load {
+            store.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        }
+        if switched {
+            cx.notify();
+        }
     }
 
     fn content_state(&self, cx: &App) -> ContentState {
@@ -427,6 +434,7 @@ impl ClanGuidePage {
                 })
                 .into_any_element();
             section = section.child(guide_card(
+                SharedString::from(format!("clan-guide-rule-{}", rule.id)),
                 theme,
                 Icon::new(IconName::RuleIcon)
                     .size(px(24.))
@@ -496,6 +504,7 @@ impl ClanGuidePage {
             let task_type = mission.task_type;
             section = section.child(
                 guide_card(
+                    SharedString::from(format!("clan-guide-mission-{}", mission.id)),
                     theme,
                     Icon::new(IconName::TargetIcon)
                         .size(px(24.))
@@ -505,7 +514,6 @@ impl ClanGuidePage {
                     description,
                     tick,
                 )
-                .id(SharedString::from(format!("clan-guide-mission-{index}")))
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     start_mission(clan_id, channel_id, task_type, index, cx);
@@ -612,20 +620,29 @@ fn empty_card(theme: &Theme, message: &'static str) -> AnyElement {
 }
 
 fn guide_card(
+    id: impl Into<ElementId>,
     theme: &Theme,
     icon: AnyElement,
     title: SharedString,
     description: AnyElement,
     action: Option<AnyElement>,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id(id)
         .flex()
         .items_start()
         .gap_2()
         .p_4()
         .rounded(px(8.))
+        .border_1()
+        .border_color(theme.tokens.border_primary)
         .bg(theme.tokens.bg_active_member_channel)
         .text_color(theme.tokens.text_theme_primary)
+        .hover(|style| {
+            style
+                .bg(theme.tokens.bg_item_hover)
+                .text_color(theme.tokens.text_secondary)
+        })
         .overflow_x_hidden()
         .child(
             div()

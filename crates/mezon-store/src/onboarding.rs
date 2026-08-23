@@ -62,8 +62,10 @@ pub struct OnboardingStore {
     steps: HashMap<ClanId, i32>,
     steps_loading: HashSet<ClanId>,
     steps_fetched_at: HashMap<ClanId, Instant>,
+    steps_failed_at: HashMap<ClanId, Instant>,
     mission_done: HashMap<ClanId, usize>,
     answers: HashMap<ClanId, HashSet<(i64, usize)>>,
+    reset_generation: u64,
     api: Arc<AppApi>,
     _connection_watch: Task<()>,
 }
@@ -88,8 +90,10 @@ impl OnboardingStore {
             steps: HashMap::new(),
             steps_loading: HashSet::new(),
             steps_fetched_at: HashMap::new(),
+            steps_failed_at: HashMap::new(),
             mission_done: HashMap::new(),
             answers: HashMap::new(),
+            reset_generation: 0,
             api,
             _connection_watch: connection_watch,
         }
@@ -106,7 +110,7 @@ impl OnboardingStore {
                 let connected = *status.borrow() == ConnectionStatus::Connected;
                 if connected
                     && !connected_before
-                    && this.update(cx, |this, cx| this.refresh_loaded(cx)).is_err()
+                    && this.update(cx, |this, cx| this.retry_failed(cx)).is_err()
                 {
                     break;
                 }
@@ -115,12 +119,12 @@ impl OnboardingStore {
         })
     }
 
-    fn refresh_loaded(&mut self, cx: &mut Context<Self>) {
+    fn retry_failed(&mut self, cx: &mut Context<Self>) {
         let clans: HashSet<ClanId> = self
-            .clans
+            .failed_at
             .keys()
             .copied()
-            .chain(self.failed_at.keys().copied())
+            .chain(self.steps_failed_at.keys().copied())
             .collect();
         if clans.is_empty() {
             return;
@@ -148,8 +152,10 @@ impl OnboardingStore {
         self.steps.clear();
         self.steps_loading.clear();
         self.steps_fetched_at.clear();
+        self.steps_failed_at.clear();
         self.mission_done.clear();
         self.answers.clear();
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         cx.notify();
     }
 
@@ -163,6 +169,10 @@ impl OnboardingStore {
 
     pub fn load_failed(&self, clan_id: ClanId) -> bool {
         !self.clans.contains_key(&clan_id) && self.failed_at.contains_key(&clan_id)
+    }
+
+    pub fn has_onboarding(&self, clan_id: ClanId) -> bool {
+        self.clans.contains_key(&clan_id)
     }
 
     pub fn mission_done(&self, clan_id: ClanId) -> usize {
@@ -251,6 +261,7 @@ impl OnboardingStore {
     fn finish_onboarding(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.steps.insert(clan_id, DONE_ONBOARDING_STATUS);
         let api = self.api.clone();
+        let reset_generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             if let Err(error) = api
                 .update_onboarding_step(clan_id.get(), DONE_ONBOARDING_STATUS)
@@ -258,6 +269,9 @@ impl OnboardingStore {
             {
                 tracing::warn!(%error, %clan_id, "failed to mark onboarding done");
                 let _ = this.update(cx, |this, cx| {
+                    if this.reset_generation != reset_generation {
+                        return;
+                    }
                     this.steps.remove(&clan_id);
                     cx.notify();
                 });
@@ -288,6 +302,7 @@ impl OnboardingStore {
         self.fetched_at.remove(&clan_id);
         self.failed_at.remove(&clan_id);
         self.steps_fetched_at.remove(&clan_id);
+        self.steps_failed_at.remove(&clan_id);
         self.ensure_loaded(clan_id, cx);
     }
 
@@ -312,11 +327,15 @@ impl OnboardingStore {
         }
         self.loading.insert(clan_id);
         let api = self.api.clone();
+        let reset_generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_onboarding(clan_id.get(), ONBOARDING_PAGE_LIMIT, 1)
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
                 this.loading.remove(&clan_id);
                 match result {
                     Ok(response) => {
@@ -348,19 +367,28 @@ impl OnboardingStore {
                 .steps_fetched_at
                 .get(&clan_id)
                 .is_some_and(|instant| now.duration_since(*instant) < CACHE_TTL)
+            || self
+                .steps_failed_at
+                .get(&clan_id)
+                .is_some_and(|instant| now.duration_since(*instant) < FETCH_RETRY_BACKOFF)
         {
             return;
         }
         self.steps_loading.insert(clan_id);
         let api = self.api.clone();
+        let reset_generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.list_onboarding_step(clan_id.get()).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
                 this.steps_loading.remove(&clan_id);
                 match result {
                     Ok(response) => {
                         let now = Instant::now();
                         this.steps_fetched_at.insert(clan_id, now);
+                        this.steps_failed_at.remove(&clan_id);
                         for step in response.list_onboarding_step {
                             let step_clan = ClanId(step.clan_id);
                             this.steps.insert(step_clan, step.onboarding_step);
@@ -368,6 +396,7 @@ impl OnboardingStore {
                         }
                     }
                     Err(error) => {
+                        this.steps_failed_at.insert(clan_id, Instant::now());
                         tracing::warn!(%error, %clan_id, "failed to load onboarding steps");
                     }
                 }
@@ -406,8 +435,10 @@ mod tests {
             steps: HashMap::new(),
             steps_loading: HashSet::new(),
             steps_fetched_at: HashMap::new(),
+            steps_failed_at: HashMap::new(),
             mission_done: HashMap::new(),
             answers: HashMap::new(),
+            reset_generation: 0,
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
