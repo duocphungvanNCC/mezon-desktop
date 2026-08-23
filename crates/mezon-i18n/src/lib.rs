@@ -116,6 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn every_locale_carries_every_english_key() {
+        let english = super::data("en");
+        for locale in LOCALES {
+            let bundle = super::data(locale);
+            let missing: Vec<_> = english
+                .keys()
+                .filter(|k| !bundle.contains_key(*k))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{locale} is missing {} keys, first: {:?}",
+                missing.len(),
+                &missing[..missing.len().min(5)]
+            );
+        }
+    }
+
+    #[test]
     fn unknown_key_returns_key() {
         assert_eq!(t("en", "no.such.key"), "no.such.key");
         assert_eq!(t("vi", "no.such.key"), "no.such.key");
