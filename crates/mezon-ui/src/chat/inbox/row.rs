@@ -1189,7 +1189,9 @@ fn render_inbox_message_spans(
                 children.push(element);
             }
             if let MessageSpan::CodeBlock {
-                text: code_text, ..
+                text: code_text,
+                fenced_source,
+                ..
             } = span
             {
                 if let Some(rel) = text[offset..].find(code_text.as_ref()) {
@@ -1198,7 +1200,12 @@ fn render_inbox_message_spans(
                 let copy_id =
                     SharedString::from(format!("inbox-code-copy-{notification_id}-{code_key}"));
                 code_key += 1;
-                children.push(render_inbox_code_block(theme, code_text, copy_id));
+                children.push(render_inbox_code_block(
+                    theme,
+                    code_text,
+                    copy_id,
+                    fenced_source.clone(),
+                ));
             }
             continue;
         }
@@ -1263,9 +1270,9 @@ fn render_inbox_code_block(
     theme: &Theme,
     text: &SharedString,
     copy_id: SharedString,
+    copy_source: SharedString,
 ) -> gpui::AnyElement {
     div()
-        .relative()
         .w_full()
         .min_w_0()
         .my_1()
@@ -1277,7 +1284,7 @@ fn render_inbox_code_block(
         .text_size(px(14.))
         .text_color(theme.tokens.text_theme_message)
         .child(text.clone())
-        .child(code_block_copy_overlay(copy_id, text.clone(), theme))
+        .child(code_block_copy_overlay(copy_id, copy_source, theme))
         .into_any_element()
 }
 

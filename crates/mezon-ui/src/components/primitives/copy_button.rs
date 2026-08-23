@@ -1,39 +1,49 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, ClipboardItem, Context, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    RenderOnce, SharedString, Window, div, prelude::*, px,
+    App, ClipboardItem, Context, ElementId, Hsla, IntoElement, Pixels, RenderOnce, SharedString,
+    Task, Window, div, prelude::*, px,
 };
 
 use crate::components::primitives::{Icon, IconName};
 
-/// React resets the copied state after 5s (`MarkdownContent.tsx`, `TripleBackticks`).
 const COPIED_DURATION: Duration = Duration::from_secs(5);
+const COPY_ICON_SIZE: Pixels = px(16.);
+const COPIED_ICON_SIZE: Pixels = px(20.);
 
 pub struct CopyButtonState {
     copied_at: Option<Instant>,
+    _reset: Option<Task<()>>,
 }
 
 impl CopyButtonState {
     fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { copied_at: None }
+        Self {
+            copied_at: None,
+            _reset: None,
+        }
     }
 
     fn is_copied(&self) -> bool {
         self.copied_at
             .is_some_and(|at| at.elapsed() < COPIED_DURATION)
     }
+
+    fn mark_copied(&mut self, cx: &mut Context<Self>) {
+        self.copied_at = Some(Instant::now());
+        self._reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_DURATION).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
+        cx.notify();
+    }
 }
 
-/// Copy-to-clipboard icon button. React shows `CopyIcon`, swapping to `PasteIcon`
-/// (a check mark) for five seconds after a copy.
 #[derive(IntoElement)]
 pub struct CopyButton {
     id: ElementId,
     text: SharedString,
     color: Hsla,
-    hover_bg: Hsla,
-    size: Pixels,
 }
 
 impl CopyButton {
@@ -41,32 +51,23 @@ impl CopyButton {
         id: impl Into<ElementId>,
         text: impl Into<SharedString>,
         color: impl Into<Hsla>,
-        hover_bg: impl Into<Hsla>,
     ) -> Self {
         Self {
             id: id.into(),
             text: text.into(),
             color: color.into(),
-            hover_bg: hover_bg.into(),
-            size: px(16.),
         }
-    }
-
-    pub fn size(mut self, size: Pixels) -> Self {
-        self.size = size;
-        self
     }
 }
 
 impl RenderOnce for CopyButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, CopyButtonState::new);
-        let icon = if state.read(cx).is_copied() {
-            IconName::PasteIcon
+        let (icon, size) = if state.read(cx).is_copied() {
+            (IconName::PasteIcon, COPIED_ICON_SIZE)
         } else {
-            IconName::CopyIcon
+            (IconName::CopyIcon, COPY_ICON_SIZE)
         };
-        let hover_bg = self.hover_bg;
         let text = self.text;
 
         div()
@@ -74,28 +75,15 @@ impl RenderOnce for CopyButton {
             .flex()
             .items_center()
             .justify_center()
-            .p_1()
-            .rounded(px(4.))
             .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
-            // Without this the press starts a text selection drag over the block.
-            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-            })
+            .occlude()
             .on_click(move |_, _, cx| {
-                cx.stop_propagation();
+                if text.is_empty() {
+                    return;
+                }
                 cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                state.update(cx, |state, cx| {
-                    state.copied_at = Some(Instant::now());
-                    cx.notify();
-                });
-                let state_id = state.entity_id();
-                cx.spawn(async move |cx| {
-                    cx.background_executor().timer(COPIED_DURATION).await;
-                    cx.update(|cx| cx.notify(state_id))
-                })
-                .detach();
+                state.update(cx, |state, cx| state.mark_copied(cx));
             })
-            .child(Icon::new(icon).size(self.size).text_color(self.color))
+            .child(Icon::new(icon).size(size).text_color(self.color))
     }
 }

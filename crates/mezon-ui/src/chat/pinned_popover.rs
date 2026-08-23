@@ -968,7 +968,11 @@ fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> g
                         .child(text.clone()),
                 );
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 if has_inline {
                     col = col.child(row);
                     row = pin_inline_row();
@@ -995,7 +999,6 @@ fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> g
                 code_key += 1;
                 col = col.child(
                     div()
-                        .relative()
                         .w_full()
                         .min_w_0()
                         .max_w_full()
@@ -1007,7 +1010,11 @@ fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> g
                         .border_color(theme.tokens.border_primary)
                         .bg(code_bg)
                         .child(code_col)
-                        .child(code_block_copy_overlay(copy_id, text.clone(), theme)),
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
                 );
             }
         }
