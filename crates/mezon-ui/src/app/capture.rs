@@ -1143,6 +1143,39 @@ pub fn jump_to_present(cx: &mut App) -> anyhow::Result<Value> {
     Ok(json!({ "ok": true }))
 }
 
+// Mirror the row's own click gate (`parts.rs`): the tile is inert while the
+// bytes are still going up, after they failed, or before the url exists.
+// Without these a tool opens a viewer on an empty url and answers ok, which is
+// a pass for something a user cannot do.
+fn ensure_attachment_viewable(
+    attachment: &mezon_store::MessageAttachment,
+    message_id: i64,
+    attachment_index: usize,
+) -> anyhow::Result<()> {
+    if attachment.uploading {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} is still uploading; the row \
+             does not open the viewer yet"
+        );
+    }
+    if attachment.upload_failed {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} failed to upload, so there \
+             is nothing to view"
+        );
+    }
+    if attachment.presign_pending {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} is still waiting for its \
+             presign to finish, so its url does not resolve yet"
+        );
+    }
+    if attachment.url.is_empty() {
+        anyhow::bail!("attachment {attachment_index} of message {message_id} has no url yet");
+    }
+    Ok(())
+}
+
 pub fn open_message_image_viewer(
     settings: &gpui::Entity<mezon_store::Settings>,
     message_id: i64,
@@ -1177,31 +1210,7 @@ pub fn open_message_image_viewer(
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
         })?;
-        // Mirror the row's own click gate (`parts.rs`): the tile is inert while the
-        // bytes are still going up, after they failed, or before the url exists.
-        // Without these the tool opens a viewer on an empty url and answers ok,
-        // which is a pass for something a user cannot do.
-        if attachment.uploading {
-            anyhow::bail!(
-                "attachment {attachment_index} of message {message_id} is still uploading; the row \
-                 does not open the viewer yet"
-            );
-        }
-        if attachment.upload_failed {
-            anyhow::bail!(
-                "attachment {attachment_index} of message {message_id} failed to upload, so there \
-                 is nothing to view"
-            );
-        }
-        if attachment.presign_pending {
-            anyhow::bail!(
-                "attachment {attachment_index} of message {message_id} is still waiting for its \
-                 presign to finish, so its url does not resolve yet"
-            );
-        }
-        if attachment.url.is_empty() {
-            anyhow::bail!("attachment {attachment_index} of message {message_id} has no url yet");
-        }
+        ensure_attachment_viewable(attachment, message_id, attachment_index)?;
         (
             mezon_store::AttachmentSeedInput::from_message(attachment),
             message.id,
@@ -1218,6 +1227,66 @@ pub fn open_message_image_viewer(
             id,
             create_time,
             uploader_id,
+            window,
+            cx,
+        );
+    })?;
+    Ok(serde_json::json!({ "ok": true, "url": opened }))
+}
+
+pub fn open_message_pdf_viewer(
+    settings: &gpui::Entity<mezon_store::Settings>,
+    message_id: i64,
+    attachment_index: usize,
+    cx: &mut App,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let topic_id = mezon_store::TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id();
+    let (url, filename) = {
+        let store = store.read(cx);
+        let message = store
+            .messages()
+            .iter()
+            .find(|message| message.id.0 == message_id)
+            .or_else(|| {
+                topic_id.and_then(|id| {
+                    store
+                        .messages_in_channel(mezon_store::ChannelId(id))
+                        .iter()
+                        .find(|message| message.id.0 == message_id)
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "message {message_id} is not in the open channel's loaded history, nor in the open topic's"
+                )
+            })?;
+        let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
+            anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
+        })?;
+        ensure_attachment_viewable(attachment, message_id, attachment_index)?;
+        if !mezon_store::is_pdf(&attachment.filetype, &attachment.filename) {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is not a pdf, so the row \
+                 shows no view button"
+            );
+        }
+        (
+            gpui::SharedString::from(attachment.url.clone()),
+            gpui::SharedString::from(attachment.filename.clone()),
+        )
+    };
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let opened = url.clone();
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::pdf_viewer::open_pdf_viewer(
+            crate::pdf_viewer::OpenPdfRequest {
+                url,
+                filename,
+                settings: settings.clone(),
+            },
             window,
             cx,
         );

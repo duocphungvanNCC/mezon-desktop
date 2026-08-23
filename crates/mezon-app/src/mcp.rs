@@ -179,6 +179,21 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::OpenPdfViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_pdf_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ScrollWheel {
                         delta_y,
                         ticks,

@@ -202,6 +202,7 @@ pub enum RealtimeEvent {
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
     UserProfileUpdated(realtime::UserProfileUpdatedEvent),
     ClanDeleted(realtime::ClanDeletedEvent),
+    TransferOwnership(realtime::TransferOwnershipEvent),
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
     RemoveFriend(realtime::RemoveFriend),
@@ -260,6 +261,7 @@ impl RealtimeEvent {
             Self::UserClanRemoved(_) => "UserClanRemoved",
             Self::BanUser(_) => "BanUser",
             Self::ClanUpdated(_) => "ClanUpdated",
+            Self::TransferOwnership(_) => "TransferOwnership",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
             Self::UserProfileUpdated(_) => "UserProfileUpdated",
             Self::ClanDeleted(_) => "ClanDeleted",
@@ -325,6 +327,9 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::BanUserEvent(m) => Ok(Self::BanUser(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
+            realtime::envelope::Message::TransferOwnershipEvent(m) => {
+                Ok(Self::TransferOwnership(m))
+            }
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
             }

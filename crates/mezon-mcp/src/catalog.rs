@@ -663,6 +663,20 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "open_pdf_viewer",
+        description: "\
+Open the pdf viewer window on a message's pdf attachment.
+
+Same reach as open_image_viewer: the message must be in the open channel's loaded
+history (or the open topic's), so call open_channel and load_more_messages first.
+The row only offers this for a pdf attachment, and so does this tool.
+
+Parameters:
+- message_id (required): message carrying the pdf attachment.
+- attachment_index (optional): zero-based index on that message. Default 0.",
+        write: false,
+    },
+    ToolSpec {
         name: "scroll_wheel",
         description: "\
 Send wheel events to the message list, the way a mouse wheel does.
