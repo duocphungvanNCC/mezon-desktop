@@ -1395,6 +1395,29 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_onboarding_step(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ListOnboardingStepResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_onboarding_step(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_onboarding_step(&self, clan_id: i64, onboarding_step: i32) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_onboarding_step(clan_id, onboarding_step)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Create a new clan.
     pub async fn create_clan_desc(
         &self,

@@ -42,6 +42,7 @@ pub mod messages;
 pub mod notification_push;
 pub mod notification_setting;
 pub mod ogp;
+pub mod onboarding;
 pub mod permissions;
 pub mod pinned;
 pub mod platform;
@@ -185,6 +186,11 @@ pub use notification_setting::{NotificationSettingEvent, NotificationSettingStor
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
     internal_invite_id, invite_id_from_url, trusted_invite_id,
+};
+pub use onboarding::{
+    ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
+    GUIDE_TYPE_RULE, GUIDE_TYPE_TASK, MISSION_DO_SOMETHING, MISSION_SEND_MESSAGE, MISSION_VISIT,
+    OnboardingStore,
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,

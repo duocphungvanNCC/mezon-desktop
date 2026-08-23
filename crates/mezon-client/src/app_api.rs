@@ -333,6 +333,19 @@ impl AppApi {
         self.transport.delete_onboarding(id, clan_id).await
     }
 
+    pub async fn list_onboarding_step(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ListOnboardingStepResponse> {
+        self.transport.list_onboarding_step(clan_id).await
+    }
+
+    pub async fn update_onboarding_step(&self, clan_id: i64, onboarding_step: i32) -> Result<()> {
+        self.transport
+            .update_onboarding_step(clan_id, onboarding_step)
+            .await
+    }
+
     pub async fn list_clan_users(
         &self,
         clan_id: i64,
