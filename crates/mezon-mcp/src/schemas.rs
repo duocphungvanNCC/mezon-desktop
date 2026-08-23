@@ -340,6 +340,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "open_pdf_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the pdf attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
         "scroll_wheel" => Arc::new(object(
             json!({
                 "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
