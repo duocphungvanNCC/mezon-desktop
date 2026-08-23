@@ -1040,13 +1040,16 @@ fn render_search_spans(
             MessageSpan::Emoji { name, .. } => {
                 row = row.child(div().max_w_full().min_w_0().child(name.to_string()));
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 let copy_id =
                     SharedString::from(format!("search-code-copy-{}-{code_key}", message_id.get()));
                 code_key += 1;
                 row = row.child(
                     div()
-                        .relative()
                         .w_full()
                         .min_w_0()
                         .my_1()
@@ -1054,7 +1057,11 @@ fn render_search_spans(
                         .rounded_md()
                         .bg(code_bg)
                         .child(text.to_string())
-                        .child(code_block_copy_overlay(copy_id, text.clone(), theme)),
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
                 );
             }
             MessageSpan::Canvas { title, .. } | MessageSpan::Heading { text: title, .. } => {
