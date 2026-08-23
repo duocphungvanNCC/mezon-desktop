@@ -674,6 +674,7 @@ impl ChannelList {
                 },
                 ClanEvent::Deleted(clan_id) => this.forget_clan(*clan_id, cx),
                 ClanEvent::Joined(clan_id) => this.on_rejoined_clan(*clan_id, cx),
+                ClanEvent::OwnerChanged { .. } => {}
             },
         );
 

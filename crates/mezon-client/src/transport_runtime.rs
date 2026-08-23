@@ -1457,6 +1457,14 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn transfer_ownership(&self, clan_id: i64, new_owner_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.transfer_ownership(clan_id, new_owner_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_system_message_by_clan_id(
         &self,
         clan_id: i64,

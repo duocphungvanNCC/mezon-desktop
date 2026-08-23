@@ -404,6 +404,12 @@ impl AppApi {
         self.transport.delete_clan_desc(clan_desc_id).await
     }
 
+    pub async fn transfer_ownership(&self, clan_id: i64, new_owner_id: i64) -> Result<()> {
+        self.transport
+            .transfer_ownership(clan_id, new_owner_id)
+            .await
+    }
+
     pub async fn get_system_message_by_clan_id(
         &self,
         clan_id: i64,
