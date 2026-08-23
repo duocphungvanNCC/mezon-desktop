@@ -336,8 +336,12 @@ impl PdfViewer {
 
     fn clear_page_image(&mut self, window: Option<&mut Window>, cx: &mut App) {
         self.rendered_key = None;
-        if let Some(image) = self.page_image.take() {
-            cx.drop_image(image, window);
+        let Some(image) = self.page_image.take() else {
+            return;
+        };
+        match window {
+            Some(window) => cx.drop_image(image, Some(window)),
+            None => crate::image_cache::queue_atlas_drop(cx, image),
         }
     }
 
@@ -351,6 +355,7 @@ impl PdfViewer {
         self._render_task = None;
         self.document = None;
         self.clear_page_image(window, cx);
+        crate::image_cache::release_freed_memory_to_os(cx);
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
