@@ -80,6 +80,11 @@ pub enum McpCommand {
         attachment_index: usize,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    OpenPdfViewer {
+        message_id: i64,
+        attachment_index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ScrollWheel {
         delta_y: f32,
         ticks: u32,

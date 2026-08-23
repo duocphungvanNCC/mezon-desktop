@@ -10,8 +10,8 @@ use gpui::{
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelType, ClanId,
     ClanList, ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore,
-    TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
+    MessageReference, MessagesStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
+    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -1083,12 +1083,6 @@ fn presign_child(
     }
 }
 
-fn open_external(url: &str, cx: &mut App) {
-    if let Some(store) = PlatformStore::try_global(cx) {
-        let _ = store.read(cx).open_url_external(url);
-    }
-}
-
 fn render_photo(
     index: usize,
     att: &MessageAttachment,
@@ -1481,8 +1475,7 @@ fn render_file_box(
     } else {
         SharedString::from(att.filename.clone())
     };
-    let is_pdf =
-        att.filetype == "application/pdf" || att.filename.to_ascii_lowercase().ends_with(".pdf");
+    let is_pdf = mezon_store::is_pdf(&att.filetype, &att.filename);
     let url = SharedString::from(att.url.clone());
     // While the object is not on the CDN yet the size we have is the sender's
     // claim about a file nobody can fetch, so say what is actually happening
@@ -1499,6 +1492,9 @@ fn render_file_box(
     let body_url = url.clone();
     let body_name = filename.clone();
     let pdf_url = url.clone();
+    let pdf_name = filename.clone();
+    let pdf_settings = ctx.settings.clone();
+    let body_settings = ctx.settings.clone();
     let body_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
     let remove_selection = ctx.selection.clone();
@@ -1563,14 +1559,27 @@ fn render_file_box(
                 .flex_1()
                 .min_w_0()
                 .when(!sending && !failed, |d| {
-                    d.cursor_pointer().on_click(move |_, _, cx| {
-                        if !body_selection.borrow().has_selection() {
-                            crate::util::download::save_with_progress_toast(
-                                body_url.clone(),
-                                body_name.clone(),
+                    d.cursor_pointer().on_click(move |_, window, cx| {
+                        if body_selection.borrow().has_selection() {
+                            return;
+                        }
+                        if is_pdf {
+                            crate::pdf_viewer::open_pdf_viewer(
+                                crate::pdf_viewer::OpenPdfRequest {
+                                    url: body_url.clone(),
+                                    filename: body_name.clone(),
+                                    settings: body_settings.clone(),
+                                },
+                                window,
                                 cx,
                             );
+                            return;
                         }
+                        crate::util::download::save_with_progress_toast(
+                            body_url.clone(),
+                            body_name.clone(),
+                            cx,
+                        );
                     })
                 })
                 .child(
@@ -1636,10 +1645,19 @@ fn render_file_box(
                             ("file-pdf", index),
                             IconName::FileIcon,
                             theme,
-                            move |_, _, cx| {
-                                if !pdf_selection.borrow().has_selection() {
-                                    open_external(&pdf_url, cx);
+                            move |_, window, cx| {
+                                if pdf_selection.borrow().has_selection() {
+                                    return;
                                 }
+                                crate::pdf_viewer::open_pdf_viewer(
+                                    crate::pdf_viewer::OpenPdfRequest {
+                                        url: pdf_url.clone(),
+                                        filename: pdf_name.clone(),
+                                        settings: pdf_settings.clone(),
+                                    },
+                                    window,
+                                    cx,
+                                );
                             },
                         ))
                     }),
