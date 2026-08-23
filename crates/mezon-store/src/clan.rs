@@ -2,7 +2,7 @@ use crate::channel::ChannelList;
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
 use crate::ogp::trusted_invite_id;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -669,7 +669,7 @@ impl ClanList {
             RealtimeEvent::ClanDeleted(e) => {
                 self.drop_clan(ClanId(e.clan_id), cx);
             }
-            RealtimeEvent::TransferOwnership(e) => {
+            RealtimeEvent::TransferOwnership(e) if e.curr_owner != 0 => {
                 self.set_clan_creator(ClanId(e.clan_id), UserId(e.curr_owner), cx);
             }
             RealtimeEvent::ClanUpdated(e) => {
@@ -993,7 +993,11 @@ impl ClanList {
 
     pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
-        let previous: HashSet<ClanId> = self.clans.iter().map(|clan| clan.id).collect();
+        let previous: HashMap<ClanId, UserId> = self
+            .clans
+            .iter()
+            .map(|clan| (clan.id, clan.creator_id))
+            .collect();
         carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
         self.apply_saved_order_internal();
@@ -1007,8 +1011,15 @@ impl ClanList {
             cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         }
         for clan in &self.clans {
-            if !previous.contains(&clan.id) {
-                cx.emit(ClanEvent::Joined(clan.id));
+            match previous.get(&clan.id) {
+                None => cx.emit(ClanEvent::Joined(clan.id)),
+                Some(creator_id) if *creator_id != clan.creator_id => {
+                    cx.emit(ClanEvent::OwnerChanged {
+                        clan_id: clan.id,
+                        new_owner_id: clan.creator_id,
+                    })
+                }
+                Some(_) => {}
             }
         }
         cx.notify();
@@ -2086,6 +2097,76 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
+    #[gpui::test]
+    fn a_transfer_event_without_a_new_owner_is_ignored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(
+                    vec![Clan {
+                        creator_id: UserId(9),
+                        ..make_clan(1, "One", None)
+                    }],
+                    cx,
+                );
+
+                list.handle_event(
+                    &RealtimeEvent::TransferOwnership(
+                        mezon_proto::realtime::TransferOwnershipEvent {
+                            clan_id: 1,
+                            prev_owner: 9,
+                            curr_owner: 0,
+                        },
+                    ),
+                    cx,
+                );
+
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_refetch_that_changes_the_creator_emits_owner_changed(cx: &mut gpui::TestAppContext) {
+        let owner_changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (clan_list, _sub) = cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            let seen = owner_changes.clone();
+            let sub = cx.subscribe(&clan_list, move |_, event: &ClanEvent, _| {
+                if let ClanEvent::OwnerChanged {
+                    clan_id,
+                    new_owner_id,
+                } = event
+                {
+                    seen.lock().unwrap().push((*clan_id, *new_owner_id));
+                }
+            });
+            (clan_list, sub)
+        });
+
+        cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.update_clans(
+                    vec![
+                        Clan {
+                            creator_id: UserId(55),
+                            ..make_clan(1, "One", None)
+                        },
+                        make_clan(2, "Two", Some("old.png")),
+                        make_clan(3, "Three", None),
+                    ],
+                    cx,
+                );
+            });
+        });
+
+        assert_eq!(
+            *owner_changes.lock().unwrap(),
+            vec![(ClanId(1), UserId(55))]
+        );
+    }
+
     #[gpui::test]
     fn a_pushed_transfer_ownership_event_updates_the_creator(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

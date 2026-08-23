@@ -921,7 +921,24 @@ impl Shell {
             self.error(message, cx);
             return;
         };
-        let current_owner = party(current_user_id, "");
+        let self_account = mezon_store::AccountStore::try_global(cx)
+            .and_then(|store| store.read(cx).account.clone());
+        let self_name = self_account
+            .as_ref()
+            .map(|account| {
+                if account.display_name.is_empty() {
+                    account.username.clone()
+                } else {
+                    account.display_name.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut current_owner = party(current_user_id, &self_name);
+        if current_owner.avatar.is_empty()
+            && let Some(avatar) = self_account.and_then(|account| account.avatar_url)
+        {
+            current_owner.avatar = avatar.into();
+        }
         let new_owner = party(new_owner_id, new_owner_name);
         let title: SharedString = mezon_i18n::t(locale, "transferOwner.title")
             .to_string()
@@ -1298,6 +1315,16 @@ impl Shell {
         };
         cx.notify();
         focus
+    }
+
+    pub fn close_modal_view(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|modal| modal.entity_id() == view)
+        {
+            self.close_modal(cx);
+        }
     }
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {

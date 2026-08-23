@@ -270,6 +270,12 @@ mod tests {
             Some(RealtimeKind::ClanUpdated)
         );
         assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::TransferOwnership(
+                realtime::TransferOwnershipEvent::default()
+            )),
+            Some(RealtimeKind::TransferOwnership)
+        );
+        assert_eq!(
             RealtimeKind::of(&RealtimeEvent::SessionRefreshed(api::Session::default())),
             Some(RealtimeKind::SessionRefreshed)
         );

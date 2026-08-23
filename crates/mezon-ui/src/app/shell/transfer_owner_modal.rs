@@ -47,6 +47,7 @@ impl TransferOwnerModal {
         let new_owner_id = self.new_owner_id;
         let success_message = self.success_message.clone();
         let error_message = self.error_message.clone();
+        let view_id = cx.entity_id();
         let task = ClanList::global(cx).update(cx, |store, cx| {
             store.transfer_ownership(clan_id, new_owner_id, cx)
         });
@@ -68,7 +69,7 @@ impl TransferOwnerModal {
                             shell.error(error_message, cx);
                         }
                     }
-                    shell.close_modal(cx);
+                    shell.close_modal_view(view_id, cx);
                 });
             });
         })
