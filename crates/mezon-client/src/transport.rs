@@ -796,6 +796,8 @@ pub struct ApiAccount {
     pub status: String,
     #[serde(default)]
     pub user_status: String,
+    #[serde(default)]
+    pub dob_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3717,6 +3719,7 @@ impl MezonTransport {
             logo,
             status: user.status,
             user_status: user.user_status,
+            dob_seconds: user.dob_seconds,
         }
     }
 
@@ -9367,6 +9370,7 @@ impl MezonTransport {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -9377,6 +9381,7 @@ impl MezonTransport {
             avatar_url: avatar_url.map(str::to_string),
             about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
+            dob_seconds: dob_seconds.unwrap_or_default(),
             ..Default::default()
         }
         .encode_to_vec();

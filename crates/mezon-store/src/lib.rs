@@ -387,6 +387,8 @@ pub struct Settings {
     /// Start the HTTP MCP server in read-only mode (no write tools)
     #[serde(default)]
     pub mcp_read_only: bool,
+    #[serde(default)]
+    pub age_restricted_confirmed: Vec<ChannelId>,
 }
 
 impl Default for Settings {
@@ -411,6 +413,7 @@ impl Default for Settings {
             last_clan_id: None,
             last_channel_id: None,
             mcp_read_only: false,
+            age_restricted_confirmed: Vec::new(),
         }
     }
 }
