@@ -309,9 +309,6 @@ mod tests {
         );
     }
 
-    /// The seven kinds added for the React parity pass all arrive wrapped in
-    /// `RealtimeEvent::Unhandled`, so a missing arm here is silent: the event would be dropped
-    /// exactly as it was before, with nothing to observe. Pin every one of them.
     #[test]
     fn kind_of_maps_every_envelope_only_kind() {
         use realtime::envelope::Message;

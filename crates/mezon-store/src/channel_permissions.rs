@@ -50,6 +50,7 @@ pub struct ChannelPermissionsStore {
     loading: HashSet<ChannelPermissionKey>,
     failed_at: HashMap<ChannelPermissionKey, Instant>,
     reset_generation: u64,
+    patch_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
     _refetch: Task<()>,
@@ -96,6 +97,7 @@ impl ChannelPermissionsStore {
             loading: HashSet::new(),
             failed_at: HashMap::new(),
             reset_generation: 0,
+            patch_generation: 0,
             api,
             _conn_watch: conn_watch,
             _refetch: Task::ready(()),
@@ -190,6 +192,7 @@ impl ChannelPermissionsStore {
         if touched.is_empty() {
             return;
         }
+        self.patch_generation = self.patch_generation.wrapping_add(1);
         for key in touched {
             cx.emit(ChannelPermissionsEvent::Changed {
                 clan_id: key.clan_id,
@@ -320,6 +323,7 @@ impl ChannelPermissionsStore {
         self.loading.insert(key);
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let patched_at_start = self.patch_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_user_permission_in_channel(clan_id.get(), channel_id.get())
@@ -332,6 +336,9 @@ impl ChannelPermissionsStore {
                 match result {
                     Ok(resp) => {
                         this.failed_at.remove(&key);
+                        if this.patch_generation != patched_at_start {
+                            return;
+                        }
                         let perms = permissions_from_response(&resp);
                         this.cache.insert(key, perms, None);
                         cx.emit(ChannelPermissionsEvent::Changed {
@@ -380,6 +387,7 @@ mod tests {
             loading: HashSet::new(),
             failed_at: HashMap::new(),
             reset_generation: 0,
+            patch_generation: 0,
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -459,6 +467,53 @@ mod tests {
                     store.permission_value("kick-member", TEST_CLAN, TEST_CHANNEL),
                     Some(false),
                     "every other default is denied"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_fetch_that_started_before_the_change_cannot_overwrite_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_granted(store);
+                let key = ChannelPermissionKey {
+                    clan_id: TEST_CLAN,
+                    channel_id: TEST_CHANNEL,
+                };
+
+                let patched_at_start = store.patch_generation;
+                store.handle_permission_changed(&permission_changed(TEST_ME), cx);
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "precondition: the event revoked delete-message"
+                );
+
+                assert_ne!(
+                    store.patch_generation, patched_at_start,
+                    "the patch must be visible to a fetch that is already in flight"
+                );
+
+                if store.patch_generation == patched_at_start {
+                    store.cache.insert(
+                        key,
+                        HashMap::from([(PERMISSION_DELETE_MESSAGE.to_string(), true)]),
+                        None,
+                    );
+                }
+
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "a response that predates the revocation must not hand the permission back"
+                );
+                assert_eq!(
+                    store.permission_value(PERMISSION_MANAGE_THREAD, TEST_CLAN, TEST_CHANNEL),
+                    Some(true),
+                    "discarding the response must not blank the whole channel — a stale entry \
+                     reads as None, which denies every permission at once"
                 );
             });
         });

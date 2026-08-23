@@ -46,9 +46,6 @@ pub fn t(locale: &str, key: &'static str) -> &'static str {
     key
 }
 
-/// Server status codes carry no text of their own; React renders them through the
-/// `errors:error_<code>` bundle (`channels.slice.ts`, `threads.slice.ts`). Unknown codes fall
-/// back to `error_2` ("Unknown error"), the same slot React lands on for an unmapped code.
 pub fn api_error(locale: &str, code: u32) -> &'static str {
     const KEYS: [&str; 17] = [
         "errors.error_0",

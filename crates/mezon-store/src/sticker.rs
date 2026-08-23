@@ -493,9 +493,6 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
     })
 }
 
-/// `StickerCreateEvent` carries no `media_type`, yet `AddClanSticker` creates clan sounds
-/// through the same call. React infers the kind from the source URL
-/// (`settingSticker.slice.ts`); do the same so a new sound never lands in the sticker picker.
 fn is_audio_source(source: &str) -> bool {
     let lowered = source.to_ascii_lowercase();
     lowered.ends_with(".mp3") || lowered.ends_with(".wav") || lowered.contains("/sounds/")
