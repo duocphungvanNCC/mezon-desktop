@@ -139,7 +139,12 @@ impl ActivityStore {
             .cloned()
             .map(activity_from_api)
             .collect::<Vec<_>>();
-        self.apply_activities(next, cx);
+        if next == self.activities {
+            return;
+        }
+        self.activities = next;
+        cx.emit(ActivityEvent::Changed);
+        cx.notify();
     }
 
     fn apply_activities(&mut self, next: Vec<UserActivity>, cx: &mut Context<Self>) {
@@ -266,6 +271,36 @@ mod tests {
                 ));
                 store.handle_list_activity(&event, cx);
                 assert_eq!(store.activities(), &[work(2, "Spotify")]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_pushed_roster_does_not_satisfy_the_fetch_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, _cx| {
+                assert!(
+                    !store.freshness.is_fresh(crate::CACHE_TTL),
+                    "precondition: a new store is stale"
+                );
+            });
+            store.update(cx, |store, cx| {
+                let event = RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(
+                    realtime::ListActivity {
+                        acts: vec![api::UserActivity {
+                            user_id: 2,
+                            activity_name: "Spotify".into(),
+                            activity_type: ACTIVITY_TYPE_WORK,
+                            ..Default::default()
+                        }],
+                    },
+                ));
+                store.handle_list_activity(&event, cx);
+                assert!(
+                    !store.freshness.is_fresh(crate::CACHE_TTL),
+                    "a socket push must not stand in for a fetch — the push may be partial"
+                );
             });
         });
     }

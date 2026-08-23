@@ -143,7 +143,10 @@ impl ChannelRolePermissionsStore {
             return;
         };
         let me = BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx));
-        if me.is_some_and(|me| set.caller == me.get().to_string()) {
+        let caller = set.caller.parse::<i64>().ok();
+        if let (Some(me), Some(caller)) = (me, caller)
+            && me.get() == caller
+        {
             return;
         }
         let Some(entity) = permission_entity_of(set) else {

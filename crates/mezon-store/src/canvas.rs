@@ -149,7 +149,7 @@ impl CanvasStore {
             return;
         }
         let canvas_id = canvas.id.to_string();
-        if canvas.status == CANVAS_STATUS_CREATED {
+        if canvas.status == CANVAS_STATUS_CREATED || canvas.status == CANVAS_STATUS_UPDATE {
             let known = self
                 .cache
                 .get_mut(&channel_id)
@@ -157,12 +157,14 @@ impl CanvasStore {
                 .map(|item| {
                     item.title = canvas.title.clone();
                     item.is_default = canvas.is_default;
-                    item.creator_id = UserId(canvas.editor_id);
+                    if canvas.status == CANVAS_STATUS_CREATED {
+                        item.creator_id = UserId(canvas.editor_id);
+                    }
                 })
                 .is_some();
             if known {
                 cx.notify();
-            } else {
+            } else if canvas.status == CANVAS_STATUS_CREATED {
                 self.refresh(cx);
             }
             return;
@@ -620,12 +622,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_non_created_event_removes_the_canvas(cx: &mut gpui::TestAppContext) {
+    fn an_update_event_renames_in_place_and_never_removes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = init_canvas_store(cx);
             store.update(cx, |store, cx| {
                 seed(store, "42", &[7, 8]);
-                store.handle_canvas_event(&canvas_event(7, 42, CANVAS_STATUS_UPDATE, ""), cx);
+                store.handle_canvas_event(&canvas_event(7, 42, CANVAS_STATUS_UPDATE, "edited"), cx);
+                let ids: Vec<_> = store.canvases().iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["7", "8"],
+                    "saving a canvas must not drop it from the list"
+                );
+                assert_eq!(store.canvases()[0].title, "edited");
+                assert_eq!(
+                    store.canvases()[0].creator_id,
+                    UserId(1),
+                    "an edit by someone else must not rewrite the author"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unknown_status_removes_the_canvas(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_canvas_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, "42", &[7, 8]);
+                store.handle_canvas_event(&canvas_event(7, 42, 3, ""), cx);
                 let ids: Vec<_> = store.canvases().iter().map(|c| c.id.as_str()).collect();
                 assert_eq!(ids, ["8"]);
             });
@@ -639,7 +664,7 @@ mod tests {
             store.update(cx, |store, cx| {
                 seed(store, "42", &[7]);
                 store.cache.insert("99".to_string(), Vec::new(), None);
-                store.handle_canvas_event(&canvas_event(7, 99, CANVAS_STATUS_UPDATE, ""), cx);
+                store.handle_canvas_event(&canvas_event(7, 99, 3, ""), cx);
                 assert_eq!(store.canvases().len(), 1, "the open channel is untouched");
                 assert!(!store.cache.is_fresh("99", crate::CACHE_TTL));
             });

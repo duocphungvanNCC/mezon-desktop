@@ -199,21 +199,9 @@ impl StickerStore {
             return;
         };
         let changed = match message {
-            realtime::envelope::Message::StickerCreateEvent(e) => match sticker_from_event(e) {
-                Some(sticker) => {
-                    self.insert(sticker);
-                    true
-                }
-                None => false,
-            },
+            realtime::envelope::Message::StickerCreateEvent(e) => self.insert_from_event(e),
             realtime::envelope::Message::StickerUpdateEvent(e) => {
-                match self.by_id.get_mut(&e.sticker_id.to_string()) {
-                    Some(sticker) if !e.shortname.is_empty() => {
-                        sticker.shortname = e.shortname.clone();
-                        true
-                    }
-                    _ => false,
-                }
+                self.rename(&e.sticker_id.to_string(), &e.shortname)
             }
             realtime::envelope::Message::StickerDeleteEvent(e) => {
                 self.remove(&e.sticker_id.to_string())
@@ -226,12 +214,50 @@ impl StickerStore {
         }
     }
 
-    fn remove(&mut self, id: &str) -> bool {
-        if self.by_id.remove(id).is_none() {
+    fn insert_from_event(&mut self, e: &realtime::StickerCreateEvent) -> bool {
+        if e.sticker_id == 0 || e.source.is_empty() {
             return false;
         }
-        self.order.retain(|existing| existing != id);
-        true
+        if is_audio_source(&e.source) {
+            let sound = sound_from_event(e);
+            if self.sounds.iter().any(|existing| existing.id == sound.id) {
+                return false;
+            }
+            self.sounds.push(sound);
+            return true;
+        }
+        match sticker_from_event(e) {
+            Some(sticker) => {
+                self.insert(sticker);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn rename(&mut self, id: &str, shortname: &str) -> bool {
+        if shortname.is_empty() {
+            return false;
+        }
+        if let Some(sticker) = self.by_id.get_mut(id) {
+            sticker.shortname = shortname.to_string();
+            return true;
+        }
+        if let Some(sound) = self.sounds.iter_mut().find(|sound| sound.id == id) {
+            sound.shortname = shortname.to_string();
+            return true;
+        }
+        false
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        if self.by_id.remove(id).is_some() {
+            self.order.retain(|existing| existing != id);
+            return true;
+        }
+        let before = self.sounds.len();
+        self.sounds.retain(|sound| sound.id != id);
+        self.sounds.len() != before
     }
 
     fn insert(&mut self, sticker: Sticker) {
@@ -467,6 +493,30 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
     })
 }
 
+/// `StickerCreateEvent` carries no `media_type`, yet `AddClanSticker` creates clan sounds
+/// through the same call. React infers the kind from the source URL
+/// (`settingSticker.slice.ts`); do the same so a new sound never lands in the sticker picker.
+fn is_audio_source(source: &str) -> bool {
+    let lowered = source.to_ascii_lowercase();
+    lowered.ends_with(".mp3") || lowered.ends_with(".wav") || lowered.contains("/sounds/")
+}
+
+fn sound_from_event(e: &realtime::StickerCreateEvent) -> ClanSound {
+    ClanSound {
+        id: e.sticker_id.to_string(),
+        shortname: if e.shortname.is_empty() {
+            "sound.mp3".to_string()
+        } else {
+            e.shortname.clone()
+        },
+        src: e.source.clone(),
+        clan_id: e.clan_id.to_string(),
+        clan_name: e.clan_name.clone(),
+        logo: e.logo.clone(),
+        creator_id: e.creator_id.to_string(),
+    }
+}
+
 fn sticker_from_event(e: &realtime::StickerCreateEvent) -> Option<Sticker> {
     if e.sticker_id == 0 || e.source.is_empty() {
         return None;
@@ -579,6 +629,57 @@ mod tests {
                 store.handle_sticker_event(&deleted, cx);
                 assert!(store.get("7").is_none());
                 assert!(store.all().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_created_sound_never_lands_in_the_sticker_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_sticker_store(cx);
+            store.update(cx, |store, cx| {
+                for (id, source) in [
+                    (11i64, "https://cdn/clip.mp3"),
+                    (12, "https://cdn/clip.WAV"),
+                    (13, "https://cdn/sounds/clip.ogg"),
+                ] {
+                    let created =
+                        RealtimeEvent::Unhandled(realtime::envelope::Message::StickerCreateEvent(
+                            realtime::StickerCreateEvent {
+                                sticker_id: id,
+                                source: source.into(),
+                                shortname: "boom".into(),
+                                clan_id: 3,
+                                clan_name: "MyClan".into(),
+                                ..Default::default()
+                            },
+                        ));
+                    store.handle_sticker_event(&created, cx);
+                }
+                assert!(store.all().is_empty(), "sounds must stay out of the picker");
+                assert_eq!(store.sounds().len(), 3);
+
+                let renamed = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerUpdateEvent(realtime::StickerUpdateEvent {
+                        sticker_id: 11,
+                        shortname: "bang".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&renamed, cx);
+                assert_eq!(
+                    store.get_sound("11").map(|s| s.shortname.as_str()),
+                    Some("bang")
+                );
+
+                let deleted = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerDeleteEvent(realtime::StickerDeleteEvent {
+                        sticker_id: 11,
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&deleted, cx);
+                assert_eq!(store.sounds().len(), 2);
             });
         });
     }
