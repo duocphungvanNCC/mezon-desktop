@@ -1211,6 +1211,16 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn close_modal_view(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|modal| modal.entity_id() == view)
+        {
+            self.close_modal(cx);
+        }
+    }
+
     pub fn has_modal(&self) -> bool {
         self.modal.is_some()
     }

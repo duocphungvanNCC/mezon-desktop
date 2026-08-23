@@ -3148,6 +3148,7 @@ impl TransportClient {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         tracing::debug!("TransportClient::update_account() called");
 
@@ -3165,6 +3166,7 @@ impl TransportClient {
                         avatar_url.as_deref(),
                         about_me.as_deref(),
                         logo.as_deref(),
+                        dob_seconds,
                     )
                     .await
             })

@@ -92,6 +92,21 @@ mod tests {
     }
 
     #[test]
+    fn age_restricted_birthday_form_is_localized() {
+        assert_eq!(t("en", "ageRestricted.dateOfBirth"), "Date of birth");
+        assert_eq!(t("en", "ageRestricted.selectDay"), "Day");
+        assert_eq!(t("vi", "ageRestricted.selectYear"), "Năm");
+        assert_eq!(t("vi", "ageRestricted.month.january"), "Tháng 1");
+        for locale in LOCALES {
+            assert_ne!(
+                t(locale, "ageRestricted.month.december"),
+                "ageRestricted.month.december",
+                "locale {locale} is missing the december label"
+            );
+        }
+    }
+
+    #[test]
     fn full_react_corpus_present() {
         assert_eq!(t("en", "clan.title"), "Customize Your Clan");
         assert_eq!(t("en", "channelCreator.monthsShort.0"), "JAN");
