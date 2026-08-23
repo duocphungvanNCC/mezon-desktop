@@ -33,6 +33,7 @@ mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
+mod transfer_owner_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
@@ -55,6 +56,7 @@ use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use disable_clan_community_modal::DisableClanCommunityModal;
+use transfer_owner_modal::{TransferOwnerModal, TransferOwnerParty};
 use upload_limit_modal::UploadLimitModal;
 use wallet_not_available_modal::WalletNotAvailableModal;
 
@@ -865,6 +867,88 @@ impl Shell {
                 error_message,
                 reason_input,
             }
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_transfer_ownership(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        new_owner_id: mezon_store::UserId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        let members = mezon_store::ClanMembersStore::global(cx);
+        let party = |user_id: mezon_store::UserId| {
+            members
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| TransferOwnerParty {
+                    name: member.name().to_string().into(),
+                    avatar: member.avatar().to_string().into(),
+                })
+                .unwrap_or_else(|| TransferOwnerParty {
+                    name: SharedString::default(),
+                    avatar: SharedString::default(),
+                })
+        };
+        let Some(current_user_id) = mezon_store::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return;
+        };
+        let current_owner = party(current_user_id);
+        let new_owner = party(new_owner_id);
+        let title: SharedString = mezon_i18n::t(locale, "transferOwner.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "transferOwner.description")
+            .replace("{{clanName}}", &clan_name)
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let confirmation: SharedString = mezon_i18n::t(locale, "transferOwner.confirmation")
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let transfer_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.transfer")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.cancel")
+            .to_string()
+            .into();
+        let success_message: SharedString = mezon_i18n::t(locale, "common.transferredSuccessfully")
+            .to_string()
+            .into();
+        let error_message: SharedString = mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+        )
+        .to_string()
+        .into();
+        let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let view = cx.new(|cx| TransferOwnerModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            new_owner_id,
+            title,
+            description,
+            confirmation,
+            transfer_label,
+            cancel_label,
+            success_message,
+            error_message,
+            current_owner,
+            new_owner,
+            avatar_cache,
+            acknowledged: false,
+            pending: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

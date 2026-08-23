@@ -438,6 +438,10 @@ pub enum ClanEvent {
     /// A clan was removed (server push).
     Deleted(ClanId),
     Joined(ClanId),
+    OwnerChanged {
+        clan_id: ClanId,
+        new_owner_id: UserId,
+    },
 }
 
 /// Clan store — owns the clan list, fetches it over REST, and self-subscribes to realtime
@@ -735,6 +739,40 @@ impl ClanList {
                 .map_err(|_| "store dropped".to_string())?;
             Ok(())
         })
+    }
+
+    pub fn transfer_ownership(
+        &mut self,
+        clan_id: ClanId,
+        new_owner_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.transfer_ownership(clan_id.get(), new_owner_id.get())
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                this.set_clan_creator(clan_id, new_owner_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    fn set_clan_creator(&mut self, clan_id: ClanId, creator_id: UserId, cx: &mut Context<Self>) {
+        let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) else {
+            return;
+        };
+        if clan.creator_id == creator_id {
+            return;
+        }
+        clan.creator_id = creator_id;
+        cx.emit(ClanEvent::OwnerChanged {
+            clan_id,
+            new_owner_id: creator_id,
+        });
+        cx.notify();
     }
 
     pub fn delete_clan(
@@ -2044,6 +2082,34 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
+    #[gpui::test]
+    fn transferring_ownership_moves_creator_id_and_emits_once(cx: &mut gpui::TestAppContext) {
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (clan_list, _sub) = cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            let counter = emitted.clone();
+            let sub = cx.subscribe(&clan_list, move |_, event: &ClanEvent, _| {
+                if matches!(event, ClanEvent::OwnerChanged { .. }) {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            (clan_list, sub)
+        });
+
+        cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.set_clan_creator(ClanId(1), UserId(42), cx);
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(42));
+
+                list.set_clan_creator(ClanId(1), UserId(42), cx);
+                list.set_clan_creator(ClanId(99), UserId(42), cx);
+            });
+        });
+
+        assert_eq!(emitted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[gpui::test]
     fn user_clan_removed_keeps_the_clan_when_someone_else_is_kicked(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
