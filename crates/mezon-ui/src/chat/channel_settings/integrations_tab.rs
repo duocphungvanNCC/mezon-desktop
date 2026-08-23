@@ -1560,7 +1560,8 @@ mod tests {
             "Bạn chưa có webhook nào!"
         );
         for locale in [
-            "en", "vi", "ru", "es", "tt", "de", "it", "pt", "jpn", "kr", "swe",
+            "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+            "fr", "nl",
         ] {
             let label = mezon_i18n::t(locale, "integrations.noWebhooks");
             assert_ne!(label, "integrations.noWebhooks");

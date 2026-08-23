@@ -21,6 +21,11 @@ fn data(locale: &str) -> &'static HashMap<String, String> {
         "jpn" => load!("../../../assets/i18n/jpn.json"),
         "kr" => load!("../../../assets/i18n/kr.json"),
         "swe" => load!("../../../assets/i18n/swe.json"),
+        "ukr" => load!("../../../assets/i18n/ukr.json"),
+        "pl" => load!("../../../assets/i18n/pl.json"),
+        "nl" => load!("../../../assets/i18n/nl.json"),
+        "fr" => load!("../../../assets/i18n/fr.json"),
+        "blr" => load!("../../../assets/i18n/blr.json"),
         _ => load!("../../../assets/i18n/en.json"),
     }
 }
@@ -41,12 +46,40 @@ pub fn t(locale: &str, key: &'static str) -> &'static str {
     key
 }
 
+/// Server status codes carry no text of their own; React renders them through the
+/// `errors:error_<code>` bundle (`channels.slice.ts`, `threads.slice.ts`). Unknown codes fall
+/// back to `error_2` ("Unknown error"), the same slot React lands on for an unmapped code.
+pub fn api_error(locale: &str, code: u32) -> &'static str {
+    const KEYS: [&str; 17] = [
+        "errors.error_0",
+        "errors.error_1",
+        "errors.error_2",
+        "errors.error_3",
+        "errors.error_4",
+        "errors.error_5",
+        "errors.error_6",
+        "errors.error_7",
+        "errors.error_8",
+        "errors.error_9",
+        "errors.error_10",
+        "errors.error_11",
+        "errors.error_12",
+        "errors.error_13",
+        "errors.error_14",
+        "errors.error_15",
+        "errors.error_16",
+    ];
+    let key = KEYS.get(code as usize).copied().unwrap_or(KEYS[2]);
+    t(locale, key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::t;
 
     const LOCALES: &[&str] = &[
-        "en", "vi", "ru", "es", "tt", "de", "it", "pt", "jpn", "kr", "swe",
+        "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+        "fr", "nl",
     ];
 
     #[test]
@@ -60,6 +93,26 @@ mod tests {
     #[test]
     fn unknown_locale_falls_back_to_english() {
         assert_eq!(t("xx", "common.settings"), "Settings");
+    }
+
+    #[test]
+    fn api_error_maps_status_codes_and_clamps_unknown_ones() {
+        assert_eq!(super::api_error("en", 7), "Permission denied");
+        assert_eq!(
+            super::api_error("en", 16),
+            "Session expired. Please log in again."
+        );
+        assert_eq!(super::api_error("en", 99), "Unknown error");
+        assert_ne!(super::api_error("vi", 7), super::api_error("en", 7));
+        for locale in LOCALES {
+            for code in 0..=16u32 {
+                let message = super::api_error(locale, code);
+                assert!(
+                    !message.starts_with("errors.error_"),
+                    "{locale} code {code} fell through to the raw key"
+                );
+            }
+        }
     }
 
     #[test]

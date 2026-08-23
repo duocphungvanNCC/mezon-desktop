@@ -10,7 +10,9 @@ use futures::future::Shared;
 use gpui::{
     App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, Global, Subscription, Task,
 };
-use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc, is_channel_limit_api_error};
+use mezon_client::transport::{
+    ApiCategoryDesc, ApiChannelDesc, api_status_from_error, is_channel_limit_api_error,
+};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
     build_channel_app_url,
@@ -364,6 +366,7 @@ pub enum CreateChannelError {
     InvalidName,
     DuplicateName,
     ChannelLimitExceeded,
+    Api(u32),
     Other(String),
 }
 
@@ -387,6 +390,9 @@ pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
 fn map_create_channel_api_error(err: anyhow::Error) -> CreateChannelError {
     if is_channel_limit_api_error(&err) {
         return CreateChannelError::ChannelLimitExceeded;
+    }
+    if let Some(status) = api_status_from_error(&err) {
+        return CreateChannelError::Api(status.code);
     }
     CreateChannelError::Other(err.to_string())
 }
@@ -2728,6 +2734,11 @@ impl ChannelList {
                 return Task::ready(Err(UpdateChannelOverviewError::Other(
                     "channel limit exceeded".into(),
                 )));
+            }
+            Err(CreateChannelError::Api(code)) => {
+                return Task::ready(Err(UpdateChannelOverviewError::Other(format!(
+                    "API error: code={code}"
+                ))));
             }
             Err(CreateChannelError::Other(msg)) => {
                 return Task::ready(Err(UpdateChannelOverviewError::Other(msg)));
@@ -5348,6 +5359,11 @@ mod tests {
             CreateChannelError::ChannelLimitExceeded
         );
         let err = anyhow::Error::from(ApiStatusError { code: 13 });
+        assert_eq!(
+            map_create_channel_api_error(err),
+            CreateChannelError::Api(13)
+        );
+        let err = anyhow::anyhow!("socket closed");
         assert!(matches!(
             map_create_channel_api_error(err),
             CreateChannelError::Other(_)

@@ -67,6 +67,13 @@ pub enum RealtimeKind {
     UnblockFriend,
     TokenSent,
     RoleEvent,
+    PermissionSet,
+    PermissionChanged,
+    StickerCreate,
+    StickerUpdate,
+    StickerDelete,
+    CanvasEvent,
+    ListActivity,
     WebrtcSignaling,
     IncomingCallPush,
     Webhook,
@@ -126,6 +133,27 @@ impl RealtimeKind {
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
             RealtimeEvent::Webhook(_) => Self::Webhook,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
+            RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionSetEvent(_)) => {
+                Self::PermissionSet
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionChangedEvent(_)) => {
+                Self::PermissionChanged
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerCreateEvent(_)) => {
+                Self::StickerCreate
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerUpdateEvent(_)) => {
+                Self::StickerUpdate
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerDeleteEvent(_)) => {
+                Self::StickerDelete
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::CanvasEvent(_)) => {
+                Self::CanvasEvent
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(_)) => {
+                Self::ListActivity
+            }
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             RealtimeEvent::IncomingCallPush(_) => Self::IncomingCallPush,
             _ => return None,
