@@ -26,8 +26,22 @@ fn minimal_pdf() -> Vec<u8> {
     pdf.into_bytes()
 }
 
+fn backend_ready() -> bool {
+    if mezon_pdf::is_supported() {
+        return true;
+    }
+    eprintln!(
+        "skipping: {}",
+        mezon_pdf::unavailable_reason().unwrap_or_else(|| "pdf backend unavailable".to_string())
+    );
+    false
+}
+
 #[test]
 fn renders_a_page_to_an_opaque_bitmap() {
+    if !backend_ready() {
+        return;
+    }
     let doc = mezon_pdf::PdfDocument::from_bytes(minimal_pdf()).expect("open pdf");
     assert_eq!(doc.page_count(), 1);
 
@@ -76,6 +90,9 @@ fn ink_bounds(bitmap: &mezon_pdf::PdfBitmap) -> (u32, u32, u32, u32) {
 
 #[test]
 fn rejects_a_page_index_past_the_end() {
+    if !backend_ready() {
+        return;
+    }
     let doc = mezon_pdf::PdfDocument::from_bytes(minimal_pdf()).expect("open pdf");
     assert!(doc.page_size(1).is_err());
     assert!(doc.render_page(1, 100, 100).is_err());
@@ -83,5 +100,8 @@ fn rejects_a_page_index_past_the_end() {
 
 #[test]
 fn rejects_bytes_that_are_not_a_pdf() {
+    if !backend_ready() {
+        return;
+    }
     assert!(mezon_pdf::PdfDocument::from_bytes(b"not a pdf at all".to_vec()).is_err());
 }
