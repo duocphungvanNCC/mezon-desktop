@@ -3079,7 +3079,6 @@ impl ChannelList {
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
-                let age_restricted = (!e.topic.is_empty()).then_some(e.age_restricted);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3087,7 +3086,7 @@ impl ChannelList {
                         id,
                         label.clone(),
                         topic.clone(),
-                        age_restricted,
+                        None,
                         e.channel_private,
                     ) {
                         changed = true;
@@ -5900,6 +5899,31 @@ mod tests {
         assert_eq!(c[0].channels[0].topic, "rules channel");
         assert_eq!(c[0].channels[0].age_restricted, 1);
         assert_eq!(c[0].channels[0].name, "alpha");
+    }
+
+    #[test]
+    fn a_rename_leaves_the_age_restricted_flag_alone() {
+        let mut c = categories();
+        assert!(update_channel(
+            &mut c,
+            ChannelId(10),
+            None,
+            Some("rules channel".into()),
+            Some(1),
+            false,
+        ));
+        assert!(update_channel(
+            &mut c,
+            ChannelId(10),
+            Some("renamed".into()),
+            Some("new topic".into()),
+            None,
+            false,
+        ));
+        assert_eq!(
+            c[0].channels[0].age_restricted, 1,
+            "an update that says nothing about the age gate must not clear it"
+        );
     }
 
     #[test]
