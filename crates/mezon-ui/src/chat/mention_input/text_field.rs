@@ -475,7 +475,7 @@ impl MentionInputState {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_next_word_end(
@@ -492,7 +492,7 @@ impl MentionInputState {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_start(
@@ -509,7 +509,7 @@ impl MentionInputState {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_end(
@@ -526,7 +526,7 @@ impl MentionInputState {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -807,7 +807,7 @@ impl MentionInputState {
                     self.content[self.selected_range.clone()].to_string(),
                 ));
             }
-            self.replace_text_in_range(None, "", window, cx)
+            self.delete_selected_range(window, cx)
         }
     }
 

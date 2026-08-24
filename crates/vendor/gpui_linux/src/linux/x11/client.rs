@@ -1675,9 +1675,9 @@ impl X11Client {
                     state.restore_xim(ximc, xim_handler);
                 }
                 drop(state);
+                self.reset_ime();
                 self.drain_dbus_im();
                 self.0.borrow_mut().keyboard_focused_window = None;
-                self.reset_ime();
                 window.handle_ime_unmark();
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {

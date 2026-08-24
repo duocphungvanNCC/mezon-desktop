@@ -468,6 +468,14 @@ mod tests {
     }
 
     #[test]
+    fn ime_replace_with_none_deletes_whole_mark_not_partial_selection() {
+        let selected = 2..4;
+        let marked = 0..5;
+        assert_eq!(ime_replace_range(&selected, Some(&marked)), marked);
+        assert_ne!(ime_replace_range(&selected, Some(&marked)), selected);
+    }
+
+    #[test]
     fn discarded_ime_commit_swallows_the_echoed_preedit() {
         let mut discard = Some("hoa".to_string());
         assert!(swallow_discarded_ime_commit(
