@@ -2679,7 +2679,7 @@ impl ChannelList {
         clan_id: ClanId,
         channel_id: ChannelId,
         topic: String,
-        age_restricted: i32,
+        age_restricted: Option<i32>,
         e2ee: i32,
         app_id: i64,
         cx: &mut Context<Self>,
@@ -2694,7 +2694,7 @@ impl ChannelList {
                 channel_id,
                 None,
                 Some(topic),
-                Some(age_restricted),
+                age_restricted,
                 channel.private,
             );
             if changed {

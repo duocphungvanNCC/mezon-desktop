@@ -102,6 +102,7 @@ pub struct Shell {
     modal: Option<AnyView>,
     modal_underlay: Option<(AnyView, bool, bool, Option<gpui::FocusHandle>)>,
     modal_fullscreen: bool,
+    modal_backdrop_dismissible: bool,
     command_palette_open: bool,
     next_id: usize,
 }
@@ -116,6 +117,7 @@ impl Shell {
             modal: None,
             modal_underlay: None,
             modal_fullscreen: false,
+            modal_backdrop_dismissible: true,
             command_palette_open: false,
             next_id: 0,
         });
@@ -294,8 +296,20 @@ impl Shell {
         self.modal_underlay = None;
         self.command_palette_open = false;
         self.modal_fullscreen = false;
+        self.modal_backdrop_dismissible = true;
         self.modal = Some(view);
         cx.notify();
+    }
+
+    /// A modal a stray click must not throw away: the backdrop ignores mouse
+    /// presses, `Esc` still dismisses it so the user is never trapped behind it.
+    pub fn show_modal_keyboard_dismiss_only(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.show_modal(view, cx);
+        self.modal_backdrop_dismissible = false;
+    }
+
+    pub fn modal_view_id(&self) -> Option<gpui::EntityId> {
+        self.modal.as_ref().map(|modal| modal.entity_id())
     }
 
     /// Show `view` as a fullscreen modal (e.g. an image/media viewer): it renders its own
@@ -1389,6 +1403,7 @@ impl Shell {
                         .top_0()
                         .left_0()
                         .size_full()
+                        .occlude()
                         .key_context("modal_backdrop")
                         .on_action(|_: &::menu::Cancel, window, cx| {
                             Shell::global(cx)
@@ -1406,14 +1421,18 @@ impl Shell {
                         .items_center()
                         .justify_center()
                         .bg(hsla(0., 0., 0., 0.5))
+                        .occlude()
                         .key_context("modal_backdrop")
                         .on_action(|_: &::menu::Cancel, window, cx| {
                             Shell::global(cx)
                                 .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         })
                         .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            Shell::global(cx)
-                                .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                if shell.modal_backdrop_dismissible {
+                                    shell.dismiss_modal(window, cx);
+                                }
+                            });
                         })
                         .child(div().occlude().child(view))
                         .into_any_element()

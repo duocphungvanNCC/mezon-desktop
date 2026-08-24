@@ -1064,6 +1064,23 @@ pub fn is_adult_dob_on(dob_seconds: u32, today: NaiveDate) -> bool {
     adult_date(born.date_naive()).is_some_and(|adult_on| adult_on <= today)
 }
 
+/// A birthday the client can act on: present, decodable, and not in the future.
+/// The server hands brand-new accounts a placeholder `dob_seconds` far ahead of
+/// today, which is neither a real birthday nor the `0` that means "never set".
+pub fn dob_needs_entry(dob_seconds: u32) -> bool {
+    dob_needs_entry_on(dob_seconds, Utc::now().date_naive())
+}
+
+pub fn dob_needs_entry_on(dob_seconds: u32, today: NaiveDate) -> bool {
+    if dob_seconds == 0 {
+        return true;
+    }
+    let Some(born) = DateTime::from_timestamp(i64::from(dob_seconds), 0) else {
+        return true;
+    };
+    born.date_naive() > today
+}
+
 fn adult_date(born: NaiveDate) -> Option<NaiveDate> {
     let year = born.year() + ADULT_AGE_YEARS;
     born.with_year(year)
@@ -1105,6 +1122,43 @@ fn format_device_last_active(seconds: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_or_impossible_birthday_asks_for_entry() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 24).expect("valid date");
+        let secs = |y, m, d| {
+            NaiveDate::from_ymd_opt(y, m, d)
+                .expect("valid date")
+                .and_hms_opt(0, 0, 0)
+                .expect("valid time")
+                .and_utc()
+                .timestamp() as u32
+        };
+
+        assert!(dob_needs_entry_on(0, today), "never set");
+        assert!(
+            dob_needs_entry_on(secs(2042, 7, 14), today),
+            "a birthday in the future is a server placeholder, not a birthday"
+        );
+        assert!(!dob_needs_entry_on(secs(2026, 8, 24), today), "born today");
+        assert!(!dob_needs_entry_on(secs(1997, 4, 4), today), "adult");
+        assert!(
+            !dob_needs_entry_on(secs(2015, 1, 1), today),
+            "a real minor already told us their birthday"
+        );
+    }
+
+    #[test]
+    fn a_future_birthday_is_never_adult() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 24).expect("valid date");
+        let future = NaiveDate::from_ymd_opt(2042, 7, 14)
+            .expect("valid date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid time")
+            .and_utc()
+            .timestamp() as u32;
+        assert!(!is_adult_dob_on(future, today));
+    }
+
     use super::*;
 
     #[test]

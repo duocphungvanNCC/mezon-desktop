@@ -286,6 +286,7 @@
   "ageRestricted.continue": "계속",
   "ageRestricted.dateOfBirth": "생년월일",
   "ageRestricted.description": "이 채널은 성인용 콘텐츠를 포함하며 연령 제한이 표시됩니다. 계속하시겠습니까?",
+  "ageRestricted.enterBirthday": "생년월일 입력",
   "ageRestricted.month.april": "4월",
   "ageRestricted.month.august": "8월",
   "ageRestricted.month.december": "12월",
