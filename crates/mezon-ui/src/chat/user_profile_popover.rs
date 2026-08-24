@@ -2,7 +2,7 @@ use gpui::{
     Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, DismissEvent, Div, ElementId,
     EventEmitter, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, ParentElement,
     Render, SharedString, Stateful, StyleRefinement, Styled, Window, deferred, div, img,
-    prelude::*, px, svg,
+    prelude::*, px,
 };
 use mezon_store::{
     BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
@@ -903,30 +903,17 @@ impl Render for UserProfilePopover {
 const BANNER_ICON_BG: u32 = 0x272120;
 const BANNER_ICON_BG_HOVER: u32 = 0x1e1a19;
 const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
-const SHARE_CONTACT_BODY: u32 = 0x656369;
-const SHARE_CONTACT_CHECK: u32 = 0x549d5b;
-
 pub(crate) fn share_contact_icon() -> gpui::AnyElement {
-    div()
-        .relative()
+    img("icons/icon-share-contact.svg")
         .size(px(16.))
-        .child(
-            svg()
-                .path("icons/icon-share-contact-base.svg")
-                .size(px(16.))
-                .flex_none()
-                .text_color(gpui::rgb(SHARE_CONTACT_BODY)),
-        )
-        .child(
-            svg()
-                .path("icons/icon-share-contact-accent.svg")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(16.))
-                .flex_none()
-                .text_color(gpui::rgb(SHARE_CONTACT_CHECK)),
-        )
+        .flex_none()
+        .into_any_element()
+}
+
+pub(crate) fn friend_icon() -> gpui::AnyElement {
+    img("icons/icon-friend.svg")
+        .size(px(16.))
+        .flex_none()
         .into_any_element()
 }
 
@@ -1039,15 +1026,20 @@ fn render_banner_actions(
                 div()
                     .relative()
                     .child(
-                        banner_icon_button("profile-friend", IconName::IconFriend, false, false, {
-                            let entity = entity.clone();
-                            move |_: &ClickEvent, _window, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.friend_menu_open = !this.friend_menu_open;
-                                    cx.notify();
-                                });
-                            }
-                        })
+                        banner_icon_shell(
+                            "profile-friend",
+                            false,
+                            {
+                                let entity = entity.clone();
+                                move |_: &ClickEvent, _window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.friend_menu_open = !this.friend_menu_open;
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            friend_icon(),
+                        )
                         .into_any_element(),
                     )
                     .when(this.friend_menu_open, |el| {

@@ -1,7 +1,7 @@
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::chat::user_profile_popover::{
-    banner_icon_button, banner_icon_shell, format_member_since, share_contact_icon,
+    banner_icon_button, banner_icon_shell, format_member_since, friend_icon, share_contact_icon,
 };
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -718,7 +718,7 @@ fn render_profile_actions(
             .into_any_element();
     }
 
-    let friend_icon = match friend_state {
+    let friend_icon_name = match friend_state {
         Some(FriendState::Friend) => IconName::IconFriend,
         Some(FriendState::InviteSent) => IconName::PendingFriend,
         Some(FriendState::Blocked) => return actions.into_any_element(),
@@ -729,58 +729,78 @@ fn render_profile_actions(
     let action_display_name = display_name.to_string();
     let action_avatar = avatar.to_string();
     let action_locale = locale.to_string();
-    actions
-        .child(profile_action_button(
-            "full-profile-friend-state",
-            friend_icon,
-            match friend_state {
-                Some(FriendState::Friend) => mezon_i18n::t(locale, "common.friend"),
-                Some(FriendState::InviteSent) => mezon_i18n::t(locale, "common.pending"),
-                Some(FriendState::InviteReceived) => mezon_i18n::t(locale, "common.accept"),
-                _ => mezon_i18n::t(locale, "common.addFriend"),
-            },
-            move |_, window, cx| match friend_state {
-                Some(FriendState::Friend) => {
-                    UserProfileModal::close(cx);
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.confirm_remove_friend(
-                            user_id,
-                            &action_username,
-                            FriendRemovalKind::RemoveFriend,
-                            &action_locale,
-                            window,
-                            cx,
-                        );
-                    });
-                }
-                Some(FriendState::InviteSent) => {
-                    UserProfileModal::close(cx);
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.confirm_remove_friend(
-                            user_id,
-                            &action_username,
-                            FriendRemovalKind::CancelRequest,
-                            &action_locale,
-                            window,
-                            cx,
-                        );
-                    });
-                }
-                None => {
-                    FriendStore::global(cx).update(cx, |store, cx| {
-                        store.add_friend(
-                            user_id,
-                            action_username.clone(),
-                            action_display_name.clone(),
-                            action_avatar.clone(),
-                            cx,
-                        );
-                    });
-                }
-                _ => {}
-            },
-        ))
-        .into_any_element()
+    let friend_tooltip = match friend_state {
+        Some(FriendState::Friend) => mezon_i18n::t(locale, "common.friend"),
+        Some(FriendState::InviteSent) => mezon_i18n::t(locale, "common.pending"),
+        Some(FriendState::InviteReceived) => mezon_i18n::t(locale, "common.accept"),
+        _ => mezon_i18n::t(locale, "common.addFriend"),
+    };
+    let on_friend_click =
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| match friend_state {
+            Some(FriendState::Friend) => {
+                UserProfileModal::close(cx);
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_remove_friend(
+                        user_id,
+                        &action_username,
+                        FriendRemovalKind::RemoveFriend,
+                        &action_locale,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            Some(FriendState::InviteSent) => {
+                UserProfileModal::close(cx);
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_remove_friend(
+                        user_id,
+                        &action_username,
+                        FriendRemovalKind::CancelRequest,
+                        &action_locale,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            None => {
+                FriendStore::global(cx).update(cx, |store, cx| {
+                    store.add_friend(
+                        user_id,
+                        action_username.clone(),
+                        action_display_name.clone(),
+                        action_avatar.clone(),
+                        cx,
+                    );
+                });
+            }
+            _ => {}
+        };
+
+    if friend_state == Some(FriendState::Friend) {
+        actions
+            .child(
+                div()
+                    .id("full-profile-friend-state-tooltip")
+                    .tooltip(Tooltip::text(friend_tooltip))
+                    .child(banner_icon_shell(
+                        "full-profile-friend-state",
+                        false,
+                        on_friend_click,
+                        friend_icon(),
+                    )),
+            )
+            .into_any_element()
+    } else {
+        actions
+            .child(profile_action_button(
+                "full-profile-friend-state",
+                friend_icon_name,
+                friend_tooltip,
+                on_friend_click,
+            ))
+            .into_any_element()
+    }
 }
 
 fn profile_action_button(
