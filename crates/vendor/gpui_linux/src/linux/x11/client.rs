@@ -1368,6 +1368,14 @@ impl X11Client {
         true
     }
 
+    fn clear_preedit(&self, window: &X11WindowStatePtr) {
+        let composing = self.0.borrow().composing;
+        self.0.borrow_mut().composing = false;
+        if composing {
+            window.handle_ime_delete();
+        }
+    }
+
     fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
         let pending = self.0.borrow().escape_cancel_pending;
         if consume_escape_cancel_pending(&mut events, pending) {
@@ -1379,25 +1387,12 @@ impl X11Client {
                     self.0.borrow_mut().composing = false;
                     window.handle_ime_commit(text);
                 }
-                ImEvent::HidePreedit => {
-                    let composing = self.0.borrow().composing;
-                    self.0.borrow_mut().composing = false;
-                    if composing {
-                        window.handle_ime_unmark();
-                    }
-                }
+                ImEvent::HidePreedit => self.clear_preedit(window),
+                ImEvent::Preedit { ref text, .. } if text.is_empty() => self.clear_preedit(window),
                 ImEvent::Preedit { text, caret_chars } => {
-                    if text.is_empty() {
-                        let composing = self.0.borrow().composing;
-                        self.0.borrow_mut().composing = false;
-                        if composing {
-                            window.handle_ime_delete();
-                        }
-                    } else {
-                        self.0.borrow_mut().composing = true;
-                        let caret = super::caret_utf16_range(&text, caret_chars);
-                        window.handle_ime_preedit(text, caret);
-                    }
+                    self.0.borrow_mut().composing = true;
+                    let caret = super::caret_utf16_range(&text, caret_chars);
+                    window.handle_ime_preedit(text, caret);
                 }
                 ImEvent::DeleteSurrounding { offset, nchars } => {
                     if let Some(surrounding) = window.get_ime_surrounding() {
@@ -3928,6 +3923,27 @@ mod tests {
         let mut events = vec![ImEvent::Commit("hoa".into())];
         assert!(consume_escape_cancel_pending(&mut events, true));
         assert!(matches!(events[0], ImEvent::Commit(_)));
+    }
+
+    #[test]
+    fn fold_keeps_lone_preedit_clear_events() {
+        let hidden = fold_im_events(vec![ImEvent::HidePreedit]);
+        assert!(matches!(hidden.as_slice(), [ImEvent::HidePreedit]));
+
+        let emptied = fold_im_events(vec![ImEvent::Preedit {
+            text: String::new(),
+            caret_chars: 0,
+        }]);
+        assert!(matches!(
+            emptied.as_slice(),
+            [ImEvent::Preedit { text, .. }] if text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn fold_drops_preedit_clear_next_to_commit() {
+        let committed = fold_im_events(vec![ImEvent::Commit("được".into()), ImEvent::HidePreedit]);
+        assert!(matches!(committed.as_slice(), [ImEvent::Commit(_)]));
     }
 
     #[test]

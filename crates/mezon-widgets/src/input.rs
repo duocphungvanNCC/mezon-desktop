@@ -629,7 +629,7 @@ impl InputState {
             }
             self.extend_selection(prev, cx)
         }
-        self.replace_text_in_range(None, "", window, cx)
+        self.delete_selected_range(window, cx)
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
@@ -649,7 +649,12 @@ impl InputState {
             }
             self.extend_selection(next, cx)
         }
-        self.replace_text_in_range(None, "", window, cx)
+        self.delete_selected_range(window, cx)
+    }
+
+    fn delete_selected_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let range_utf16 = self.range_to_utf16(&self.selected_range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx)
     }
 
     fn on_mouse_down(
