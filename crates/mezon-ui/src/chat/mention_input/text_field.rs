@@ -29,11 +29,10 @@ use crate::components::primitives::text_actions::{
 };
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, arm_discard_for_marked_delete,
-    extend_range_for_granularity, granularity_for_click, home_target, ime_replace_range, line_end,
-    line_start, marked_caret_range, marked_range_after_delete, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce, surrounding_delete_range,
-    swallow_discarded_ime_commit,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -1074,26 +1073,14 @@ impl EntityInputHandler for MentionInputState {
         let range = self.clamp_range(range);
         let prior_marked = self.marked_range.clone();
 
-        let kind = if self.marked_range.is_some() {
-            EditKind::Insert
-        } else if new_text.is_empty() {
+        let kind = if new_text.is_empty() {
             EditKind::Delete
-        } else if range.is_empty() && !new_text.contains('\n') {
+        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
             EditKind::Insert
         } else {
             EditKind::Other
         };
         self.record_history(kind);
-
-        #[cfg(target_os = "linux")]
-        if new_text.is_empty() {
-            arm_discard_for_marked_delete(
-                &mut self.discard_ime_commit,
-                &self.content,
-                prior_marked.as_ref(),
-                &range,
-            );
-        }
 
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);

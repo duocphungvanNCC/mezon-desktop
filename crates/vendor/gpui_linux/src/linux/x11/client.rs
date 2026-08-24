@@ -169,30 +169,6 @@ fn ime_mode_modifier(keyval: u32) -> bool {
     )
 }
 
-fn rewrite_escape_cancel(events: &mut [ImEvent]) -> bool {
-    if events.iter().any(im_event_has_text) {
-        return false;
-    }
-    let mut converted = false;
-    for event in events {
-        if matches!(event, ImEvent::HidePreedit) {
-            *event = ImEvent::ClearPreedit;
-            converted = true;
-        }
-    }
-    converted
-}
-
-fn consume_escape_cancel_pending(events: &mut [ImEvent], pending: bool) -> bool {
-    if !pending {
-        return false;
-    }
-    if events.iter().any(im_event_has_text) {
-        return true;
-    }
-    rewrite_escape_cancel(events)
-}
-
 fn navigation_skips_ime(keyval: u32) -> bool {
     const TAB: u32 = 0xff09;
     const ISO_LEFT_TAB: u32 = 0xfe20;
@@ -245,10 +221,7 @@ fn maybe_append_fcitx_space(keyval: u32, events: &mut Vec<ImEvent>) {
     if !events.iter().any(|event| {
         matches!(
             event,
-            ImEvent::ClearPreedit
-                | ImEvent::HidePreedit
-                | ImEvent::Commit(_)
-                | ImEvent::Preedit { .. }
+            ImEvent::ClearPreedit | ImEvent::Commit(_) | ImEvent::Preedit { .. }
         )
     }) {
         return;
@@ -261,7 +234,7 @@ fn fold_im_events(events: Vec<ImEvent>) -> Vec<ImEvent> {
     events
         .into_iter()
         .filter(|event| match event {
-            ImEvent::ClearPreedit | ImEvent::HidePreedit => !has_text,
+            ImEvent::ClearPreedit => !has_text,
             ImEvent::Preedit { text, .. } if text.is_empty() => !has_text,
             _ => true,
         })
@@ -360,7 +333,6 @@ pub struct X11ClientState {
     im_watch_token: Option<RegistrationToken>,
     dbus_unavailable: bool,
     dbus_im_focused: bool,
-    escape_cancel_pending: bool,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     // TODO: Can the other updates to `modifiers` be removed so that this is unnecessary?
@@ -702,7 +674,6 @@ impl X11Client {
             im_watch_token: None,
             dbus_unavailable: false,
             dbus_im_focused: false,
-            escape_cancel_pending: false,
 
             compose_state,
             pre_edit_text: None,
@@ -1074,7 +1045,6 @@ impl X11Client {
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
         state.composing = false;
-        state.escape_cancel_pending = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
             return;
@@ -1136,9 +1106,6 @@ impl X11Client {
         if !self.0.borrow().dbus_im_focused && self.sync_dbus_im(None, true, true) {
             self.0.borrow_mut().dbus_im_focused = true;
             self.drain_dbus_im();
-        }
-        if !is_release {
-            self.0.borrow_mut().escape_cancel_pending = keyval == 0xff1b;
         }
         if shortcut_skips_ime(state, keyval) && !is_modifier {
             if !is_release {
@@ -1376,16 +1343,7 @@ impl X11Client {
         }
     }
 
-    fn unmark_preedit(&self, window: &X11WindowStatePtr) {
-        self.0.borrow_mut().composing = false;
-        window.handle_ime_unmark();
-    }
-
-    fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
-        let pending = self.0.borrow().escape_cancel_pending;
-        if consume_escape_cancel_pending(&mut events, pending) {
-            self.0.borrow_mut().escape_cancel_pending = false;
-        }
+    fn apply_im_events(&self, window: &X11WindowStatePtr, events: Vec<ImEvent>) {
         for event in fold_im_events(events) {
             match event {
                 ImEvent::Commit(text) => {
@@ -1393,7 +1351,6 @@ impl X11Client {
                     window.handle_ime_commit(text);
                 }
                 ImEvent::ClearPreedit => self.clear_preedit(window),
-                ImEvent::UnmarkPreedit | ImEvent::HidePreedit => self.unmark_preedit(window),
                 ImEvent::Preedit { ref text, .. } if text.is_empty() => self.clear_preedit(window),
                 ImEvent::Preedit { text, caret_chars } => {
                     self.0.borrow_mut().composing = true;
@@ -3908,32 +3865,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancel_keeps_latch_when_first_drain_has_no_hide() {
-        let mut first = vec![ImEvent::ForwardKey {
-            keyval: 0xff1b,
-            state: 0,
-            is_release: false,
-        }];
-        assert!(!consume_escape_cancel_pending(&mut first, true));
-        assert!(matches!(first[0], ImEvent::ForwardKey { .. }));
-
-        let mut second = vec![ImEvent::HidePreedit];
-        assert!(consume_escape_cancel_pending(&mut second, true));
-        assert!(matches!(second[0], ImEvent::ClearPreedit));
-    }
-
-    #[test]
-    fn escape_cancel_clears_latch_on_text_commit() {
-        let mut events = vec![ImEvent::Commit("hoa".into())];
-        assert!(consume_escape_cancel_pending(&mut events, true));
-        assert!(matches!(events[0], ImEvent::Commit(_)));
-    }
-
-    #[test]
     fn fold_keeps_lone_preedit_clear_events() {
-        let hidden = fold_im_events(vec![ImEvent::UnmarkPreedit]);
-        assert!(matches!(hidden.as_slice(), [ImEvent::UnmarkPreedit]));
-
         let cleared = fold_im_events(vec![ImEvent::ClearPreedit]);
         assert!(matches!(cleared.as_slice(), [ImEvent::ClearPreedit]));
 
@@ -3951,12 +3883,5 @@ mod tests {
     fn fold_drops_preedit_clear_next_to_commit() {
         let committed = fold_im_events(vec![ImEvent::Commit("được".into()), ImEvent::ClearPreedit]);
         assert!(matches!(committed.as_slice(), [ImEvent::Commit(_)]));
-    }
-
-    #[test]
-    fn escape_cancel_is_noop_when_latch_is_off() {
-        let mut events = vec![ImEvent::HidePreedit];
-        assert!(!consume_escape_cancel_pending(&mut events, false));
-        assert!(matches!(events[0], ImEvent::HidePreedit));
     }
 }

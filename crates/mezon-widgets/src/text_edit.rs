@@ -223,38 +223,24 @@ pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>)
     marked.cloned().unwrap_or_else(|| selected.clone())
 }
 
+fn offset_after_delete(offset: usize, deleted: &Range<usize>) -> usize {
+    if offset <= deleted.start {
+        offset
+    } else if offset <= deleted.end {
+        deleted.start
+    } else {
+        offset - (deleted.end - deleted.start)
+    }
+}
+
 pub fn marked_range_after_delete(
     marked: Option<&Range<usize>>,
     deleted: &Range<usize>,
 ) -> Option<Range<usize>> {
     let marked = marked?;
-    if deleted.end <= marked.start || deleted.start >= marked.end {
-        return Some(marked.clone());
-    }
-    if deleted.start <= marked.start && deleted.end >= marked.end {
-        return None;
-    }
-    if deleted.start >= marked.start && deleted.end <= marked.end {
-        let len = deleted.end - deleted.start;
-        return Some(marked.start..marked.end.saturating_sub(len));
-    }
-    None
-}
-
-pub fn arm_discard_for_marked_delete(
-    discard: &mut Option<String>,
-    content: &str,
-    marked: Option<&Range<usize>>,
-    deleted: &Range<usize>,
-) {
-    let Some(marked) = marked else {
-        return;
-    };
-    if deleted.start <= marked.start && deleted.end >= marked.end {
-        let end = marked.end.min(content.len());
-        let start = marked.start.min(end);
-        *discard = content.get(start..end).map(str::to_string);
-    }
+    let start = offset_after_delete(marked.start, deleted);
+    let end = offset_after_delete(marked.end, deleted);
+    (start < end).then_some(start..end)
 }
 
 pub fn swallow_discarded_ime_commit(
@@ -519,12 +505,35 @@ mod tests {
     }
 
     #[test]
-    fn arm_discard_for_full_marked_delete() {
-        let text = "được";
-        let len = text.len();
-        let mut discard = None;
-        arm_discard_for_marked_delete(&mut discard, text, Some(&(0..len)), &(0..len));
-        assert_eq!(discard.as_deref(), Some(text));
+    fn marked_range_shifts_left_when_delete_is_before_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..1)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..2)),
+            Some(0..3)
+        );
+    }
+
+    #[test]
+    fn marked_range_is_untouched_when_delete_is_after_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(5..8)),
+            Some(2..5)
+        );
+    }
+
+    #[test]
+    fn marked_range_keeps_the_surviving_side_on_partial_overlap() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(1..3)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(5..8)),
+            Some(2..5)
+        );
     }
 
     #[test]

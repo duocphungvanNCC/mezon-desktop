@@ -77,8 +77,6 @@ pub(crate) enum ImEvent {
         is_release: bool,
     },
     ClearPreedit,
-    UnmarkPreedit,
-    HidePreedit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,7 +158,7 @@ impl X11ImContext {
             .map(|events| {
                 !events.is_empty()
                     && events.iter().all(|event| match event {
-                        ImEvent::ClearPreedit | ImEvent::HidePreedit => true,
+                        ImEvent::ClearPreedit => true,
                         ImEvent::Preedit { text, .. } => text.is_empty(),
                         _ => false,
                     })
@@ -1034,11 +1032,7 @@ fn parse_ibus_preedit(message: &Message) -> Option<ImEvent> {
     let _ = iter.next();
     let visible = iter.get::<bool>().unwrap_or(true);
     if !visible {
-        return Some(if text.is_empty() {
-            ImEvent::ClearPreedit
-        } else {
-            ImEvent::UnmarkPreedit
-        });
+        return Some(ImEvent::ClearPreedit);
     }
     Some(ImEvent::Preedit { text, caret_chars })
 }
