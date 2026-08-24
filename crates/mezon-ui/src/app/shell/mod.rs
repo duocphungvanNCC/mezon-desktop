@@ -301,8 +301,6 @@ impl Shell {
         cx.notify();
     }
 
-    /// A modal a stray click must not throw away: the backdrop ignores mouse
-    /// presses, `Esc` still dismisses it so the user is never trapped behind it.
     pub fn show_modal_keyboard_dismiss_only(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.show_modal(view, cx);
         self.modal_backdrop_dismissible = false;

@@ -1064,9 +1064,6 @@ pub fn is_adult_dob_on(dob_seconds: u32, today: NaiveDate) -> bool {
     adult_date(born.date_naive()).is_some_and(|adult_on| adult_on <= today)
 }
 
-/// A birthday the client can act on: present, decodable, and not in the future.
-/// The server hands brand-new accounts a placeholder `dob_seconds` far ahead of
-/// today, which is neither a real birthday nor the `0` that means "never set".
 pub fn dob_needs_entry(dob_seconds: u32) -> bool {
     dob_needs_entry_on(dob_seconds, Utc::now().date_naive())
 }

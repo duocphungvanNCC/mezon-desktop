@@ -2299,7 +2299,6 @@ mod opt_string_flex {
     }
 }
 
-/// One malformed field must not take the whole embed's field list with it.
 mod embed_fields_lenient {
     use super::ApiEmbedField;
     use serde::{Deserialize, Deserializer};

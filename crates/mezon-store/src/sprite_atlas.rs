@@ -1,11 +1,3 @@
-//! Sprite-sheet atlases for embed ANIMATION components.
-//!
-//! React's `EmbedAnimation` fetches the atlas JSON pointed at by `url_position`
-//! and drives a CSS keyframe animation that walks `background-position` across
-//! the sheet. There is no background-position in GPUI, so the same effect is
-//! rebuilt by clipping an oversized `img()` inside a frame-sized box; this
-//! module only owns the fetch + parse of the atlas itself.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,7 +5,6 @@ use anyhow::Result;
 use gpui::SharedString;
 use serde::Deserialize;
 
-/// A frame's rectangle inside the sheet, in sheet pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SpriteFrame {
     pub x: f32,
@@ -57,9 +48,7 @@ struct RawFrame {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawFrames {
-    /// TexturePacker "hash" layout: `{ "frames": { "name": { "frame": {...} } } }`.
     Map(HashMap<String, RawFrame>),
-    /// TexturePacker "array" layout: `{ "frames": [ { "filename": ..., ... } ] }`.
     List(Vec<RawFrame>),
 }
 
@@ -98,8 +87,6 @@ pub fn parse_sprite_atlas(bytes: &[u8]) -> Result<SpriteAtlas> {
     if frames.is_empty() {
         anyhow::bail!("sprite atlas has no frames");
     }
-    // `meta.size` is the whole sheet; without it, fall back to the extent the
-    // frames themselves cover so the clipped image is still scaled correctly.
     let (fallback_width, fallback_height) = frames.values().fold((0f32, 0f32), |acc, frame| {
         (
             acc.0.max(frame.x + frame.width),
