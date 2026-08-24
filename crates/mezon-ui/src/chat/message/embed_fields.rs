@@ -1,9 +1,6 @@
-use std::time::Duration;
+use std::time::Instant;
 
-use gpui::{
-    Animation, AnimationExt, AnyElement, FontWeight, Rgba, SharedString, div, img, prelude::*, px,
-    rgb,
-};
+use gpui::{AnyElement, FontWeight, Rgba, SharedString, div, img, prelude::*, px, rgb};
 use mezon_store::{
     EmbedAnimation, EmbedField, EmbedGrid, EmbedInput, EmbedRadio, EmbedRadioOption,
     EmbedTextInput, Message, MessageId, MessagesStore, SpriteAtlas,
@@ -156,12 +153,7 @@ fn render_field(
             column = column.child(render_embed_radio(message_id, embed_index, radio, ctx));
         }
         Some(EmbedInput::Animation(animation)) => {
-            column = column.child(render_embed_animation(
-                message_id,
-                embed_index,
-                animation,
-                ctx,
-            ));
+            column = column.child(render_embed_animation(message_id, animation, ctx));
         }
         None => {}
     }
@@ -400,7 +392,6 @@ fn render_embed_grid(grid: &EmbedGrid) -> AnyElement {
 
 fn render_embed_animation(
     message_id: MessageId,
-    embed_index: usize,
     animation: &EmbedAnimation,
     ctx: &RowCtx,
 ) -> AnyElement {
@@ -415,16 +406,8 @@ fn render_embed_animation(
         }
         return row.into_any_element();
     };
-    for (index, frames) in animation.pool.iter().enumerate() {
-        if let Some(box_element) = render_animation_box(
-            message_id,
-            embed_index,
-            animation,
-            atlas,
-            frames,
-            index,
-            ctx,
-        ) {
+    for frames in &animation.pool {
+        if let Some(box_element) = render_animation_box(message_id, animation, atlas, frames, ctx) {
             row = row.child(box_element);
         }
     }
@@ -447,11 +430,9 @@ fn animation_box_size(animation: &EmbedAnimation, ctx: &RowCtx) -> f32 {
 
 fn render_animation_box(
     message_id: MessageId,
-    embed_index: usize,
     animation: &EmbedAnimation,
     atlas: &SpriteAtlas,
     frames: &[SharedString],
-    index: usize,
     ctx: &RowCtx,
 ) -> Option<AnyElement> {
     let rects: Vec<_> = frames
@@ -486,32 +467,37 @@ fn render_animation_box(
                 .into_any_element(),
         );
     }
-    let repeat = animation.repeat;
-    let cycles = repeat.unwrap_or(1).max(1) as f32;
-    let total = Duration::from_secs_f32((animation.duration_seconds * cycles).max(0.05));
-    let mut spec = Animation::new(total);
-    if repeat.is_none() {
-        spec = spec.repeat();
+    let step = animation_step(message_id, animation, rects.len(), ctx);
+    let frame = rects[step];
+    Some(
+        clipped
+            .child(sheet.left(px(-frame.x * ratio)).top(px(-frame.y * ratio)))
+            .into_any_element(),
+    )
+}
+
+fn animation_step(
+    message_id: MessageId,
+    animation: &EmbedAnimation,
+    count: usize,
+    ctx: &RowCtx,
+) -> usize {
+    let Some(started) = ctx
+        .animation_starts
+        .get(&(message_id, animation.id.clone()))
+    else {
+        return 0;
+    };
+    let elapsed = Instant::now()
+        .saturating_duration_since(*started)
+        .as_secs_f32();
+    let cycle = animation.duration_seconds.max(0.05);
+    let cycles_done = elapsed / cycle;
+    if animation
+        .repeat
+        .is_some_and(|repeat| cycles_done >= repeat as f32)
+    {
+        return count - 1;
     }
-    let count = rects.len();
-    let animated = sheet.with_animation(
-        SharedString::from(format!(
-            "embed-animation-{}-{embed_index}-{}-{index}",
-            message_id.get(),
-            animation.id
-        )),
-        spec,
-        move |element, delta| {
-            let position = (delta * cycles).min(cycles);
-            let progress = if position >= cycles {
-                1.0
-            } else {
-                position.fract()
-            };
-            let step = ((progress * count as f32) as usize).min(count - 1);
-            let frame = rects[step];
-            element.left(px(-frame.x * ratio)).top(px(-frame.y * ratio))
-        },
-    );
-    Some(clipped.child(animated).into_any_element())
+    ((cycles_done.fract() * count as f32) as usize).min(count - 1)
 }

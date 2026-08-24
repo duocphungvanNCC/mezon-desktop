@@ -8209,6 +8209,7 @@ const EMBED_COMPONENT_TYPE_RADIO: i32 = 5;
 const EMBED_COMPONENT_TYPE_ANIMATION: i32 = 6;
 const EMBED_COMPONENT_TYPE_GRID: i32 = 7;
 const EMBED_ANIMATION_DEFAULT_DURATION: f32 = 2.0;
+const EMBED_GRID_MAX_ITEMS: u32 = 2048;
 
 fn parse_embed_field_buttons(value: Option<&serde_json::Value>) -> Vec<MessageButton> {
     let Some(serde_json::Value::Array(items)) = value else {
@@ -8242,6 +8243,7 @@ fn parse_embed_shape(value: Option<&serde_json::Value>) -> Option<EmbedGrid> {
     if columns == 0 || rows == 0 {
         return None;
     }
+    let cells = columns.saturating_mul(rows).min(EMBED_GRID_MAX_ITEMS) as usize;
     Some(EmbedGrid {
         columns,
         rows,
@@ -8249,6 +8251,7 @@ fn parse_embed_shape(value: Option<&serde_json::Value>) -> Option<EmbedGrid> {
             .component
             .items
             .iter()
+            .take(cells)
             .map(|item| EmbedGridItem {
                 start_col: item.start_col.unwrap_or(1).max(1) as u32,
                 start_row: item.start_row.unwrap_or(1).max(1) as u32,
@@ -9871,6 +9874,29 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn a_grid_never_renders_more_cells_than_the_board_has() {
+        let shape = serde_json::json!({
+            "type": 7,
+            "id": "board",
+            "columns": 2,
+            "rows": 2,
+            "component": {
+                "items": (0..50)
+                    .map(|index| serde_json::json!({ "start_col": 1, "start_row": 1, "width": index % 3 + 1 }))
+                    .collect::<Vec<_>>()
+            }
+        });
+        let grid = parse_embed_shape(Some(&shape)).expect("grid");
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.rows, 2);
+        assert_eq!(
+            grid.items.len(),
+            4,
+            "a 2x2 board keeps four cells however many the payload lists"
+        );
     }
 
     #[test]

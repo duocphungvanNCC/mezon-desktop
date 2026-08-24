@@ -327,6 +327,7 @@ fn message_offset_at(
 }
 
 const EMBED_DATE_PICKER_HEIGHT: f32 = 36.0;
+const ANIMATION_TICK_FALLBACK: Duration = Duration::from_millis(120);
 const SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
 
 fn press_drag_started(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
@@ -1284,6 +1285,9 @@ pub struct ChannelMessages {
     sprite_atlases: Rc<HashMap<SharedString, Arc<SpriteAtlas>>>,
     sprite_atlas_pending: HashSet<SharedString>,
     sprite_atlas_failed: HashSet<SharedString>,
+    animation_starts: Rc<HashMap<(MessageId, SharedString), Instant>>,
+    animation_tick: Option<Task<()>>,
+    window_active: bool,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
     skeleton_key: SkeletonKey,
@@ -1933,6 +1937,9 @@ impl ChannelMessages {
             sprite_atlases: Rc::new(HashMap::new()),
             sprite_atlas_pending: HashSet::new(),
             sprite_atlas_failed: HashSet::new(),
+            animation_starts: Rc::new(HashMap::new()),
+            animation_tick: None,
+            window_active: true,
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
             skeleton_key: SkeletonKey::None,
@@ -3117,24 +3124,41 @@ impl ChannelMessages {
 
     fn fetch_embed_sprite_atlases(&mut self, cx: &mut Context<Self>) {
         let topic_source = self.topic_embed_source();
-        let wanted: Vec<SharedString> = {
+        let animations: Vec<(MessageId, SharedString, SharedString, f32, usize)> = {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
             embed_source(topic_source.as_deref(), store)
                 .iter()
-                .flat_map(|message| message.embeds.iter())
-                .flat_map(|embed| embed.fields.iter())
-                .filter_map(|field| match field.input.as_ref() {
-                    Some(EmbedInput::Animation(animation))
-                        if !animation.url_position.is_empty()
-                            && !animation.url_image.is_empty() =>
-                    {
-                        Some(animation.url_position.clone())
-                    }
-                    _ => None,
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed
+                            .fields
+                            .iter()
+                            .filter_map(move |field| match field.input.as_ref() {
+                                Some(EmbedInput::Animation(animation))
+                                    if !animation.url_position.is_empty()
+                                        && !animation.url_image.is_empty() =>
+                                {
+                                    Some((
+                                        message_id,
+                                        animation.id.clone(),
+                                        animation.url_position.clone(),
+                                        animation.duration_seconds,
+                                        animation.pool.iter().map(Vec::len).max().unwrap_or(1),
+                                    ))
+                                }
+                                _ => None,
+                            })
+                    })
                 })
                 .collect()
         };
+        self.sync_animation_tick(&animations, cx);
+        let wanted: Vec<SharedString> = animations
+            .iter()
+            .map(|(_, _, url, _, _)| url.clone())
+            .collect();
         for url in wanted {
             if self.sprite_atlases.contains_key(&url)
                 || self.sprite_atlas_failed.contains(&url)
@@ -3162,6 +3186,63 @@ impl ChannelMessages {
             })
             .detach();
         }
+    }
+
+    fn sync_animation_tick(
+        &mut self,
+        animations: &[(MessageId, SharedString, SharedString, f32, usize)],
+        cx: &mut Context<Self>,
+    ) {
+        let wanted: HashSet<(MessageId, SharedString)> = animations
+            .iter()
+            .map(|(message_id, id, _, _, _)| (*message_id, id.clone()))
+            .collect();
+        if self
+            .animation_starts
+            .keys()
+            .any(|key| !wanted.contains(key))
+        {
+            Rc::make_mut(&mut self.animation_starts).retain(|key, _| wanted.contains(key));
+        }
+        let now = Instant::now();
+        for key in wanted {
+            if !self.animation_starts.contains_key(&key) {
+                Rc::make_mut(&mut self.animation_starts).insert(key, now);
+            }
+        }
+        if animations.is_empty() {
+            self.animation_tick = None;
+            return;
+        }
+        if self.animation_tick.is_some() {
+            return;
+        }
+        let interval = animations
+            .iter()
+            .map(|(_, _, _, duration, frames)| {
+                Duration::from_secs_f32((duration / frames.max(&1).to_owned() as f32).max(0.08))
+            })
+            .min()
+            .unwrap_or(ANIMATION_TICK_FALLBACK);
+        self.animation_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(interval).await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.animation_starts.is_empty() {
+                            return false;
+                        }
+                        if this.window_active {
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        }));
     }
 
     fn reconcile_cold(&mut self, cx: &mut Context<Self>) {
@@ -3257,6 +3338,8 @@ impl ChannelMessages {
         self.embed_input_subs.clear();
         Rc::make_mut(&mut self.embed_date_pickers).clear();
         self.embed_date_picker_subs.clear();
+        Rc::make_mut(&mut self.animation_starts).clear();
+        self.animation_tick = None;
         self.embed_input_fingerprint = None;
         self.embed_select_seeded.clear();
     }
@@ -4448,6 +4531,7 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.window_active = window.is_window_active();
         self.sync_render_identity(cx);
         self.drive_scroll_anim(window);
         self.schedule_selection_autoscroll(window, cx);
@@ -4522,6 +4606,7 @@ impl ChannelMessages {
         let embed_inputs = self.embed_inputs.clone();
         let embed_date_pickers = self.embed_date_pickers.clone();
         let sprite_atlases = self.sprite_atlases.clone();
+        let animation_starts = self.animation_starts.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -4583,6 +4668,7 @@ impl ChannelMessages {
                         embed_inputs: &embed_inputs,
                         embed_date_pickers: &embed_date_pickers,
                         sprite_atlases: &sprite_atlases,
+                        animation_starts: &animation_starts,
                         window_active: window.is_window_active(),
                         video_host: video_host.clone(),
                         now: frame_now,
@@ -4687,6 +4773,7 @@ impl EventEmitter<ChannelMessagesEvent> for ChannelMessages {}
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active();
         self.ogp_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         {
@@ -4786,6 +4873,7 @@ impl Render for ChannelMessages {
         let embed_inputs = self.embed_inputs.clone();
         let embed_date_pickers = self.embed_date_pickers.clone();
         let sprite_atlases = self.sprite_atlases.clone();
+        let animation_starts = self.animation_starts.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -4856,6 +4944,7 @@ impl Render for ChannelMessages {
                         embed_inputs: &embed_inputs,
                         embed_date_pickers: &embed_date_pickers,
                         sprite_atlases: &sprite_atlases,
+                        animation_starts: &animation_starts,
                         window_active: window.is_window_active(),
                         video_host: video_host.clone(),
                         now: frame_now,

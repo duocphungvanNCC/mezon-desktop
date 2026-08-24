@@ -82,6 +82,7 @@ pub struct RowCtx<'a> {
     pub embed_inputs: &'a HashMap<(MessageId, SharedString), Entity<TextArea>>,
     pub embed_date_pickers: &'a HashMap<(MessageId, SharedString), Entity<DatePicker>>,
     pub sprite_atlases: &'a HashMap<SharedString, Arc<SpriteAtlas>>,
+    pub animation_starts: &'a HashMap<(MessageId, SharedString), std::time::Instant>,
     pub window_active: bool,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
