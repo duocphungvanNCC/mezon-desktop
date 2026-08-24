@@ -805,7 +805,7 @@ impl CommunitySettingPage {
                         .w_full()
                         .h_full()
                         .rounded(radius)
-                        .object_fit(gpui::ObjectFit::Fill),
+                        .object_fit(gpui::ObjectFit::Cover),
                 )
             })
             .when(!has_banner, |el| {
