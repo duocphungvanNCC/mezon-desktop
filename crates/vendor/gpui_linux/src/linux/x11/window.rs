@@ -1254,6 +1254,8 @@ impl X11WindowStatePtr {
             drop(state);
             if let Some(marked) = input_handler.marked_text_range() {
                 input_handler.replace_text_in_range(Some(marked), "");
+            } else {
+                input_handler.unmark_text();
             }
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);

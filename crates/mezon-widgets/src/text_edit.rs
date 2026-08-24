@@ -223,6 +223,40 @@ pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>)
     marked.cloned().unwrap_or_else(|| selected.clone())
 }
 
+pub fn marked_range_after_delete(
+    marked: Option<&Range<usize>>,
+    deleted: &Range<usize>,
+) -> Option<Range<usize>> {
+    let marked = marked?;
+    if deleted.end <= marked.start || deleted.start >= marked.end {
+        return Some(marked.clone());
+    }
+    if deleted.start <= marked.start && deleted.end >= marked.end {
+        return None;
+    }
+    if deleted.start >= marked.start && deleted.end <= marked.end {
+        let len = deleted.end - deleted.start;
+        return Some(marked.start..marked.end.saturating_sub(len));
+    }
+    None
+}
+
+pub fn arm_discard_for_marked_delete(
+    discard: &mut Option<String>,
+    content: &str,
+    marked: Option<&Range<usize>>,
+    deleted: &Range<usize>,
+) {
+    let Some(marked) = marked else {
+        return;
+    };
+    if deleted.start <= marked.start && deleted.end >= marked.end {
+        let end = marked.end.min(content.len());
+        let start = marked.start.min(end);
+        *discard = content.get(start..end).map(str::to_string);
+    }
+}
+
 pub fn swallow_discarded_ime_commit(
     discard: &mut Option<String>,
     range_utf16: Option<&Range<usize>>,
@@ -465,6 +499,32 @@ mod tests {
     #[test]
     fn ime_replace_uses_marked_when_preedit_is_present() {
         assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn marked_range_shrinks_after_tail_delete_within_preedit() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(
+            marked_range_after_delete(Some(&(0..len)), &(len - 1..len)),
+            Some(0..len - 1)
+        );
+    }
+
+    #[test]
+    fn marked_range_clears_after_full_preedit_delete() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(marked_range_after_delete(Some(&(0..len)), &(0..len)), None);
+    }
+
+    #[test]
+    fn arm_discard_for_full_marked_delete() {
+        let text = "được";
+        let len = text.len();
+        let mut discard = None;
+        arm_discard_for_marked_delete(&mut discard, text, Some(&(0..len)), &(0..len));
+        assert_eq!(discard.as_deref(), Some(text));
     }
 
     #[test]

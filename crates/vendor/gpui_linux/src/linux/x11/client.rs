@@ -176,10 +176,7 @@ fn rewrite_escape_cancel(events: &mut [ImEvent]) -> bool {
     let mut converted = false;
     for event in events {
         if matches!(event, ImEvent::HidePreedit) {
-            *event = ImEvent::Preedit {
-                text: String::new(),
-                caret_chars: 0,
-            };
+            *event = ImEvent::ClearPreedit;
             converted = true;
         }
     }
@@ -248,7 +245,10 @@ fn maybe_append_fcitx_space(keyval: u32, events: &mut Vec<ImEvent>) {
     if !events.iter().any(|event| {
         matches!(
             event,
-            ImEvent::HidePreedit | ImEvent::Commit(_) | ImEvent::Preedit { .. }
+            ImEvent::ClearPreedit
+                | ImEvent::HidePreedit
+                | ImEvent::Commit(_)
+                | ImEvent::Preedit { .. }
         )
     }) {
         return;
@@ -261,7 +261,7 @@ fn fold_im_events(events: Vec<ImEvent>) -> Vec<ImEvent> {
     events
         .into_iter()
         .filter(|event| match event {
-            ImEvent::HidePreedit => !has_text,
+            ImEvent::ClearPreedit | ImEvent::HidePreedit => !has_text,
             ImEvent::Preedit { text, .. } if text.is_empty() => !has_text,
             _ => true,
         })
@@ -1376,6 +1376,11 @@ impl X11Client {
         }
     }
 
+    fn unmark_preedit(&self, window: &X11WindowStatePtr) {
+        self.0.borrow_mut().composing = false;
+        window.handle_ime_unmark();
+    }
+
     fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
         let pending = self.0.borrow().escape_cancel_pending;
         if consume_escape_cancel_pending(&mut events, pending) {
@@ -1387,7 +1392,8 @@ impl X11Client {
                     self.0.borrow_mut().composing = false;
                     window.handle_ime_commit(text);
                 }
-                ImEvent::HidePreedit => self.clear_preedit(window),
+                ImEvent::ClearPreedit => self.clear_preedit(window),
+                ImEvent::UnmarkPreedit | ImEvent::HidePreedit => self.unmark_preedit(window),
                 ImEvent::Preedit { ref text, .. } if text.is_empty() => self.clear_preedit(window),
                 ImEvent::Preedit { text, caret_chars } => {
                     self.0.borrow_mut().composing = true;
@@ -1677,7 +1683,11 @@ impl X11Client {
                 drop(state);
                 self.reset_ime();
                 self.drain_dbus_im();
-                self.0.borrow_mut().keyboard_focused_window = None;
+                {
+                    let mut state = self.0.borrow_mut();
+                    state.composing = false;
+                    state.keyboard_focused_window = None;
+                }
                 window.handle_ime_unmark();
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
@@ -3909,13 +3919,7 @@ mod tests {
 
         let mut second = vec![ImEvent::HidePreedit];
         assert!(consume_escape_cancel_pending(&mut second, true));
-        assert!(matches!(
-            second[0],
-            ImEvent::Preedit {
-                text: ref t,
-                caret_chars: 0
-            } if t.is_empty()
-        ));
+        assert!(matches!(second[0], ImEvent::ClearPreedit));
     }
 
     #[test]
@@ -3927,8 +3931,11 @@ mod tests {
 
     #[test]
     fn fold_keeps_lone_preedit_clear_events() {
-        let hidden = fold_im_events(vec![ImEvent::HidePreedit]);
-        assert!(matches!(hidden.as_slice(), [ImEvent::HidePreedit]));
+        let hidden = fold_im_events(vec![ImEvent::UnmarkPreedit]);
+        assert!(matches!(hidden.as_slice(), [ImEvent::UnmarkPreedit]));
+
+        let cleared = fold_im_events(vec![ImEvent::ClearPreedit]);
+        assert!(matches!(cleared.as_slice(), [ImEvent::ClearPreedit]));
 
         let emptied = fold_im_events(vec![ImEvent::Preedit {
             text: String::new(),
@@ -3942,7 +3949,7 @@ mod tests {
 
     #[test]
     fn fold_drops_preedit_clear_next_to_commit() {
-        let committed = fold_im_events(vec![ImEvent::Commit("được".into()), ImEvent::HidePreedit]);
+        let committed = fold_im_events(vec![ImEvent::Commit("được".into()), ImEvent::ClearPreedit]);
         assert!(matches!(committed.as_slice(), [ImEvent::Commit(_)]));
     }
 

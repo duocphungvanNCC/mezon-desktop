@@ -24,10 +24,11 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
-    should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, arm_discard_for_marked_delete,
+    extend_range_for_granularity, granularity_for_click, home_target, ime_replace_range, line_end,
+    line_start, marked_caret_range, marked_range_after_delete, next_word_boundary,
+    previous_word_boundary, range_for_granularity, should_coalesce, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -1022,6 +1023,7 @@ impl EntityInputHandler for InputState {
         } else {
             ime_replace_range(&self.selected_range, self.marked_range.as_ref())
         };
+        let prior_marked = self.marked_range.clone();
 
         let candidate =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
@@ -1032,6 +1034,16 @@ impl EntityInputHandler for InputState {
         };
         if !valid {
             return;
+        }
+
+        #[cfg(target_os = "linux")]
+        if new_text.is_empty() {
+            arm_discard_for_marked_delete(
+                &mut self.discard_ime_commit,
+                &self.content,
+                prior_marked.as_ref(),
+                &range,
+            );
         }
 
         let kind = if self.marked_range.is_some() {
@@ -1047,7 +1059,11 @@ impl EntityInputHandler for InputState {
 
         self.content = candidate.into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range.take();
+        if new_text.is_empty() {
+            self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
+        } else {
+            self.marked_range.take();
+        }
         self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
         cx.notify();
