@@ -51,6 +51,7 @@ pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
+pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
 pub mod threads;
@@ -211,6 +212,7 @@ pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
+pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{

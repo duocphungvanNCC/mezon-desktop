@@ -286,6 +286,7 @@
   "ageRestricted.continue": "Продолжить",
   "ageRestricted.dateOfBirth": "Дата рождения",
   "ageRestricted.description": "Этот канал содержит контент для взрослых, имеющий возрастное ограничение. Хотите продолжить?",
+  "ageRestricted.enterBirthday": "Указать дату рождения",
   "ageRestricted.month.april": "Апрель",
   "ageRestricted.month.august": "Август",
   "ageRestricted.month.december": "Декабрь",

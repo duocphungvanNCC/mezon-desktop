@@ -286,6 +286,7 @@
   "ageRestricted.continue": "Продовжити",
   "ageRestricted.dateOfBirth": "Дата народження",
   "ageRestricted.description": "Цей канал містить дорослий вміст і позначений як такий, що має вікові обмеження. Ви хочете продовжити?",
+  "ageRestricted.enterBirthday": "Вказати дату народження",
   "ageRestricted.month.april": "Квітень",
   "ageRestricted.month.august": "Серпень",
   "ageRestricted.month.december": "Грудень",
