@@ -1741,6 +1741,11 @@ impl MentionInput {
                 this.invalidate_pool(Sigil::Colon, cx)
             }));
         }
+        if let Some(store) = QuickMenuStore::try_global(cx) {
+            subs.push(cx.observe(&store, |this, _, cx| {
+                this.invalidate_pool(Sigil::Slash, cx);
+            }));
+        }
         subs
     }
 
@@ -1780,7 +1785,7 @@ impl MentionInput {
                 let locale = self.settings.read(cx).language.clone();
                 if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
                     QuickMenuStore::global(cx).update(cx, |store, cx| {
-                        store.ensure_loaded(channel_id, QUICK_MENU_TYPE_FLASH, cx);
+                        store.refresh(channel_id, QUICK_MENU_TYPE_FLASH, cx);
                     });
                 }
                 self.session_commands = slash_command_pool(&locale, cx);
@@ -1801,7 +1806,7 @@ impl MentionInput {
         let query_lc = query.to_lowercase();
         self.session_commands
             .iter()
-            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .filter(|command| command.display_lc.contains(&query_lc))
             .map(|command| Suggestion::SlashCommand(command.clone()))
             .collect()
     }

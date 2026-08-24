@@ -22,6 +22,7 @@ mod confirm_delete_channel_modal;
 mod confirm_delete_clan_modal;
 mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
+mod confirm_delete_quick_menu_modal;
 mod confirm_delete_role_modal;
 mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
@@ -44,6 +45,7 @@ use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
 use confirm_delete_clan_modal::ConfirmDeleteClanModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+use confirm_delete_quick_menu_modal::ConfirmDeleteQuickMenuModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
@@ -740,6 +742,52 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_quick_menu(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        item_id: i64,
+        command_label: &str,
+        is_flash: bool,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let type_name = if is_flash {
+            mezon_i18n::t(locale, "channelSetting.quickAction.flashMessage")
+        } else {
+            mezon_i18n::t(locale, "channelSetting.quickAction.quickMenu")
+        };
+        let title: SharedString = format!(
+            "{} {}",
+            mezon_i18n::t(locale, "channelSetting.quickAction.delete"),
+            type_name
+        )
+        .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "channelSetting.quickAction.deleteTitle")
+                .replace("{{command}}", command_label)
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteQuickMenuModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            item_id,
+            title,
+            description,
+            cancel_label: mezon_i18n::t(locale, "channelSetting.quickAction.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "channelSetting.quickAction.delete")
+                .to_string()
+                .into(),
+            submitting: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

@@ -8984,18 +8984,26 @@ impl MezonTransport {
         Ok(api::MezonOauthClient::decode(response.as_slice())?)
     }
 
-    /// Add quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -9008,18 +9016,26 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Update quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();

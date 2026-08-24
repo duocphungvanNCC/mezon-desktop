@@ -19,8 +19,8 @@ use mezon_store::{
     ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
     GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
     PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
-    ProfileContext, RolesEvent, RolesStore, Settings, TopicsEvent, TopicsStore, UserId,
-    UsersByUserStore,
+    ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
+    TopicsEvent, TopicsStore, UserId, UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1337,8 +1337,10 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
+    quick_menu_submenu_open: bool,
     emoji_recent: Rc<Vec<RecentEmojiCell>>,
     _emoji_observe: Subscription,
+    _quick_menu_observe: Option<Subscription>,
     channel_permissions_fp: Option<(bool, bool, bool)>,
     _channel_permissions_observe: Subscription,
     _roles_observe: Subscription,
@@ -1893,6 +1895,13 @@ impl ChannelMessages {
                 cx.notify();
             },
         );
+        let quick_menu_observe = QuickMenuStore::try_global(cx).map(|store| {
+            cx.observe(&store, |this, _, cx| {
+                if this.context_menu_target.is_some() {
+                    cx.notify();
+                }
+            })
+        });
         Self {
             list_state,
             focus_handle: cx.focus_handle(),
@@ -1974,8 +1983,10 @@ impl ChannelMessages {
             context_menu_target: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
+            quick_menu_submenu_open: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
+            _quick_menu_observe: quick_menu_observe,
             channel_permissions_fp: None,
             _channel_permissions_observe: channel_permissions_observe,
             _roles_observe: roles_observe,
@@ -2508,6 +2519,12 @@ impl ChannelMessages {
         self.clear_hover_tasks();
         self.hovered_row = None;
         self.reaction_submenu_open = false;
+        self.quick_menu_submenu_open = false;
+        if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
+            QuickMenuStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(channel_id, QUICK_MENU_TYPE_QUICK, cx);
+            });
+        }
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
@@ -2515,6 +2532,7 @@ impl ChannelMessages {
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
             self.reaction_submenu_open = false;
+            self.quick_menu_submenu_open = false;
             if self.hover_target().is_none() {
                 self.hovered_row = None;
             }
@@ -2526,6 +2544,13 @@ impl ChannelMessages {
     pub(crate) fn set_reaction_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.reaction_submenu_open != open {
             self.reaction_submenu_open = open;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_quick_menu_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.quick_menu_submenu_open != open {
+            self.quick_menu_submenu_open = open;
             cx.notify();
         }
     }
@@ -4497,6 +4522,7 @@ impl ChannelMessages {
                     self.context_menu_forward_all,
                     true,
                     self.reaction_submenu_open,
+                    self.quick_menu_submenu_open,
                     selected_text,
                     cx.entity().downgrade(),
                     cx,
@@ -4762,6 +4788,7 @@ impl Render for ChannelMessages {
                     self.context_menu_forward_all,
                     false,
                     self.reaction_submenu_open,
+                    self.quick_menu_submenu_open,
                     selected_text,
                     cx.entity().downgrade(),
                     cx,
