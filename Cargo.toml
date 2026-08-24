@@ -22,8 +22,7 @@ members = [
     "crates/mezon-widgets",
     "crates/mezon-canvas",
     "crates/mmn-client",
-    # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
-    # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
+    "crates/mezon-active-windows",
     # Vendored GPUI crates
     "crates/vendor/gpui",
     "crates/vendor/gpui_macros",
@@ -136,7 +135,7 @@ mezon-theme   = { path = "crates/mezon-theme" }
 mezon-widgets = { path = "crates/mezon-widgets" }
 mezon-canvas  = { path = "crates/mezon-canvas" }
 mmn-client    = { path = "crates/mmn-client" }
-# mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
+mezon-active-windows = { path = "crates/mezon-active-windows" }
 
 # ---------- Async runtime ----------
 tokio                = { version = "1", features = ["full"] }

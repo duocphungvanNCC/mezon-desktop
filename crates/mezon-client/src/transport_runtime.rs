@@ -2923,6 +2923,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn create_activity(
+        &self,
+        request: mezon_proto::api::CreateActivityRequest,
+    ) -> Result<mezon_proto::api::UserActivity> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_activiy(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn add_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<Vec<i64>> {
         let transport = self.inner.clone();
         runtime()
