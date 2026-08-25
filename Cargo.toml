@@ -199,6 +199,7 @@ objc                 = "0.2"
 objc2-app-kit        = { version = "0.3", default-features = false, features = ["NSGraphics"] }
 mach2                = "0.5"
 libc                 = "0.2"
+x11rb                = { version = "0.13", features = ["screensaver"] }
 windows              = { version = "0.61.3", features = [
     "Foundation_Numerics",
     "Globalization_DateTimeFormatting",

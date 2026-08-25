@@ -1,4 +1,4 @@
-use crate::catalog::{ActivityKind, match_linux_process, pick_highest_priority_match};
+use crate::catalog::{ActivityKind, match_linux_process, running_process_kind_priority};
 use crate::info::ActiveWindowInfo;
 
 struct ProcMatch {
@@ -63,20 +63,16 @@ pub fn scan_tracked_process() -> Option<ActiveWindowInfo> {
 }
 
 fn pick_best_proc_match(matches: Vec<ProcMatch>) -> Option<ProcMatch> {
-    let picked = pick_highest_priority_match(
-        matches
-            .iter()
-            .map(|item| (item.app_name.clone(), item.kind)),
-    )?;
-    let (app_name, kind) = picked;
     let mut best: Option<ProcMatch> = None;
     for item in matches {
-        if item.app_name != app_name || item.kind != kind {
-            continue;
-        }
+        let kind_priority = running_process_kind_priority(item.kind);
         let replace = best
             .as_ref()
-            .map(|current| item.role_score > current.role_score)
+            .map(|current| {
+                let current_kind = running_process_kind_priority(current.kind);
+                kind_priority > current_kind
+                    || (kind_priority == current_kind && item.role_score > current.role_score)
+            })
             .unwrap_or(true);
         if replace {
             best = Some(item);
@@ -177,17 +173,37 @@ mod tests {
     }
 
     #[test]
+    fn pick_best_proc_match_prefers_work_over_play() {
+        let picked = pick_best_proc_match(vec![
+            ProcMatch {
+                app_name: "LeagueClientUx".into(),
+                kind: ActivityKind::Play,
+                pid: 10,
+                role_score: 3,
+            },
+            ProcMatch {
+                app_name: "Cursor".into(),
+                kind: ActivityKind::Coding,
+                pid: 11,
+                role_score: 3,
+            },
+        ])
+        .expect("work activity");
+        assert_eq!(picked.app_name, "Cursor");
+    }
+
+    #[test]
     fn pick_best_proc_match_prefers_main_cursor_pid() {
         let picked = pick_best_proc_match(vec![
             ProcMatch {
                 app_name: "Cursor".into(),
-                kind: ActivityKind::Work,
+                kind: ActivityKind::Coding,
                 pid: 10,
                 role_score: 0,
             },
             ProcMatch {
                 app_name: "Cursor".into(),
-                kind: ActivityKind::Work,
+                kind: ActivityKind::Coding,
                 pid: 11,
                 role_score: 3,
             },
@@ -204,7 +220,7 @@ mod tests {
                 "/usr/share/cursor/cursor --type=zygote",
                 Some("/usr/share/cursor/cursor"),
             ),
-            Some(("Cursor".into(), ActivityKind::Work))
+            Some(("Cursor".into(), ActivityKind::Coding))
         );
     }
 }

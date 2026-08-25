@@ -11,11 +11,10 @@ use crate::Settings;
 use crate::ids::UserId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// A user's current rich-presence activity, mirroring proto `UserActivity` and React `IActivity`.
-/// `activity_type` groups the activity (React `ActivitiesType`): `1` = coding/work (Visual Studio
-/// Code), `2` = music/live (Spotify), `3` = gaming/play (League of Legends).
+/// `activity_type` groups the activity (React `ActivitiesType`): `1` = coding (editors/dev tools),
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserActivity {
     pub user_id: UserId,
@@ -25,9 +24,7 @@ pub struct UserActivity {
 }
 
 /// Activity kinds used by the Friends activity sidebar, matching React's `activity_type` literals.
-pub const ACTIVITY_TYPE_WORK: i32 = 1;
-pub const ACTIVITY_TYPE_LIVE: i32 = 2;
-pub const ACTIVITY_TYPE_PLAY: i32 = 3;
+pub use mezon_active_windows::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 
 #[derive(Debug, Clone)]
 pub enum ActivityEvent {
@@ -37,9 +34,7 @@ pub enum ActivityEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PublishedActivity {
     app_name: String,
-    window_title: String,
     activity_type: i32,
-    start_time_seconds: u32,
 }
 
 fn activity_from_api(a: api::UserActivity) -> UserActivity {
@@ -158,7 +153,7 @@ impl ActivityStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.publish_generation = self.publish_generation.wrapping_add(1);
-        self.last_published = None;
+        self.clear_published_activity(cx);
         self.activities.clear();
         self.loading = false;
         self.freshness.mark_stale();
@@ -222,10 +217,17 @@ impl ActivityStore {
         if !self.tracking_enabled(cx) || !self.is_connected() {
             return;
         }
-        match get_active_window() {
-            Ok(info) => self.apply_active_window(info, cx),
-            Err(error) => tracing::debug!("active window query failed: {error}"),
-        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { get_active_window() })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(info) => this.apply_active_window(info, cx),
+                Err(error) => tracing::debug!("active window query failed: {error}"),
+            });
+        })
+        .detach();
     }
 
     fn apply_active_window(
@@ -240,9 +242,7 @@ impl ActivityStore {
             return;
         };
         let unchanged = self.last_published.as_ref().is_some_and(|published| {
-            published.app_name == app_name
-                && published.window_title == description
-                && published.activity_type == activity_type
+            published.app_name == app_name && published.activity_type == activity_type
         });
         if unchanged {
             return;
@@ -253,9 +253,7 @@ impl ActivityStore {
             .unwrap_or(0);
         self.last_published = Some(PublishedActivity {
             app_name: app_name.clone(),
-            window_title: description.clone(),
             activity_type,
-            start_time_seconds,
         });
         self.publish_activity(
             publish_activity_request(&app_name, &description, activity_type, start_time_seconds),
@@ -397,7 +395,7 @@ mod tests {
         };
         let (app, title, activity_type) = detect_tracked_activity(&code).expect("code activity");
         assert_eq!(app, "Code");
-        assert_eq!(title, "main.rs");
+        assert!(title.is_empty());
         assert_eq!(activity_type, ACTIVITY_TYPE_WORK);
 
         let lol = mezon_active_windows::ActiveWindowInfo {
@@ -512,6 +510,24 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn clear_activity_request_matches_react_contract() {
+        let request = clear_activity_request();
+        assert_eq!(request.activity_name, "");
+        assert_eq!(request.activity_type, 0);
+        assert_eq!(request.status, 0);
+    }
+
+    #[test]
+    fn publish_activity_request_is_process_only() {
+        let request = publish_activity_request("Cursor", "", ACTIVITY_TYPE_WORK, 100);
+        assert_eq!(request.activity_name, "Cursor");
+        assert_eq!(request.activity_description, "");
+        assert_eq!(request.activity_type, ACTIVITY_TYPE_WORK);
+        assert_eq!(request.start_time_seconds, 100);
+        assert_eq!(request.status, 1);
     }
 
     #[test]

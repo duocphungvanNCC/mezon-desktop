@@ -67,7 +67,7 @@ pub fn get_active_window() -> anyhow::Result<ActiveWindowInfo> {
         let mut last_input = LASTINPUTINFO::default();
         last_input.cbSize = std::mem::size_of::<LASTINPUTINFO>() as u32;
         let mut idle_time = 0;
-        if GetLastInputInfo(&mut last_input).is_ok() {
+        if GetLastInputInfo(&mut last_input).as_bool() {
             let tick_count = windows::Win32::System::SystemInformation::GetTickCount();
             idle_time = (tick_count.saturating_sub(last_input.dwTime)) / 1000;
         }
