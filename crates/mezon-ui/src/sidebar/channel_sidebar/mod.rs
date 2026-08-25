@@ -1550,6 +1550,7 @@ fn render_banner_and_events(
             .is_some_and(|clan| clan.is_onboarding)
     });
     let guide_row = div()
+        .group("clan-guide-nav")
         .flex()
         .flex_row()
         .items_center()
@@ -1569,7 +1570,11 @@ fn render_banner_and_events(
         .child(
             gpui::img(IconName::GuideIcon.path())
                 .size(px(20.))
-                .flex_none(),
+                .flex_none()
+                .when(!guide_active, |icon| {
+                    icon.opacity(0.65)
+                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
+                }),
         )
         .child(
             div()
