@@ -1197,6 +1197,38 @@ impl AppApi {
         Ok(list.list_menus)
     }
 
+    pub async fn add_quick_menu_access(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .add_quick_menu_access(id, 0, clan_id, channel_id, menu_name, action_msg, menu_type)
+            .await
+    }
+
+    pub async fn update_quick_menu_access(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .update_quick_menu_access(id, 0, clan_id, channel_id, menu_name, action_msg, menu_type)
+            .await
+    }
+
+    pub async fn delete_quick_menu_access(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_quick_menu_access(id, clan_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message_with_flags(
         &self,
