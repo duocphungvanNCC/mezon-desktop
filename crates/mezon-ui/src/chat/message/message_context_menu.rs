@@ -58,7 +58,7 @@ fn append_quick_menus(
     };
     let store = QuickMenuStore::global(cx).read(cx);
     let loading = store.is_loading(channel_id, QUICK_MENU_TYPE_QUICK);
-    if !store.has_any(channel_id) && !loading {
+    if !store.has_items(channel_id, QUICK_MENU_TYPE_QUICK) && !loading {
         return menu;
     }
     let items: Vec<_> = store
@@ -73,6 +73,7 @@ fn append_quick_menus(
                     value: QUICK_MENU_PLACEHOLDER,
                     label: mezon_i18n::t(locale, "contextMenu.loadingQuickMenus").into(),
                     selected: false,
+                    disabled: true,
                 }],
                 Vec::new(),
             )
@@ -82,6 +83,7 @@ fn append_quick_menus(
                     value: QUICK_MENU_PLACEHOLDER,
                     label: mezon_i18n::t(locale, "contextMenu.noQuickMenusAvailable").into(),
                     selected: false,
+                    disabled: true,
                 }],
                 Vec::new(),
             )
@@ -95,6 +97,7 @@ fn append_quick_menus(
                         value: index as i32,
                         label: label.clone(),
                         selected: false,
+                        disabled: false,
                     },
                 )
                 .collect();
@@ -113,9 +116,6 @@ fn append_quick_menus(
             }
         },
         move |index, _window, cx| {
-            if index == QUICK_MENU_PLACEHOLDER {
-                return;
-            }
             let Some(name) = menu_names.get(index as usize) else {
                 return;
             };

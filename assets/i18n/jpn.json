@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "最初のクイックメニューを作成して始めましょう",
   "channelSetting.quickAction.errorDuplicateName": "この名前のコマンドはこのチャンネルに既に存在します。",
   "channelSetting.quickAction.errorInvalidName": "有効なコマンド名を入力してください（最大64文字；文字、数字、スペース、_、-、.、+；_または-で始めることはできません）。",
-  "channelSetting.quickAction.errorMessageTooLong": "メッセージ内容は512文字以内である必要があります。",
+  "channelSetting.quickAction.errorMessageTooLong": "メッセージ内容は512バイト以内である必要があります。",
   "channelSetting.quickAction.flashMessage": "フラッシュメッセージ",
   "channelSetting.quickAction.flashMessages": "フラッシュメッセージ",
   "channelSetting.quickAction.keyTitle": "キーワードを入力（例：こんにちは）:",

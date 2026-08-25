@@ -32,6 +32,7 @@ pub struct QuickMenuStore {
     by_channel: HashMap<ChannelId, HashMap<i32, Vec<QuickMenuItem>>>,
     fetched_at: HashMap<(ChannelId, i32), Instant>,
     loading: HashMap<(ChannelId, i32), bool>,
+    reload_seq: HashMap<(ChannelId, i32), u64>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _messages_sub: Subscription,
@@ -151,6 +152,7 @@ impl QuickMenuStore {
         self.by_channel.clear();
         self.fetched_at.clear();
         self.loading.clear();
+        self.reload_seq.clear();
         cx.notify();
     }
 
@@ -170,6 +172,7 @@ impl QuickMenuStore {
             by_channel: HashMap::new(),
             fetched_at: HashMap::new(),
             loading: HashMap::new(),
+            reload_seq: HashMap::new(),
             api,
             _channel_sub: channel_sub,
             _messages_sub: messages_sub,
@@ -232,6 +235,10 @@ impl QuickMenuStore {
             .is_some_and(|by_type| by_type.values().any(|items| !items.is_empty()))
     }
 
+    pub fn has_items(&self, channel_id: ChannelId, menu_type: i32) -> bool {
+        !self.items(channel_id, menu_type).is_empty()
+    }
+
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, menu_type: i32, cx: &mut Context<Self>) {
         let key = (channel_id, menu_type);
         if self.loading.get(&key).copied().unwrap_or(false) {
@@ -249,18 +256,25 @@ impl QuickMenuStore {
 
     pub fn refresh(&mut self, channel_id: ChannelId, menu_type: i32, cx: &mut Context<Self>) {
         self.fetched_at.remove(&(channel_id, menu_type));
-        self.loading.remove(&(channel_id, menu_type));
         self.reload(channel_id, menu_type, cx);
     }
 
     fn reload(&mut self, channel_id: ChannelId, menu_type: i32, cx: &mut Context<Self>) {
         let key = (channel_id, menu_type);
+        let generation = {
+            let entry = self.reload_seq.entry(key).or_insert(0);
+            *entry += 1;
+            *entry
+        };
         self.loading.insert(key, true);
         let api = self.api.clone();
         let channel_num = channel_id.get();
         cx.spawn(async move |this, cx| {
             let result = api.list_quick_menu_access(channel_num, menu_type).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reload_seq.get(&key) != Some(&generation) {
+                    return;
+                }
                 this.loading.remove(&key);
                 match result {
                     Ok(items) => {

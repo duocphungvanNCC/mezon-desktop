@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "첫 빠른 메뉴를 만들어 시작하세요",
   "channelSetting.quickAction.errorDuplicateName": "이 이름의 명령이 이 채널에 이미 존재합니다.",
   "channelSetting.quickAction.errorInvalidName": "유효한 명령 이름을 입력하세요(최대 64자; 문자, 숫자, 공백, _, -, ., +; _ 또는 -로 시작할 수 없음).",
-  "channelSetting.quickAction.errorMessageTooLong": "메시지 내용은 512자 이하여야 합니다.",
+  "channelSetting.quickAction.errorMessageTooLong": "메시지 내용은 512바이트 이하여야 합니다.",
   "channelSetting.quickAction.flashMessage": "플래시 메시지",
   "channelSetting.quickAction.flashMessages": "플래시 메시지",
   "channelSetting.quickAction.keyTitle": "키워드 입력 (예: xinchao): ",

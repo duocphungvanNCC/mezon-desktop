@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Bắt đầu bằng cách tạo menu nhanh đầu tiên của bạn",
   "channelSetting.quickAction.errorDuplicateName": "Lệnh với tên này đã tồn tại trong kênh này.",
   "channelSetting.quickAction.errorInvalidName": "Vui lòng nhập tên lệnh hợp lệ (tối đa 64 ký tự; chữ cái, số, khoảng trắng, _, -, ., +; không được bắt đầu bằng _ hoặc -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Nội dung tin nhắn phải có tối đa 512 ký tự.",
+  "channelSetting.quickAction.errorMessageTooLong": "Nội dung tin nhắn phải có tối đa 512 byte.",
   "channelSetting.quickAction.flashMessage": "Tin nhắn nhanh",
   "channelSetting.quickAction.flashMessages": "Tin nhắn nhanh",
   "channelSetting.quickAction.keyTitle": "Nhập từ khóa (VD: xinchao): ",

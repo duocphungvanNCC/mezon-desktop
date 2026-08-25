@@ -903,7 +903,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Начните с создания Вашего первого быстрого меню",
   "channelSetting.quickAction.errorDuplicateName": "Команда с таким именем уже существует в этом канале.",
   "channelSetting.quickAction.errorInvalidName": "Введите допустимое имя команды (не более 64 символов; буквы, цифры, пробелы, _, -, ., +; не может начинаться с _ или -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Содержимое сообщения должно быть не более 512 символов.",
+  "channelSetting.quickAction.errorMessageTooLong": "Содержимое сообщения должно быть не более 512 байт.",
   "channelSetting.quickAction.flashMessage": "Срочное сообщение",
   "channelSetting.quickAction.flashMessages": "Срочные сообщения",
   "channelSetting.quickAction.keyTitle": "Ключ (например: привет)",

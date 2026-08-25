@@ -903,7 +903,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Беренче тиз менюны булдырудан башлагыз",
   "channelSetting.quickAction.errorDuplicateName": "Бу исемле команда бу каналда инде бар.",
   "channelSetting.quickAction.errorInvalidName": "Дөрес команда исемен керетегез (зурлыгы 64 символдан да ким; хәрефләр, саннар, _, -, ., +; _ яки - белән башлана алмый).",
-  "channelSetting.quickAction.errorMessageTooLong": "Хәбәр эчтелеге 512 символдан да ким булырга тиеш.",
+  "channelSetting.quickAction.errorMessageTooLong": "Хәбәр эчтелеге 512 байттан да ким булырга тиеш.",
   "channelSetting.quickAction.flashMessage": "Ашыгыч хәбәр",
   "channelSetting.quickAction.flashMessages": "Ашыгыч хәбәрләр",
   "channelSetting.quickAction.keyTitle": "Ачкыч (мәсәлән: сәлам)",

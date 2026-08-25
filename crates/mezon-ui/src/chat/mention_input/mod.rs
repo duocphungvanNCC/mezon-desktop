@@ -1785,7 +1785,7 @@ impl MentionInput {
                 let locale = self.settings.read(cx).language.clone();
                 if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
                     QuickMenuStore::global(cx).update(cx, |store, cx| {
-                        store.refresh(channel_id, QUICK_MENU_TYPE_FLASH, cx);
+                        store.ensure_loaded(channel_id, QUICK_MENU_TYPE_FLASH, cx);
                     });
                 }
                 self.session_commands = slash_command_pool(&locale, cx);

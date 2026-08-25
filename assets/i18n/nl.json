@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Start met het aanmaken van je eerste snelmenu",
   "channelSetting.quickAction.errorDuplicateName": "Een commando met deze naam bestaat al in dit kanaal.",
   "channelSetting.quickAction.errorInvalidName": "Voer een geldige commandonaam in (max. 64 tekens; letters, cijfers, spaties, _, -, ., +; mag niet beginnen met _ of -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Berichtinhoud mag maximaal 512 tekens bevatten.",
+  "channelSetting.quickAction.errorMessageTooLong": "Berichtinhoud mag maximaal 512 bytes bevatten.",
   "channelSetting.quickAction.flashMessage": "Snelle boodschap",
   "channelSetting.quickAction.flashMessages": "Snelle berichten",
   "channelSetting.quickAction.keyTitle": "Voer trefwoord in (bijv. xinchao): ",

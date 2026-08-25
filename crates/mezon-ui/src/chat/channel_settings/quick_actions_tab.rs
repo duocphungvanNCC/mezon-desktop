@@ -362,7 +362,7 @@ impl QuickActionsTab {
                                     })
                                     .tooltip(Tooltip::text(edit_title))
                                     .child(
-                                        Icon::new(IconName::PenEdit)
+                                        Icon::new(IconName::QuickActionEdit)
                                             .size(px(14.))
                                             .text_color(theme.text_secondary),
                                     )
@@ -756,6 +756,9 @@ impl Render for CreateFlashMessageModal {
             .on_action(cx.listener(|_this, _: &::menu::Cancel, _window, cx| {
                 Self::close(cx);
             }))
+            .on_action(cx.listener(|this, _: &::menu::Confirm, _window, cx| {
+                this.submit(cx);
+            }))
             .w(px(448.))
             .rounded_lg()
             .bg(theme.tokens.theme_setting_primary)
@@ -1126,6 +1129,9 @@ impl Render for CreateQuickMenuModal {
             .key_context("menu")
             .on_action(cx.listener(|_this, _: &::menu::Cancel, _window, cx| {
                 Self::close(cx);
+            }))
+            .on_action(cx.listener(|this, _: &::menu::Confirm, _window, cx| {
+                this.submit(cx);
             }))
             .w(px(448.))
             .rounded_lg()

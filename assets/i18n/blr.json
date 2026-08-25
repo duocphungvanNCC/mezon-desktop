@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Пачніце, стварыўшы ваша першае хуткае меню",
   "channelSetting.quickAction.errorDuplicateName": "Каманда з такой назвай ужо існуе ў гэтым канале.",
   "channelSetting.quickAction.errorInvalidName": "Увядзіце сапраўдную назву каманды (макс. 64 сімвалы; літары, лічбы, прабелы, _, -, ., +; не можа пачынацца з _ або -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Змесціва паведамлення павінна быць не больш за 512 сімвалаў.",
+  "channelSetting.quickAction.errorMessageTooLong": "Змесціва паведамлення павінна быць не больш за 512 байт.",
   "channelSetting.quickAction.flashMessage": "Хуткае паведамленне",
   "channelSetting.quickAction.flashMessages": "Хуткія паведамленні",
   "channelSetting.quickAction.keyTitle": "Увядзіце ключавое слова (напрыклад: vitannya): ",

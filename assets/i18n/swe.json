@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Börja med att skapa din första snabba meny",
   "channelSetting.quickAction.errorDuplicateName": "Ett kommando med detta namn finns redan i den här kanalen.",
   "channelSetting.quickAction.errorInvalidName": "Ange ett giltigt kommandonamn (max 64 tecken; bokstäver, siffror, mellanslag, _, -, ., +; får inte börja med _ eller -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Meddelandeinnehållet får vara högst 512 tecken.",
+  "channelSetting.quickAction.errorMessageTooLong": "Meddelandeinnehållet får vara högst 512 byte.",
   "channelSetting.quickAction.flashMessage": "Snabbd meddelande",
   "channelSetting.quickAction.flashMessages": "Snabba meddelanden",
   "channelSetting.quickAction.keyTitle": "Ange nyckelord (T.ex. hej): ",

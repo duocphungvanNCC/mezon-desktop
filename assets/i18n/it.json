@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Inizia creando il tuo primo menu rapido",
   "channelSetting.quickAction.errorDuplicateName": "Un comando con questo nome esiste già in questo canale.",
   "channelSetting.quickAction.errorInvalidName": "Inserisci un nome comando valido (max 64 caratteri; lettere, numeri, spazi, _, -, ., +; non può iniziare con _ o -).",
-  "channelSetting.quickAction.errorMessageTooLong": "Il contenuto del messaggio deve essere di 512 caratteri o meno.",
+  "channelSetting.quickAction.errorMessageTooLong": "Il contenuto del messaggio deve essere di 512 byte o meno.",
   "channelSetting.quickAction.flashMessage": "Messaggio flash",
   "channelSetting.quickAction.flashMessages": "Messaggi flash",
   "channelSetting.quickAction.keyTitle": "Inserisci parola chiave (es: ciao): ",

@@ -894,7 +894,7 @@
   "channelSetting.quickAction.emptyQuickMenuDescription": "Beginne damit, dein erstes Schnellmenü zu erstellen",
   "channelSetting.quickAction.errorDuplicateName": "Ein Befehl mit diesem Namen existiert bereits in diesem Kanal.",
   "channelSetting.quickAction.errorInvalidName": "Bitte gib einen gültigen Befehlsnamen ein (max. 64 Zeichen; Buchstaben, Zahlen, Leerzeichen, _, -, ., +; darf nicht mit _ oder - beginnen).",
-  "channelSetting.quickAction.errorMessageTooLong": "Der Nachrichteninhalt darf höchstens 512 Zeichen lang sein.",
+  "channelSetting.quickAction.errorMessageTooLong": "Der Nachrichteninhalt darf höchstens 512 Bytes lang sein.",
   "channelSetting.quickAction.flashMessage": "Flash-Nachricht",
   "channelSetting.quickAction.flashMessages": "Flash-Nachrichten",
   "channelSetting.quickAction.keyTitle": "Schlüsselwort eingeben (z. B. hallo): ",
