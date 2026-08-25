@@ -4277,6 +4277,10 @@ impl MessagesStore {
         };
         let content_tokens: mezon_client::transport::ApiMessageContent =
             serde_json::from_value(content.clone())?;
+        let attachments: Vec<mezon_client::transport::ApiAttachment> = content
+            .get("attachments")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
         let message_id = synthesize_ws_message_id(self, channel_id, channel_id, 0);
         let api = ApiMessage {
             message_id,
@@ -4290,7 +4294,7 @@ impl MessagesStore {
             create_time: unix_now_seconds(),
             update_time: 0,
             hide_editted: true,
-            attachments: Vec::new(),
+            attachments,
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
