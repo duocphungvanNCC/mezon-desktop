@@ -554,13 +554,13 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
-        self.stop_display_link();
         unsafe {
             if !self
                 .native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
             {
+                self.stop_display_link();
                 return;
             }
         }
