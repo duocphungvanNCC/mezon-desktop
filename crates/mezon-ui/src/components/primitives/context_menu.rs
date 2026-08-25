@@ -60,6 +60,7 @@ pub struct SubmenuOption {
     pub value: i32,
     pub label: SharedString,
     pub selected: bool,
+    pub disabled: bool,
 }
 
 type SubmenuHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
@@ -721,6 +722,7 @@ impl RenderOnce for ContextMenu {
                             .occlude();
                         for (oi, option) in options.iter().enumerate() {
                             let value = option.value;
+                            let disabled = option.disabled;
                             let on_select = on_select.clone();
                             let dismiss_o = dismiss.clone();
                             sub = sub.child(
@@ -732,8 +734,10 @@ impl RenderOnce for ContextMenu {
                                     .px(px(8.))
                                     .py(px(6.))
                                     .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(hover))
+                                    .when(disabled, |row| row.opacity(0.5).cursor_default())
+                                    .when(!disabled, |row| {
+                                        row.cursor_pointer().hover(|s| s.bg(hover))
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -747,11 +751,13 @@ impl RenderOnce for ContextMenu {
                                             Icon::new(IconName::Check).size_4().text_color(text),
                                         )
                                     })
-                                    .on_click(move |_: &ClickEvent, window, cx| {
-                                        on_select(value, window, cx);
-                                        if let Some(dismiss) = &dismiss_o {
-                                            dismiss(window, cx);
-                                        }
+                                    .when(!disabled, |el| {
+                                        el.on_click(move |_: &ClickEvent, window, cx| {
+                                            on_select(value, window, cx);
+                                            if let Some(dismiss) = &dismiss_o {
+                                                dismiss(window, cx);
+                                            }
+                                        })
                                     }),
                             );
                         }

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
+const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -1831,6 +1832,53 @@ mod opt_i32_flex {
     }
 }
 
+mod opt_f32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_f64().map(|v| v as f32)),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<f32>().ok()),
+            _ => Ok(None),
+        }
+    }
+}
+
+mod sprite_pool {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut flat = Vec::new();
+        let mut pools = Vec::new();
+        for item in items {
+            match item {
+                serde_json::Value::Array(frames) => pools.push(
+                    frames
+                        .iter()
+                        .filter_map(super::flex_string)
+                        .collect::<Vec<_>>(),
+                ),
+                other => flat.extend(super::flex_string(&other)),
+            }
+        }
+        if !flat.is_empty() {
+            pools.push(flat);
+        }
+        Ok(pools)
+    }
+}
+
 mod i32_flex {
     use serde::{Deserialize, Deserializer};
 
@@ -1960,23 +2008,23 @@ mod poll_answers {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedAuthor {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedThumbnail {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedImage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub width: Option<i32>,
@@ -1986,17 +2034,17 @@ pub struct ApiEmbedImage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedFooter {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedField {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub value: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub inline: bool,
@@ -2010,16 +2058,104 @@ pub struct ApiEmbedField {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiMessageInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub placeholder: Option<String>,
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
+    pub input_type: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub required: bool,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub textarea: bool,
-    #[serde(default, rename = "defaultValue")]
+    #[serde(
+        default,
+        rename = "defaultValue",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
     pub default_value: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiRadioOption {
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub label: String,
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub value: String,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub style: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiAnimationComponent {
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+    #[serde(default, deserialize_with = "sprite_pool::deserialize")]
+    pub pool: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "opt_f32_flex::deserialize")]
+    pub duration: Option<f32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub repeat: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub vertical: bool,
+    #[serde(
+        default,
+        rename = "isResult",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub is_result: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridItem {
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub width: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub height: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_col: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_row: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridComponent {
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    pub items: Vec<ApiGridItem>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiEmbedShapeWrapper {
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub component_type: Option<i32>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub component: ApiGridComponent,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub columns: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub rows: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2030,7 +2166,7 @@ pub struct ApiEmbedInputWrapper {
         deserialize_with = "opt_i32_flex::deserialize"
     )]
     pub component_type: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub id: Option<String>,
     #[serde(default)]
     pub component: serde_json::Value,
@@ -2042,21 +2178,21 @@ pub struct ApiEmbedInputWrapper {
 pub struct ApiEmbed {
     #[serde(default, deserialize_with = "embed_color::deserialize")]
     pub color: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
     #[serde(default)]
     pub author: Option<ApiEmbedAuthor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub description: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<ApiEmbedThumbnail>,
-    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    #[serde(default, deserialize_with = "embed_fields_lenient::deserialize")]
     pub fields: Vec<ApiEmbedField>,
     #[serde(default)]
     pub image: Option<ApiEmbedImage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub timestamp: Option<String>,
     #[serde(default)]
     pub footer: Option<ApiEmbedFooter>,
@@ -2076,15 +2212,15 @@ pub struct ApiSelectOption {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiButtonComponent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub label: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disable: bool,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub style: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon: Option<String>,
 }
 
@@ -2161,6 +2297,26 @@ mod opt_string_flex {
             .as_ref()
             .and_then(super::flex_string)
             .filter(|text| !text.is_empty()))
+    }
+}
+
+mod embed_fields_lenient {
+    use super::ApiEmbedField;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiEmbedField>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect())
     }
 }
 
@@ -4242,7 +4398,7 @@ impl MezonTransport {
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
             clan_id,
-            limit: 500,
+            limit: CHANNEL_DESC_FETCH_LIMIT,
             state: 1,
             channel_type: 1,
             ..Default::default()
@@ -8038,16 +8194,10 @@ impl MezonTransport {
     /// Create activity.
     pub async fn create_activiy(
         &self,
-        activity_name: &str,
-        activity_type: i32,
+        request: api::CreateActivityRequest,
     ) -> Result<api::UserActivity> {
         let cid = self.generate_cid();
-        let body = api::CreateActivityRequest {
-            activity_name: activity_name.to_string(),
-            activity_type,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateActiviy", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8973,18 +9123,26 @@ impl MezonTransport {
         Ok(api::MezonOauthClient::decode(response.as_slice())?)
     }
 
-    /// Add quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -8997,18 +9155,26 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Update quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
