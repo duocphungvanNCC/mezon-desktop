@@ -1432,12 +1432,9 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        self.borrow()
-            .client
-            .get_client()
-            .borrow()
-            .mouse_location
-            .unwrap_or_default()
+        let client = self.borrow().client.get_client();
+        let state = client.borrow();
+        state.mouse_location.unwrap_or(state.last_mouse_location)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -1478,8 +1475,9 @@ impl PlatformWindow for WaylandWindow {
                 // The remap frame must actually present, otherwise no buffer is
                 // attached and the surface stays invisible. Nothing else marks
                 // the window dirty here, so force the frame.
-                state.redraw_requested = true;
                 state.surface.commit();
+                drop(state);
+                self.0.request_redraw();
             }
         }
 
@@ -1651,6 +1649,7 @@ impl PlatformWindow for WaylandWindow {
         // surface hidden to tray. Stay dark until `activate` unmaps the flag.
         if state.unmapped {
             state.redraw_requested = false;
+            state.presentation = PresentationState::Unpresented;
             self.0.frame_loop.set(FrameLoop::Parked);
             return;
         }

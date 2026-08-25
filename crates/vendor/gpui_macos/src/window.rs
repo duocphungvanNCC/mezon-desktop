@@ -565,10 +565,11 @@ impl MacWindowState {
             }
         }
         let screen = unsafe { self.native_window.screen() };
-        if screen.is_null() {
-            return;
-        }
-        let display_id = unsafe { display_id_for_screen(screen) };
+        let display_id = if screen.is_null() {
+            MacDisplay::primary().0
+        } else {
+            unsafe { display_id_for_screen(screen) }
+        };
         self.frame_source
             .get_or_insert_with(|| {
                 WindowFrameSource::new(self.native_view.as_ptr() as *mut c_void, step)

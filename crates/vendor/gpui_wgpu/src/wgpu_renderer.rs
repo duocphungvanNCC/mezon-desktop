@@ -194,6 +194,7 @@ pub struct WgpuRenderer {
     gamma_offset: u64,
     instance_buffer_capacity: u64,
     instance_peak_since_check: u64,
+    instance_bytes_this_frame: u64,
     instance_frames_since_check: u32,
     max_buffer_size: u64,
     storage_buffer_alignment: u64,
@@ -547,6 +548,7 @@ impl WgpuRenderer {
             gamma_offset,
             instance_buffer_capacity: initial_instance_buffer_capacity,
             instance_peak_since_check: 0,
+            instance_bytes_this_frame: 0,
             instance_frames_since_check: 0,
             max_buffer_size,
             storage_buffer_alignment,
@@ -1327,6 +1329,7 @@ impl WgpuRenderer {
 
     fn record_frame(&mut self, scene: &Scene, frame_view: &wgpu::TextureView) -> Result<()> {
         let mut instance_offset = 0;
+        self.instance_bytes_this_frame = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
             .with_context(|| {
@@ -1457,7 +1460,7 @@ impl WgpuRenderer {
         self.resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
-        self.maybe_shrink_instance_buffer(instance_offset);
+        self.maybe_shrink_instance_buffer(self.instance_bytes_this_frame);
         Ok(())
     }
 
@@ -1715,6 +1718,7 @@ impl WgpuRenderer {
             offset = 0;
         }
         *instance_offset = offset + size;
+        self.instance_bytes_this_frame += size;
 
         let resources = self.resources();
         if !data.is_empty() {

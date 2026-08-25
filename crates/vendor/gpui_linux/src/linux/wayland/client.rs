@@ -289,6 +289,7 @@ pub(crate) struct WaylandClientState {
     pub capslock: Capslock,
     axis_source: AxisSource,
     pub mouse_location: Option<Point<Pixels>>,
+    pub last_mouse_location: Point<Pixels>,
     continuous_scroll_delta: Option<Point<Pixels>>,
     discrete_scroll_delta: Option<Point<f32>>,
     vertical_modifier: f32,
@@ -901,6 +902,7 @@ impl WaylandClient {
             scroll_event_received: false,
             axis_source: AxisSource::Wheel,
             mouse_location: None,
+            last_mouse_location: Point::default(),
             continuous_scroll_delta: None,
             discrete_scroll_delta: None,
             vertical_modifier: -1.0,
@@ -1984,9 +1986,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 }
                 if serial == commit_count {
                     commit_text_input(&client, text_input);
-                    if last_serial.as_raw() == serial {
-                        client.borrow_mut().last_ime_cursor_rectangle = cursor_rectangle;
-                    }
+                    client.borrow_mut().last_ime_cursor_rectangle = cursor_rectangle;
                 }
             }
             _ => {}
@@ -2079,6 +2079,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         modifiers: state.modifiers,
                     });
                     state.mouse_focused_window = None;
+                    if let Some(location) = state.mouse_location {
+                        state.last_mouse_location = location;
+                    }
                     state.mouse_location = None;
                     state.button_pressed = None;
                     state.cursor_hidden_window = None;
