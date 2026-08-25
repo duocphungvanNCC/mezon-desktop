@@ -4,8 +4,8 @@ use gpui::{
 };
 
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ChannelWebhook, ClanId, ClanMembersStore,
-    Settings, WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
+    AppConfig, ChannelId, ChannelList, ChannelWebhook, ClanId, ClanMembersStore, Settings,
+    WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
 };
 
 use super::integration_setting_page::{
@@ -53,7 +53,10 @@ impl ChannelWebhookTab {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        channel_list.update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        channel_list.update(cx, |store, cx| {
+            store.load_for_clan(clan_id, cx);
+            store.ensure_user_channels_loaded(cx);
+        });
         WebhookStore::global(cx).update(cx, |store, cx| {
             store.ensure_channel_webhooks_loaded(clan_id, cx);
         });
@@ -108,19 +111,12 @@ impl ChannelWebhookTab {
     ) -> Vec<ChannelOption> {
         channel_list
             .read(cx)
-            .categories_for_clan(clan_id)
-            .iter()
-            .flat_map(|category| {
-                category.channels.iter().filter_map(|channel| {
-                    if channel.channel_type != ChannelType::Text || channel.private {
-                        return None;
-                    }
-                    Some(ChannelOption {
-                        id: channel.id,
-                        label: channel.name.clone().into(),
-                        category_name: category.name.to_uppercase().into(),
-                    })
-                })
+            .webhook_target_channels_for_clan(clan_id)
+            .into_iter()
+            .map(|channel| ChannelOption {
+                id: channel.id,
+                label: channel.name.into(),
+                category_name: channel.category_name.to_uppercase().into(),
             })
             .collect()
     }

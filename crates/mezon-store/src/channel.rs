@@ -316,6 +316,17 @@ pub struct Category {
     pub channels: Vec<Channel>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebhookTargetChannel {
+    pub id: ChannelId,
+    pub name: String,
+    pub category_name: String,
+}
+
+fn is_webhook_target_channel(channel: &Channel) -> bool {
+    channel.channel_type == ChannelType::Text && channel.parent_id.is_none()
+}
+
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
     ActiveChannelChanged(Option<ChannelId>),
@@ -3344,6 +3355,59 @@ impl ChannelList {
         self.cache.get(&clan_id).map_or(&[], Vec::as_slice)
     }
 
+    pub fn webhook_target_channels_for_clan(&self, clan_id: ClanId) -> Vec<WebhookTargetChannel> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+
+        for channel in self.user_channels() {
+            if channel.clan_id != clan_id || !is_webhook_target_channel(channel) {
+                continue;
+            }
+            if !seen.insert(channel.id) {
+                continue;
+            }
+            out.push(WebhookTargetChannel {
+                id: channel.id,
+                name: channel.name.clone(),
+                category_name: self.category_name_for_channel(clan_id, channel.id),
+            });
+        }
+
+        for category in self.categories_for_clan(clan_id) {
+            for channel in &category.channels {
+                if !is_webhook_target_channel(channel) || !seen.insert(channel.id) {
+                    continue;
+                }
+                out.push(WebhookTargetChannel {
+                    id: channel.id,
+                    name: channel.name.clone(),
+                    category_name: category.name.clone(),
+                });
+            }
+        }
+
+        out.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.get().cmp(&b.id.get()))
+        });
+        out
+    }
+
+    fn category_name_for_channel(&self, clan_id: ClanId, channel_id: ChannelId) -> String {
+        for category in self.categories_for_clan(clan_id) {
+            if category
+                .channels
+                .iter()
+                .any(|channel| channel.id == channel_id)
+            {
+                return category.name.clone();
+            }
+        }
+        String::new()
+    }
+
     pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
         self.loading.contains_key(&clan_id)
     }
@@ -5440,6 +5504,90 @@ mod tests {
             e2ee: 0,
             app_id: 0,
         }
+    }
+
+    fn api_desc(id: i64, name: &str, parent_id: i64) -> ApiChannelDesc {
+        ApiChannelDesc {
+            channel_id: id,
+            channel_label: name.into(),
+            channel_type: 1,
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            active: CHANNEL_ACTIVE_JOINED,
+            creator_id: 0,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        }
+    }
+
+    #[gpui::test]
+    fn webhook_target_channels_excludes_threads_and_voice(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let general = make_channel(1, "general", "1");
+                let mut thread = make_channel(3, "thread", "1");
+                thread.channel_type = ChannelType::Thread;
+                thread.parent_id = Some(ChannelId(1));
+                let mut voice = make_channel(4, "voice", "1");
+                voice.channel_type = ChannelType::Voice;
+
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    vec![Category {
+                        id: "1".into(),
+                        clan_id: ClanId(1),
+                        name: "General".into(),
+                        order: 0,
+                        channels: vec![general, thread, voice],
+                    }],
+                    None,
+                    cx,
+                );
+
+                let targets = channels.webhook_target_channels_for_clan(ClanId(1));
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].id, ChannelId(1));
+                assert_eq!(targets[0].category_name, "General");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn webhook_target_channels_merges_user_channels_missing_from_structure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), vec![], None, cx);
+                channels.merge_user_channels_from_api_descs(
+                    vec![api_desc(2, "alpha", 0), api_desc(6, "zulu", 0)],
+                    cx,
+                );
+
+                let targets = channels.webhook_target_channels_for_clan(ClanId(1));
+                assert_eq!(
+                    targets.iter().map(|channel| channel.id).collect::<Vec<_>>(),
+                    vec![ChannelId(2), ChannelId(6)]
+                );
+            });
+        });
     }
 
     #[test]
