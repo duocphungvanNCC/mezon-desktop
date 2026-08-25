@@ -286,6 +286,7 @@
   "ageRestricted.continue": "Continue",
   "ageRestricted.dateOfBirth": "Date of birth",
   "ageRestricted.description": "This channel contains adult content marked as age-restricted. Do you wish to proceed?",
+  "ageRestricted.enterBirthday": "Enter birthday",
   "ageRestricted.month.april": "April",
   "ageRestricted.month.august": "August",
   "ageRestricted.month.december": "December",

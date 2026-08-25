@@ -286,6 +286,7 @@
   "ageRestricted.continue": "続行",
   "ageRestricted.dateOfBirth": "生年月日",
   "ageRestricted.description": "このチャンネルにはアダルトコンテンツが含まれており、年齢制限が表示されています。続行しますか？",
+  "ageRestricted.enterBirthday": "生年月日を入力",
   "ageRestricted.month.april": "4月",
   "ageRestricted.month.august": "8月",
   "ageRestricted.month.december": "12月",

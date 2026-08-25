@@ -938,7 +938,11 @@ impl FriendsPage {
                             .justify_center()
                             .text_center()
                             .mb(px(120.))
-                            .child(mezon_i18n::t(locale, key).to_string()),
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .child(mezon_i18n::t(locale, key).to_string()),
+                            ),
                     ),
             );
         }
