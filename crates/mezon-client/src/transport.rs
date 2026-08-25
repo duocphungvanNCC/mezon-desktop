@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
+const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -4397,7 +4398,7 @@ impl MezonTransport {
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
             clan_id,
-            limit: 500,
+            limit: CHANNEL_DESC_FETCH_LIMIT,
             state: 1,
             channel_type: 1,
             ..Default::default()
