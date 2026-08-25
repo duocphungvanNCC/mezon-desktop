@@ -24,8 +24,8 @@ use crate::components::primitives::text_actions::{
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
-    should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const DEFAULT_MAX_VISIBLE_LINES: usize = 8;
@@ -576,7 +576,7 @@ impl TextArea {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_next_word_end(
@@ -592,7 +592,7 @@ impl TextArea {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_start(
@@ -608,7 +608,7 @@ impl TextArea {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_end(
@@ -624,7 +624,7 @@ impl TextArea {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -690,7 +690,7 @@ impl TextArea {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
@@ -701,7 +701,12 @@ impl TextArea {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
+    }
+
+    fn delete_selected_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let range_utf16 = self.range_to_utf16(&self.selected_range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
@@ -742,7 +747,7 @@ impl TextArea {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
-            self.replace_text_in_range(None, "", window, cx);
+            self.delete_selected_range(window, cx);
         }
     }
 
@@ -916,6 +921,7 @@ impl EntityInputHandler for TextArea {
             ime_replace_range(&self.selected_range, self.marked_range.as_ref())
         };
         let range = self.clamp_range(range);
+        let prior_marked = self.marked_range.clone();
         let numeric_text;
         let new_text = if self.numeric && !new_text.is_empty() {
             numeric_text = keep_numeric(new_text);
@@ -926,11 +932,9 @@ impl EntityInputHandler for TextArea {
         } else {
             new_text
         };
-        let kind = if self.marked_range.is_some() {
-            EditKind::Insert
-        } else if new_text.is_empty() {
+        let kind = if new_text.is_empty() {
             EditKind::Delete
-        } else if range.is_empty() && !new_text.contains('\n') {
+        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
             EditKind::Insert
         } else {
             EditKind::Other
@@ -940,7 +944,11 @@ impl EntityInputHandler for TextArea {
         self.set_content(next);
         let cursor = self.clamp_offset((range.start + new_text.len()).min(self.content.len()));
         self.selected_range = cursor..cursor;
-        self.marked_range = None;
+        if new_text.is_empty() {
+            self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
+        } else {
+            self.marked_range = None;
+        }
         self.caret_blink.pause_blinking(cx);
         cx.notify();
         cx.emit(TextAreaEvent::Change);
