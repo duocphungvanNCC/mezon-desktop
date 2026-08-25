@@ -265,17 +265,18 @@ impl Render for TopicPanel {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x5865f233))
+            .bg(rgba(0x3b82f633))
             .border_2()
             .border_dashed()
-            .border_color(rgb(0x5865f2))
+            .border_color(rgb(0x3b82f6))
             .rounded(px(8.))
             .child(
                 div()
                     .px(px(24.))
                     .py(px(12.))
                     .rounded(px(8.))
-                    .bg(rgb(0x5865f2))
+                    .bg(rgb(0x3b82f6))
+                    .shadow_lg()
                     .child(
                         div()
                             .text_lg()
@@ -285,19 +286,13 @@ impl Render for TopicPanel {
                     ),
             );
 
-        v_flex()
+        let drop_body = v_flex()
             .relative()
             .group("topic-drop-zone")
-            .w(px(PANEL_WIDTH))
-            .min_w(px(PANEL_WIDTH))
-            .flex_shrink_0()
-            .h_full()
+            .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_hidden()
-            .border_l_1()
-            .border_color(tokens.border_primary)
-            .bg(theme.bg_primary)
-            .text_color(tokens.text_theme_message)
             .on_drop(
                 move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                     let dropped: Vec<PathBuf> = paths.paths().to_vec();
@@ -307,12 +302,6 @@ impl Render for TopicPanel {
                     });
                 },
             )
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" {
-                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
-                }
-            }))
-            .child(header)
             .child(
                 div()
                     .id("topic-timeline-host")
@@ -336,6 +325,25 @@ impl Render for TopicPanel {
                     .children(self.topic_timeline.read(cx).skeleton_overlay(cx.theme())),
             )
             .child(composer)
-            .child(drop_overlay)
+            .child(drop_overlay);
+
+        v_flex()
+            .w(px(PANEL_WIDTH))
+            .min_w(px(PANEL_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .min_h_0()
+            .overflow_hidden()
+            .border_l_1()
+            .border_color(tokens.border_primary)
+            .bg(theme.bg_primary)
+            .text_color(tokens.text_theme_message)
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
+                }
+            }))
+            .child(header)
+            .child(drop_body)
     }
 }
