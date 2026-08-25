@@ -700,8 +700,17 @@ impl WaylandWindowStatePtr {
         self.frame_loop.set(FrameLoop::Parked);
     }
 
-    pub fn frame_callback_fired(&self) {
-        self.state.borrow_mut().pending_frame_callback = None;
+    pub fn frame_callback_fired(&self, callback_id: &ObjectId) {
+        let mut state = self.state.borrow_mut();
+        let is_current_callback = state
+            .pending_frame_callback
+            .as_ref()
+            .is_some_and(|callback| callback.id() == callback_id.clone());
+        if !is_current_callback {
+            return;
+        }
+        state.pending_frame_callback = None;
+        drop(state);
         if self.frame_loop.get() == FrameLoop::AwaitingCallback {
             self.frame();
         }
@@ -1554,6 +1563,10 @@ impl PlatformWindow for WaylandWindow {
             return;
         }
         state.unmapped = true;
+        // A callback attached to the pre-hide surface commit is no longer a valid pacing
+        // source for the remapped window. Ignore it by clearing the tracked callback; event
+        // dispatch also checks its object id so a late Done cannot consume the new callback.
+        state.pending_frame_callback = None;
         self.0.frame_loop.set(FrameLoop::Unconfigured);
         state.surface.attach(None, 0, 0);
         state.surface.commit();

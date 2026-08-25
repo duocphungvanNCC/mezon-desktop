@@ -521,22 +521,29 @@ impl WaylandClientStatePtr {
             return;
         };
         let cursor_rectangle = ImeCursorRectangle::from(bounds);
-        if state.last_ime_cursor_rectangle == Some(cursor_rectangle) {
-            return;
+        let cursor_rectangle_changed = state.last_ime_cursor_rectangle != Some(cursor_rectangle);
+        if cursor_rectangle_changed {
+            state.last_ime_cursor_rectangle = Some(cursor_rectangle);
         }
-        state.last_ime_cursor_rectangle = Some(cursor_rectangle);
         let composing = state.composing || state.pre_edit_text.is_some();
         let window = state.keyboard_focused_window.clone();
         drop(state);
 
         if composing {
+            if !cursor_rectangle_changed {
+                return;
+            }
             set_ime_cursor_rectangle(&text_input, cursor_rectangle);
             commit_text_input(&client, &text_input);
         } else if let Some(window) = window {
+            // The cursor can remain at the same visual position while the surrounding text
+            // changes. Cache only the rectangle request; always refresh text sent to the IME.
             sync_text_input(&text_input, &window, ChangeCause::Other);
-            set_ime_cursor_rectangle(&text_input, cursor_rectangle);
+            if cursor_rectangle_changed {
+                set_ime_cursor_rectangle(&text_input, cursor_rectangle);
+            }
             commit_text_input(&client, &text_input);
-        } else {
+        } else if cursor_rectangle_changed {
             set_ime_cursor_rectangle(&text_input, cursor_rectangle);
             commit_text_input(&client, &text_input);
         }
@@ -1359,7 +1366,7 @@ delegate_noop!(WaylandClientStatePtr: ignore wp_viewport::WpViewport);
 impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
     fn event(
         state: &mut WaylandClientStatePtr,
-        _: &wl_callback::WlCallback,
+        callback: &wl_callback::WlCallback,
         event: wl_callback::Event,
         surface_id: &ObjectId,
         _: &Connection,
@@ -1373,7 +1380,7 @@ impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
         drop(state);
 
         if let wl_callback::Event::Done { .. } = event {
-            window.frame_callback_fired();
+            window.frame_callback_fired(&callback.id());
         }
     }
 }

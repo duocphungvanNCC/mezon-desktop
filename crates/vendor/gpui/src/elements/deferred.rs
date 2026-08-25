@@ -31,8 +31,8 @@ impl Deferred {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, Entity, StyleRefinement, TestAppContext, Window, anchored, deferred, div, point,
-        prelude::*, px, size,
+        AnyView, Context, Entity, StyleRefinement, TestAppContext, Window, anchored, deferred, div,
+        point, prelude::*, px, size,
     };
 
     /// A stand-in for a dock panel hosting a popover (deferred draw) whose
@@ -71,8 +71,7 @@ mod tests {
     impl Render for RootView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().key_context("Root").size_full().child(
-                self.panel
-                    .clone()
+                AnyView::from(self.panel.clone())
                     .cached(StyleRefinement::default().size_full()),
             )
         }
