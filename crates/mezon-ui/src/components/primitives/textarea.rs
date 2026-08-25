@@ -40,6 +40,12 @@ fn normalize_pasted(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+fn keep_numeric(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-')
+        .collect()
+}
+
 fn byte_offset_to_utf16(text: &str, byte_offset: usize) -> usize {
     let mut utf16 = 0;
     let mut utf8 = 0;
@@ -108,6 +114,7 @@ pub struct TextArea {
     select_granularity: SelectGranularity,
     select_anchor: Range<usize>,
     single_line: bool,
+    numeric: bool,
     bg: Option<Hsla>,
     text_color: Option<Hsla>,
     text_size: Pixels,
@@ -159,6 +166,7 @@ impl TextArea {
             select_granularity: SelectGranularity::Character,
             select_anchor: 0..0,
             single_line: false,
+            numeric: false,
             bg: None,
             text_color: None,
             text_size: px(14.),
@@ -195,6 +203,11 @@ impl TextArea {
         if single_line {
             self.max_visible_lines = 1;
         }
+        self
+    }
+
+    pub fn numeric(mut self, numeric: bool) -> Self {
+        self.numeric = numeric;
         self
     }
 
@@ -909,6 +922,16 @@ impl EntityInputHandler for TextArea {
         };
         let range = self.clamp_range(range);
         let prior_marked = self.marked_range.clone();
+        let numeric_text;
+        let new_text = if self.numeric && !new_text.is_empty() {
+            numeric_text = keep_numeric(new_text);
+            if numeric_text.is_empty() {
+                return;
+            }
+            numeric_text.as_str()
+        } else {
+            new_text
+        };
         let kind = if new_text.is_empty() {
             EditKind::Delete
         } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {

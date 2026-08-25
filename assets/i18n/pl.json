@@ -286,6 +286,7 @@
   "ageRestricted.continue": "Kontynuuj",
   "ageRestricted.dateOfBirth": "Data urodzenia",
   "ageRestricted.description": "Ten kanał zawiera treści dla dorosłych i jest oznaczony jako ograniczony wiekowo. Czy chcesz kontynuować?",
+  "ageRestricted.enterBirthday": "Podaj datę urodzenia",
   "ageRestricted.month.april": "Kwiecień",
   "ageRestricted.month.august": "Sierpień",
   "ageRestricted.month.december": "Grudzień",
