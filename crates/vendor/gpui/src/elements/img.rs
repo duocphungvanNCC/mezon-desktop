@@ -270,6 +270,24 @@ pub struct ImgLayoutState {
 
 const MIN_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(11);
 const CLAMPED_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(100);
+const ANIMATION_WAKEUP_QUANTUM: Duration = Duration::from_millis(33);
+
+// mezon vendor edit: every animating img scheduled its own wakeup, and a wakeup
+// notifies the owning view, which rebuilds every cached ancestor. A handful of
+// animated emoji therefore redrew the whole window at the union of their frame
+// rates. Wakeups now land on one process-wide grid, so the cost stops scaling
+// with the number of animations on screen; the frame index catches up from the
+// clock, so quantising the wakeup never slows an animation down.
+fn coalesced_wakeup(due_at: Instant) -> Instant {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    let Some(offset) = due_at.checked_duration_since(origin) else {
+        return due_at;
+    };
+    let quantum = ANIMATION_WAKEUP_QUANTUM.as_nanos();
+    let steps = offset.as_nanos().div_ceil(quantum);
+    origin + Duration::from_nanos((steps * quantum) as u64)
+}
 
 fn animation_frame_delay(data: &RenderImage, frame_index: usize) -> Duration {
     let delay = Duration::from(data.delay(frame_index));
@@ -357,10 +375,19 @@ impl Element for Img {
                                                 animation_frame_delay(&data, state.frame_index);
 
                                             if elapsed >= frame_duration {
-                                                state.frame_index =
-                                                    (state.frame_index + 1) % frame_count;
+                                                let mut remaining = elapsed;
+                                                let mut index = state.frame_index;
+                                                for _ in 0..frame_count {
+                                                    let step = animation_frame_delay(&data, index);
+                                                    if remaining < step {
+                                                        break;
+                                                    }
+                                                    remaining -= step;
+                                                    index = (index + 1) % frame_count;
+                                                }
+                                                state.frame_index = index;
                                                 state.last_frame_time =
-                                                    Some(current_time - (elapsed - frame_duration));
+                                                    Some(current_time - remaining);
                                             }
                                         } else {
                                             state.last_frame_time = Some(current_time);
@@ -434,10 +461,11 @@ impl Element for Img {
                                             && state.next_frame_due != Some(due_at)
                                         {
                                             state.next_frame_due = Some(due_at);
+                                            let wake_at = coalesced_wakeup(due_at);
                                             let current_view = window.current_view();
                                             state.next_frame_wakeup =
                                                 Some(window.spawn(cx, async move |cx| {
-                                                    let remaining = due_at
+                                                    let remaining = wake_at
                                                         .saturating_duration_since(Instant::now());
                                                     cx.background_executor()
                                                         .timer(remaining)
