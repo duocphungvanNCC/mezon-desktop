@@ -169,7 +169,7 @@ impl Element for AnyView {
                         return (None, element_state);
                     }
 
-                    let refreshing = mem::replace(&mut window.refreshing, true);
+                    let refreshing = window.refreshing;
                     let prepaint_start = window.prepaint_index();
                     let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                         let mut element = (self.render)(self, window, cx);
