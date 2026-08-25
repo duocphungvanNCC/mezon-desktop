@@ -903,15 +903,25 @@ impl Render for UserProfilePopover {
 const BANNER_ICON_BG: u32 = 0x272120;
 const BANNER_ICON_BG_HOVER: u32 = 0x1e1a19;
 const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
-pub(crate) fn share_contact_icon() -> gpui::AnyElement {
-    img("icons/icon-share-contact.svg")
-        .size(px(16.))
-        .flex_none()
-        .into_any_element()
+pub(crate) fn share_contact_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/icon-share-contact.svg", cache)
 }
 
-pub(crate) fn friend_icon() -> gpui::AnyElement {
-    img("icons/icon-friend.svg")
+pub(crate) fn friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/icon-friend.svg", cache)
+}
+
+pub(crate) fn add_person_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/add-person.svg", cache)
+}
+
+pub(crate) fn accept_friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/i-con-accept-friend.svg", cache)
+}
+
+fn profile_asset_icon(path: &'static str, cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    img(path)
+        .image_cache(&cache)
         .size(px(16.))
         .flex_none()
         .into_any_element()
@@ -1012,7 +1022,7 @@ fn render_banner_actions(
                 let locale = this.settings.read(cx).language.clone().into();
                 ShareContactModal::open(contact, locale, window, cx);
             }),
-            share_contact_icon(),
+            share_contact_icon(this.avatar_image_cache.clone()),
         ));
     }
 
@@ -1038,7 +1048,7 @@ fn render_banner_actions(
                                     });
                                 }
                             },
-                            friend_icon(),
+                            friend_icon(this.avatar_image_cache.clone()),
                         )
                         .into_any_element(),
                     )
@@ -1068,13 +1078,18 @@ fn render_banner_actions(
         }
         Some(FriendState::InviteReceived) => {
             buttons.push(
-                banner_icon_button("profile-accept", IconName::IConAcceptFriend, true, false, {
-                    let user_id = this.user_id;
-                    move |_: &ClickEvent, _window, cx| {
-                        FriendStore::global(cx)
-                            .update(cx, |store, cx| store.accept_friend(user_id, cx));
-                    }
-                })
+                banner_icon_shell(
+                    "profile-accept",
+                    true,
+                    {
+                        let user_id = this.user_id;
+                        move |_: &ClickEvent, _window, cx| {
+                            FriendStore::global(cx)
+                                .update(cx, |store, cx| store.accept_friend(user_id, cx));
+                        }
+                    },
+                    accept_friend_icon(this.avatar_image_cache.clone()),
+                )
                 .into_any_element(),
             );
             buttons.push(
@@ -1107,10 +1122,8 @@ fn render_banner_actions(
                 let display_name = profile.display_name.clone();
                 let avatar = profile.avatar_url.clone();
                 buttons.push(
-                    banner_icon_button(
+                    banner_icon_shell(
                         "profile-add-friend",
-                        IconName::AddPerson,
-                        false,
                         false,
                         move |_: &ClickEvent, _window, cx| {
                             FriendStore::global(cx).update(cx, |store, cx| {
@@ -1123,6 +1136,7 @@ fn render_banner_actions(
                                 );
                             });
                         },
+                        add_person_icon(this.avatar_image_cache.clone()),
                     )
                     .into_any_element(),
                 );
@@ -1144,50 +1158,57 @@ fn render_friend_menu(
     let locale_label = locale_str.clone();
     let theme = cx.theme();
 
-    div()
-        .absolute()
-        .top(px(36.))
-        .right_0()
-        .w(px(165.))
-        .p_2()
-        .rounded_lg()
-        .bg(theme.bg_floating)
-        .shadow_lg()
-        .child(
-            ClickableContainer::new("profile-remove-friend")
-                .cursor(CursorStyle::PointingHand)
-                .on_click({
-                    move |_: &ClickEvent, window, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| {
-                            shell.confirm_remove_friend(
-                                user_id,
-                                &username,
-                                FriendRemovalKind::RemoveFriend,
-                                &locale_str,
-                                window,
-                                cx,
-                            );
-                        });
-                        entity.update(cx, |this, cx| {
-                            this.friend_menu_open = false;
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(4.))
-                        .text_sm()
-                        .text_color(theme.tokens.text_theme_primary)
-                        .child(mezon_i18n::t(
-                            locale_label.as_str(),
-                            "userProfile.pendingContent.removeFriend",
-                        )),
-                ),
-        )
-        .into_any_element()
+    deferred(
+        div()
+            .occlude()
+            .absolute()
+            .top_0()
+            .left(px(44.))
+            .w(px(150.))
+            .p_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surfaces.secondary)
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .id("profile-remove-friend")
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(theme.text_secondary)
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .on_click({
+                        move |_: &ClickEvent, window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                shell.confirm_remove_friend(
+                                    user_id,
+                                    &username,
+                                    FriendRemovalKind::RemoveFriend,
+                                    &locale_str,
+                                    window,
+                                    cx,
+                                );
+                            });
+                            entity.update(cx, |this, cx| {
+                                this.friend_menu_open = false;
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(mezon_i18n::t(
+                        locale_label.as_str(),
+                        "userProfile.pendingContent.removeFriend",
+                    )),
+            ),
+    )
+    .into_any_element()
 }
 
 fn render_pending_friend(user_id: UserId, username: &str, locale: &str) -> AnyElement {
