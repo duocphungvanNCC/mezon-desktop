@@ -3827,6 +3827,7 @@
   "screenShare.selectScreen": "Chọn màn hình để chia sẻ",
   "screenShare.share": "Chia sẻ",
   "screenShare.shareAudio": "Chia sẻ âm thanh",
+  "screenShare.systemWillAsk": "Hệ thống sẽ hỏi bạn muốn chia sẻ cửa sổ hoặc màn hình nào.",
   "screenShare.window": "Cửa sổ",
   "screenStack.menuChannelStack.channelSetting": "Cài đặt kênh",
   "screenStack.menuChannelStack.permissionOverrides": "Ghi đè quyền",
