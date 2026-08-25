@@ -1623,10 +1623,23 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
             return refs;
         }
     }
+    let salvaged = salvage_message_refs(bytes);
+    if !salvaged.is_empty() {
+        tracing::warn!(
+            "salvaged {} message reference(s) from a malformed blob ({} bytes)",
+            salvaged.len(),
+            bytes.len()
+        );
+        return salvaged;
+    }
     tracing::warn!(
-        "failed to decode message references ({} bytes, leading bytes {})",
+        "failed to decode message references ({} bytes, leading bytes {}, utf8 {}, json {:?})",
         bytes.len(),
-        blob_prefix(bytes)
+        blob_prefix(bytes),
+        std::str::from_utf8(bytes).is_ok(),
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .err()
+            .map(|e| e.to_string())
     );
     Vec::new()
 }
@@ -1664,6 +1677,59 @@ fn base64_blob(bytes: &[u8]) -> Option<Vec<u8>> {
         .decode(text)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
         .ok()
+}
+
+fn salvage_scalar(text: &str, key: &str) -> Option<String> {
+    let start = text.find(key)? + key.len();
+    let rest = text[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(rest.len());
+        if end == 0 {
+            None
+        } else {
+            Some(rest[..end].to_string())
+        }
+    }
+}
+
+fn salvage_message_refs(bytes: &[u8]) -> Vec<ApiMessageRef> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut refs = Vec::new();
+    for chunk in text.split("\"message_ref_id\"").skip(1) {
+        let chunk = format!("\"message_ref_id\"{chunk}");
+        let Some(id) = salvage_scalar(&chunk, "\"message_ref_id\"") else {
+            continue;
+        };
+        let Ok(message_ref_id) = id.parse::<i64>() else {
+            continue;
+        };
+        if message_ref_id == 0 {
+            continue;
+        }
+        refs.push(ApiMessageRef {
+            message_ref_id,
+            content: String::new(),
+            has_attachment: false,
+            message_sender_id: salvage_scalar(&chunk, "\"message_sender_id\"")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or_default(),
+            message_sender_username: salvage_scalar(&chunk, "\"message_sender_username\"")
+                .unwrap_or_default(),
+            message_sender_avatar: salvage_scalar(&chunk, "\"message_sender_avatar\"")
+                .unwrap_or_default(),
+            message_sender_clan_nick: salvage_scalar(&chunk, "\"message_sender_clan_nick\"")
+                .unwrap_or_default(),
+            message_sender_display_name: salvage_scalar(&chunk, "\"message_sender_display_name\"")
+                .unwrap_or_default(),
+        });
+    }
+    refs
 }
 
 fn blob_prefix(bytes: &[u8]) -> String {
