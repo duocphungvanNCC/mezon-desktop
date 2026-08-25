@@ -3356,11 +3356,15 @@ impl ChannelList {
     }
 
     pub fn webhook_target_channels_for_clan(&self, clan_id: ClanId) -> Vec<WebhookTargetChannel> {
+        let category_names = self.channel_category_names_for_clan(clan_id);
         let mut seen = HashSet::new();
         let mut out = Vec::new();
 
         for channel in self.user_channels() {
             if channel.clan_id != clan_id || !is_webhook_target_channel(channel) {
+                continue;
+            }
+            if self.is_locally_archived(channel.id) || self.is_locally_deleted(channel.id) {
                 continue;
             }
             if !seen.insert(channel.id) {
@@ -3369,13 +3373,22 @@ impl ChannelList {
             out.push(WebhookTargetChannel {
                 id: channel.id,
                 name: channel.name.clone(),
-                category_name: self.category_name_for_channel(clan_id, channel.id),
+                category_name: category_names.get(&channel.id).cloned().unwrap_or_default(),
             });
         }
 
         for category in self.categories_for_clan(clan_id) {
+            if category.id == FAVOR_CATE_ID {
+                continue;
+            }
             for channel in &category.channels {
-                if !is_webhook_target_channel(channel) || !seen.insert(channel.id) {
+                if !is_webhook_target_channel(channel) {
+                    continue;
+                }
+                if self.is_locally_archived(channel.id) || self.is_locally_deleted(channel.id) {
+                    continue;
+                }
+                if !seen.insert(channel.id) {
                     continue;
                 }
                 out.push(WebhookTargetChannel {
@@ -3386,26 +3399,22 @@ impl ChannelList {
             }
         }
 
-        out.sort_by(|a, b| {
-            a.name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-                .then_with(|| a.id.get().cmp(&b.id.get()))
-        });
         out
     }
 
-    fn category_name_for_channel(&self, clan_id: ClanId, channel_id: ChannelId) -> String {
+    fn channel_category_names_for_clan(&self, clan_id: ClanId) -> HashMap<ChannelId, String> {
+        let mut names = HashMap::new();
         for category in self.categories_for_clan(clan_id) {
-            if category
-                .channels
-                .iter()
-                .any(|channel| channel.id == channel_id)
-            {
-                return category.name.clone();
+            if category.id == FAVOR_CATE_ID {
+                continue;
+            }
+            for channel in &category.channels {
+                names
+                    .entry(channel.id)
+                    .or_insert_with(|| category.name.clone());
             }
         }
-        String::new()
+        names
     }
 
     pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
@@ -5575,7 +5584,6 @@ mod tests {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), vec![], None, cx);
                 channels.merge_user_channels_from_api_descs(
                     vec![api_desc(2, "alpha", 0), api_desc(6, "zulu", 0)],
                     cx,
@@ -5586,6 +5594,68 @@ mod tests {
                     targets.iter().map(|channel| channel.id).collect::<Vec<_>>(),
                     vec![ChannelId(2), ChannelId(6)]
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn webhook_target_channels_skips_favorite_category_label(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    vec![
+                        Category {
+                            id: FAVOR_CATE_ID.into(),
+                            clan_id: ClanId(1),
+                            name: "favoriteChannel".into(),
+                            order: i32::MIN,
+                            channels: vec![make_channel(20, "starred", FAVOR_CATE_ID)],
+                        },
+                        Category {
+                            id: "cat1".into(),
+                            clan_id: ClanId(1),
+                            name: "Main".into(),
+                            order: 0,
+                            channels: vec![make_channel(20, "starred", "cat1")],
+                        },
+                    ],
+                    None,
+                    cx,
+                );
+
+                let targets = channels.webhook_target_channels_for_clan(ClanId(1));
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].category_name, "Main");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn webhook_target_channels_excludes_locally_archived_user_channels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    vec![Category {
+                        id: "1".into(),
+                        clan_id: ClanId(1),
+                        name: "General".into(),
+                        order: 0,
+                        channels: vec![make_channel(1, "general", "1")],
+                    }],
+                    None,
+                    cx,
+                );
+                channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                channels.merge_user_channels_from_api_descs(vec![api_desc(1, "general", 0)], cx);
+
+                let targets = channels.webhook_target_channels_for_clan(ClanId(1));
+                assert!(targets.is_empty());
             });
         });
     }
