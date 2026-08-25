@@ -87,7 +87,12 @@ impl WindowsDispatcher {
             })
         };
 
-        ThreadPool::RunWithPriorityAsync(&handler, priority).log_err();
+        if let Err(error) = ThreadPool::RunWithPriorityAsync(&handler, priority) {
+            log::error!("failed to dispatch work to the Windows thread pool: {error}");
+            // Zed #60693 adapted to this older WinRT dispatcher: leaking the handler keeps
+            // the captured runnable pending instead of cancelling a task during shutdown.
+            std::mem::forget(handler);
+        }
     }
 
     fn dispatch_on_threadpool_after(&self, runnable: RunnableVariant, duration: Duration) {
@@ -110,7 +115,10 @@ impl WindowsDispatcher {
                 Ok(())
             })
         };
-        ThreadPoolTimer::CreateTimer(&handler, duration.into()).log_err();
+        if let Err(error) = ThreadPoolTimer::CreateTimer(&handler, duration.into()) {
+            log::error!("failed to create a Windows thread-pool timer: {error}");
+            std::mem::forget(handler);
+        }
     }
 
     #[inline(always)]
