@@ -8213,14 +8213,9 @@ impl MezonTransport {
     }
 
     /// Delete event.
-    pub async fn delete_event(&self, event_id: i64, clan_id: i64) -> Result<()> {
+    pub async fn delete_event(&self, request: api::DeleteEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::DeleteEventRequest {
-            event_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8229,15 +8224,9 @@ impl MezonTransport {
     }
 
     /// Update event.
-    pub async fn update_event(&self, event_id: i64, clan_id: i64, title: &str) -> Result<()> {
+    pub async fn update_event(&self, request: api::UpdateEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateEventRequest {
-            event_id,
-            clan_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
