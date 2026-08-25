@@ -1722,6 +1722,7 @@ fn salvage_message_refs(bytes: &[u8]) -> Vec<ApiMessageRef> {
             message_sender_username: salvage_scalar(&chunk, "\"message_sender_username\"")
                 .unwrap_or_default(),
             message_sender_avatar: salvage_scalar(&chunk, "\"message_sender_avatar\"")
+                .or_else(|| salvage_scalar(&chunk, "\"mesages_sender_avatar\""))
                 .unwrap_or_default(),
             message_sender_clan_nick: salvage_scalar(&chunk, "\"message_sender_clan_nick\"")
                 .unwrap_or_default(),

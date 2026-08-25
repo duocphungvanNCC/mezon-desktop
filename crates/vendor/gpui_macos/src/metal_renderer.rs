@@ -981,6 +981,11 @@ impl MetalRenderer {
             mem::size_of_val(&viewport_size) as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
+        command_encoder.set_fragment_bytes(
+            QuadInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
 
         command_encoder.draw_primitives_instanced_base_instance(
             metal::MTLPrimitiveType::Triangle,
