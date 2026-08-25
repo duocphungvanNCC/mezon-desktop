@@ -925,9 +925,6 @@ fn open_main_window(
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,
-        // Mezon remains interactive while another app has focus (for example when the user
-        // scrolls it without activating it), so keep animation frames at the display cadence.
-        inactive_frame_interval: None,
         window_decorations: main_window_decorations(),
         app_id: linux_app_id(),
         ..Default::default()
