@@ -6122,6 +6122,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "windows 0.61.3",
+ "x11rb",
  "zed-scap",
 ]
 
@@ -6190,6 +6191,7 @@ dependencies = [
  "nokhwa",
  "objc",
  "parking_lot",
+ "pipewire",
  "screencapturekit",
  "screencapturekit-sys",
  "tiny-skia",
