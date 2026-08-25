@@ -1612,9 +1612,29 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if let Some(value) = message_field_json(bytes) {
         return parse_references_json_value(&value);
     }
-    match api::MessageRefList::decode(bytes) {
-        Ok(list) => list
-            .refs
+    if let Some(refs) = decode_message_ref_list(bytes) {
+        return refs;
+    }
+    if let Some(inner) = base64_blob(bytes) {
+        if let Some(value) = message_field_json(&inner) {
+            return parse_references_json_value(&value);
+        }
+        if let Some(refs) = decode_message_ref_list(&inner) {
+            return refs;
+        }
+    }
+    tracing::warn!(
+        "failed to decode message references ({} bytes, leading bytes {})",
+        bytes.len(),
+        blob_prefix(bytes)
+    );
+    Vec::new()
+}
+
+fn decode_message_ref_list(bytes: &[u8]) -> Option<Vec<ApiMessageRef>> {
+    let list = api::MessageRefList::decode(bytes).ok()?;
+    Some(
+        list.refs
             .into_iter()
             .map(|r| ApiMessageRef {
                 message_ref_id: r.message_ref_id,
@@ -1627,14 +1647,32 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
                 message_sender_display_name: r.message_sender_display_name,
             })
             .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "failed to decode message references ({} bytes): {e}",
-                bytes.len()
-            );
-            Vec::new()
-        }
+    )
+}
+
+fn base64_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+    {
+        return None;
     }
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
+        .ok()
+}
+
+fn blob_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
