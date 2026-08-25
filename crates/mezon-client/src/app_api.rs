@@ -1744,6 +1744,14 @@ impl AppApi {
         self.transport.list_activity().await
     }
 
+    /// Publish or clear the local user's rich-presence activity (React `createActivity`).
+    pub async fn create_activity(
+        &self,
+        request: mezon_proto::api::CreateActivityRequest,
+    ) -> Result<mezon_proto::api::UserActivity> {
+        self.transport.create_activity(request).await
+    }
+
     /// Create a category in a clan; returns its id.
     pub async fn create_category(
         &self,

@@ -5768,6 +5768,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-active-windows"
+version = "2.0.17"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.0",
+ "libc",
+ "serde",
+ "tracing",
+ "windows 0.61.3",
+ "x11rb",
+]
+
+[[package]]
 name = "mezon-app"
 version = "2.0.17"
 dependencies = [
@@ -6020,6 +6033,7 @@ dependencies = [
  "gpui",
  "image",
  "keyring",
+ "mezon-active-windows",
  "mezon-audio",
  "mezon-call",
  "mezon-client",

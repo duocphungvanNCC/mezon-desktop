@@ -8193,16 +8193,10 @@ impl MezonTransport {
     /// Create activity.
     pub async fn create_activiy(
         &self,
-        activity_name: &str,
-        activity_type: i32,
+        request: api::CreateActivityRequest,
     ) -> Result<api::UserActivity> {
         let cid = self.generate_cid();
-        let body = api::CreateActivityRequest {
-            activity_name: activity_name.to_string(),
-            activity_type,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateActiviy", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
