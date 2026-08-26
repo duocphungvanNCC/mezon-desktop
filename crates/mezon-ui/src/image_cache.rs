@@ -174,6 +174,9 @@ const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
 const OGP_AUX_CACHE_CAPACITY: usize = 4;
 const OGP_AUX_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const OGP_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
+const SOCIAL_THUMB_CACHE_CAPACITY: usize = 12;
+const SOCIAL_THUMB_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+const SOCIAL_THUMB_ENTRY_MAX_BYTES: u64 = 3 * 1024 * 1024 / 2;
 
 pub fn ogp_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
     ogp_preview_cache(
@@ -195,6 +198,18 @@ fn ogp_preview_cache(
     cx: &mut App,
 ) -> Entity<LruImageCache> {
     cx.new(|cx| LruImageCache::ogp_thumbnail(label, capacity, bytes, OGP_ENTRY_MAX_BYTES, cx))
+}
+
+pub fn social_thumb_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    cx.new(|cx| {
+        LruImageCache::social_thumbnail(
+            label,
+            SOCIAL_THUMB_CACHE_CAPACITY,
+            SOCIAL_THUMB_CACHE_BYTES,
+            SOCIAL_THUMB_ENTRY_MAX_BYTES,
+            cx,
+        )
+    })
 }
 
 /// Shared decode cache for role icons. They render at 12-20px everywhere, so
@@ -636,6 +651,7 @@ enum LoaderKind {
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
     OgpThumbnail,
+    SocialThumbnail,
     /// Aspect-preserving thumbnail for Timeline/Events/Event-Detail preview
     /// cards, capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`].
     GalleryPreview,
@@ -816,6 +832,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::OgpThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn social_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::SocialThumbnail,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -1234,6 +1267,9 @@ impl LruImageCache {
             LoaderKind::OgpThumbnail => {
                 AssetLogger::<OgpImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::SocialThumbnail => {
+                AssetLogger::<SocialPosterLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryPreview => {
                 AssetLogger::<GalleryPreviewLoader>::load(resource.clone(), cx).boxed()
             }
@@ -1343,6 +1379,8 @@ const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
 /// (typically 1200×630) can never decode oversized in the preview card.
 const OGP_THUMB_DECODE_MAX_PX: u32 = 512;
+const SOCIAL_THUMB_DECODE_MAX_PX: u32 = 640;
+const SOCIAL_POSTER_FETCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Timeline/Events/Event-Detail preview cards render up to ~900px wide
 /// (featured banner) at aspect ratio; decode to this longest side so the
 /// featured image stays sharp while grid/card thumbnails (much smaller on
@@ -2069,6 +2107,84 @@ impl Asset for OgpImageLoader {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         load_scaled_aspect(source, OGP_THUMB_DECODE_MAX_PX, cx)
+    }
+}
+
+fn load_social_poster(
+    source: Resource,
+    max_px: u32,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    async move {
+        let _permit = acquire_image_pipeline_permit().await?;
+        use anyhow::Context as _;
+        let Resource::Uri(uri) = source else {
+            return Err(ImageCacheError::Asset(
+                "a social poster needs a link url".into(),
+            ));
+        };
+        let poster = if mezon_client::social::is_tiktok_link(uri.as_ref()) {
+            mezon_client::social::fetch_tiktok_poster(uri.as_ref())
+                .await
+                .with_context(|| format!("resolving a tiktok poster for {uri:?}"))?
+        } else {
+            uri.to_string()
+        };
+        let mut candidate = poster;
+        let bytes = loop {
+            match fetch_social_poster_bytes(&client, &candidate).await {
+                Ok(bytes) => break bytes,
+                Err(err) => match mezon_client::social::youtube_poster_fallback(&candidate) {
+                    Some(next) => candidate = next,
+                    None => return Err(err),
+                },
+            }
+        };
+        let decoded = match decode_scaled_dynamic(&bytes, max_px) {
+            Some(image) => image,
+            None => image::load_from_memory(&bytes)?,
+        };
+        Ok(Arc::new(RenderImage::new(vec![downscaled_static_frame(
+            decoded, max_px,
+        )])))
+    }
+}
+
+async fn fetch_social_poster_bytes(
+    client: &Arc<dyn gpui::http_client::HttpClient>,
+    poster: &str,
+) -> Result<Vec<u8>, ImageCacheError> {
+    use anyhow::Context as _;
+    let mut response = client
+        .get(poster, ().into(), true)
+        .await
+        .with_context(|| format!("loading a social poster from {poster:?}"))?;
+    let bytes = read_body_limited(&mut response, SOCIAL_POSTER_FETCH_MAX_BYTES).await?;
+    if !response.status().is_success() {
+        let mut body = String::from_utf8_lossy(&bytes).into_owned();
+        let first_line = body.lines().next().unwrap_or("").trim_end();
+        body.truncate(first_line.len());
+        return Err(ImageCacheError::BadStatus {
+            uri: poster.to_string().into(),
+            status: response.status(),
+            body,
+        });
+    }
+    Ok(bytes)
+}
+
+pub enum SocialPosterLoader {}
+
+impl Asset for SocialPosterLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_social_poster(source, SOCIAL_THUMB_DECODE_MAX_PX, cx)
     }
 }
 
