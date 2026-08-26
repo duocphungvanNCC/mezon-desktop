@@ -161,14 +161,7 @@ impl X11ImContext {
     fn only_clears_preedit(&self) -> bool {
         self.events
             .lock()
-            .map(|events| {
-                !events.is_empty()
-                    && events.iter().all(|event| match event {
-                        ImEvent::ClearPreedit => true,
-                        ImEvent::Preedit { text, .. } => text.is_empty(),
-                        _ => false,
-                    })
-            })
+            .map(|events| events_only_clear_preedit(&events))
             .unwrap_or(false)
     }
 
@@ -1075,6 +1068,15 @@ fn parse_ibus_hide_preedit(_message: &Message) -> Option<ImEvent> {
     Some(ImEvent::HidePreedit)
 }
 
+fn events_only_clear_preedit(events: &[ImEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|event| match event {
+            ImEvent::ClearPreedit | ImEvent::HidePreedit => true,
+            ImEvent::Preedit { text, .. } => text.is_empty(),
+            _ => false,
+        })
+}
+
 fn parse_ibus_forward(message: &Message) -> Option<ImEvent> {
     let (keyval, _keycode, state): (u32, u32, u32) = message.read3().ok()?;
     Some(ImEvent::ForwardKey {
@@ -1378,6 +1380,24 @@ mod tests {
             parse_ibus_hide_preedit(&hide),
             Some(ImEvent::HidePreedit)
         ));
+    }
+
+    #[test]
+    fn hide_only_waits_for_following_preedit() {
+        assert!(events_only_clear_preedit(&[ImEvent::HidePreedit]));
+        assert!(events_only_clear_preedit(&[
+            ImEvent::HidePreedit,
+            ImEvent::ClearPreedit,
+        ]));
+        assert!(!events_only_clear_preedit(&[
+            ImEvent::HidePreedit,
+            ImEvent::Preedit {
+                text: "t".into(),
+                caret_chars: 1,
+            },
+        ]));
+        assert!(!events_only_clear_preedit(&[ImEvent::Commit("được ".into())]));
+        assert!(!events_only_clear_preedit(&[]));
     }
 
     #[test]
