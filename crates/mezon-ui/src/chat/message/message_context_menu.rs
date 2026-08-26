@@ -43,8 +43,6 @@ pub(crate) fn resolve_forward_group(
     resolve_forward_group_in(store.messages(), message_id, sender_id)
 }
 
-const QUICK_MENU_PLACEHOLDER: i32 = -1;
-
 fn append_quick_menus(
     menu: ContextMenu,
     message_id: MessageId,
@@ -56,53 +54,27 @@ fn append_quick_menus(
     let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
         return menu;
     };
-    let store = QuickMenuStore::global(cx).read(cx);
-    let loading = store.is_loading(channel_id, QUICK_MENU_TYPE_QUICK);
-    if !store.has_items(channel_id, QUICK_MENU_TYPE_QUICK) && !loading {
-        return menu;
-    }
-    let items: Vec<_> = store
+    let menu_names: Vec<_> = QuickMenuStore::global(cx)
+        .read(cx)
         .items(channel_id, QUICK_MENU_TYPE_QUICK)
         .iter()
         .map(|item| item.menu_name.clone())
         .collect();
-    let (options, menu_names): (Vec<crate::components::primitives::SubmenuOption>, Vec<_>) =
-        if loading && items.is_empty() {
-            (
-                vec![crate::components::primitives::SubmenuOption {
-                    value: QUICK_MENU_PLACEHOLDER,
-                    label: mezon_i18n::t(locale, "contextMenu.loadingQuickMenus").into(),
-                    selected: false,
-                    disabled: true,
-                }],
-                Vec::new(),
-            )
-        } else if items.is_empty() {
-            (
-                vec![crate::components::primitives::SubmenuOption {
-                    value: QUICK_MENU_PLACEHOLDER,
-                    label: mezon_i18n::t(locale, "contextMenu.noQuickMenusAvailable").into(),
-                    selected: false,
-                    disabled: true,
-                }],
-                Vec::new(),
-            )
-        } else {
-            let menu_names: Vec<_> = items;
-            let options = menu_names
-                .iter()
-                .enumerate()
-                .map(
-                    |(index, label)| crate::components::primitives::SubmenuOption {
-                        value: index as i32,
-                        label: label.clone(),
-                        selected: false,
-                        disabled: false,
-                    },
-                )
-                .collect();
-            (options, menu_names)
-        };
+    if menu_names.is_empty() {
+        return menu;
+    }
+    let options: Vec<crate::components::primitives::SubmenuOption> = menu_names
+        .iter()
+        .enumerate()
+        .map(
+            |(index, label)| crate::components::primitives::SubmenuOption {
+                value: index as i32,
+                label: label.clone(),
+                selected: false,
+                disabled: false,
+            },
+        )
+        .collect();
     let label: SharedString = mezon_i18n::t(locale, "contextMenu.quickMenus").into();
     let host_open = host.clone();
     menu.submenu(

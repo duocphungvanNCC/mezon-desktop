@@ -276,6 +276,7 @@ impl QuickMenuStore {
                     return;
                 }
                 this.loading.remove(&key);
+                cx.notify();
                 match result {
                     Ok(items) => {
                         this.fetched_at.insert(key, Instant::now());
@@ -292,7 +293,6 @@ impl QuickMenuStore {
                             .entry(channel_id)
                             .or_default()
                             .insert(menu_type, mapped);
-                        cx.notify();
                     }
                     Err(e) => tracing::error!("list_quick_menu_access failed: {e}"),
                 }
