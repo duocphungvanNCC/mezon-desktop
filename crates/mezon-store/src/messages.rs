@@ -29,13 +29,14 @@ use mezon_client::{
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::Settings;
-use crate::account::AccountStore;
+use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
-use crate::direct::{DirectKind, DirectMessageStore};
+use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
+use crate::group_members::GroupMembersStore;
 use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
     CallLog, CallLogType, Embed, EmbedAnimation, EmbedAuthor, EmbedDatePicker, EmbedField,
@@ -6114,11 +6115,15 @@ impl MessagesStore {
     ) -> Task<anyhow::Result<PollDetail>> {
         let api = self.api.clone();
         let cid = self.active_channel_id.map_or(0, |c| c.get());
-        let clan_id = self.active_clan_id.unwrap_or(ClanId(0));
+        let is_dm = self.is_dm;
+        let clan_id = (!is_dm).then_some(self.active_clan_id).flatten();
+        let dm_channel_id = is_dm.then_some(self.active_channel_id).flatten();
         let mid = message_id.get();
         cx.spawn(async move |this, cx| {
             let resp = api.get_poll(poll_id, mid, cid).await?;
-            let detail = this.update(cx, |_store, cx| map_poll_detail(&resp, clan_id, cx))?;
+            let detail = this.update(cx, |_store, cx| {
+                map_poll_detail(&resp, clan_id, dm_channel_id, cx)
+            })?;
             Ok(detail)
         })
     }
@@ -7767,12 +7772,17 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
 
 fn map_poll_detail(
     resp: &mezon_proto::api::GetPollResponse,
-    clan_id: ClanId,
+    clan_id: Option<ClanId>,
+    dm_channel_id: Option<ChannelId>,
     cx: &App,
 ) -> PollDetail {
-    let members_entity = ClanMembersStore::global(cx);
-    let members = members_entity.read(cx);
     let cfg = AppConfig::try_global(cx);
+    let clan = clan_id.map(|clan_id| (clan_id, ClanMembersStore::global(cx).read(cx)));
+    let group =
+        dm_channel_id.map(|channel_id| (channel_id, GroupMembersStore::global(cx).read(cx)));
+    let dm_channel = dm_channel_id
+        .and_then(|channel_id| DirectMessageStore::global(cx).read(cx).find(channel_id));
+    let account = AccountStore::try_global(cx).and_then(|store| store.read(cx).account.as_ref());
     let answer_count = resp.answers.len().max(resp.answer_counts.len());
     let mut voters_by_answer: Vec<Vec<PollVoter>> = vec![Vec::new(); answer_count];
     for detail in &resp.voter_details {
@@ -7781,34 +7791,85 @@ fn map_poll_detail(
             continue;
         };
         for &uid in &detail.user_ids {
-            let user_id = UserId(uid);
-            let voter = match members.member(clan_id, user_id) {
-                Some(member) => {
-                    let avatar = member.avatar();
-                    let avatar_proxied = cfg
-                        .map(|c| c.avatar_proxy(avatar))
-                        .unwrap_or_else(|| avatar.to_string());
-                    PollVoter {
-                        user_id,
-                        display_name: member.name().to_string().into(),
-                        username: member.user.username.clone().into(),
-                        avatar_proxied: avatar_proxied.into(),
-                    }
-                }
-                None => PollVoter {
-                    user_id,
-                    display_name: uid.to_string().into(),
-                    username: SharedString::default(),
-                    avatar_proxied: SharedString::default(),
-                },
-            };
-            slot.push(voter);
+            slot.push(resolve_poll_voter(
+                UserId(uid),
+                clan,
+                group,
+                dm_channel,
+                account,
+                cfg,
+            ));
         }
     }
     PollDetail {
         total_votes: resp.total_votes,
         answer_counts: resp.answer_counts.clone(),
         voters_by_answer,
+    }
+}
+
+fn resolve_poll_voter(
+    user_id: UserId,
+    clan: Option<(ClanId, &ClanMembersStore)>,
+    group: Option<(ChannelId, &GroupMembersStore)>,
+    dm_channel: Option<&DirectChannel>,
+    account: Option<&UserAccount>,
+    cfg: Option<&AppConfig>,
+) -> PollVoter {
+    let proxy = |avatar: &str| {
+        cfg.map(|c| c.avatar_proxy(avatar))
+            .unwrap_or_else(|| avatar.to_string())
+    };
+    if let Some((clan_id, members)) = clan
+        && let Some(member) = members.member(clan_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some((channel_id, members)) = group
+        && let Some(member) = members.member(channel_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some(dm) = dm_channel
+        && dm.peer_user_id == Some(user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: dm.label.clone().into(),
+            username: dm.peer_username.clone().into(),
+            avatar_proxied: proxy(&dm.avatar).into(),
+        };
+    }
+    if let Some(account) = account
+        && account.user_id == user_id.get()
+    {
+        let display_name = if account.display_name.is_empty() {
+            &account.username
+        } else {
+            &account.display_name
+        };
+        return PollVoter {
+            user_id,
+            display_name: display_name.clone().into(),
+            username: account.username.clone().into(),
+            avatar_proxied: proxy(account.avatar_url.as_deref().unwrap_or_default()).into(),
+        };
+    }
+    PollVoter {
+        user_id,
+        display_name: user_id.get().to_string().into(),
+        username: SharedString::default(),
+        avatar_proxied: SharedString::default(),
     }
 }
 
@@ -8487,7 +8548,7 @@ fn poll_label_segments(label: &str, cfg: Option<&AppConfig>) -> Vec<PollLabelSeg
     segments
 }
 
-fn build_poll_data(
+pub(crate) fn build_poll_data(
     content: &ApiMessageContent,
     text: &str,
     cfg: Option<&AppConfig>,
