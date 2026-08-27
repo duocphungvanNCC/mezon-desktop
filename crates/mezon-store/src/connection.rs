@@ -5,27 +5,31 @@
 //! gpui-coupled lifecycle lives here as a store instead of in the app binary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, DEFAULT_WS_HOST, HttpFallbackSession, NetworkMonitor,
-    RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session, TransportClient, favicon_probe_url,
-    keychain, probe_network_reachability,
+    AppApi, ConnectionStatus, DEFAULT_WS_HOST, ENDPOINT_QUALITY_PROBE_TIMEOUT, EndpointPool,
+    HttpFallbackSession, NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent,
+    ServiceEndpoint, Session, TransportClient, endpoint_probe_url, favicon_probe_url, keychain,
+    probe_endpoint_latency, probe_network_reachability,
 };
+use parking_lot::Mutex;
 
 use crate::login::{session_credentials, spawn_session_logout};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{AppConfig, AuthState};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const ENDPOINT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
 const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
-const DEFAULT_TLS_PORT: u16 = 443;
 /// The gateway discards its own 401 before it reaches the wire (`cleanup_connection` clears the
 /// write queue that `flush_ssl_wbio` had only queued), so a dead `session_id`, the per-user session
 /// limit and a plain outage all arrive as an identical silent close. After this many silent
@@ -67,9 +71,11 @@ pub struct ConnectionStore {
     connecting_attempt: u32,
     transport: Arc<TransportClient>,
     wake: Arc<tokio::sync::Notify>,
+    connection_generation: Arc<AtomicU64>,
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
+    _endpoint_probe: Task<()>,
     _token_watch: Task<()>,
     _online_watch: Task<()>,
     _network: NetworkMonitor,
@@ -112,8 +118,10 @@ impl ConnectionStore {
     pub fn reconnect(&self, cx: &mut Context<Self>) {
         let transport = self.transport.clone();
         let wake = self.wake.clone();
+        let connection_generation = self.connection_generation.clone();
         cx.background_executor()
             .spawn(async move {
+                connection_generation.fetch_add(1, Ordering::AcqRel);
                 if let Err(e) = transport.close().await {
                     tracing::warn!("Failed to close the transport before reconnect: {e}");
                 }
@@ -164,9 +172,27 @@ impl ConnectionStore {
         };
 
         let token_watch = Self::spawn_token_watch(api.clone(), auth_state.clone(), cx);
-        let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
+        let endpoint_pool = Arc::new(Mutex::new(EndpointPool::default()));
+        let connection_generation = Arc::new(AtomicU64::new(0));
+        let heartbeat = Self::spawn_heartbeat(
+            transport.clone(),
+            api.clone(),
+            wake.clone(),
+            endpoint_pool.clone(),
+            connection_generation.clone(),
+            cx,
+        );
+        let endpoint_probe = Self::spawn_endpoint_probe(
+            transport.clone(),
+            api.clone(),
+            wake.clone(),
+            endpoint_pool.clone(),
+            connection_generation.clone(),
+            cx,
+        );
         let transport_handle = transport.clone();
         let wake_handle = wake.clone();
+        let connection_generation_handle = connection_generation.clone();
 
         let probe_url = AppConfig::try_global(cx)
             .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
@@ -207,7 +233,9 @@ impl ConnectionStore {
 
                 let Some(mut session) = session else {
                     api.set_http_fallback(None);
+                    endpoint_pool.lock().replace(Vec::new());
                     if connected_user_id.take().is_some() {
+                        connection_generation.fetch_add(1, Ordering::AcqRel);
                         if let Err(e) = transport.close().await {
                             tracing::warn!("Failed to close TCP transport after logout: {e}");
                         }
@@ -220,14 +248,13 @@ impl ConnectionStore {
                     continue;
                 };
 
-                api.set_http_fallback(http_fallback_session(
-                    &session,
-                    configured_api_base.as_deref(),
-                    &api_server_key,
-                ));
+                endpoint_pool.lock().replace(
+                    session.realtime_endpoints(DEFAULT_WS_HOST, tcp_default_port),
+                );
 
                 if connected_user_id.as_deref() == Some(session.user_id.as_str())
                     && transport.is_open().await
+                    && endpoint_pool.lock().active_id().is_some()
                 {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
@@ -235,18 +262,19 @@ impl ConnectionStore {
                     continue;
                 }
 
-                let mut network_confirmed = false;
-                if requires_network_probe(consecutive_failures) {
-                    // Probe the deployment this session actually belongs to; the baked config can
-                    // point somewhere else entirely.
-                    let target = session
-                        .api_url
-                        .as_deref()
-                        .filter(|url| !url.is_empty())
-                        .map(favicon_probe_url)
-                        .unwrap_or_else(|| probe_url.clone());
-                    let reachable =
-                        probe_network_reachability(&target, RECONNECT_NETWORK_PROBE_TIMEOUT).await;
+                let endpoint = endpoint_pool.lock().select(Instant::now());
+                let Some(endpoint) = endpoint else {
+                    api.set_http_fallback(http_fallback_session(
+                        &session,
+                        None,
+                        configured_api_base.as_deref(),
+                        &api_server_key,
+                    ));
+                    let reachable = probe_network_reachability(
+                        &probe_url,
+                        RECONNECT_NETWORK_PROBE_TIMEOUT,
+                    )
+                    .await;
                     let _ = this.update(cx, |store, cx| {
                         if store.online != reachable {
                             store.online = reachable;
@@ -255,22 +283,33 @@ impl ConnectionStore {
                     });
                     if !reachable {
                         if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
-                            tracing::warn!(
-                                "Network unreachable ({target} did not answer) — pausing reconnect until it is back"
-                            );
+                            tracing::warn!("Network unreachable — pausing endpoint retries");
                         }
-                        promote_connecting_to_authenticated(&auth_state, cx);
-                        backoff_wait(&exec, &wake, network_retry_secs).await;
                         network_retry_secs = next_network_retry_secs(network_retry_secs);
-                        continue;
-                    }
-                    network_confirmed = true;
-                    if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
+                    } else if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
                         tracing::info!("Network reachable again — resuming reconnect");
                         network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     }
+                    promote_connecting_to_authenticated(&auth_state, cx);
+                    let endpoint_delay = endpoint_pool
+                        .lock()
+                        .next_available_in(Instant::now())
+                        .unwrap_or(Duration::from_secs(network_retry_secs));
+                    let delay = if reachable {
+                        endpoint_delay
+                    } else {
+                        endpoint_delay.min(Duration::from_secs(network_retry_secs))
+                    };
+                    wait_or_wake(&exec, &wake, delay).await;
+                    continue;
+                };
 
-                }
+                api.set_http_fallback(http_fallback_session(
+                    &session,
+                    endpoint.api_url.as_deref(),
+                    configured_api_base.as_deref(),
+                    &api_server_key,
+                ));
 
                 // Two credentials authenticate the same session; the JWT is the escape hatch when
                 // the stored `session_id` keeps being refused.
@@ -295,10 +334,11 @@ impl ConnectionStore {
                     && !probed_this_outage
                 {
                     probed_this_outage = true;
-                    let api_base = session
+                    let api_base = endpoint
                         .api_url
                         .clone()
                         .filter(|url| !url.is_empty())
+                        .or_else(|| session.api_url.clone().filter(|url| !url.is_empty()))
                         .or_else(|| configured_api_base.clone());
                     if let Some(api_base) = api_base {
                         match auth_client.probe_session(&api_base, &session.token).await {
@@ -336,21 +376,18 @@ impl ConnectionStore {
                     }
                 }
 
-                let host = session
-                    .tcp_host
-                    .clone()
-                    .or(session.ws_host.clone())
-                    .unwrap_or_else(|| DEFAULT_WS_HOST.to_string());
-                let explicit_port = resolve_tcp_port(&session, tcp_default_port);
-                let endpoint_label = format!("{host}:{explicit_port}");
-
+                let generation = connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 if transport.is_open().await
                     && let Err(e) = transport.close().await
                 {
                     tracing::warn!("Failed to close stale transport: {e}");
                 }
 
-                tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
+                tracing::info!(
+                    "Connecting shared abridged TCP transport to endpoint_id={} region={}",
+                    endpoint.id,
+                    endpoint.region
+                );
                 api.set_status(ConnectionStatus::Connecting);
                 let token = if use_jwt {
                     tracing::info!(
@@ -363,35 +400,62 @@ impl ConnectionStore {
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
+                let endpoint_pool_for_close = endpoint_pool.clone();
+                let connection_generation_for_publish = connection_generation.clone();
+                let connection_generation_for_close = connection_generation.clone();
+                let connection_confirmed = Arc::new(AtomicBool::new(false));
+                let connection_confirmed_for_close = connection_confirmed.clone();
+                let endpoint_id = endpoint.id.clone();
+                let endpoint_id_for_close = endpoint_id.clone();
                 connect_ack_rx.borrow_and_update();
                 let connect_result = transport
                     .connect(
-                        &host,
-                        explicit_port,
+                        &endpoint.host,
+                        endpoint.port,
                         &token,
                         move |event| {
-                            api_for_publish.publish_event(event);
+                            if connection_generation_for_publish.load(Ordering::Acquire)
+                                == generation
+                            {
+                                api_for_publish.publish_event(event);
+                            }
                         },
                         move |was_clean| {
+                            if connection_generation_for_close.load(Ordering::Acquire) != generation
+                            {
+                                return;
+                            }
                             if was_clean {
                                 tracing::info!("TCP transport closed cleanly");
                             } else {
                                 tracing::warn!("TCP transport closed with error");
+                            }
+                            if connection_confirmed_for_close.load(Ordering::Acquire) {
+                                endpoint_pool_for_close
+                                    .lock()
+                                    .record_unreachable(&endpoint_id_for_close, Instant::now());
                             }
                             api_for_close.set_status(ConnectionStatus::Disconnected);
                             wake_for_close.notify_one();
                         },
                     )
                     .await;
+                let reached_gateway = connect_result.is_ok();
 
                 let outcome = match connect_result {
                     Ok(()) => {
                         tracing::info!("Shared abridged TCP transport connected");
                         let signaled = tokio::select! {
                             res = connect_ack_rx.changed() => res.is_ok(),
-                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
+                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => false,
                         };
-                        let handshake_ok = signaled && transport.is_open().await;
+                        let handshake_ok = if !transport.is_open().await {
+                            false
+                        } else if signaled {
+                            true
+                        } else {
+                            transport.ping_roundtrip().await.is_ok()
+                        };
                         if handshake_ok {
                             ConnectOutcome::Confirmed
                         } else {
@@ -406,13 +470,17 @@ impl ConnectionStore {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Could not reach {endpoint_label}: {e} — a reachability failure, not a credential one"
+                            "Could not reach endpoint_id={endpoint_id}: {e} — a reachability failure, not a credential one"
                         );
                         ConnectOutcome::Unreachable
                     }
                 };
 
                 if outcome == ConnectOutcome::Confirmed {
+                    connection_confirmed.store(true, Ordering::Release);
+                    endpoint_pool
+                        .lock()
+                        .record_connected(&endpoint_id, Instant::now());
                     connected_user_id = Some(session.user_id.clone());
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
@@ -428,6 +496,7 @@ impl ConnectionStore {
                             refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
                         api.set_http_fallback(http_fallback_session(
                             &renewed,
+                            endpoint.api_url.as_deref(),
                             configured_api_base.as_deref(),
                             &api_server_key,
                         ));
@@ -454,9 +523,14 @@ impl ConnectionStore {
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
                 let refused = outcome == ConnectOutcome::Refused;
+                if outcome == ConnectOutcome::Unreachable {
+                    endpoint_pool
+                        .lock()
+                        .record_unreachable(&endpoint_id, Instant::now());
+                }
                 if refused {
                     gateway_refusals += 1;
-                    if use_jwt && network_confirmed {
+                    if use_jwt && reached_gateway {
                         jwt_refusals += 1;
                     } else if use_jwt {
                         tracing::info!(
@@ -481,6 +555,13 @@ impl ConnectionStore {
                     continue;
                 }
 
+                if outcome == ConnectOutcome::Unreachable
+                    && endpoint_pool.lock().has_available(Instant::now())
+                {
+                    retry_backoff_secs = 1;
+                    continue;
+                }
+
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
                 backoff_wait(&exec, &wake, retry_backoff_secs).await;
             }
@@ -491,9 +572,11 @@ impl ConnectionStore {
             connecting_attempt: 0,
             transport: transport_handle,
             wake: wake_handle,
+            connection_generation: connection_generation_handle,
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,
+            _endpoint_probe: endpoint_probe,
             _token_watch: token_watch,
             _online_watch: online_watch,
             _network: network,
@@ -558,6 +641,8 @@ impl ConnectionStore {
         transport: Arc<TransportClient>,
         api: Arc<AppApi>,
         wake: Arc<tokio::sync::Notify>,
+        endpoint_pool: Arc<Mutex<EndpointPool>>,
+        connection_generation: Arc<AtomicU64>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let exec = cx.background_executor().clone();
@@ -569,9 +654,69 @@ impl ConnectionStore {
                 }
                 if let Err(e) = transport.ping_roundtrip().await {
                     tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
+                    if let Some(endpoint_id) = endpoint_pool.lock().active_id().map(str::to_string)
+                    {
+                        endpoint_pool
+                            .lock()
+                            .record_unreachable(&endpoint_id, Instant::now());
+                    }
+                    connection_generation.fetch_add(1, Ordering::AcqRel);
                     let _ = transport.close().await;
                     api.set_status(ConnectionStatus::Disconnected);
                     wake.notify_one();
+                }
+            }
+        })
+    }
+
+    fn spawn_endpoint_probe(
+        transport: Arc<TransportClient>,
+        api: Arc<AppApi>,
+        wake: Arc<tokio::sync::Notify>,
+        endpoint_pool: Arc<Mutex<EndpointPool>>,
+        connection_generation: Arc<AtomicU64>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let exec = cx.background_executor().clone();
+        exec.clone().spawn(async move {
+            loop {
+                exec.timer(ENDPOINT_PROBE_INTERVAL).await;
+                if !transport.is_open().await {
+                    continue;
+                }
+                let endpoints = endpoint_pool.lock().probe_endpoints(Instant::now());
+                for endpoint in endpoints {
+                    let Some(api_url) = endpoint.api_url.as_deref() else {
+                        continue;
+                    };
+                    let target = endpoint_probe_url(api_url);
+                    let sample =
+                        probe_endpoint_latency(&target, ENDPOINT_QUALITY_PROBE_TIMEOUT).await;
+                    let should_switch = if let Some(rtt) = sample {
+                        endpoint_pool
+                            .lock()
+                            .record_probe(&endpoint.id, rtt, Instant::now())
+                    } else {
+                        let mut pool = endpoint_pool.lock();
+                        if pool.active_id() == Some(endpoint.id.as_str()) {
+                            pool.record_active_rtt(ENDPOINT_QUALITY_PROBE_TIMEOUT);
+                        } else {
+                            pool.record_unreachable(&endpoint.id, Instant::now());
+                        }
+                        false
+                    };
+                    if !should_switch {
+                        continue;
+                    }
+                    tracing::info!(
+                        "Switching to lower-latency endpoint_id={} after hysteresis threshold",
+                        endpoint.id
+                    );
+                    connection_generation.fetch_add(1, Ordering::AcqRel);
+                    api.set_status(ConnectionStatus::Disconnected);
+                    let _ = transport.close().await;
+                    wake.notify_one();
+                    break;
                 }
             }
         })
@@ -600,14 +745,28 @@ impl ConnectionStore {
                                 !ev.session_id.is_empty() && ev.session_id != session.session_id;
                             let id_token_changed =
                                 !ev.id_token.is_empty() && ev.id_token != session.id_token;
+                            let endpoints = ev
+                                .endpoints
+                                .iter()
+                                .map(ServiceEndpoint::from)
+                                .collect::<Vec<_>>();
+                            let endpoints_changed = (!endpoints.is_empty()
+                                && endpoints != session.endpoints)
+                                || (ev.endpoints_ttl_seconds != 0
+                                    && ev.endpoints_ttl_seconds
+                                        != session.endpoints_ttl_seconds);
                             session.apply_refresh(
                                 &ev.token,
                                 &ev.refresh_token,
                                 &ev.session_id,
                                 &ev.id_token,
                             );
+                            session.apply_endpoint_refresh(
+                                endpoints,
+                                ev.endpoints_ttl_seconds,
+                            );
                             tracing::info!(
-                                "refresh_session_event user_id={} token_sent={} token_changed={} refresh_token_sent={} sid_sent={} sid_changed={} id_token_sent={} id_token_changed={} id_token_valid_for={:?} jwt_valid_for={}s jwt_expired={}",
+                                "refresh_session_event user_id={} token_sent={} token_changed={} refresh_token_sent={} sid_sent={} sid_changed={} id_token_sent={} id_token_changed={} endpoint_count={} endpoints_changed={} id_token_valid_for={:?} jwt_valid_for={}s jwt_expired={}",
                                 ev.user_id,
                                 !ev.token.is_empty(),
                                 token_changed,
@@ -616,6 +775,8 @@ impl ConnectionStore {
                                 sid_changed,
                                 !ev.id_token.is_empty(),
                                 id_token_changed,
+                                ev.endpoints.len(),
+                                endpoints_changed,
                                 id_token_valid_for(session),
                                 session.expires_at.saturating_sub(now_secs()),
                                 session.expires_at != 0 && now_secs() >= session.expires_at,
@@ -623,6 +784,7 @@ impl ConnectionStore {
                             if ev.token.is_empty()
                                 && ev.session_id.is_empty()
                                 && ev.id_token.is_empty()
+                                && !endpoints_changed
                             {
                                 return;
                             }
@@ -787,16 +949,16 @@ fn configured_api_base_url(config: &AppConfig) -> String {
 
 fn http_fallback_session(
     session: &Session,
+    endpoint_api_base: Option<&str>,
     configured_api_base: Option<&str>,
     api_server_key: &str,
 ) -> Option<HttpFallbackSession> {
     if session.token.is_empty() {
         return None;
     }
-    let base_url = session
-        .api_url
-        .as_deref()
+    let base_url = endpoint_api_base
         .filter(|url| !url.is_empty())
+        .or_else(|| session.api_url.as_deref().filter(|url| !url.is_empty()))
         .or(configured_api_base)?
         .to_string();
     Some(HttpFallbackSession {
@@ -809,6 +971,7 @@ fn http_fallback_session(
     })
 }
 
+#[cfg(test)]
 fn requires_network_probe(consecutive_failures: u32) -> bool {
     consecutive_failures >= 1
 }
@@ -872,14 +1035,6 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
     });
 }
 
-pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> u16 {
-    session
-        .tcp_port
-        .or(session.ws_port)
-        .or(default_port)
-        .unwrap_or(DEFAULT_TLS_PORT)
-}
-
 /// Restore a stored session from the OS keychain.
 ///
 /// - Stored session → `Connecting` (the socket validates it; the server pushes a fresh token via
@@ -916,7 +1071,7 @@ mod tests {
             ..Default::default()
         };
         let fallback =
-            http_fallback_session(&s, Some("https://baked:8088"), "key").expect("fallback");
+            http_fallback_session(&s, None, Some("https://baked:8088"), "key").expect("fallback");
         assert_eq!(fallback.base_url, "https://api.mezon.ai");
         assert_eq!(fallback.token, "jwt");
         assert_eq!(fallback.expires_at, expires_at);
@@ -930,8 +1085,21 @@ mod tests {
             ..Default::default()
         };
         let fallback =
-            http_fallback_session(&s, Some("https://baked:8088"), "key").expect("fallback");
+            http_fallback_session(&s, None, Some("https://baked:8088"), "key").expect("fallback");
         assert_eq!(fallback.base_url, "https://baked:8088");
+    }
+
+    #[test]
+    fn http_fallback_is_paired_with_the_active_endpoint() {
+        let s = Session {
+            token: "jwt".into(),
+            api_url: Some("https://api-primary.example.com".into()),
+            ..Default::default()
+        };
+        let fallback =
+            http_fallback_session(&s, Some("https://api-secondary.example.com"), None, "key")
+                .expect("fallback");
+        assert_eq!(fallback.base_url, "https://api-secondary.example.com");
     }
 
     #[test]
@@ -940,13 +1108,15 @@ mod tests {
             api_url: Some("https://api.mezon.ai".into()),
             ..Default::default()
         };
-        assert!(http_fallback_session(&no_token, Some("https://baked:8088"), "key").is_none());
+        assert!(
+            http_fallback_session(&no_token, None, Some("https://baked:8088"), "key").is_none()
+        );
 
         let no_base = Session {
             token: "jwt".into(),
             ..Default::default()
         };
-        assert!(http_fallback_session(&no_base, None, "key").is_none());
+        assert!(http_fallback_session(&no_base, None, None, "key").is_none());
     }
 
     /// `SessionRefresh` rotates the socket credential, so its response must replace the stored
@@ -976,46 +1146,10 @@ mod tests {
             expires_at: now_secs().saturating_sub(60),
             ..Default::default()
         };
-        let fallback = http_fallback_session(&session, None, "api-key").expect("fallback");
+        let fallback = http_fallback_session(&session, None, None, "api-key").expect("fallback");
         assert_eq!(fallback.refresh_token, "refresh");
         assert!(fallback.is_remember);
         assert_eq!(fallback.server_key, "api-key");
-    }
-
-    #[test]
-    fn resolve_tcp_port_uses_tcp_port_field_first() {
-        let s = Session {
-            tcp_port: Some(9999),
-            ws_port: Some(1111),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), 9999);
-    }
-
-    #[test]
-    fn resolve_tcp_port_falls_back_to_ws_port() {
-        let s = Session {
-            ws_port: Some(8888),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), 8888);
-    }
-
-    #[test]
-    fn resolve_tcp_port_uses_config_default_when_session_has_no_port() {
-        let s = Session {
-            tcp_host: Some("mezon.ai".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(7349)), 7349);
-    }
-
-    #[test]
-    fn resolve_tcp_port_falls_back_to_tls_default_when_unset() {
-        assert_eq!(
-            resolve_tcp_port(&Session::default(), None),
-            DEFAULT_TLS_PORT
-        );
     }
 
     #[test]
@@ -1034,13 +1168,6 @@ mod tests {
         assert_eq!(next_backoff_secs(16), 32);
         assert_eq!(next_backoff_secs(32), 60);
         assert_eq!(next_backoff_secs(60), 60);
-    }
-
-    #[test]
-    fn first_attempt_connects_without_probe_then_probes_every_retry() {
-        assert!(!requires_network_probe(0));
-        assert!(requires_network_probe(1));
-        assert!(requires_network_probe(4));
     }
 
     #[test]

@@ -14,7 +14,7 @@ const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SOCKET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const SOCK_HOST_IP_ENV: &str = "MEZON_SOCK_HOST_IP";
-const TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const CONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[cfg(debug_assertions)]
 fn sock_host_ip_override(host: &str) -> Option<String> {
@@ -33,14 +33,11 @@ fn sock_host_ip_override(_host: &str) -> Option<String> {
     None
 }
 
-async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
-    tokio::time::timeout(
-        TCP_CONNECT_TIMEOUT,
-        TcpStream::connect(format!("{host}:{port}")),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
-    .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))
+async fn connect_tcp(host: &str, port: u16, deadline: tokio::time::Instant) -> Result<TcpStream> {
+    tokio::time::timeout_at(deadline, TcpStream::connect(format!("{host}:{port}")))
+        .await
+        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 4s"))?
+        .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))
 }
 
 #[cfg(debug_assertions)]
@@ -760,17 +757,18 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let deadline = tokio::time::Instant::now() + CONNECT_ATTEMPT_TIMEOUT;
 
         tracing::debug!("TCP connecting...");
         let tcp = match sock_host_ip_override(host) {
-            Some(ip) => match connect_tcp(&ip, port).await {
+            Some(ip) => match connect_tcp(&ip, port, deadline).await {
                 Ok(tcp) => tcp,
                 Err(e) => {
                     tracing::warn!("pinned socket host failed ({e}); falling back to DNS");
-                    connect_tcp(host, port).await?
+                    connect_tcp(host, port, deadline).await?
                 }
             },
-            None => connect_tcp(host, port).await?,
+            None => connect_tcp(host, port, deadline).await?,
         };
         let local = tcp
             .local_addr()
@@ -781,9 +779,9 @@ impl TransportAdapter for AbridgedTcpAdapter {
             .map_err(|e| anyhow::anyhow!("Invalid DNS name: {e}"))?;
 
         tracing::debug!("Starting TLS handshake...");
-        let tls = connector
-            .connect(domain, tcp)
+        let tls = tokio::time::timeout_at(deadline, connector.connect(domain, tcp))
             .await
+            .map_err(|_| anyhow::anyhow!("TLS handshake timed out after 4s"))?
             .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
         tracing::debug!("TLS handshake complete");
 
@@ -810,8 +808,9 @@ impl TransportAdapter for AbridgedTcpAdapter {
         });
 
         tracing::debug!("Waiting for I/O loop to be ready...");
-        ready_rx
+        tokio::time::timeout_at(deadline, ready_rx)
             .await
+            .map_err(|_| anyhow::anyhow!("I/O loop startup timed out after 4s"))?
             .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
         tracing::info!("I/O loop confirmed READY");
         *self.io_task.lock().await = Some(task);

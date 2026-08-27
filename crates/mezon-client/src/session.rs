@@ -1,6 +1,32 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+use crate::EndpointCandidate;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ServiceEndpoint {
+    pub id: String,
+    pub region: String,
+    pub api_url: Option<String>,
+    pub ws_url: Option<String>,
+    pub tcp_url: Option<String>,
+    pub priority: u32,
+}
+
+impl From<&mezon_proto::api::ServiceEndpoint> for ServiceEndpoint {
+    fn from(endpoint: &mezon_proto::api::ServiceEndpoint) -> Self {
+        Self {
+            id: endpoint.id.clone(),
+            region: endpoint.region.clone(),
+            api_url: non_empty(endpoint.api_url.clone()),
+            ws_url: non_empty(endpoint.ws_url.clone()),
+            tcp_url: non_empty(endpoint.tcp_url.clone()),
+            priority: endpoint.priority,
+        }
+    }
+}
+
 /// Authenticated session returned after login.
 /// Mirrors the mezon-js Session object.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -41,6 +67,10 @@ pub struct Session {
     pub tcp_host: Option<String>,
     /// Parsed TCP port returned by the server after auth
     pub tcp_port: Option<u16>,
+    #[serde(default)]
+    pub endpoints: Vec<ServiceEndpoint>,
+    #[serde(default)]
+    pub endpoints_ttl_seconds: u32,
     /// User ID
     pub user_id: String,
     /// Username
@@ -97,6 +127,118 @@ impl Session {
             self.id_token = id_token.to_string();
         }
     }
+
+    pub fn apply_endpoint_refresh(
+        &mut self,
+        endpoints: Vec<ServiceEndpoint>,
+        endpoints_ttl_seconds: u32,
+    ) {
+        if !endpoints.is_empty() {
+            self.endpoints = endpoints;
+        }
+        if endpoints_ttl_seconds != 0 {
+            self.endpoints_ttl_seconds = endpoints_ttl_seconds;
+        }
+    }
+
+    pub fn realtime_endpoints(
+        &self,
+        default_host: &str,
+        default_port: Option<u16>,
+    ) -> Vec<EndpointCandidate> {
+        let mut candidates = Vec::new();
+        let mut addresses = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let (tcp_host, tcp_port, _) = parse_endpoint(endpoint.tcp_url.as_deref());
+            let (ws_host, ws_port, _) = parse_endpoint(endpoint.ws_url.as_deref());
+            let Some(host) = tcp_host.or(ws_host) else {
+                continue;
+            };
+            let port = tcp_port.or(ws_port).or(default_port).unwrap_or(443);
+            if !addresses.insert((host.clone(), port)) {
+                continue;
+            }
+            let mut id = if endpoint.id.is_empty() {
+                format!("endpoint-{index}")
+            } else {
+                endpoint.id.clone()
+            };
+            if !ids.insert(id.clone()) {
+                id = format!("{id}-{index}");
+                ids.insert(id.clone());
+            }
+            candidates.push(EndpointCandidate {
+                id,
+                region: endpoint.region.clone(),
+                api_url: endpoint.api_url.clone().filter(|url| !url.is_empty()),
+                host,
+                port,
+                priority: endpoint.priority,
+            });
+        }
+
+        if candidates.is_empty() {
+            let host = self
+                .tcp_host
+                .clone()
+                .or_else(|| self.ws_host.clone())
+                .unwrap_or_else(|| default_host.to_string());
+            let port = self
+                .tcp_port
+                .or(self.ws_port)
+                .or(default_port)
+                .unwrap_or(443);
+            candidates.push(EndpointCandidate {
+                id: "legacy".to_string(),
+                region: String::new(),
+                api_url: self.api_url.clone().filter(|url| !url.is_empty()),
+                host,
+                port,
+                priority: 0,
+            });
+        }
+
+        candidates.sort_by_key(|candidate| candidate.priority);
+        candidates
+    }
+}
+
+pub(crate) fn parse_endpoint(
+    endpoint: Option<&str>,
+) -> (Option<String>, Option<u16>, Option<bool>) {
+    let Some(endpoint) = endpoint else {
+        return (None, None, None);
+    };
+
+    let endpoint = if endpoint.contains("://") {
+        endpoint.to_owned()
+    } else if endpoint.contains(':') {
+        format!("tcp://{endpoint}")
+    } else {
+        return (Some(endpoint.to_owned()), None, Some(true));
+    };
+
+    let Ok(parsed) = url::Url::parse(&endpoint) else {
+        return (None, None, None);
+    };
+
+    let secure = match parsed.scheme() {
+        "https" | "wss" => Some(true),
+        "http" | "ws" | "tcp" => Some(false),
+        _ => None,
+    };
+
+    (
+        parsed.host_str().map(str::to_owned),
+        parsed.port_or_known_default(),
+        secure,
+    )
+}
+
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 pub fn jwt_expires_at(token: &str) -> Option<u64> {
@@ -224,5 +366,69 @@ mod tests {
         assert_eq!(session.refresh_token, "old-refresh");
         assert_eq!(session.session_id, "new-sid");
         assert_eq!(session.expires_at, 1000);
+    }
+
+    #[test]
+    fn endpoint_list_is_preferred_over_the_legacy_target() {
+        let session = Session {
+            tcp_host: Some("legacy.example.com".into()),
+            endpoints: vec![
+                ServiceEndpoint {
+                    id: "secondary".into(),
+                    tcp_url: Some("secondary.example.com:4433".into()),
+                    priority: 2,
+                    ..Default::default()
+                },
+                ServiceEndpoint {
+                    id: "primary".into(),
+                    api_url: Some("https://api-primary.example.com".into()),
+                    ws_url: Some("wss://primary.example.com/socket".into()),
+                    priority: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let candidates = session.realtime_endpoints("default.example.com", Some(7349));
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "primary");
+        assert_eq!(candidates[0].host, "primary.example.com");
+        assert_eq!(candidates[0].port, 443);
+        assert_eq!(candidates[1].id, "secondary");
+        assert_eq!(candidates[1].port, 4433);
+    }
+
+    #[test]
+    fn legacy_session_still_produces_one_candidate() {
+        let session = Session {
+            api_url: Some("https://api.example.com".into()),
+            tcp_host: Some("socket.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+
+        let candidates = session.realtime_endpoints("default.example.com", Some(7349));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "legacy");
+        assert_eq!(candidates[0].host, "socket.example.com");
+        assert_eq!(candidates[0].port, 4433);
+    }
+
+    #[test]
+    fn empty_endpoint_refresh_preserves_the_previous_pool() {
+        let mut session = Session {
+            endpoints: vec![ServiceEndpoint {
+                id: "primary".into(),
+                tcp_url: Some("primary.example.com:4433".into()),
+                ..Default::default()
+            }],
+            endpoints_ttl_seconds: 60,
+            ..Default::default()
+        };
+
+        session.apply_endpoint_refresh(Vec::new(), 0);
+        assert_eq!(session.endpoints.len(), 1);
+        assert_eq!(session.endpoints_ttl_seconds, 60);
     }
 }

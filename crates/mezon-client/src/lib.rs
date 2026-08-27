@@ -6,6 +6,7 @@ pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
 pub mod channel_app_launch;
+pub mod endpoint_pool;
 pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
@@ -37,6 +38,7 @@ pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
+pub use endpoint_pool::{EndpointCandidate, EndpointPool};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
@@ -50,7 +52,8 @@ pub use inbox::{
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
-    RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
+    ENDPOINT_QUALITY_PROBE_TIMEOUT, RECONNECT_NETWORK_PROBE_TIMEOUT, endpoint_probe_url,
+    favicon_probe_url, probe_endpoint_latency, probe_network_reachability,
 };
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
@@ -66,7 +69,7 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::{Session, jwt_expires_at};
+pub use session::{ServiceEndpoint, Session, jwt_expires_at};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
