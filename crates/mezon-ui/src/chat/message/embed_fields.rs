@@ -130,6 +130,8 @@ fn render_field(
     };
     if multi_column {
         column = column.flex_1();
+    } else {
+        column = column.w_full();
     }
     column = column.child(text_block);
 
