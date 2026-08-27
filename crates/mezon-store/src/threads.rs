@@ -1012,10 +1012,12 @@ impl ThreadsStore {
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
         let clan_id_i64 = clan_id_parsed.get();
-        let parent_channel_type = ChannelList::global(cx)
+        let parent_channel = ChannelList::global(cx)
             .read(cx)
             .channel(clan_id_parsed, parent_channel_id)
-            .map(|channel| channel.channel_type.as_raw() as i32);
+            .map(|channel| (channel.channel_type.as_raw() as i32, channel.private));
+        let parent_channel_type = parent_channel.map(|(channel_type, _)| channel_type);
+        let parent_is_public = parent_channel.is_some_and(|(_, private)| !private);
         let cached_parent_members = ChannelMembersStore::try_global(cx).and_then(|members| {
             let members = members.read(cx);
             members
@@ -1113,7 +1115,7 @@ impl ThreadsStore {
 
             let parent_members = match cached_parent_members {
                 Some(ids) => ids,
-                None => match parent_channel_type {
+                None if !parent_is_public => match parent_channel_type {
                     Some(channel_type) => {
                         match api
                             .list_channel_users(clan_id_i64, parent_channel_id.get(), channel_type)
@@ -1145,8 +1147,10 @@ impl ThreadsStore {
                     }
                     None => Vec::new(),
                 },
+                None => Vec::new(),
             };
-            let invite_ids = plan_thread_membership(None, &[], &parent_members, &mentioned);
+            let invite_ids =
+                plan_thread_membership(None, &[], &parent_members, parent_is_public, &mentioned);
 
             let mut invite_failed = false;
             if !invite_ids.is_empty() {

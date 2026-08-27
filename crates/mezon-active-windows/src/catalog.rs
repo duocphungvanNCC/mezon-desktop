@@ -149,10 +149,10 @@ pub fn match_linux_process(
         return Some(matched);
     }
     let comm_normalized = comm.replace('_', " ");
-    if comm_normalized != comm {
-        if let Some(matched) = match_process_name(&comm_normalized) {
-            return Some(matched);
-        }
+    if comm_normalized != comm
+        && let Some(matched) = match_process_name(&comm_normalized)
+    {
+        return Some(matched);
     }
     for (comm_alias, catalog_alias) in LINUX_COMM_ALIASES {
         if comm.eq_ignore_ascii_case(comm_alias) {
@@ -200,6 +200,7 @@ pub fn pick_highest_priority_match(
     best.map(|(name, kind, _)| (name, kind))
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn running_process_kind_priority(kind: ActivityKind) -> u8 {
     match kind {
         ActivityKind::Coding => 3,
