@@ -2785,45 +2785,6 @@ impl ChannelList {
         })
     }
 
-    pub fn patch_channel_overview_detail(
-        &mut self,
-        clan_id: ClanId,
-        channel_id: ChannelId,
-        topic: String,
-        age_restricted: Option<i32>,
-        e2ee: i32,
-        app_id: i64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
-            return;
-        };
-        let mut changed = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id) {
-            changed = update_channel(
-                categories,
-                channel_id,
-                None,
-                Some(topic),
-                age_restricted,
-                channel.private,
-            );
-            if changed {
-                for cat in categories.iter_mut() {
-                    for ch in cat.channels.iter_mut() {
-                        if ch.id == channel_id {
-                            ch.e2ee = e2ee;
-                            ch.app_id = app_id;
-                        }
-                    }
-                }
-            }
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
     pub fn update_channel_overview(
         &mut self,
         clan_id: ClanId,
