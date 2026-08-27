@@ -5298,6 +5298,16 @@ impl MessagesStore {
     }
 
     fn spawn_join(
+    /// Subscribe the socket to one channel — but never before the clan itself is joined.
+    ///
+    /// A `channel_join` for a **public** channel resolves to the clan-wide stream, not a
+    /// per-channel one, so the gateway ends up with the clan stream already tracked. Its
+    /// `clan_join` handler answers an already-tracked clan from the tracker and skips the
+    /// fan-out entirely, which silently leaves every **private** channel and thread in that
+    /// clan unsubscribed for the rest of the session — public rows keep updating, so it
+    /// reads as "some channels stopped going unread". Awaiting the clan join first is what
+    /// keeps the fan-out reachable. React gets this ordering for free: its clan route loader
+    /// dispatches `joinClan` before the channel loader dispatches `joinChannel`.
         &self,
         clan_id: ClanId,
         channel_id: ChannelId,
@@ -5307,7 +5317,14 @@ impl MessagesStore {
     ) {
         let api = self.api.clone();
         cx.spawn(async move |_this, _cx| {
+        let clan_joined = (!clan_id.is_zero()).then(|| {
+            ChannelList::global(cx)
+                .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+        });
             if let Err(e) = api
+            if let Some(clan_joined) = clan_joined {
+                clan_joined.await;
+            }
                 .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
                 .await
             {

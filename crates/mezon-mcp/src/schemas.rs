@@ -502,6 +502,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "index": json!({
                     "type": "integer",
                     "minimum": 0,
+        "topic_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
                     "description": "Suggestion index (default 0)."
                 }),
             }),

@@ -168,8 +168,14 @@ impl McpBackend {
                 self.send_ui_result(|reply| McpCommand::OpenTopic { message_id, reply })
                     .await
             }
-            "close_topic" => self.send_ui_result(|reply| McpCommand::CloseTopic { reply }).await,
-            "topic_state" => self.send_ui_result(|reply| McpCommand::TopicState { reply }).await,
+            "close_topic" => {
+                self.send_ui_result(|reply| McpCommand::CloseTopic { reply })
+                    .await
+            }
+            "topic_state" => {
+                self.send_ui_result(|reply| McpCommand::TopicState { reply })
+                    .await
+            }
             "topic_type" => {
                 let text = arguments
                     .get("text")
@@ -180,6 +186,12 @@ impl McpBackend {
                     .await
             }
             "topic_submit" => {
+            "topic_pick" => {
+                self.require_write_mode("topic_pick")?;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::TopicPick { index, reply })
+                    .await
+            }
                 self.send_ui_result(|reply| McpCommand::TopicSubmit { reply })
                     .await
             }
