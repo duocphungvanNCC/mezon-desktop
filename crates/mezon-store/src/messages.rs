@@ -6270,6 +6270,7 @@ pub(crate) fn plan_thread_membership(
     self_id: Option<UserId>,
     thread_members: &[UserId],
     parent_members: &[UserId],
+    parent_is_public: bool,
     mentioned: &[UserId],
 ) -> Vec<UserId> {
     let mut plan = Vec::new();
@@ -6281,7 +6282,7 @@ pub(crate) fn plan_thread_membership(
     for user_id in mentioned {
         if Some(*user_id) == self_id
             || thread_members.contains(user_id)
-            || !parent_members.contains(user_id)
+            || (!parent_is_public && !parent_members.contains(user_id))
             || plan.contains(user_id)
         {
             continue;
@@ -6329,6 +6330,7 @@ struct ThreadSendContext {
     parent_id: ChannelId,
     channel_type: Option<i32>,
     parent_channel_type: Option<i32>,
+    parent_is_public: bool,
     self_id: Option<UserId>,
     /// `None` when the store holds no roster for the channel. Distinguishing that
     /// from an empty roster matters: an unloaded thread would otherwise read as
@@ -6352,12 +6354,16 @@ fn thread_send_context(
     let parent_channel_type = channels
         .channel(clan_id, parent_id)
         .map(|channel| channel.channel_type.as_raw() as i32);
+    let parent_is_public = channels
+        .channel(clan_id, parent_id)
+        .is_some_and(|channel| !channel.private);
     let members = ChannelMembersStore::try_global(cx)?;
     let members = members.read(cx);
     Some(ThreadSendContext {
         parent_id,
         channel_type,
         parent_channel_type,
+        parent_is_public,
         self_id: viewer_user_id(cx),
         thread_members: members
             .has_channel(channel_id)
@@ -6447,25 +6453,27 @@ async fn resolve_thread_membership_plan(
     let mut candidates = ctx.mentioned;
     candidates.extend_from_slice(extra_candidates);
     // Parent membership only gates the candidates; a self-join never consults it.
-    let parent_members = if needs_parent_lookup(&thread_members, &candidates) {
-        resolve_channel_members(
-            api,
-            this,
-            clan_id,
-            ctx.parent_id,
-            ctx.parent_channel_type,
-            ctx.parent_members,
-            cx,
-        )
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let parent_members =
+        if !ctx.parent_is_public && needs_parent_lookup(&thread_members, &candidates) {
+            resolve_channel_members(
+                api,
+                this,
+                clan_id,
+                ctx.parent_id,
+                ctx.parent_channel_type,
+                ctx.parent_members,
+                cx,
+            )
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     plan_thread_membership(
         if join_self { ctx.self_id } else { None },
         &thread_members,
         &parent_members,
+        ctx.parent_is_public,
         &candidates,
     )
 }
@@ -8963,8 +8971,13 @@ mod tests {
 
     #[test]
     fn thread_send_joins_sender_when_not_a_member() {
-        let plan =
-            plan_thread_membership(Some(UserId(1)), &[UserId(2)], &[UserId(1), UserId(2)], &[]);
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
@@ -8975,6 +8988,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[],
         );
 
@@ -8987,6 +9001,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2), UserId(3)],
+            false,
             &[UserId(2), UserId(3)],
         );
 
@@ -8999,6 +9014,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2), UserId(9)],
         );
 
@@ -9011,6 +9027,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2)],
         );
 
@@ -9023,6 +9040,7 @@ mod tests {
             Some(UserId(1)),
             &[],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(1), UserId(2), UserId(2)],
         );
 
@@ -9031,7 +9049,7 @@ mod tests {
 
     #[test]
     fn thread_send_without_a_known_viewer_only_adds_mentions() {
-        let plan = plan_thread_membership(None, &[], &[UserId(2)], &[UserId(2)]);
+        let plan = plan_thread_membership(None, &[], &[UserId(2)], false, &[UserId(2)]);
 
         assert_eq!(plan, vec![UserId(2)]);
     }
@@ -9047,16 +9065,28 @@ mod tests {
     }
 
     #[test]
+    fn public_parent_does_not_require_an_explicit_channel_roster() {
+        let plan = plan_thread_membership(Some(UserId(1)), &[UserId(1)], &[], true, &[UserId(2)]);
+
+        assert_eq!(plan, vec![UserId(2)]);
+    }
+
+    #[test]
     fn thread_reaction_joins_a_parent_member() {
-        let plan =
-            plan_thread_membership(None, &[UserId(2)], &[UserId(1), UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(
+            None,
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[UserId(1)],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
 
     #[test]
     fn thread_reaction_does_not_join_a_non_parent_member() {
-        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], false, &[UserId(1)]);
 
         assert!(plan.is_empty());
     }
