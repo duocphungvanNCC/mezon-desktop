@@ -728,7 +728,7 @@ impl Render for UserProfilePopover {
             .w(px(300.))
             .overflow_hidden()
             .rounded_lg()
-            .bg(theme.bg_floating)
+            .bg(theme.surfaces.outside_footer.ramp())
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {

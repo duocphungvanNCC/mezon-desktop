@@ -3949,6 +3949,7 @@ impl ChannelMessages {
                 .absolute()
                 .inset_0()
                 .bg(theme.bg_primary)
+                .bg(theme.surfaces.secondary.ramp())
                 .flex()
                 .flex_col()
                 .justify_end()

@@ -1307,7 +1307,6 @@ impl Render for MemberListPanel {
             .flex_shrink_0()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.surfaces.direct_message.ramp())
             .child(list)
             .when_some(menu_overlay, |el, args| {
                 let position = args.position;

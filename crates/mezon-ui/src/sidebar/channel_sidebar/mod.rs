@@ -973,7 +973,7 @@ impl Render for ChannelSidebar {
             .flex_col()
             .w_full()
             .h_full()
-            .bg(theme.bg_secondary)
+            .bg(theme.surfaces.direct_message.ramp())
             .child({
                 let sidebar = sidebar.clone();
                 let sidebar_for_menu = sidebar_for_clan_menu.clone();
@@ -1407,7 +1407,7 @@ fn sidebar_skeleton_layer(theme: &Theme, cx: &App) -> gpui::Div {
     div()
         .absolute()
         .inset_0()
-        .bg(theme.bg_secondary)
+        .bg(theme.surfaces.direct_message.ramp())
         .child(render_skeleton(cx))
 }
 
