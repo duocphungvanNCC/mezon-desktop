@@ -195,7 +195,7 @@ impl Render for AppearancePage {
                 v_flex()
                     .h(px(150.0))
                     .rounded_lg()
-                    .bg(theme.surfaces.direct_message.ramp())
+                    .bg(theme.surfaces.secondary.ramp())
                     .border_1()
                     .border_color(theme.border)
                     .pb_5()

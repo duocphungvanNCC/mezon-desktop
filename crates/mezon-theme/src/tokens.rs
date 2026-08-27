@@ -1794,9 +1794,9 @@ impl ThemeTokens {
                     a: 0.25,
                 },
                 bg_active_friend_list: Rgba {
-                    r: 0.073035,
-                    g: 0.0044147,
-                    b: 0.0044147,
+                    r: 0.10912,
+                    g: 0.04016,
+                    b: 0.05712,
                     a: 1.0,
                 },
                 bg_active_member_channel: Rgba {
@@ -2004,9 +2004,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_secondary: Rgba {
-                    r: 0.070008,
-                    g: 0.0039517,
-                    b: 0.0039517,
+                    r: 0.15345,
+                    g: 0.056475,
+                    b: 0.080325,
                     a: 1.0,
                 },
                 bg_secondary_button_hover: Rgba {
@@ -2016,9 +2016,9 @@ impl ThemeTokens {
                     a: 0.3,
                 },
                 bg_surface: Rgba {
-                    r: 0.13412,
-                    g: 0.037837,
-                    b: 0.037837,
+                    r: 0.206844,
+                    g: 0.056456,
+                    b: 0.074756,
                     a: 1.0,
                 },
                 bg_tertiary: Rgba {
@@ -2354,9 +2354,9 @@ impl ThemeTokens {
                     a: 0.25,
                 },
                 bg_active_friend_list: Rgba {
-                    r: 0.040392,
-                    g: 0.03098,
-                    b: 0.098039,
+                    r: 0.0561,
+                    g: 0.0714,
+                    b: 0.1632,
                     a: 1.0,
                 },
                 bg_active_member_channel: Rgba {
@@ -2564,9 +2564,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_secondary: Rgba {
-                    r: 0.040392,
-                    g: 0.03098,
-                    b: 0.098039,
+                    r: 0.0858,
+                    g: 0.1092,
+                    b: 0.2496,
                     a: 1.0,
                 },
                 bg_secondary_button_hover: Rgba {
@@ -2576,9 +2576,9 @@ impl ThemeTokens {
                     a: 0.3,
                 },
                 bg_surface: Rgba {
-                    r: 0.1098,
-                    g: 0.083824,
-                    b: 0.22725,
+                    r: 0.098274,
+                    g: 0.138055,
+                    b: 0.286855,
                     a: 1.0,
                 },
                 bg_tertiary: Rgba {

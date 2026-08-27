@@ -848,22 +848,22 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                 viewport_anchored: false,
             }),
             secondary: Some(SurfaceGradient {
-                angle: 64.92,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.58428,
-                            g: 0.03532,
-                            b: 0.03532,
+                            r: 0.541,
+                            g: 0.188,
+                            b: 0.251,
                             a: 1.0,
                         },
                         position: 0.4,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.1158,
-                            g: 0.0042,
-                            b: 0.0042,
+                            r: 0.141,
+                            g: 0.063,
+                            b: 0.106,
                             a: 1.0,
                         },
                         position: 0.9,
@@ -873,29 +873,29 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
-                    a: 0.8,
+                    a: 0.55,
                 }),
                 base: None,
                 viewport_anchored: false,
             }),
             surface: Some(SurfaceGradient {
-                angle: 180.0,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.65,
+                            r: 0.1,
+                            g: 0.025,
+                            b: 0.04,
+                            a: 0.52,
                         },
                         position: 0.0,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.24706,
-                            g: 0.06667,
-                            b: 0.06667,
-                            a: 0.65,
+                            r: 0.34,
+                            g: 0.09,
+                            b: 0.13,
+                            a: 0.72,
                         },
                         position: 1.0,
                     },
@@ -972,22 +972,22 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                 viewport_anchored: true,
             }),
             active_friend_list: Some(SurfaceGradient {
-                angle: 64.92,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.58428,
-                            g: 0.03532,
-                            b: 0.03532,
+                            r: 0.541,
+                            g: 0.188,
+                            b: 0.251,
                             a: 1.0,
                         },
                         position: 0.1617,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
+                            r: 0.141,
+                            g: 0.063,
+                            b: 0.106,
                             a: 1.0,
                         },
                         position: 0.72,
@@ -997,7 +997,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
-                    a: 0.75,
+                    a: 0.68,
                 }),
                 base: None,
                 viewport_anchored: true,
@@ -1129,22 +1129,22 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                 viewport_anchored: false,
             }),
             secondary: Some(SurfaceGradient {
-                angle: 48.17,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.32549,
-                            g: 0.28235,
-                            b: 0.79216,
+                            r: 0.26,
+                            g: 0.3,
+                            b: 0.68,
                             a: 1.0,
                         },
                         position: 0.1121,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.07843,
-                            g: 0.02745,
-                            b: 0.18824,
+                            r: 0.07,
+                            g: 0.12,
+                            b: 0.28,
                             a: 1.0,
                         },
                         position: 0.6192,
@@ -1154,28 +1154,28 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
-                    a: 0.8,
+                    a: 0.48,
                 }),
                 base: None,
                 viewport_anchored: false,
             }),
             surface: Some(SurfaceGradient {
-                angle: 48.17,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.32549,
-                            g: 0.28235,
-                            b: 0.79216,
+                            r: 0.28,
+                            g: 0.32,
+                            b: 0.72,
                             a: 1.0,
                         },
                         position: 0.1121,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.2,
-                            g: 0.10196,
-                            b: 0.41176,
+                            r: 0.07,
+                            g: 0.2,
+                            b: 0.42,
                             a: 1.0,
                         },
                         position: 0.6192,
@@ -1185,7 +1185,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     r: 0.02745,
                     g: 0.02549,
                     b: 0.02549,
-                    a: 0.65,
+                    a: 0.52,
                 }),
                 base: None,
                 viewport_anchored: false,
@@ -1253,22 +1253,22 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                 viewport_anchored: true,
             }),
             active_friend_list: Some(SurfaceGradient {
-                angle: 48.17,
+                angle: 154.19,
                 stops: &[
                     GradientStop {
                         color: Rgba {
-                            r: 0.32549,
-                            g: 0.28235,
-                            b: 0.79216,
+                            r: 0.26,
+                            g: 0.3,
+                            b: 0.68,
                             a: 1.0,
                         },
                         position: 0.1121,
                     },
                     GradientStop {
                         color: Rgba {
-                            r: 0.07843,
-                            g: 0.02745,
-                            b: 0.18824,
+                            r: 0.07,
+                            g: 0.12,
+                            b: 0.28,
                             a: 1.0,
                         },
                         position: 0.6192,
@@ -1278,7 +1278,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
-                    a: 0.8,
+                    a: 0.66,
                 }),
                 base: None,
                 viewport_anchored: false,
