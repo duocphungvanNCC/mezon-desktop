@@ -5297,7 +5297,6 @@ impl MessagesStore {
         self.spawn_initial_fetch(clan_id, channel_id, generation, cx);
     }
 
-    fn spawn_join(
     /// Subscribe the socket to one channel — but never before the clan itself is joined.
     ///
     /// A `channel_join` for a **public** channel resolves to the clan-wide stream, not a
@@ -5308,6 +5307,7 @@ impl MessagesStore {
     /// reads as "some channels stopped going unread". Awaiting the clan join first is what
     /// keeps the fan-out reachable. React gets this ordering for free: its clan route loader
     /// dispatches `joinClan` before the channel loader dispatches `joinChannel`.
+    fn spawn_join(
         &self,
         clan_id: ClanId,
         channel_id: ChannelId,
@@ -5316,15 +5316,15 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
-        cx.spawn(async move |_this, _cx| {
         let clan_joined = (!clan_id.is_zero()).then(|| {
             ChannelList::global(cx)
                 .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
         });
-            if let Err(e) = api
+        cx.spawn(async move |_this, _cx| {
             if let Some(clan_joined) = clan_joined {
                 clan_joined.await;
             }
+            if let Err(e) = api
                 .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
                 .await
             {

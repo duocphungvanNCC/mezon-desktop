@@ -2998,6 +2998,30 @@ impl ChannelList {
         }
     }
 
+    pub fn set_channels_muted_any_clan(
+        &mut self,
+        channel_ids: &HashSet<ChannelId>,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for categories in self.cache.values_mut() {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| channel_ids.contains(&ch.id))
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn apply_last_seen(
         &mut self,
         clan_id: ClanId,
@@ -5041,6 +5065,7 @@ fn merge_previous_voice_members(
 
 struct LiveUnreadState {
     badge_count: u32,
+    muted: bool,
     last_seen_timestamp: i64,
     last_seen_message_id: MessageId,
     last_sent_timestamp: i64,
@@ -5062,6 +5087,7 @@ fn collect_channel_badges(
                         ch.id,
                         LiveUnreadState {
                             badge_count: ch.badge_count,
+                            muted: ch.muted,
                             last_seen_timestamp: ch.last_seen_timestamp,
                             last_seen_message_id: ch.last_seen_message_id,
                             last_sent_timestamp: ch.last_sent_timestamp,
@@ -5091,6 +5117,7 @@ fn carry_live_channel_badges(
         let Some(live) = previous.get(&ch.id) else {
             continue;
         };
+        ch.muted = live.muted;
         ch.badge_count = ch.badge_count.max(live.badge_count);
         if live.last_seen_timestamp > ch.last_seen_timestamp
             || (live.last_seen_timestamp == ch.last_seen_timestamp
@@ -8763,6 +8790,42 @@ mod tests {
                      badge forward instead of resetting it, exactly like ClanList::carry_live_badges \
                      does for the clan-icon aggregate"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn live_channel_mute_survives_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.set_channel_muted(ClanId(1), ChannelId(1), true, cx);
+                assert!(channels.channel(ClanId(1), ChannelId(1)).unwrap().muted);
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().muted,
+                    "a stale structure response must not erase a newer realtime mute"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_channel_mute_updates_matching_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.set_channels_muted_any_clan(
+                    &HashSet::from([ChannelId(1), ChannelId(2)]),
+                    true,
+                    cx,
+                );
+
+                assert!(channels.channel(ClanId(1), ChannelId(1)).unwrap().muted);
+                assert!(channels.channel(ClanId(1), ChannelId(2)).unwrap().muted);
             });
         });
     }

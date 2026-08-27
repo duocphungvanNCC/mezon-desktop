@@ -153,6 +153,14 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "name"],
         )),
+        "mute_channel" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "mute_minutes": integer("Minutes to mute. Use -1 forever or 0 to unmute.", Some(0)),
+            }),
+            &["clan_id", "channel_id"],
+        )),
         "channel_menu_open" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id from list_clans."),
@@ -479,6 +487,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             json!({ "text": string("Full composer text to set.") }),
             &["text"],
         )),
+        "topic_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
         "composer_pick" => Arc::new(object(
             json!({
                 "index": json!({
@@ -502,16 +520,6 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "index": json!({
                     "type": "integer",
                     "minimum": 0,
-        "topic_pick" => Arc::new(object(
-            json!({
-                "index": json!({
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Index into the suggestion list (default 0)."
-                }),
-            }),
-            &[],
-        )),
                     "description": "Suggestion index (default 0)."
                 }),
             }),

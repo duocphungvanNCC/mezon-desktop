@@ -424,6 +424,17 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "mute_channel",
+        description: "\
+Mute or unmute a channel for the signed-in user (backend SetMuteChannel).
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- mute_minutes (optional): minutes to mute (-1 = forever, 0 = unmute, default 0).",
+        write: true,
+    },
+    ToolSpec {
         name: "channel_menu_state",
         description: "\
 Return the channel context menu that is currently open in the channel sidebar, if any.
@@ -609,9 +620,27 @@ Parameters: none.",
         description: "\
 Replace the topic composer's text, the way typing into the panel does.
 
+Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
+# (channel), : (emoji). Returns the composer state including the suggestion list; follow
+with topic_pick to accept one, then topic_submit to send.
+
 Parameters:
 - text (required)",
         write: false,
+    },
+    ToolSpec {
+        name: "topic_pick",
+        description: "\
+Accept one entry of the topic composer's suggestion popup.
+
+Typing `@name` on its own only produces literal text. A real mention needs the picked
+entry, because that is what writes the id into the message's `mentions` field — and the
+receiving client detects mentions from that field, never from the text. So a topic
+mention can only be exercised end to end through topic_type + topic_pick + topic_submit.
+
+Parameters:
+- index (optional, default 0): suggestion index from topic_type/topic_state.",
+        write: true,
     },
     ToolSpec {
         name: "topic_submit",
@@ -679,28 +708,10 @@ Parameters:
     ToolSpec {
         name: "scroll_wheel",
         description: "\
-Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
-# (channel), : (emoji). Returns the composer state including the suggestion list; follow
-with topic_pick to accept one, then topic_submit to send.
-
 Send wheel events to the message list, the way a mouse wheel does.
 
 scroll_messages jumps the viewport, which cancels the wheel animation and never sets
 the list's scroll-active flag. That flag matters: while it is set the chat suppresses
-    ToolSpec {
-        name: "topic_pick",
-        description: "\
-Accept one entry of the topic composer's suggestion popup.
-
-Typing `@name` on its own only produces literal text. A real mention needs the picked
-entry, because that is what writes the id into the message's `mentions` field — and the
-receiving client detects mentions from that field, never from the text. So a topic
-mention can only be exercised end to end through topic_type + topic_pick + topic_submit.
-
-Parameters:
-- index (optional, default 0): suggestion index from topic_type/topic_state.",
-        write: true,
-    },
 its image-cache sweep, so a jump measures the app under lighter memory pressure than
 real scrolling does. Use this when the run has to reproduce scrolling behaviour, and
 scroll_messages when you only need to land at an edge.
