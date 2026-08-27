@@ -5,11 +5,10 @@ use gpui::{
     FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_client::display_text_from_message_content;
 use mezon_store::{
     ChannelId, ChannelMembersStore, ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore,
     MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary, ThreadsStore, UserId,
-    group_threads, resolve_user_profile,
+    group_threads, resolve_user_profile, thread_preview_display,
 };
 use ui::utils::{DateTimeType, format_distance_from_now};
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -683,13 +682,13 @@ fn thread_card(
     let time_label = format_thread_time(preview.timestamp, locale);
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
-    let preview_text = if preview.content.trim().is_empty() && preview.has_attachment {
+    let preview_text = if preview.display_text.is_empty() && preview.has_attachment {
         format!(
             "[{}]",
             mezon_i18n::t(locale, "message.attachments.attachment")
         )
     } else {
-        thread_list_preview_text(&preview.content)
+        preview.display_text.clone()
     };
 
     let mut avatar = Avatar::new()
@@ -865,7 +864,7 @@ fn thread_member_avatars(
 }
 
 struct ThreadCardPreview {
-    content: String,
+    display_text: String,
     sender_id_raw: String,
     sender_name: String,
     sender_avatar: String,
@@ -879,7 +878,7 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
         .last_cached_message(&thread.channel_id)
     {
         return ThreadCardPreview {
-            content: message.content.clone(),
+            display_text: thread_preview_display(&message.content),
             sender_id_raw: message.sender_id.clone(),
             sender_name: message.sender_name.to_string(),
             sender_avatar: message.avatar_url.to_string(),
@@ -895,39 +894,13 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
     };
 
     ThreadCardPreview {
-        content: display_text_from_message_content(&thread.last_message_content),
+        display_text: thread.last_message_preview.clone(),
         sender_id_raw,
         sender_name: thread.last_message_sender_name.clone(),
         sender_avatar: thread.last_message_sender_avatar.clone(),
         timestamp: thread.last_sent_timestamp,
         has_attachment: false,
     }
-}
-
-fn thread_list_preview_text(content: &str) -> String {
-    let text = display_text_from_message_content(content);
-    let normalized = text
-        .replace("\\n", " ")
-        .replace("\\r", " ")
-        .replace("\\t", " ");
-    collapse_preview_whitespace(&normalized)
-}
-
-fn collapse_preview_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut prev_space = false;
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            if !prev_space && !out.is_empty() {
-                out.push(' ');
-                prev_space = true;
-            }
-        } else {
-            out.push(ch);
-            prev_space = false;
-        }
-    }
-    out.trim().to_string()
 }
 
 fn thread_clan_id(thread: &ThreadSummary, cx: &App) -> Option<ClanId> {
@@ -1000,28 +973,4 @@ pub fn thread_popover_on_open(layout: Entity<ChatLayout>) -> ThreadPopoverOnOpen
             });
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::thread_list_preview_text;
-
-    #[test]
-    fn thread_list_preview_text_collapses_code_block_newlines() {
-        let raw = r#"{"t":"\n123\n123\n111\n"}"#;
-        assert_eq!(thread_list_preview_text(raw), "123 123 111");
-    }
-
-    #[test]
-    fn thread_list_preview_text_collapses_literal_backslash_n() {
-        assert_eq!(
-            thread_list_preview_text(r"\n123\n123\n111\n"),
-            "123 123 111"
-        );
-    }
-
-    #[test]
-    fn thread_list_preview_text_preserves_plain_single_line() {
-        assert_eq!(thread_list_preview_text("hello world"), "hello world");
-    }
 }
