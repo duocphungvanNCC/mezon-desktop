@@ -178,7 +178,7 @@ pub enum MessagesEvent {
 
 /// The message currently being replied to (composer state), mirroring React's
 /// reply reference draft in `references.slice`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyDraft {
     pub message_ref_id: MessageId,
     pub sender_id: UserId,
@@ -593,8 +593,7 @@ pub struct MessagesStore {
     fetch_generation: u64,
     latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
-    /// Active reply target for the composer, if any.
-    reply_target: Option<ReplyDraft>,
+    reply_targets: KeyedCache<ChannelId, ReplyDraft>,
     /// Message currently being edited inline in its row (self-only; one at a time).
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
@@ -977,7 +976,7 @@ impl MessagesStore {
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
-        self.reply_target = None;
+        self.reply_targets.clear();
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
@@ -1048,7 +1047,7 @@ impl MessagesStore {
             fetch_generation: 0,
             latest_fetch: HashMap::new(),
             reset_generation: 0,
-            reply_target: None,
+            reply_targets: KeyedCache::new(Some(crate::compose::MAX_DRAFT_CHANNELS)),
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
@@ -2147,12 +2146,17 @@ impl MessagesStore {
 
     /// Current composer reply target (React reply reference draft).
     pub fn reply_target(&self) -> Option<&ReplyDraft> {
-        self.reply_target.as_ref()
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.get(&channel_id))
     }
 
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
-        self.reply_target = Some(draft);
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.reply_targets
+            .insert(channel_id, draft, Some(&channel_id));
         cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
@@ -2183,10 +2187,15 @@ impl MessagesStore {
 
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
-        if self.reply_target.take().is_some() {
+        if self.take_reply_target().is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
+    }
+
+    fn take_reply_target(&mut self) -> Option<ReplyDraft> {
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.remove(&channel_id))
     }
 
     /// Message currently being edited inline in its row, if any.
@@ -4387,7 +4396,7 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let reply = self.reply_target.take();
+        let reply = self.take_reply_target();
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
@@ -4520,7 +4529,7 @@ impl MessagesStore {
         let has_attachments = !attachments.is_empty();
         let reply = match reply_override {
             Some(draft) => Some(draft),
-            None => self.reply_target.take(),
+            None => self.take_reply_target(),
         };
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
@@ -5128,13 +5137,14 @@ impl MessagesStore {
         self.pending_self_adds.clear();
         self.prune_message_ui_state();
         let Some(channel_id) = channel_id else {
+            let had_reply_target = self.reply_target().is_some();
             self.flush_pending_last_seen(cx);
             self.active_channel_id = None;
             self.active_clan_id = None;
             self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
-            if self.reply_target.take().is_some() {
+            if had_reply_target {
                 cx.emit(MessagesEvent::ReplyTargetChanged);
             }
             self.sync_anonymous_mode(cx);
@@ -5253,6 +5263,7 @@ impl MessagesStore {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
+        let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
         if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
             self.pending_jump = None;
@@ -5266,7 +5277,8 @@ impl MessagesStore {
         self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
-        if self.reply_target.take().is_some() {
+        self.reply_targets.touch(&channel_id);
+        if self.reply_target() != previous_reply_target.as_ref() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -5687,12 +5699,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self
-            .reply_target
-            .as_ref()
+            .reply_targets
+            .get(&storage_id)
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
-            self.reply_target = None;
-            cx.emit(MessagesEvent::ReplyTargetChanged);
+            self.reply_targets.remove(&storage_id);
+            if self.active_channel_id == Some(storage_id) {
+                cx.emit(MessagesEvent::ReplyTargetChanged);
+            }
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -9263,6 +9277,65 @@ mod tests {
             &[("reset", 1), ("reset", 0), ("reset", 2), ("reset", 1)],
             "returning to the dm must re-emit its real row count, not zero"
         );
+    }
+
+    #[gpui::test]
+    fn reply_targets_are_restored_per_conversation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            let clan_channel = ChannelId(22);
+            let dm_message = MessageId(1);
+            let clan_message = MessageId(2);
+
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(dm_message, "dm", "5", "Bob", 100)]);
+                store.set_channel(
+                    clan_channel,
+                    vec![Message::new(clan_message, "clan", "6", "Eve", 200)],
+                );
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.set_reply_to(dm_message, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.close(cx);
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert!(store.reply_target().is_none());
+                store.set_reply_to(clan_message, cx);
+
+                store.close(cx);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(clan_message)
+                );
+                store.clear_reply(cx);
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+            });
+        });
     }
 
     fn api_page(ids: &[i64]) -> mezon_client::transport::ListChannelMessagesResult {
