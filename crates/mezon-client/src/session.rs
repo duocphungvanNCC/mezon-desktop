@@ -23,16 +23,46 @@ pub struct ServiceEndpoint {
     pub priority: u32,
 }
 
-impl From<&mezon_proto::api::ServiceEndpoint> for ServiceEndpoint {
-    fn from(endpoint: &mezon_proto::api::ServiceEndpoint) -> Self {
-        Self {
-            id: endpoint.id.clone(),
-            region: endpoint.region.clone(),
-            api_url: non_empty(endpoint.api_url.clone()),
-            ws_url: non_empty(endpoint.ws_url.clone()),
-            tcp_url: non_empty(endpoint.tcp_url.clone()),
-            priority: endpoint.priority,
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum HealthyEndpointReason {
+    Unreachable = 1,
+    HighLatency = 2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct HealthyEndpointSession {
+    #[serde(alias = "userId")]
+    pub user_id: String,
+    #[serde(alias = "sessionId")]
+    pub session_id: String,
+    #[serde(alias = "apiUrl")]
+    pub api_url: Option<String>,
+    #[serde(alias = "wsUrl")]
+    pub ws_url: Option<String>,
+    #[serde(alias = "tcpUrl")]
+    pub tcp_url: Option<String>,
+}
+
+impl HealthyEndpointSession {
+    pub fn realtime_endpoint(
+        &self,
+        region: &str,
+        default_port: Option<u16>,
+    ) -> Option<EndpointCandidate> {
+        let (tcp_host, tcp_port, _) = parse_endpoint(self.tcp_url.as_deref());
+        let (ws_host, ws_port, _) = parse_endpoint(self.ws_url.as_deref());
+        let host = tcp_host.or(ws_host)?;
+        let port = tcp_port.or(ws_port).or(default_port).unwrap_or(443);
+        Some(EndpointCandidate {
+            id: format!("backend:{host}:{port}"),
+            region: region.to_string(),
+            api_url: self.api_url.clone().filter(|url| !url.is_empty()),
+            host,
+            port,
+            priority: 0,
+        })
     }
 }
 
@@ -78,8 +108,6 @@ pub struct Session {
     pub tcp_port: Option<u16>,
     #[serde(default)]
     pub endpoints: Vec<ServiceEndpoint>,
-    #[serde(default)]
-    pub endpoints_ttl_seconds: u32,
     /// User ID
     pub user_id: String,
     /// Username
@@ -137,17 +165,62 @@ impl Session {
         }
     }
 
-    pub fn apply_endpoint_refresh(
+    pub fn apply_healthy_endpoint(
         &mut self,
-        endpoints: Vec<ServiceEndpoint>,
-        endpoints_ttl_seconds: u32,
-    ) {
-        if !endpoints.is_empty() {
-            self.endpoints = endpoints;
+        endpoint: &HealthyEndpointSession,
+        region: &str,
+        default_port: Option<u16>,
+        endpoint_id: Option<&str>,
+    ) -> bool {
+        let Some(candidate) = endpoint.realtime_endpoint(region, default_port) else {
+            return false;
+        };
+        if !endpoint.user_id.is_empty() && endpoint.user_id != self.user_id {
+            return false;
         }
-        if endpoints_ttl_seconds != 0 {
-            self.endpoints_ttl_seconds = endpoints_ttl_seconds;
+        if !endpoint.session_id.is_empty() {
+            self.session_id = endpoint.session_id.clone();
         }
+
+        let api_url = endpoint
+            .api_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .or_else(|| self.api_url.clone());
+        let ws_url = endpoint
+            .ws_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .or_else(|| self.ws_url.clone());
+        let tcp_url = endpoint
+            .tcp_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .or_else(|| self.tcp_url.clone());
+        let (api_host, api_port, api_secure) = parse_endpoint(api_url.as_deref());
+        let (ws_host, ws_port, ws_secure) = parse_endpoint(ws_url.as_deref());
+        let (tcp_host, tcp_port, _) = parse_endpoint(tcp_url.as_deref());
+
+        self.api_url = api_url.clone();
+        self.api_host = api_host;
+        self.api_port = api_port;
+        self.api_secure = api_secure;
+        self.ws_url = ws_url.clone();
+        self.ws_host = ws_host;
+        self.ws_port = ws_port;
+        self.ws_secure = ws_secure;
+        self.tcp_url = tcp_url.clone();
+        self.tcp_host = tcp_host;
+        self.tcp_port = tcp_port;
+        self.endpoints = vec![ServiceEndpoint {
+            id: endpoint_id.unwrap_or(&candidate.id).to_string(),
+            region: candidate.region,
+            api_url,
+            ws_url,
+            tcp_url,
+            priority: 0,
+        }];
+        true
     }
 
     pub fn realtime_endpoints(
@@ -287,10 +360,6 @@ pub(crate) fn parse_endpoint(
         parsed.port_or_known_default(),
         secure,
     )
-}
-
-fn non_empty(value: String) -> Option<String> {
-    (!value.is_empty()).then_some(value)
 }
 
 pub fn jwt_expires_at(token: &str) -> Option<u64> {
@@ -468,20 +537,48 @@ mod tests {
     }
 
     #[test]
-    fn empty_endpoint_refresh_preserves_the_previous_pool() {
+    fn healthy_endpoint_replaces_urls_and_socket_credential() {
         let mut session = Session {
-            endpoints: vec![ServiceEndpoint {
-                id: "primary".into(),
-                tcp_url: Some("primary.example.com:4433".into()),
-                ..Default::default()
-            }],
-            endpoints_ttl_seconds: 60,
+            user_id: "7".into(),
+            session_id: "old-sid".into(),
+            api_url: Some("https://old-api.example.com".into()),
+            tcp_url: Some("old-sock.example.com:4433".into()),
+            tcp_host: Some("old-sock.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+        let response = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "new-sid".into(),
+            api_url: Some("https://new-api.example.com".into()),
+            ws_url: Some("wss://new-sock.example.com".into()),
+            tcp_url: Some("new-sock.example.com:4433".into()),
+        };
+
+        assert!(session.apply_healthy_endpoint(&response, "vn-south", Some(4433), None));
+        assert_eq!(session.session_id, "new-sid");
+        assert_eq!(session.tcp_host.as_deref(), Some("new-sock.example.com"));
+        assert_eq!(session.endpoints.len(), 1);
+        assert_eq!(session.endpoints[0].id, "backend:new-sock.example.com:4433");
+        assert_eq!(session.endpoints[0].region, "vn-south");
+    }
+
+    #[test]
+    fn healthy_endpoint_rejects_another_users_session() {
+        let mut session = Session {
+            user_id: "7".into(),
+            session_id: "old-sid".into(),
+            ..Default::default()
+        };
+        let response = HealthyEndpointSession {
+            user_id: "8".into(),
+            session_id: "new-sid".into(),
+            tcp_url: Some("new-sock.example.com:4433".into()),
             ..Default::default()
         };
 
-        session.apply_endpoint_refresh(Vec::new(), 0);
-        assert_eq!(session.endpoints.len(), 1);
-        assert_eq!(session.endpoints_ttl_seconds, 60);
+        assert!(!session.apply_healthy_endpoint(&response, "", Some(4433), None));
+        assert_eq!(session.session_id, "old-sid");
     }
 
     #[cfg(debug_assertions)]

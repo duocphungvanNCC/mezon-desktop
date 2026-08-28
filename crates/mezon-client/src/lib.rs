@@ -69,7 +69,9 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::{ServiceEndpoint, Session, jwt_expires_at};
+pub use session::{
+    HealthyEndpointReason, HealthyEndpointSession, ServiceEndpoint, Session, jwt_expires_at,
+};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{

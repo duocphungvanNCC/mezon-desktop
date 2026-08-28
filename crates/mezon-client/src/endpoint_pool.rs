@@ -25,6 +25,7 @@ struct EndpointHealth {
     ewma_rtt: Option<Duration>,
     circuit_open_until: Option<Instant>,
     better_streak: u8,
+    slow_report_suppressed_until: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +109,37 @@ impl EndpointPool {
         }
     }
 
+    pub fn record_active_probe(&mut self, rtt: Duration, now: Instant) -> bool {
+        let dwell_elapsed = self
+            .active_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= SLOW_SWITCH_COOLDOWN);
+        let Some(id) = self.active_id.as_deref() else {
+            return false;
+        };
+        let Some(health) = self.health.get_mut(id) else {
+            return false;
+        };
+        update_ewma(&mut health.ewma_rtt, rtt);
+        if health
+            .slow_report_suppressed_until
+            .is_some_and(|until| until > now)
+        {
+            health.better_streak = 0;
+            return false;
+        }
+        if dwell_elapsed && health.ewma_rtt.is_some_and(|sample| sample >= SLOW_RTT) {
+            health.better_streak = health.better_streak.saturating_add(1);
+        } else {
+            health.better_streak = 0;
+        }
+        if health.better_streak < SLOW_STREAK_REQUIRED {
+            return false;
+        }
+        health.better_streak = 0;
+        health.slow_report_suppressed_until = Some(now + SLOW_SWITCH_COOLDOWN);
+        true
+    }
+
     pub fn record_unreachable(&mut self, id: &str, now: Instant) {
         let health = self.health.entry(id.to_string()).or_default();
         health.consecutive_failures = health.consecutive_failures.saturating_add(1);
@@ -139,7 +171,7 @@ impl EndpointPool {
 
     pub fn record_probe(&mut self, id: &str, rtt: Duration, now: Instant) -> bool {
         if self.active_id.as_deref() == Some(id) {
-            self.record_active_rtt(rtt);
+            self.record_active_probe(rtt, now);
             return false;
         }
 
@@ -187,6 +219,14 @@ impl EndpointPool {
 
     pub fn active_id(&self) -> Option<&str> {
         self.active_id.as_deref()
+    }
+
+    pub fn active_endpoint(&self) -> Option<EndpointCandidate> {
+        let active_id = self.active_id.as_deref()?;
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == active_id)
+            .cloned()
     }
 
     fn is_available(&self, id: &str, now: Instant) -> bool {
@@ -269,6 +309,25 @@ mod tests {
             pool.select(after_dwell).map(|endpoint| endpoint.id),
             Some("b".into())
         );
+    }
+
+    #[test]
+    fn active_slow_endpoint_requests_backend_only_after_dwell_and_three_samples() {
+        let now = Instant::now();
+        let mut pool = EndpointPool::default();
+        pool.replace(vec![endpoint("a", 0)]);
+        pool.record_connected("a", now);
+        assert!(!pool.record_active_probe(Duration::from_millis(800), now));
+        let after_dwell = now + SLOW_SWITCH_COOLDOWN;
+        assert!(!pool.record_active_probe(Duration::from_millis(800), after_dwell));
+        assert!(!pool.record_active_probe(Duration::from_millis(800), after_dwell));
+        assert!(pool.record_active_probe(Duration::from_millis(800), after_dwell));
+        assert!(!pool.record_active_probe(Duration::from_millis(800), after_dwell));
+        assert!(!pool.record_active_probe(
+            Duration::from_millis(800),
+            after_dwell + SLOW_SWITCH_COOLDOWN
+        ));
+        assert_eq!(pool.active_id(), Some("a"));
     }
 
     #[test]
