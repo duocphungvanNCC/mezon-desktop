@@ -203,7 +203,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     a: 0.85,
                 }),
                 base: None,
-                viewport_anchored: false,
+                viewport_anchored: true,
             }),
             modal_search: Some(SurfaceGradient {
                 angle: 154.19,
@@ -243,7 +243,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     a: 0.85,
                 }),
                 base: None,
-                viewport_anchored: true,
+                viewport_anchored: false,
             }),
             outside_footer: Some(SurfaceGradient {
                 angle: 154.19,
@@ -1000,7 +1000,7 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                     a: 0.68,
                 }),
                 base: None,
-                viewport_anchored: true,
+                viewport_anchored: false,
             }),
             modal_search: Some(SurfaceGradient {
                 angle: 64.92,
