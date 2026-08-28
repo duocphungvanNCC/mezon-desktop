@@ -380,6 +380,32 @@ impl MezonClient {
 
     /// Convert an `ApiSession` wire response into our internal `Session`.
     fn parse_session(&self, api: ApiSession) -> Session {
+        let endpoint_ids = api
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.as_str())
+            .collect::<Vec<_>>();
+        let endpoint_regions = api
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.region.as_str())
+            .collect::<Vec<_>>();
+        let endpoint_priorities = api
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.priority)
+            .collect::<Vec<_>>();
+        tracing::info!(
+            endpoint_count = api.endpoints.len(),
+            endpoint_ttl_seconds = api.endpoints_ttl_seconds,
+            endpoint_ids = ?endpoint_ids,
+            endpoint_regions = ?endpoint_regions,
+            endpoint_priorities = ?endpoint_priorities,
+            api_url_present = api.api_url.as_deref().is_some_and(|value| !value.is_empty()),
+            ws_url_present = api.ws_url.as_deref().is_some_and(|value| !value.is_empty()),
+            tcp_url_present = api.tcp_url.as_deref().is_some_and(|value| !value.is_empty()),
+            "Auth session decoded"
+        );
         let (user_id, username, expires_at) = decode_jwt_claims(&api.token);
         let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
         let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
