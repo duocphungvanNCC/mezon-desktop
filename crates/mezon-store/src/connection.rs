@@ -13,7 +13,7 @@ use gpui::{
 };
 use mezon_client::{
     AppApi, ConnectionStatus, DEFAULT_WS_HOST, ENDPOINT_QUALITY_PROBE_TIMEOUT, EndpointCandidate,
-    EndpointPool, HealthyEndpointReason, HealthyEndpointSession, HttpFallbackSession,
+    EndpointPool, HealthyEndpointReason, HealthyEndpointSession, HttpFallbackSession, MezonClient,
     NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session, TransportClient,
     endpoint_probe_url, favicon_probe_url, keychain, probe_endpoint_latency,
     probe_network_reachability,
@@ -32,6 +32,7 @@ const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
 const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
 const HEALTHY_ENDPOINT_RETRY_SECS: u64 = 5;
+const HEALTHY_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(debug_assertions)]
 const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
 #[cfg(debug_assertions)]
@@ -281,80 +282,116 @@ impl ConnectionStore {
                     session.realtime_endpoints(DEFAULT_WS_HOST, tcp_default_port),
                 );
 
-                if let Some(request) = pending_endpoint_refresh.take() {
+                let endpoint_refresh_wait =
+                    endpoint_refresh_retry_in(last_endpoint_refresh_at, Instant::now());
+                if endpoint_refresh_wait.is_zero()
+                    && let Some(request) = pending_endpoint_refresh.take()
+                {
+                    last_endpoint_refresh = Some(request.clone());
                     last_endpoint_refresh_at = Some(Instant::now());
                     tracing::info!(
                         "Requesting healthy endpoint current_endpoint_id={} reason_code={}",
                         backend_endpoint_id(&request.endpoint.id),
                         request.reason as i32
                     );
-                    match auth_client
-                        .get_healthy_endpoint(
-                            &session.token,
+                    api.set_http_fallback(http_fallback_session(
+                        &session,
+                        request.endpoint.api_url.as_deref(),
+                        configured_api_base.as_deref(),
+                        &api_server_key,
+                    ));
+                    if healthy_endpoint_credential(&session).is_none() {
+                        let (renewed, verdict) =
+                            refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
+                        session = renewed;
+                        if verdict == RefreshVerdict::Renewed {
+                            refreshed_this_run = true;
+                        }
+                    }
+                    if let Some(credential) = healthy_endpoint_credential(&session) {
+                        match fetch_healthy_endpoint_with_timeout(
+                            &exec,
+                            &auth_client,
+                            credential,
                             backend_endpoint_id(&request.endpoint.id),
                             request.reason,
                             &request.endpoint.region,
                         )
                         .await
-                    {
-                        Ok(response) => {
-                            let replacement = response.realtime_endpoint(
-                                &request.endpoint.region,
-                                tcp_default_port,
-                            );
-                            let same_realtime = replacement.as_ref().is_some_and(|endpoint| {
-                                endpoint.host == request.endpoint.host
-                                    && endpoint.port == request.endpoint.port
-                            });
-                            let preserved_id = same_realtime.then_some(request.endpoint.id.as_str());
-                            if let Some(updated) = apply_healthy_endpoint_to_auth(
-                                &auth_state,
-                                &session.user_id,
-                                &response,
-                                &request.endpoint.region,
-                                tcp_default_port,
-                                preserved_id,
-                                cx,
-                            ) {
-                                session = updated;
-                                endpoint_pool.lock().replace(session.realtime_endpoints(
-                                    DEFAULT_WS_HOST,
+                        {
+                            Ok(response) => {
+                                let replacement = response.realtime_endpoint(
+                                    &request.endpoint.region,
                                     tcp_default_port,
-                                ));
-                                last_endpoint_refresh = None;
-                                last_endpoint_refresh_at = None;
-                                tracing::info!(
-                                    "Healthy endpoint applied same_realtime={} session_id_present={}",
-                                    same_realtime,
-                                    !response.session_id.is_empty()
                                 );
-                                if request.reason == HealthyEndpointReason::HighLatency
-                                    && !same_realtime
-                                {
-                                    connected_user_id = None;
-                                    connection_generation.fetch_add(1, Ordering::AcqRel);
-                                    api.set_status(ConnectionStatus::Disconnected);
-                                    if let Err(e) = transport.close().await {
+                                let same_realtime = replacement.as_ref().is_some_and(|endpoint| {
+                                    endpoint.host == request.endpoint.host
+                                        && endpoint.port == request.endpoint.port
+                                });
+                                let preserved_id =
+                                    same_realtime.then_some(request.endpoint.id.as_str());
+                                if let Some(updated) = apply_healthy_endpoint_to_auth(
+                                    &auth_state,
+                                    &session.user_id,
+                                    &response,
+                                    &request.endpoint.region,
+                                    tcp_default_port,
+                                    preserved_id,
+                                    cx,
+                                ) {
+                                    session = updated;
+                                    endpoint_pool.lock().replace(session.realtime_endpoints(
+                                        DEFAULT_WS_HOST,
+                                        tcp_default_port,
+                                    ));
+                                    let retry_same_unreachable = same_realtime
+                                        && request.reason == HealthyEndpointReason::Unreachable;
+                                    if retry_same_unreachable {
+                                        endpoint_pool.lock().retry_now(&request.endpoint.id);
+                                    } else {
+                                        last_endpoint_refresh = None;
+                                        last_endpoint_refresh_at = None;
+                                    }
+                                    tracing::info!(
+                                        "Healthy endpoint applied same_realtime={} session_id_present={}",
+                                        same_realtime,
+                                        !response.session_id.is_empty()
+                                    );
+                                    if request.reason == HealthyEndpointReason::HighLatency
+                                        && !same_realtime
+                                    {
+                                        connected_user_id = None;
+                                        connection_generation.fetch_add(1, Ordering::AcqRel);
+                                        api.set_status(ConnectionStatus::Disconnected);
+                                        if let Err(e) = transport.close().await {
+                                            tracing::warn!(
+                                                "Failed to close slow endpoint before reconnect: {e}"
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    if request.reason == HealthyEndpointReason::HighLatency {
                                         tracing::warn!(
-                                            "Failed to close slow endpoint before reconnect: {e}"
+                                            "Backend returned the current realtime endpoint for a high-latency report — keeping the live connection"
                                         );
                                     }
-                                    continue;
-                                }
-                                if request.reason == HealthyEndpointReason::HighLatency {
+                                } else {
                                     tracing::warn!(
-                                        "Backend returned the current realtime endpoint for a high-latency report — keeping the live connection"
+                                        "Healthy endpoint response did not match the authenticated session"
                                     );
+                                    pending_endpoint_refresh = Some(request.clone());
                                 }
-                            } else {
-                                tracing::warn!(
-                                    "Healthy endpoint response did not match the authenticated session"
-                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("Healthy endpoint request failed: {e}");
+                                pending_endpoint_refresh = Some(request.clone());
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("Healthy endpoint request failed: {e}");
-                        }
+                    } else {
+                        tracing::warn!(
+                            "Healthy endpoint request deferred because no valid credential is available"
+                        );
+                        pending_endpoint_refresh = Some(request.clone());
                     }
                 }
 
@@ -364,16 +401,23 @@ impl ConnectionStore {
                 {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    wake.notified().await;
+                    if pending_endpoint_refresh.is_some() {
+                        let delay = endpoint_refresh_retry_in(
+                            last_endpoint_refresh_at,
+                            Instant::now(),
+                        );
+                        wait_or_wake(&exec, &wake, delay).await;
+                    } else {
+                        wake.notified().await;
+                    }
                     continue;
                 }
 
                 let endpoint = endpoint_pool.lock().select(Instant::now());
                 let Some(endpoint) = endpoint else {
-                    let retry_due = last_endpoint_refresh_at.is_none_or(|attempted_at| {
-                        attempted_at.elapsed() >= Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
-                    });
-                    if retry_due
+                    let endpoint_refresh_wait =
+                        endpoint_refresh_retry_in(last_endpoint_refresh_at, Instant::now());
+                    if endpoint_refresh_wait.is_zero()
                         && let Some(request) = last_endpoint_refresh.clone()
                     {
                         pending_endpoint_refresh = Some(request);
@@ -410,6 +454,11 @@ impl ConnectionStore {
                         .lock()
                         .next_available_in(Instant::now())
                         .unwrap_or(Duration::from_secs(network_retry_secs));
+                    let endpoint_delay = if last_endpoint_refresh.is_some() {
+                        endpoint_delay.min(endpoint_refresh_wait)
+                    } else {
+                        endpoint_delay
+                    };
                     let delay = if reachable {
                         endpoint_delay
                     } else {
@@ -610,6 +659,9 @@ impl ConnectionStore {
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
+                    pending_endpoint_refresh = None;
+                    last_endpoint_refresh = None;
+                    last_endpoint_refresh_at = None;
                     network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
@@ -1107,6 +1159,16 @@ fn jwt_is_fresh(session: &Session) -> bool {
         && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
 }
 
+fn healthy_endpoint_credential(session: &Session) -> Option<&str> {
+    if !session.session_id.is_empty() {
+        Some(session.session_id.as_str())
+    } else if jwt_is_fresh(session) {
+        Some(session.token.as_str())
+    } else {
+        None
+    }
+}
+
 fn configured_api_base_url(config: &AppConfig) -> String {
     let scheme = if config.api_secure { "https" } else { "http" };
     format!("{scheme}://{}:{}", config.api_host, config.api_port)
@@ -1191,6 +1253,46 @@ fn next_backoff_secs(current: u64) -> u64 {
 
 fn next_network_retry_secs(current: u64) -> u64 {
     current.saturating_mul(2).min(NETWORK_PROBE_RETRY_CAP_SECS)
+}
+
+fn endpoint_refresh_retry_in(last_attempt: Option<Instant>, now: Instant) -> Duration {
+    last_attempt
+        .map(|attempted_at| {
+            Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
+                .saturating_sub(now.saturating_duration_since(attempted_at))
+        })
+        .unwrap_or(Duration::ZERO)
+}
+
+async fn fetch_healthy_endpoint_with_timeout(
+    executor: &BackgroundExecutor,
+    client: &MezonClient,
+    credential: &str,
+    current_endpoint_id: i32,
+    reason: HealthyEndpointReason,
+    geo_ip: &str,
+) -> anyhow::Result<HealthyEndpointSession> {
+    wait_for_healthy_endpoint(
+        executor,
+        client.get_healthy_endpoint(credential, current_endpoint_id, reason, geo_ip),
+        HEALTHY_ENDPOINT_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_healthy_endpoint(
+    executor: &BackgroundExecutor,
+    request: impl std::future::Future<Output = anyhow::Result<HealthyEndpointSession>>,
+    timeout_after: Duration,
+) -> anyhow::Result<HealthyEndpointSession> {
+    let request = std::pin::pin!(request);
+    let timeout = std::pin::pin!(executor.timer(timeout_after));
+    match futures::future::select(request, timeout).await {
+        futures::future::Either::Left((response, _)) => response,
+        futures::future::Either::Right(_) => {
+            anyhow::bail!("healthy endpoint request timed out")
+        }
+    }
 }
 
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
@@ -1394,6 +1496,36 @@ mod tests {
     }
 
     #[test]
+    fn healthy_endpoint_retry_deadline_wakes_before_socket_cooldown() {
+        let attempted_at = Instant::now();
+        assert_eq!(
+            endpoint_refresh_retry_in(Some(attempted_at), attempted_at),
+            Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
+        );
+        assert_eq!(
+            endpoint_refresh_retry_in(
+                Some(attempted_at),
+                attempted_at + Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            endpoint_refresh_retry_in(None, attempted_at),
+            Duration::ZERO
+        );
+    }
+
+    #[gpui::test]
+    async fn healthy_endpoint_timeout_runs_on_the_gpui_executor(cx: &mut gpui::TestAppContext) {
+        let request = futures::future::pending::<anyhow::Result<HealthyEndpointSession>>();
+        let error = wait_for_healthy_endpoint(&cx.executor(), request, Duration::from_millis(1))
+            .await
+            .expect_err("a stalled request must time out");
+
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
     fn a_session_without_an_id_authenticates_with_the_jwt() {
         let jwt_only = Session {
             token: "jwt".into(),
@@ -1403,6 +1535,18 @@ mod tests {
         assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
+    }
+
+    #[test]
+    fn healthy_endpoint_prefers_the_durable_session_id_when_the_jwt_is_stale() {
+        let session = Session {
+            session_id: "sid".into(),
+            token: "stale-jwt".into(),
+            expires_at: now_secs().saturating_sub(1),
+            ..Default::default()
+        };
+
+        assert_eq!(healthy_endpoint_credential(&session), Some("sid"));
     }
 
     #[test]

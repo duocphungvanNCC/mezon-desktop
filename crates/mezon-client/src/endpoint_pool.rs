@@ -156,6 +156,12 @@ impl EndpointPool {
         }
     }
 
+    pub fn retry_now(&mut self, id: &str) {
+        if let Some(health) = self.health.get_mut(id) {
+            health.circuit_open_until = None;
+        }
+    }
+
     pub fn probe_endpoints(&self, now: Instant) -> Vec<EndpointCandidate> {
         let mut endpoints = self
             .endpoints
@@ -339,6 +345,24 @@ mod tests {
         pool.record_unreachable("b", now);
         assert!(!pool.has_available(now));
         assert_eq!(pool.next_available_in(now), Some(FAILURE_COOLDOWN));
+    }
+
+    #[test]
+    fn backend_confirmation_allows_an_immediate_retry_after_long_cooldown() {
+        let now = Instant::now();
+        let mut pool = EndpointPool::default();
+        pool.replace(vec![endpoint("a", 0)]);
+        for _ in 0..8 {
+            pool.record_unreachable("a", now);
+        }
+        assert_eq!(pool.next_available_in(now), Some(FAILURE_COOLDOWN_CAP));
+
+        pool.retry_now("a");
+
+        assert_eq!(
+            pool.select(now).map(|endpoint| endpoint.id),
+            Some("a".into())
+        );
     }
 
     #[test]
