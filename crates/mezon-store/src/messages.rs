@@ -2592,6 +2592,7 @@ impl MessagesStore {
                     uid,
                     uname,
                     payload.anonymous,
+                    payload.reply,
                     cx,
                 );
                 return;
@@ -4918,6 +4919,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4940,6 +4942,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4961,6 +4964,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4975,6 +4979,7 @@ impl MessagesStore {
         sender_id: String,
         sender_name: String,
         anonymous: bool,
+        reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4988,6 +4993,17 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
+        let reply = match reply_override {
+            Some(draft) => Some(draft),
+            None => self.take_reply_target(),
+        };
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
         self.clear_last_read_message(channel_id);
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
@@ -5012,7 +5028,7 @@ impl MessagesStore {
                 content_tokens: OutgoingContent::default(),
                 attachments: Vec::new(),
                 ogp: None,
-                reply: None,
+                reply: reply.clone(),
                 anonymous,
                 message_code: 0,
                 url_attachment: Some(UrlAttachment {
@@ -5041,12 +5057,58 @@ impl MessagesStore {
 
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let (reply_reference, reply_ref) = match &reply {
+            Some(draft) => {
+                let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                    draft.sender_id,
+                    (
+                        "",
+                        &draft.sender_name,
+                        &draft.sender_name,
+                        &draft.sender_avatar,
+                    ),
+                    reply_clan_id,
+                    cx,
+                );
+                (
+                    Some(MessageReference {
+                        message_ref_id: draft.message_ref_id,
+                        sender_id: draft.sender_id,
+                        sender_name: name_for_prioritize(&clan_nick, &display_name, &username),
+                        sender_clan_nick: clan_nick.clone(),
+                        sender_display_name: display_name.clone(),
+                        sender_username: username.clone(),
+                        sender_avatar: avatar.clone(),
+                        content_preview: crate::message::reply_preview_line(&draft.content_preview)
+                            .into(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        has_embed: draft.has_embed,
+                        is_poll: draft.is_poll,
+                    }),
+                    Some(OutgoingReply {
+                        message_ref_id: draft.message_ref_id.get(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        message_sender_id: draft.sender_id.get(),
+                        message_sender_username: username,
+                        message_sender_avatar: avatar,
+                        message_sender_clan_nick: clan_nick,
+                        message_sender_display_name: display_name,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
         let mut optimistic =
             Message::new(temp_id, String::new(), sender_id, display_name, create_time)
                 .with_sort_id(sort_id)
                 .with_avatar(avatar_url)
                 .with_avatar_proxied(avatar_proxied)
                 .with_attachments(vec![optimistic_attachment]);
+        if let Some(reference) = reply_reference {
+            optimistic = optimistic.with_references(vec![reference]);
+        }
         if anonymous {
             let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
@@ -5054,12 +5116,11 @@ impl MessagesStore {
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
-
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
-                .send_message_with_attachment_urls(
+                .send_message_with_attachment_urls_reply(
                     clan_id.get(),
                     channel_id.get(),
                     is_public,
@@ -5071,6 +5132,7 @@ impl MessagesStore {
                         width,
                         height,
                     }],
+                    reply_ref,
                     OutgoingMessageFlags {
                         anonymous_message: anonymous,
                         message_code: 0,
@@ -12837,6 +12899,52 @@ mod tests {
                 assert_eq!(
                     payload.url_attachment.as_ref().map(|a| a.url.as_str()),
                     Some("https://cdn.example/sticker.webp")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_url_attachment_reply_keeps_its_reference(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(7);
+                let target = MessageId(42);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(target, "hello", "6", "Eve", 100)],
+                );
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+                store.set_reply_to(target, cx);
+
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".to_string(),
+                    "sticker.webp".to_string(),
+                    "5".to_string(),
+                    "Bob".to_string(),
+                    cx,
+                );
+
+                assert!(store.reply_target().is_none());
+                let payload = store
+                    .pending_send_payloads
+                    .values()
+                    .next()
+                    .expect("sticker reply records a payload to retry with");
+                assert_eq!(
+                    payload.reply.as_ref().map(|reply| reply.message_ref_id),
+                    Some(target)
+                );
+                assert_eq!(
+                    store
+                        .cache
+                        .get(&channel)
+                        .and_then(|messages| messages.messages.last())
+                        .and_then(|message| message.references.first())
+                        .map(|reference| reference.message_ref_id),
+                    Some(target)
                 );
             });
         });
