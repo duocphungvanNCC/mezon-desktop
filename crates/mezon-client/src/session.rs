@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::EndpointCandidate;
 
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_UNREACHABLE_PRIMARY: &str = "unreachable-primary";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct ServiceEndpoint {
@@ -200,9 +205,34 @@ impl Session {
             });
         }
 
+        #[cfg(debug_assertions)]
+        if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+            == Ok(DEBUG_FAILOVER_UNREACHABLE_PRIMARY)
+        {
+            inject_debug_unreachable_primary(&mut candidates);
+        }
+
         candidates.sort_by_key(|candidate| candidate.priority);
         candidates
     }
+}
+
+#[cfg(debug_assertions)]
+fn inject_debug_unreachable_primary(candidates: &mut Vec<EndpointCandidate>) {
+    for candidate in candidates.iter_mut() {
+        candidate.priority = candidate.priority.saturating_add(1);
+    }
+    candidates.insert(
+        0,
+        EndpointCandidate {
+            id: "debug-unreachable-primary".to_string(),
+            region: "debug".to_string(),
+            api_url: None,
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            priority: 0,
+        },
+    );
 }
 
 pub(crate) fn parse_endpoint(
@@ -430,5 +460,26 @@ mod tests {
         session.apply_endpoint_refresh(Vec::new(), 0);
         assert_eq!(session.endpoints.len(), 1);
         assert_eq!(session.endpoints_ttl_seconds, 60);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_failover_simulation_injects_an_unreachable_primary() {
+        let mut candidates = vec![EndpointCandidate {
+            id: "legacy".into(),
+            region: String::new(),
+            api_url: Some("https://api.example.com".into()),
+            host: "socket.example.com".into(),
+            port: 4433,
+            priority: 0,
+        }];
+
+        inject_debug_unreachable_primary(&mut candidates);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "debug-unreachable-primary");
+        assert_eq!(candidates[0].priority, 0);
+        assert_eq!(candidates[1].id, "legacy");
+        assert_eq!(candidates[1].priority, 1);
     }
 }
