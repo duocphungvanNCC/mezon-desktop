@@ -8471,7 +8471,7 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
             if options.is_empty() {
                 return None;
             }
-            Some(EmbedInput::Radio(EmbedRadio {
+            let mut radio = EmbedRadio {
                 id: id.into(),
                 options: options
                     .into_iter()
@@ -8485,7 +8485,11 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                     })
                     .collect(),
                 max_options: wrapper.max_options.filter(|max| *max > 0),
-            }))
+            };
+            if radio.max_options.is_none() && radio.allows_multiple() {
+                radio.max_options = Some(i32::try_from(radio.options.len()).unwrap_or(i32::MAX));
+            }
+            Some(EmbedInput::Radio(radio))
         }
         Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
             let component: ApiAnimationComponent =
@@ -9975,10 +9979,10 @@ mod tests {
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
                 max_options: Some(1),
             };
-            let unbounded_multi = EmbedRadio {
-                id: "unbounded-picks".into(),
+            let bounded_multi = EmbedRadio {
+                id: "implicit-picks".into(),
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
-                max_options: None,
+                max_options: Some(2),
             };
 
             store.update(cx, |store, cx| {
@@ -10002,12 +10006,12 @@ mod tests {
                     "picking the same option again clears it"
                 );
 
-                pick(store, &unbounded_multi, "a", cx);
-                pick(store, &unbounded_multi, "b", cx);
+                pick(store, &bounded_multi, "a", cx);
+                pick(store, &bounded_multi, "b", cx);
                 assert_eq!(
-                    store.message_select_selection(message_id, "unbounded-picks"),
+                    store.message_select_selection(message_id, "implicit-picks"),
                     ["a", "b"],
-                    "a missing max_options leaves a multi-choice radio unbounded"
+                    "an inferred multi-choice radio accepts each available option"
                 );
             });
         });
@@ -10354,7 +10358,7 @@ mod tests {
             panic!("expected a radio");
         };
         assert!(radio.allows_multiple());
-        assert_eq!(radio.max_options, None);
+        assert_eq!(radio.max_options, Some(2));
     }
 
     #[test]

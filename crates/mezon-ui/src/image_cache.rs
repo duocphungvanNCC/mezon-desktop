@@ -1890,24 +1890,20 @@ fn canvas_dimensions(
     Ok(reader.into_dimensions()?)
 }
 
-fn validate_sprite_sheet_decode(bytes: &[u8]) -> Result<(), ImageCacheError> {
+fn sprite_sheet_decode_limits(bytes: &[u8]) -> Result<(u32, u32), ImageCacheError> {
     let format = image::guess_format(bytes)?;
     let (width, height) = canvas_dimensions(bytes, format)?;
     let decoded_bytes = u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(4);
-    if width > SPRITE_SHEET_MAX_PX
-        || height > SPRITE_SHEET_MAX_PX
-        || decoded_bytes > SPRITE_SHEET_ENTRY_MAX_BYTES
+    if width <= SPRITE_SHEET_MAX_PX
+        && height <= SPRITE_SHEET_MAX_PX
+        && decoded_bytes <= SPRITE_SHEET_ENTRY_MAX_BYTES
     {
-        return Err(ImageCacheError::Asset(
-            format!(
-                "sprite sheet too large to preserve: {width}x{height}, {decoded_bytes} decoded bytes"
-            )
-            .into(),
-        ));
+        Ok((SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX))
+    } else {
+        Ok((MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX))
     }
-    Ok(())
 }
 
 fn reject_oversized_canvas(
@@ -2417,9 +2413,11 @@ fn load_bounded_inner(
 
         match image::guess_format(&bytes) {
             Ok(_) => {
-                if preserve_native {
-                    validate_sprite_sheet_decode(&bytes)?;
-                }
+                let (animation_max_px, static_max_px) = if preserve_native {
+                    sprite_sheet_decode_limits(&bytes)?
+                } else {
+                    (animation_max_px, static_max_px)
+                };
                 decode_message_image(
                     &bytes,
                     animation_max_px,
@@ -2970,11 +2968,16 @@ mod tests {
             )
             .expect("sprite sheet encodes");
 
-        validate_sprite_sheet_decode(&bytes).expect("sprite sheet fits the cache budget");
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX)
+        );
         let image = decode_message_image(
             &bytes,
-            SPRITE_SHEET_MAX_PX,
-            SPRITE_SHEET_MAX_PX,
+            animation_max_px,
+            static_max_px,
             SPRITE_SHEET_ENTRY_MAX_BYTES,
         )
         .expect("sprite sheet decodes");
@@ -2984,10 +2987,10 @@ mod tests {
     }
 
     #[test]
-    fn sprite_sheet_cache_rejects_oversized_decoded_canvas() {
+    fn sprite_sheet_cache_downscales_a_larger_valid_canvas() {
         use image::ImageEncoder as _;
 
-        let pixels = image::RgbaImage::from_pixel(2048, 1025, image::Rgba([0, 0, 0, 0]));
+        let pixels = image::RgbaImage::from_pixel(1812, 1510, image::Rgba([0, 0, 0, 0]));
         let mut bytes = Vec::new();
         image::codecs::png::PngEncoder::new(&mut bytes)
             .write_image(
@@ -2998,7 +3001,23 @@ mod tests {
             )
             .expect("sprite sheet encodes");
 
-        assert!(validate_sprite_sheet_decode(&bytes).is_err());
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX)
+        );
+        let image = decode_message_image(
+            &bytes,
+            animation_max_px,
+            static_max_px,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+        )
+        .expect("larger sprite sheet falls back to bounded decoding");
+        let size = image.size(0);
+
+        assert!(size.width.0 <= MESSAGE_STATIC_MAX_PX as i32);
+        assert!(size.height.0 <= MESSAGE_STATIC_MAX_PX as i32);
     }
 
     /// A 64x64 animated WebP of a 16x16 sprite (opaque core, transparent margin,
