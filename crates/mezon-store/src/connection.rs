@@ -1231,10 +1231,10 @@ fn jwt_is_fresh(session: &Session) -> bool {
 }
 
 fn healthy_endpoint_credential(session: &Session) -> Option<HealthyEndpointCredential> {
-    if jwt_is_fresh(session) {
-        Some(HealthyEndpointCredential::Jwt)
-    } else if !session.session_id.is_empty() {
+    if !session.session_id.is_empty() {
         Some(HealthyEndpointCredential::SessionId)
+    } else if jwt_is_fresh(session) {
+        Some(HealthyEndpointCredential::Jwt)
     } else {
         None
     }
@@ -1255,9 +1255,6 @@ fn healthy_endpoint_fallback_credential(
     attempted: HealthyEndpointCredential,
 ) -> Option<HealthyEndpointCredential> {
     match attempted {
-        HealthyEndpointCredential::Jwt if !session.session_id.is_empty() => {
-            Some(HealthyEndpointCredential::SessionId)
-        }
         HealthyEndpointCredential::SessionId if jwt_is_fresh(session) => {
             Some(HealthyEndpointCredential::Jwt)
         }
@@ -1647,10 +1644,14 @@ mod tests {
         assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
+        assert_eq!(
+            healthy_endpoint_credential(&jwt_only),
+            Some(HealthyEndpointCredential::Jwt)
+        );
     }
 
     #[test]
-    fn healthy_endpoint_prefers_a_fresh_jwt() {
+    fn healthy_endpoint_prefers_the_session_id_even_with_a_fresh_jwt() {
         let session = Session {
             session_id: "sid".into(),
             token: "jwt".into(),
@@ -1660,15 +1661,15 @@ mod tests {
 
         assert_eq!(
             healthy_endpoint_credential(&session),
-            Some(HealthyEndpointCredential::Jwt)
-        );
-        assert_eq!(
-            healthy_endpoint_credential_value(&session, HealthyEndpointCredential::Jwt),
-            "jwt"
-        );
-        assert_eq!(
-            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::Jwt),
             Some(HealthyEndpointCredential::SessionId)
+        );
+        assert_eq!(
+            healthy_endpoint_credential_value(&session, HealthyEndpointCredential::SessionId),
+            "sid"
+        );
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::SessionId),
+            Some(HealthyEndpointCredential::Jwt)
         );
     }
 
