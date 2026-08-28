@@ -4074,6 +4074,7 @@
   "screenShare.selectScreen": "Выберите экран для демонстрации",
   "screenShare.share": "Поделиться",
   "screenShare.shareAudio": "Поделиться аудио",
+  "screenShare.systemWillAsk": "Система попросит выбрать окно или экран для демонстрации.",
   "screenShare.window": "Окно",
   "screenStack.menuChannelStack.channelSetting": "Настройки канала",
   "screenStack.menuChannelStack.permissionOverrides": "Переопределение разрешений",

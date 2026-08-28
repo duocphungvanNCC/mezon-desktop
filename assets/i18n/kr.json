@@ -3835,6 +3835,7 @@
   "screenShare.selectScreen": "공유할 화면 선택",
   "screenShare.share": "공유",
   "screenShare.shareAudio": "오디오 공유",
+  "screenShare.systemWillAsk": "시스템에서 공유할 창 또는 화면을 선택하라는 메시지가 표시됩니다.",
   "screenShare.window": "창",
   "screenStack.menuChannelStack.channelSetting": "채널 설정",
   "screenStack.menuChannelStack.permissionOverrides": "권한 오버라이드",

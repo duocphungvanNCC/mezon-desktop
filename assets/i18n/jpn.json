@@ -3837,6 +3837,7 @@
   "screenShare.selectScreen": "共有するスクリーンを選択",
   "screenShare.share": "共有",
   "screenShare.shareAudio": "オーディオを共有",
+  "screenShare.systemWillAsk": "共有するウィンドウまたは画面をシステムが確認します。",
   "screenShare.window": "ウィンドウ",
   "screenStack.menuChannelStack.channelSetting": "チャンネル設定",
   "screenStack.menuChannelStack.permissionOverrides": "権限のオーバーライド",

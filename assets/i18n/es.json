@@ -3870,6 +3870,7 @@
   "screenShare.selectScreen": "Seleccionar pantalla para compartir",
   "screenShare.share": "Compartir",
   "screenShare.shareAudio": "Compartir audio",
+  "screenShare.systemWillAsk": "El sistema te pedirá que elijas qué ventana o pantalla compartir.",
   "screenShare.window": "Ventana",
   "screenStack.addReaction": "Añadir reacción",
   "screenStack.menuChannelStack.channelSetting": "Ajustes del canal",

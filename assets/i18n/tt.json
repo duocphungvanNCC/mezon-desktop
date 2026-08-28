@@ -3844,6 +3844,7 @@
   "screenShare.selectScreen": "Күрсәтү өчен экран сайлагыз",
   "screenShare.share": "Уртаклашу",
   "screenShare.shareAudio": "Аудио белән уртаклашу",
+  "screenShare.systemWillAsk": "Система кайсы тәрәзәне яки экранны уртаклашырга икәнен сораячак.",
   "screenShare.window": "Тәрәзә",
   "screenStack.menuChannelStack.channelSetting": "Канал көйләнмәләре",
   "screenStack.menuChannelStack.permissionOverrides": "Рөхсәтләрне яңадан билгеләү",

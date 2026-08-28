@@ -3834,6 +3834,7 @@
   "screenShare.selectScreen": "Wybierz ekran do udostępnienia",
   "screenShare.share": "Udostępnij",
   "screenShare.shareAudio": "Udostępnij audio",
+  "screenShare.systemWillAsk": "System poprosi o wybranie okna lub ekranu do udostępnienia.",
   "screenShare.window": "Okno",
   "screenStack.menuChannelStack.channelSetting": "Ustawienia kanału",
   "screenStack.menuChannelStack.permissionOverrides": "Nadpisania uprawnień",

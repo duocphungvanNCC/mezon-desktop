@@ -5741,7 +5741,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let channels = init_authenticated_channel_list(cx);
+            let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
                 channels.apply_clan_structure(
                     ClanId(1),

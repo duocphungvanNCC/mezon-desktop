@@ -3834,6 +3834,7 @@
   "screenShare.selectScreen": "Оберіть екран для ділення",
   "screenShare.share": "Поділитися",
   "screenShare.shareAudio": "Ділитися аудіо",
+  "screenShare.systemWillAsk": "Система запропонує вибрати вікно або екран для демонстрації.",
   "screenShare.window": "Вікно",
   "screenStack.menuChannelStack.channelSetting": "Налаштування каналу",
   "screenStack.menuChannelStack.permissionOverrides": "Перевизначення дозволів",

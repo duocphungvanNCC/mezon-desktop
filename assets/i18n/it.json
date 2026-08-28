@@ -3835,6 +3835,7 @@
   "screenShare.selectScreen": "Seleziona lo schermo da condividere",
   "screenShare.share": "Condividi",
   "screenShare.shareAudio": "Condividi audio",
+  "screenShare.systemWillAsk": "Il sistema chiederà quale finestra o schermo condividere.",
   "screenShare.window": "Finestra",
   "screenStack.menuChannelStack.channelSetting": "Impostazioni canale",
   "screenStack.menuChannelStack.permissionOverrides": "Sovrascritture permessi",
