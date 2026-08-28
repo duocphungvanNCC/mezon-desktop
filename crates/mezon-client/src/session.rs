@@ -7,6 +7,10 @@ use crate::EndpointCandidate;
 const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
 #[cfg(debug_assertions)]
 const DEBUG_FAILOVER_UNREACHABLE_PRIMARY: &str = "unreachable-primary";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_FULL_CYCLE: &str = "full-cycle";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SLOW_SWITCH: &str = "slow-switch";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
@@ -206,10 +210,14 @@ impl Session {
         }
 
         #[cfg(debug_assertions)]
-        if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
-            == Ok(DEBUG_FAILOVER_UNREACHABLE_PRIMARY)
-        {
-            inject_debug_unreachable_primary(&mut candidates);
+        match std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref() {
+            Ok(DEBUG_FAILOVER_UNREACHABLE_PRIMARY) => {
+                inject_debug_unreachable_primary(&mut candidates);
+            }
+            Ok(DEBUG_FAILOVER_FULL_CYCLE | DEBUG_FAILOVER_SLOW_SWITCH) => {
+                inject_debug_full_cycle(&mut candidates);
+            }
+            _ => {}
         }
 
         candidates.sort_by_key(|candidate| candidate.priority);
@@ -233,6 +241,20 @@ fn inject_debug_unreachable_primary(candidates: &mut Vec<EndpointCandidate>) {
             priority: 0,
         },
     );
+}
+
+#[cfg(debug_assertions)]
+fn inject_debug_full_cycle(candidates: &mut Vec<EndpointCandidate>) {
+    let Some(mut primary) = candidates.first().cloned() else {
+        return;
+    };
+    primary.id = "debug-primary".to_string();
+    primary.region = "debug".to_string();
+    primary.priority = 0;
+    let mut secondary = primary.clone();
+    secondary.id = "debug-secondary".to_string();
+    secondary.priority = 1;
+    *candidates = vec![primary, secondary];
 }
 
 pub(crate) fn parse_endpoint(
@@ -481,5 +503,26 @@ mod tests {
         assert_eq!(candidates[0].priority, 0);
         assert_eq!(candidates[1].id, "legacy");
         assert_eq!(candidates[1].priority, 1);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_full_cycle_duplicates_the_live_endpoint() {
+        let mut candidates = vec![EndpointCandidate {
+            id: "legacy".into(),
+            region: String::new(),
+            api_url: Some("https://api.example.com".into()),
+            host: "socket.example.com".into(),
+            port: 4433,
+            priority: 0,
+        }];
+
+        inject_debug_full_cycle(&mut candidates);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "debug-primary");
+        assert_eq!(candidates[1].id, "debug-secondary");
+        assert_eq!(candidates[0].host, candidates[1].host);
+        assert_eq!(candidates[0].port, candidates[1].port);
     }
 }

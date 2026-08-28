@@ -30,6 +30,12 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
 const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_FULL_CYCLE: &str = "full-cycle";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SLOW_SWITCH: &str = "slow-switch";
 /// The gateway discards its own 401 before it reaches the wire (`cleanup_connection` clears the
 /// write queue that `flush_ssl_wbio` had only queued), so a dead `session_id`, the per-user session
 /// limit and a plain outage all arrive as an identical silent close. After this many silent
@@ -206,6 +212,8 @@ impl ConnectionStore {
 
         let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
+            #[cfg(debug_assertions)]
+            let debug_disconnect_step = Arc::new(AtomicU64::new(0));
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
@@ -490,6 +498,40 @@ impl ConnectionStore {
                     network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
+                    #[cfg(debug_assertions)]
+                    if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                        == Ok(DEBUG_FAILOVER_FULL_CYCLE)
+                    {
+                        let step = debug_disconnect_step.fetch_add(1, Ordering::AcqRel);
+                        if step < 2 {
+                            let transport = transport.clone();
+                            let timer = exec.clone();
+                            let endpoint_id = endpoint_id.clone();
+                            let endpoint_pool = endpoint_pool.clone();
+                            let connection_generation = connection_generation.clone();
+                            let api = api.clone();
+                            let wake = wake.clone();
+                            exec.spawn(async move {
+                                timer.timer(Duration::from_secs(2)).await;
+                                tracing::info!(
+                                    "Debug failover simulation disconnecting endpoint_id={endpoint_id} step={}",
+                                    step + 1
+                                );
+                                if let Err(error) = transport.close().await {
+                                    tracing::warn!(
+                                        "Debug failover simulation could not close endpoint_id={endpoint_id}: {error}"
+                                    );
+                                }
+                                endpoint_pool
+                                    .lock()
+                                    .record_unreachable(&endpoint_id, Instant::now());
+                                connection_generation.fetch_add(1, Ordering::AcqRel);
+                                api.set_status(ConnectionStatus::Disconnected);
+                                wake.notify_one();
+                            })
+                            .detach();
+                        }
+                    }
                     if !refreshed_this_run {
                         refreshed_this_run = true;
                         let (renewed, _) =
@@ -680,7 +722,17 @@ impl ConnectionStore {
         let exec = cx.background_executor().clone();
         exec.clone().spawn(async move {
             loop {
-                exec.timer(ENDPOINT_PROBE_INTERVAL).await;
+                #[cfg(debug_assertions)]
+                let interval = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                    == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
+                {
+                    Duration::from_secs(1)
+                } else {
+                    ENDPOINT_PROBE_INTERVAL
+                };
+                #[cfg(not(debug_assertions))]
+                let interval = ENDPOINT_PROBE_INTERVAL;
+                exec.timer(interval).await;
                 if !transport.is_open().await {
                     continue;
                 }
@@ -690,6 +742,19 @@ impl ConnectionStore {
                         continue;
                     };
                     let target = endpoint_probe_url(api_url);
+                    #[cfg(debug_assertions)]
+                    let sample = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                        == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
+                    {
+                        Some(if endpoint.id == "debug-primary" {
+                            Duration::from_millis(800)
+                        } else {
+                            Duration::from_millis(100)
+                        })
+                    } else {
+                        probe_endpoint_latency(&target, ENDPOINT_QUALITY_PROBE_TIMEOUT).await
+                    };
+                    #[cfg(not(debug_assertions))]
                     let sample =
                         probe_endpoint_latency(&target, ENDPOINT_QUALITY_PROBE_TIMEOUT).await;
                     let should_switch = if let Some(rtt) = sample {
