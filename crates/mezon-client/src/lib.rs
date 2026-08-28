@@ -33,10 +33,10 @@ pub use attachment_download::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
 };
-pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use auth::{HealthyEndpointStatusError, MezonClient};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
 pub use endpoint_pool::{EndpointCandidate, EndpointPool};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
@@ -52,8 +52,7 @@ pub use inbox::{
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
-    ENDPOINT_QUALITY_PROBE_TIMEOUT, RECONNECT_NETWORK_PROBE_TIMEOUT, endpoint_probe_url,
-    favicon_probe_url, probe_endpoint_latency, probe_network_reachability,
+    RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
 };
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;

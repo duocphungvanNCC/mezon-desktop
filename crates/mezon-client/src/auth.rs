@@ -47,6 +47,12 @@ pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
 const PROTO_CONTENT_TYPE: &str = "application/proto";
 const MAX_ENDPOINT_RESPONSE_BYTES: u64 = 256 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP {status} fetching healthy endpoint")]
+pub struct HealthyEndpointStatusError {
+    pub status: u16,
+}
+
 /// Whether the server still recognises a session. `SessionRefresh` answers every failure with a
 /// 500 (`codes.Internal`), so it cannot tell a dead credential from a backend incident; a plain
 /// authenticated call does — 403 for a refused token, 200 for a live one.
@@ -80,6 +86,8 @@ struct ApiSession {
     ws_url: Option<String>,
     /// The TCP endpoint URL returned by the server after auth.
     tcp_url: Option<String>,
+    #[serde(default, alias = "endpointId")]
+    endpoint_id: i32,
 }
 
 /// Response from the OTP request endpoint.
@@ -412,7 +420,10 @@ impl MezonClient {
             bail!("healthy endpoint response exceeds {MAX_ENDPOINT_RESPONSE_BYTES} bytes");
         }
         if !status.is_success() {
-            bail!("HTTP {} fetching healthy endpoint", status.as_u16());
+            return Err(HealthyEndpointStatusError {
+                status: status.as_u16(),
+            }
+            .into());
         }
 
         let endpoint: HealthyEndpointSession =
@@ -443,6 +454,18 @@ impl MezonClient {
         let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
         let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
         let (tcp_host, tcp_port, _) = parse_endpoint(api.tcp_url.as_deref());
+        let endpoints = if api.endpoint_id > 0 && (tcp_host.is_some() || ws_host.is_some()) {
+            vec![crate::ServiceEndpoint {
+                id: api.endpoint_id.to_string(),
+                region: String::new(),
+                api_url: api.api_url.clone(),
+                ws_url: api.ws_url.clone(),
+                tcp_url: api.tcp_url.clone(),
+                priority: 0,
+            }]
+        } else {
+            Vec::new()
+        };
         Session {
             token: api.token,
             refresh_token: api.refresh_token,
@@ -457,7 +480,7 @@ impl MezonClient {
             tcp_url: api.tcp_url,
             tcp_host,
             tcp_port,
-            endpoints: Vec::new(),
+            endpoints,
             ws_url: api.ws_url,
             ws_host,
             ws_port,
@@ -646,11 +669,46 @@ mod tests {
     #[test]
     fn healthy_endpoint_response_accepts_backend_field_names() {
         let endpoint: HealthyEndpointSession = serde_json::from_str(
-            r#"{"user_id":"7","session_id":"sid","api_url":"https://api.example.com","ws_url":"wss://sock.example.com","tcp_url":"sock.example.com:4433"}"#,
+            r#"{"user_id":"7","session_id":"sid","api_url":"https://api.example.com","ws_url":"wss://sock.example.com","tcp_url":"sock.example.com:4433","endpoint_id":2}"#,
         )
         .expect("valid backend response");
         assert_eq!(endpoint.user_id, "7");
         assert_eq!(endpoint.session_id, "sid");
         assert_eq!(endpoint.tcp_url.as_deref(), Some("sock.example.com:4433"));
+        assert_eq!(endpoint.endpoint_id, 2);
+    }
+
+    #[test]
+    fn healthy_endpoint_status_errors_preserve_the_http_code() {
+        let error = anyhow::Error::new(HealthyEndpointStatusError { status: 401 });
+        assert_eq!(
+            error
+                .downcast_ref::<HealthyEndpointStatusError>()
+                .map(|error| error.status),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn login_session_keeps_the_backend_endpoint_id() {
+        let session = MezonClient::default().parse_session(ApiSession {
+            token: "header.payload.signature".into(),
+            refresh_token: "refresh".into(),
+            id_token: String::new(),
+            created: false,
+            is_remember: true,
+            session_id: Some("sid".into()),
+            api_url: Some("https://api2.example.com".into()),
+            ws_url: Some("wss://sock2.example.com".into()),
+            tcp_url: Some("sock2.example.com:4433".into()),
+            endpoint_id: 2,
+        });
+
+        assert_eq!(session.endpoints.len(), 1);
+        assert_eq!(session.endpoints[0].id, "2");
+        assert_eq!(
+            session.endpoints[0].tcp_url.as_deref(),
+            Some("sock2.example.com:4433")
+        );
     }
 }

@@ -43,6 +43,8 @@ pub struct HealthyEndpointSession {
     pub ws_url: Option<String>,
     #[serde(alias = "tcpUrl")]
     pub tcp_url: Option<String>,
+    #[serde(alias = "endpointId")]
+    pub endpoint_id: i32,
 }
 
 impl HealthyEndpointSession {
@@ -56,7 +58,11 @@ impl HealthyEndpointSession {
         let host = tcp_host.or(ws_host)?;
         let port = tcp_port.or(ws_port).or(default_port).unwrap_or(443);
         Some(EndpointCandidate {
-            id: format!("backend:{host}:{port}"),
+            id: if self.endpoint_id > 0 {
+                self.endpoint_id.to_string()
+            } else {
+                format!("backend:{host}:{port}")
+            },
             region: region.to_string(),
             api_url: self.api_url.clone().filter(|url| !url.is_empty()),
             host,
@@ -553,13 +559,14 @@ mod tests {
             api_url: Some("https://new-api.example.com".into()),
             ws_url: Some("wss://new-sock.example.com".into()),
             tcp_url: Some("new-sock.example.com:4433".into()),
+            endpoint_id: 2,
         };
 
         assert!(session.apply_healthy_endpoint(&response, "vn-south", Some(4433), None));
         assert_eq!(session.session_id, "new-sid");
         assert_eq!(session.tcp_host.as_deref(), Some("new-sock.example.com"));
         assert_eq!(session.endpoints.len(), 1);
-        assert_eq!(session.endpoints[0].id, "backend:new-sock.example.com:4433");
+        assert_eq!(session.endpoints[0].id, "2");
         assert_eq!(session.endpoints[0].region, "vn-south");
     }
 
@@ -574,6 +581,7 @@ mod tests {
             user_id: "8".into(),
             session_id: "new-sid".into(),
             tcp_url: Some("new-sock.example.com:4433".into()),
+            endpoint_id: 2,
             ..Default::default()
         };
 

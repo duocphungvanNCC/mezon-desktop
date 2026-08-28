@@ -4,8 +4,6 @@ use std::time::{Duration, Instant};
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 const FAILURE_COOLDOWN_CAP: Duration = Duration::from_secs(60);
 const SLOW_RTT: Duration = Duration::from_millis(500);
-const SLOW_ADVANTAGE: Duration = Duration::from_millis(100);
-const SLOW_RATIO_PERCENT: u128 = 70;
 const SLOW_STREAK_REQUIRED: u8 = 3;
 const SLOW_SWITCH_COOLDOWN: Duration = Duration::from_secs(120);
 
@@ -100,15 +98,6 @@ impl EndpointPool {
         }
     }
 
-    pub fn record_active_rtt(&mut self, rtt: Duration) {
-        let Some(id) = self.active_id.as_deref() else {
-            return;
-        };
-        if let Some(health) = self.health.get_mut(id) {
-            update_ewma(&mut health.ewma_rtt, rtt);
-        }
-    }
-
     pub fn record_active_probe(&mut self, rtt: Duration, now: Instant) -> bool {
         let dwell_elapsed = self
             .active_since
@@ -160,67 +149,6 @@ impl EndpointPool {
         if let Some(health) = self.health.get_mut(id) {
             health.circuit_open_until = None;
         }
-    }
-
-    pub fn probe_endpoints(&self, now: Instant) -> Vec<EndpointCandidate> {
-        let mut endpoints = self
-            .endpoints
-            .iter()
-            .filter(|endpoint| self.is_available(&endpoint.id, now) && endpoint.api_url.is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        endpoints.sort_by_key(|endpoint| {
-            u8::from(self.active_id.as_deref() != Some(endpoint.id.as_str()))
-        });
-        endpoints
-    }
-
-    pub fn record_probe(&mut self, id: &str, rtt: Duration, now: Instant) -> bool {
-        if self.active_id.as_deref() == Some(id) {
-            self.record_active_probe(rtt, now);
-            return false;
-        }
-
-        let Some(active_id) = self.active_id.clone() else {
-            return false;
-        };
-        let active_rtt = self
-            .health
-            .get(&active_id)
-            .and_then(|health| health.ewma_rtt);
-        let candidate_health = self.health.entry(id.to_string()).or_default();
-        update_ewma(&mut candidate_health.ewma_rtt, rtt);
-        let candidate_rtt = candidate_health.ewma_rtt;
-
-        let dwell_elapsed = self
-            .active_since
-            .is_some_and(|since| now.saturating_duration_since(since) >= SLOW_SWITCH_COOLDOWN);
-        let better = active_rtt
-            .zip(candidate_rtt)
-            .is_some_and(|(active, candidate)| {
-                active >= SLOW_RTT
-                    && active.saturating_sub(candidate) >= SLOW_ADVANTAGE
-                    && candidate.as_millis().saturating_mul(100)
-                        <= active.as_millis().saturating_mul(SLOW_RATIO_PERCENT)
-            });
-
-        if better && dwell_elapsed {
-            candidate_health.better_streak = candidate_health.better_streak.saturating_add(1);
-        } else {
-            candidate_health.better_streak = 0;
-        }
-
-        if candidate_health.better_streak < SLOW_STREAK_REQUIRED {
-            return false;
-        }
-
-        candidate_health.better_streak = 0;
-        if let Some(active_health) = self.health.get_mut(&active_id) {
-            active_health.circuit_open_until = Some(now + SLOW_SWITCH_COOLDOWN);
-        }
-        self.active_id = None;
-        self.active_since = None;
-        true
     }
 
     pub fn active_id(&self) -> Option<&str> {
@@ -300,24 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn slow_switch_requires_dwell_hysteresis_and_three_samples() {
-        let now = Instant::now();
-        let mut pool = EndpointPool::default();
-        pool.replace(vec![endpoint("a", 0), endpoint("b", 1)]);
-        pool.record_connected("a", now);
-        pool.record_active_rtt(Duration::from_millis(800));
-        let after_dwell = now + SLOW_SWITCH_COOLDOWN;
-        assert!(!pool.record_probe("b", Duration::from_millis(100), after_dwell));
-        assert!(!pool.record_probe("b", Duration::from_millis(100), after_dwell));
-        assert!(pool.record_probe("b", Duration::from_millis(100), after_dwell));
-        assert_eq!(pool.active_id(), None);
-        assert_eq!(
-            pool.select(after_dwell).map(|endpoint| endpoint.id),
-            Some("b".into())
-        );
-    }
-
-    #[test]
     fn active_slow_endpoint_requests_backend_only_after_dwell_and_three_samples() {
         let now = Instant::now();
         let mut pool = EndpointPool::default();
@@ -362,21 +272,6 @@ mod tests {
         assert_eq!(
             pool.select(now).map(|endpoint| endpoint.id),
             Some("a".into())
-        );
-    }
-
-    #[test]
-    fn quality_probe_measures_the_active_endpoint_before_alternates() {
-        let now = Instant::now();
-        let mut pool = EndpointPool::default();
-        pool.replace(vec![endpoint("a", 0), endpoint("b", 1)]);
-        pool.record_connected("b", now);
-        assert_eq!(
-            pool.probe_endpoints(now)
-                .into_iter()
-                .map(|endpoint| endpoint.id)
-                .collect::<Vec<_>>(),
-            vec!["b", "a"]
         );
     }
 }

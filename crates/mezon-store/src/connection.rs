@@ -12,11 +12,10 @@ use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, DEFAULT_WS_HOST, ENDPOINT_QUALITY_PROBE_TIMEOUT, EndpointCandidate,
-    EndpointPool, HealthyEndpointReason, HealthyEndpointSession, HttpFallbackSession, MezonClient,
-    NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session, TransportClient,
-    endpoint_probe_url, favicon_probe_url, keychain, probe_endpoint_latency,
-    probe_network_reachability,
+    AppApi, ConnectionStatus, DEFAULT_WS_HOST, EndpointCandidate, EndpointPool,
+    HealthyEndpointReason, HealthyEndpointSession, HealthyEndpointStatusError, HttpFallbackSession,
+    MezonClient, NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session,
+    TransportClient, favicon_probe_url, keychain, probe_network_reachability,
 };
 use parking_lot::Mutex;
 
@@ -25,7 +24,6 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{AppConfig, AuthState};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-const ENDPOINT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
@@ -77,6 +75,13 @@ enum RefreshVerdict {
 struct EndpointRefreshRequest {
     endpoint: EndpointCandidate,
     reason: HealthyEndpointReason,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthyEndpointCredential {
+    Jwt,
+    SessionId,
 }
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
@@ -90,7 +95,6 @@ pub struct ConnectionStore {
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
-    _endpoint_probe: Task<()>,
     _token_watch: Task<()>,
     _online_watch: Task<()>,
     _network: NetworkMonitor,
@@ -199,13 +203,6 @@ impl ConnectionStore {
             endpoint_refresh_tx.clone(),
             cx,
         );
-        let endpoint_probe = Self::spawn_endpoint_probe(
-            transport.clone(),
-            wake.clone(),
-            endpoint_pool.clone(),
-            endpoint_refresh_tx.clone(),
-            cx,
-        );
         let transport_handle = transport.clone();
         let wake_handle = wake.clone();
         let connection_generation_handle = connection_generation.clone();
@@ -274,6 +271,13 @@ impl ConnectionStore {
                 };
 
                 while let Ok(request) = endpoint_refresh_rx.try_recv() {
+                    if request.generation != connection_generation.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "Dropping stale healthy endpoint request for endpoint_id={}",
+                            request.endpoint.id
+                        );
+                        continue;
+                    }
                     last_endpoint_refresh = Some(request.clone());
                     pending_endpoint_refresh = Some(request);
                 }
@@ -287,6 +291,15 @@ impl ConnectionStore {
                 if endpoint_refresh_wait.is_zero()
                     && let Some(request) = pending_endpoint_refresh.take()
                 {
+                    if request.generation != connection_generation.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "Dropping stale pending healthy endpoint request for endpoint_id={}",
+                            request.endpoint.id
+                        );
+                        last_endpoint_refresh = None;
+                        last_endpoint_refresh_at = None;
+                        continue;
+                    }
                     last_endpoint_refresh = Some(request.clone());
                     last_endpoint_refresh_at = Some(Instant::now());
                     tracing::info!(
@@ -309,16 +322,58 @@ impl ConnectionStore {
                         }
                     }
                     if let Some(credential) = healthy_endpoint_credential(&session) {
-                        match fetch_healthy_endpoint_with_timeout(
+                        let mut response = fetch_healthy_endpoint_with_timeout(
                             &exec,
                             &auth_client,
-                            credential,
+                            healthy_endpoint_credential_value(&session, credential),
                             backend_endpoint_id(&request.endpoint.id),
                             request.reason,
                             &request.endpoint.region,
                         )
-                        .await
+                        .await;
+                        if response
+                            .as_ref()
+                            .is_err_and(healthy_endpoint_auth_rejected)
                         {
+                            if credential == HealthyEndpointCredential::SessionId
+                                && !jwt_is_fresh(&session)
+                            {
+                                let (renewed, verdict) = refresh_jwt_for_fallback(
+                                    &api,
+                                    &auth_state,
+                                    session.clone(),
+                                    cx,
+                                )
+                                .await;
+                                session = renewed;
+                                if verdict == RefreshVerdict::Renewed {
+                                    refreshed_this_run = true;
+                                }
+                            }
+                            if let Some(fallback) =
+                                healthy_endpoint_fallback_credential(&session, credential)
+                            {
+                                response = fetch_healthy_endpoint_with_timeout(
+                                    &exec,
+                                    &auth_client,
+                                    healthy_endpoint_credential_value(&session, fallback),
+                                    backend_endpoint_id(&request.endpoint.id),
+                                    request.reason,
+                                    &request.endpoint.region,
+                                )
+                                .await;
+                            }
+                        }
+                        if request.generation
+                            != connection_generation.load(Ordering::Acquire)
+                        {
+                            tracing::debug!(
+                                "Dropping stale healthy endpoint response for endpoint_id={}",
+                                request.endpoint.id
+                            );
+                            continue;
+                        }
+                        match response {
                             Ok(response) => {
                                 let replacement = response.realtime_endpoint(
                                     &request.endpoint.region,
@@ -328,8 +383,8 @@ impl ConnectionStore {
                                     endpoint.host == request.endpoint.host
                                         && endpoint.port == request.endpoint.port
                                 });
-                                let preserved_id =
-                                    same_realtime.then_some(request.endpoint.id.as_str());
+                                let preserved_id = (same_realtime && response.endpoint_id <= 0)
+                                    .then_some(request.endpoint.id.as_str());
                                 if let Some(updated) = apply_healthy_endpoint_to_auth(
                                     &auth_state,
                                     &session.user_id,
@@ -604,6 +659,7 @@ impl ConnectionStore {
                                     EndpointRefreshRequest {
                                         endpoint: endpoint_for_close.clone(),
                                         reason: HealthyEndpointReason::Unreachable,
+                                        generation,
                                     },
                                 );
                             }
@@ -682,6 +738,18 @@ impl ConnectionStore {
                             let endpoint_refresh_tx = endpoint_refresh_tx.clone();
                             exec.spawn(async move {
                                 timer.timer(Duration::from_secs(2)).await;
+                                let next_generation = generation.wrapping_add(1);
+                                if connection_generation
+                                    .compare_exchange(
+                                        generation,
+                                        next_generation,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    return;
+                                }
                                 tracing::info!(
                                     "Debug failover simulation disconnecting endpoint_id={endpoint_id} step={}",
                                     step + 1
@@ -697,8 +765,8 @@ impl ConnectionStore {
                                 let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
                                     endpoint,
                                     reason: HealthyEndpointReason::Unreachable,
+                                    generation: next_generation,
                                 });
-                                connection_generation.fetch_add(1, Ordering::AcqRel);
                                 api.set_status(ConnectionStatus::Disconnected);
                                 wake.notify_one();
                             })
@@ -745,6 +813,7 @@ impl ConnectionStore {
                     let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
                         endpoint: endpoint.clone(),
                         reason: HealthyEndpointReason::Unreachable,
+                        generation,
                     });
                     wake.notify_one();
                 }
@@ -796,7 +865,6 @@ impl ConnectionStore {
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,
-            _endpoint_probe: endpoint_probe,
             _token_watch: token_watch,
             _online_watch: online_watch,
             _network: network,
@@ -869,51 +937,16 @@ impl ConnectionStore {
         let exec = cx.background_executor().clone();
         exec.clone().spawn(async move {
             loop {
-                exec.timer(HEARTBEAT_INTERVAL).await;
-                if !transport.is_open().await {
-                    continue;
-                }
-                if let Err(e) = transport.ping_roundtrip().await {
-                    tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
-                    let endpoint = endpoint_pool.lock().active_endpoint();
-                    if let Some(endpoint) = endpoint {
-                        endpoint_pool
-                            .lock()
-                            .record_unreachable(&endpoint.id, Instant::now());
-                        let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
-                            endpoint,
-                            reason: HealthyEndpointReason::Unreachable,
-                        });
-                    }
-                    connection_generation.fetch_add(1, Ordering::AcqRel);
-                    let _ = transport.close().await;
-                    api.set_status(ConnectionStatus::Disconnected);
-                    wake.notify_one();
-                }
-            }
-        })
-    }
-
-    fn spawn_endpoint_probe(
-        transport: Arc<TransportClient>,
-        wake: Arc<tokio::sync::Notify>,
-        endpoint_pool: Arc<Mutex<EndpointPool>>,
-        endpoint_refresh_tx: tokio::sync::mpsc::UnboundedSender<EndpointRefreshRequest>,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        let exec = cx.background_executor().clone();
-        exec.clone().spawn(async move {
-            loop {
                 #[cfg(debug_assertions)]
                 let interval = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
                     == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
                 {
                     Duration::from_secs(1)
                 } else {
-                    ENDPOINT_PROBE_INTERVAL
+                    HEARTBEAT_INTERVAL
                 };
                 #[cfg(not(debug_assertions))]
-                let interval = ENDPOINT_PROBE_INTERVAL;
+                let interval = HEARTBEAT_INTERVAL;
                 exec.timer(interval).await;
                 if !transport.is_open().await {
                     continue;
@@ -921,36 +954,74 @@ impl ConnectionStore {
                 let Some(endpoint) = endpoint_pool.lock().active_endpoint() else {
                     continue;
                 };
-                let Some(api_url) = endpoint.api_url.as_deref() else {
-                    continue;
-                };
-                let target = endpoint_probe_url(api_url);
-                #[cfg(debug_assertions)]
-                let sample = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
-                    == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
-                {
-                    Some(Duration::from_millis(800))
-                } else {
-                    probe_endpoint_latency(&target, ENDPOINT_QUALITY_PROBE_TIMEOUT).await
-                };
-                #[cfg(not(debug_assertions))]
-                let sample = probe_endpoint_latency(&target, ENDPOINT_QUALITY_PROBE_TIMEOUT).await;
-                let reason = if let Some(rtt) = sample {
-                    endpoint_pool
-                        .lock()
-                        .record_active_probe(rtt, Instant::now())
-                        .then_some(HealthyEndpointReason::HighLatency)
-                } else {
-                    Some(HealthyEndpointReason::Unreachable)
-                };
-                if let Some(reason) = reason {
-                    tracing::info!(
-                        "Endpoint quality threshold reached endpoint_id={} reason_code={}",
-                        endpoint.id,
-                        reason as i32
-                    );
-                    let _ = endpoint_refresh_tx.send(EndpointRefreshRequest { endpoint, reason });
-                    wake.notify_one();
+                let observed_generation = connection_generation.load(Ordering::Acquire);
+                let started = Instant::now();
+                match transport.ping_roundtrip().await {
+                    Ok(()) => {
+                        if !endpoint_observation_is_current(
+                            &endpoint_pool,
+                            &connection_generation,
+                            observed_generation,
+                            &endpoint.id,
+                        ) {
+                            continue;
+                        }
+                        #[cfg(debug_assertions)]
+                        let rtt = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                            == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
+                        {
+                            Duration::from_millis(800)
+                        } else {
+                            started.elapsed()
+                        };
+                        #[cfg(not(debug_assertions))]
+                        let rtt = started.elapsed();
+                        if endpoint_pool
+                            .lock()
+                            .record_active_probe(rtt, Instant::now())
+                        {
+                            let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                                endpoint,
+                                reason: HealthyEndpointReason::HighLatency,
+                                generation: observed_generation,
+                            });
+                            wake.notify_one();
+                        }
+                    }
+                    Err(e) => {
+                        if !endpoint_observation_is_current(
+                            &endpoint_pool,
+                            &connection_generation,
+                            observed_generation,
+                            &endpoint.id,
+                        ) {
+                            continue;
+                        }
+                        let next_generation = observed_generation.wrapping_add(1);
+                        if connection_generation
+                            .compare_exchange(
+                                observed_generation,
+                                next_generation,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
+                        endpoint_pool
+                            .lock()
+                            .record_unreachable(&endpoint.id, Instant::now());
+                        let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                            endpoint,
+                            reason: HealthyEndpointReason::Unreachable,
+                            generation: next_generation,
+                        });
+                        let _ = transport.close().await;
+                        api.set_status(ConnectionStatus::Disconnected);
+                        wake.notify_one();
+                    }
                 }
             }
         })
@@ -1159,14 +1230,55 @@ fn jwt_is_fresh(session: &Session) -> bool {
         && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
 }
 
-fn healthy_endpoint_credential(session: &Session) -> Option<&str> {
-    if !session.session_id.is_empty() {
-        Some(session.session_id.as_str())
-    } else if jwt_is_fresh(session) {
-        Some(session.token.as_str())
+fn healthy_endpoint_credential(session: &Session) -> Option<HealthyEndpointCredential> {
+    if jwt_is_fresh(session) {
+        Some(HealthyEndpointCredential::Jwt)
+    } else if !session.session_id.is_empty() {
+        Some(HealthyEndpointCredential::SessionId)
     } else {
         None
     }
+}
+
+fn healthy_endpoint_credential_value(
+    session: &Session,
+    credential: HealthyEndpointCredential,
+) -> &str {
+    match credential {
+        HealthyEndpointCredential::Jwt => &session.token,
+        HealthyEndpointCredential::SessionId => &session.session_id,
+    }
+}
+
+fn healthy_endpoint_fallback_credential(
+    session: &Session,
+    attempted: HealthyEndpointCredential,
+) -> Option<HealthyEndpointCredential> {
+    match attempted {
+        HealthyEndpointCredential::Jwt if !session.session_id.is_empty() => {
+            Some(HealthyEndpointCredential::SessionId)
+        }
+        HealthyEndpointCredential::SessionId if jwt_is_fresh(session) => {
+            Some(HealthyEndpointCredential::Jwt)
+        }
+        _ => None,
+    }
+}
+
+fn healthy_endpoint_auth_rejected(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HealthyEndpointStatusError>()
+        .is_some_and(|error| matches!(error.status, 401 | 403))
+}
+
+fn endpoint_observation_is_current(
+    endpoint_pool: &Mutex<EndpointPool>,
+    connection_generation: &AtomicU64,
+    observed_generation: u64,
+    endpoint_id: &str,
+) -> bool {
+    connection_generation.load(Ordering::Acquire) == observed_generation
+        && endpoint_pool.lock().active_id() == Some(endpoint_id)
 }
 
 fn configured_api_base_url(config: &AppConfig) -> String {
@@ -1538,7 +1650,30 @@ mod tests {
     }
 
     #[test]
-    fn healthy_endpoint_prefers_the_durable_session_id_when_the_jwt_is_stale() {
+    fn healthy_endpoint_prefers_a_fresh_jwt() {
+        let session = Session {
+            session_id: "sid".into(),
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            healthy_endpoint_credential(&session),
+            Some(HealthyEndpointCredential::Jwt)
+        );
+        assert_eq!(
+            healthy_endpoint_credential_value(&session, HealthyEndpointCredential::Jwt),
+            "jwt"
+        );
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::Jwt),
+            Some(HealthyEndpointCredential::SessionId)
+        );
+    }
+
+    #[test]
+    fn healthy_endpoint_uses_the_session_id_when_the_jwt_is_stale() {
         let session = Session {
             session_id: "sid".into(),
             token: "stale-jwt".into(),
@@ -1546,7 +1681,80 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(healthy_endpoint_credential(&session), Some("sid"));
+        assert_eq!(
+            healthy_endpoint_credential(&session),
+            Some(HealthyEndpointCredential::SessionId)
+        );
+        assert_eq!(
+            healthy_endpoint_credential_value(&session, HealthyEndpointCredential::SessionId),
+            "sid"
+        );
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::SessionId),
+            None
+        );
+    }
+
+    #[test]
+    fn a_refreshed_jwt_is_the_fallback_after_a_session_id_rejection() {
+        let session = Session {
+            session_id: "rejected-sid".into(),
+            token: "refreshed-jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::SessionId),
+            Some(HealthyEndpointCredential::Jwt)
+        );
+    }
+
+    #[test]
+    fn only_auth_statuses_trigger_a_healthy_endpoint_credential_fallback() {
+        for status in [401, 403] {
+            let error = anyhow::Error::new(HealthyEndpointStatusError { status });
+            assert!(healthy_endpoint_auth_rejected(&error));
+        }
+        let unavailable = anyhow::Error::new(HealthyEndpointStatusError { status: 503 });
+        assert!(!healthy_endpoint_auth_rejected(&unavailable));
+        assert!(!healthy_endpoint_auth_rejected(&anyhow::anyhow!(
+            "network error"
+        )));
+    }
+
+    #[test]
+    fn heartbeat_observations_are_scoped_to_connection_generation_and_endpoint() {
+        let generation = AtomicU64::new(7);
+        let pool = Mutex::new(EndpointPool::default());
+        let now = Instant::now();
+        pool.lock().replace(vec![
+            EndpointCandidate {
+                id: "1".into(),
+                region: "vn-north".into(),
+                api_url: Some("https://api.example.com".into()),
+                host: "sock.example.com".into(),
+                port: 4433,
+                priority: 0,
+            },
+            EndpointCandidate {
+                id: "2".into(),
+                region: "vn-south".into(),
+                api_url: Some("https://api2.example.com".into()),
+                host: "sock2.example.com".into(),
+                port: 4433,
+                priority: 1,
+            },
+        ]);
+        pool.lock().record_connected("1", now);
+
+        assert!(endpoint_observation_is_current(&pool, &generation, 7, "1"));
+        generation.store(8, Ordering::Release);
+        assert!(!endpoint_observation_is_current(&pool, &generation, 7, "1"));
+
+        pool.lock().record_connected("2", now);
+        assert!(!endpoint_observation_is_current(&pool, &generation, 8, "1"));
+        assert!(endpoint_observation_is_current(&pool, &generation, 8, "2"));
     }
 
     #[test]
