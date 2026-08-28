@@ -3600,6 +3600,7 @@ impl MessagesStore {
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
         local_sources: Vec<(String, Option<std::path::PathBuf>)>,
+        is_new_topic: bool,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3645,6 +3646,9 @@ impl MessagesStore {
             }
         } else {
             self.set_channel(topic_key, vec![msg]);
+        }
+        if is_new_topic && let Some(channel) = self.cache.get_mut(&topic_key) {
+            channel.has_more = false;
         }
         self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
@@ -12673,6 +12677,42 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    #[gpui::test]
+    fn new_topic_reply_marks_top_without_disabling_existing_topic_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let new_topic_id = 77;
+            let existing_topic_id = 88;
+            store.update(cx, |store, cx| {
+                store.set_active_topic(Some(new_topic_id), cx);
+                store.append_topic_message(
+                    new_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+
+                assert!(!store.topic_has_more_top());
+
+                store.set_active_topic(Some(existing_topic_id), cx);
+                store.append_topic_message(
+                    existing_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    false,
+                    cx,
+                );
+
+                assert!(store.topic_has_more_top());
+            });
+        });
     }
 
     #[gpui::test]
