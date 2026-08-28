@@ -116,11 +116,7 @@ impl ChannelSettingsStore {
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
-        for pending in self.pending_restored_rows.values_mut() {
-            pending.remove(&channel_id);
-        }
-        self.pending_restored_rows
-            .retain(|_, pending| !pending.is_empty());
+        clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
         self.rows.remove(&(clan_id, channel_id));
         let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
         self.notify_changed(clan_id, changed, cx);
@@ -218,7 +214,7 @@ impl ChannelSettingsStore {
                     Ok(mut rows) => {
                         merge_pending_restores(&mut rows, &mut this.pending_restored_rows, key);
                         if let Some(channel_list) = crate::channel::ChannelList::try_global(cx) {
-                            let active_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+                            let active_ids = active_row_ids(&rows);
                             channel_list.update(cx, |channel_list, cx| {
                                 channel_list.reconcile_active_channels(clan_id, &active_ids, cx)
                             });
@@ -396,13 +392,17 @@ impl ChannelSettingsStore {
                 let clan_id = ClanId(event.clan_id);
                 let parent_id = ChannelId(event.parent_id);
                 let channel_id = ChannelId(event.channel_id);
+                let key = (clan_id, parent_id);
+                let settings_key_is_tracked =
+                    self.rows.contains_key(&key) || self.loading.contains(&key);
                 let changed = patch_matching_rows(&mut self.rows, clan_id, channel_id, |row| {
                     row.label = event.channel_label.clone();
                     row.private = event.channel_private;
                     row.channel_type = event.channel_type;
                     row.active = event.active;
                 });
-                if missing_active_update_is_restore(event.active, &changed) {
+                if missing_active_update_is_restore(event.active, &changed, settings_key_is_tracked)
+                {
                     let restored = ChannelSetting {
                         id: channel_id,
                         creator_id: UserId(event.creator_id),
@@ -421,6 +421,7 @@ impl ChannelSettingsStore {
             RealtimeEvent::ChannelDeleted(event) => {
                 let clan_id = ClanId(event.clan_id);
                 let channel_id = ChannelId(event.channel_id);
+                clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
                 self.rows.remove(&(clan_id, channel_id));
                 let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
                 (clan_id, changed)
@@ -429,12 +430,7 @@ impl ChannelSettingsStore {
                 let clan_id = ClanId(event.clan_id);
                 let channel_id = ChannelId(event.channel_id);
                 if event.active == 0 {
-                    if let Some(pending) = self
-                        .pending_restored_rows
-                        .get_mut(&(clan_id, ChannelId(event.parent_id)))
-                    {
-                        pending.remove(&channel_id);
-                    }
+                    clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
                     let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
                     (clan_id, changed)
                 } else {
@@ -621,8 +617,32 @@ fn merge_pending_restores(
     }
 }
 
-fn missing_active_update_is_restore(active: i32, changed: &[ChannelId]) -> bool {
-    active != 0 && changed.is_empty()
+fn missing_active_update_is_restore(
+    active: i32,
+    changed: &[ChannelId],
+    settings_key_is_tracked: bool,
+) -> bool {
+    settings_key_is_tracked && active != 0 && changed.is_empty()
+}
+
+fn active_row_ids(rows: &[ChannelSetting]) -> Vec<ChannelId> {
+    rows.iter()
+        .filter(|row| row.active != 0)
+        .map(|row| row.id)
+        .collect()
+}
+
+fn clear_pending_restore(
+    pending_by_key: &mut HashMap<(ClanId, ChannelId), HashMap<ChannelId, ChannelSetting>>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+) {
+    for (&(pending_clan_id, _), pending) in pending_by_key.iter_mut() {
+        if pending_clan_id == clan_id {
+            pending.remove(&channel_id);
+        }
+    }
+    pending_by_key.retain(|_, pending| !pending.is_empty());
 }
 
 #[cfg(test)]
@@ -646,9 +666,24 @@ mod tests {
 
     #[test]
     fn active_update_for_a_missing_public_channel_is_treated_as_restore() {
-        assert!(missing_active_update_is_restore(1, &[]));
-        assert!(!missing_active_update_is_restore(0, &[]));
-        assert!(!missing_active_update_is_restore(1, &[ChannelId(4)]));
+        assert!(missing_active_update_is_restore(1, &[], true));
+        assert!(!missing_active_update_is_restore(1, &[], false));
+        assert!(!missing_active_update_is_restore(0, &[], true));
+        assert!(!missing_active_update_is_restore(1, &[ChannelId(4)], true));
+    }
+
+    #[test]
+    fn reconcile_ids_exclude_inactive_threads() {
+        let mut active_channel = row(4, 20);
+        active_channel.active = 1;
+        let mut archived_thread = row(6, 10);
+        archived_thread.parent_id = ChannelId(4);
+        archived_thread.active = 0;
+
+        assert_eq!(
+            active_row_ids(&[active_channel, archived_thread]),
+            vec![ChannelId(4)]
+        );
     }
 
     #[test]
@@ -712,5 +747,24 @@ mod tests {
 
         assert_eq!(rows.iter().filter(|row| row.id == ChannelId(4)).count(), 1);
         assert!(!pending.contains_key(&key));
+    }
+
+    #[test]
+    fn deleting_a_channel_clears_only_its_clans_pending_restore() {
+        let clan_one_key = (ClanId(1), ChannelId(0));
+        let clan_two_key = (ClanId(2), ChannelId(0));
+        let mut pending = HashMap::from([
+            (
+                clan_one_key,
+                HashMap::from([(ChannelId(4), row(4, 20)), (ChannelId(6), row(6, 10))]),
+            ),
+            (clan_two_key, HashMap::from([(ChannelId(4), row(4, 30))])),
+        ]);
+
+        clear_pending_restore(&mut pending, ClanId(1), ChannelId(4));
+
+        assert!(!pending[&clan_one_key].contains_key(&ChannelId(4)));
+        assert!(pending[&clan_one_key].contains_key(&ChannelId(6)));
+        assert!(pending[&clan_two_key].contains_key(&ChannelId(4)));
     }
 }

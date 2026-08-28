@@ -935,7 +935,8 @@ fn build_channel_list_menu(
     let has_admin = has_permission(PERMISSION_ADMINISTRATOR);
     let has_manage_clan = has_permission(PERMISSION_MANAGE_CLAN);
     let has_manage_channel = has_permission(PERMISSION_MANAGE_CHANNEL);
-    let can_archive = !archive_menu_hidden(channel_type, is_welcome)
+    let can_archive = state.row.active != 0
+        && !archive_menu_hidden(channel_type, is_welcome)
         && archive_allowed_by_server(
             is_thread,
             is_creator,
