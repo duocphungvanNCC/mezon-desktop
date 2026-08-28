@@ -8484,7 +8484,7 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                         disabled: option.disabled,
                     })
                     .collect(),
-                max_options: Some(wrapper.max_options.filter(|max| *max > 0).unwrap_or(1)),
+                max_options: wrapper.max_options.filter(|max| *max > 0),
             }))
         }
         Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
@@ -9975,6 +9975,11 @@ mod tests {
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
                 max_options: Some(1),
             };
+            let unbounded_multi = EmbedRadio {
+                id: "unbounded-picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: None,
+            };
 
             store.update(cx, |store, cx| {
                 pick(store, &single, "y", cx);
@@ -9995,6 +10000,14 @@ mod tests {
                         .message_select_selection(message_id, "picks")
                         .is_empty(),
                     "picking the same option again clears it"
+                );
+
+                pick(store, &unbounded_multi, "a", cx);
+                pick(store, &unbounded_multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "unbounded-picks"),
+                    ["a", "b"],
+                    "a missing max_options leaves a multi-choice radio unbounded"
                 );
             });
         });
@@ -10341,11 +10354,7 @@ mod tests {
             panic!("expected a radio");
         };
         assert!(radio.allows_multiple());
-        assert_eq!(
-            radio.max_options,
-            Some(1),
-            "React defaults a missing max_options to 1"
-        );
+        assert_eq!(radio.max_options, None);
     }
 
     #[test]
