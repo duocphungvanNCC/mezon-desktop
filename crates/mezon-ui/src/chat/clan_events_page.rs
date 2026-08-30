@@ -5,8 +5,9 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, BadgeService, ChannelList, ChannelType, ClanEventItem, ClanId, ClanList,
-    ClanMembersStore, EventsStore, PermissionStore, PlatformStore, Settings,
+    ClanMembersStore, EventsStore, PermissionStore, PlatformStore, Settings, UserId,
 };
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::app::shell::Shell;
@@ -14,7 +15,12 @@ use crate::chat::media_channel::media_image::render_media_image_rounded_top;
 use crate::clan::invite_people_modal::open_external_event_invite_modal;
 use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName};
 use crate::components::primitives::{ContextMenu, context_menu_at};
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
+
+const EVENT_IMAGE_CACHE_CAPACITY: usize = 8;
+const EVENT_IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+const EVENT_IMAGE_CACHE_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 
 pub struct ClanEventsModal {
     clan_id: ClanId,
@@ -27,9 +33,10 @@ pub struct ClanEventsModal {
     detail_tab: EventDetailTab,
     menu_event_id: Option<i64>,
     menu_position: Option<Point<Pixels>>,
-    event_action_task: Option<Task<()>>,
+    pending_interest_event_ids: HashSet<i64>,
     copied_external_event_id: Option<i64>,
     copy_reset_task: Option<Task<()>>,
+    image_cache: Entity<LruImageCache>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +67,15 @@ impl ClanEventsModal {
         EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ChannelList::global(cx).update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        let image_cache = cx.new(|cx| {
+            LruImageCache::gallery_preview(
+                "clan-events-modal",
+                EVENT_IMAGE_CACHE_CAPACITY,
+                EVENT_IMAGE_CACHE_BYTES,
+                EVENT_IMAGE_CACHE_ENTRY_BYTES,
+                cx,
+            )
+        });
         Self {
             clan_id,
             settings,
@@ -71,9 +87,10 @@ impl ClanEventsModal {
             detail_tab: EventDetailTab::Info,
             menu_event_id: None,
             menu_position: None,
-            event_action_task: None,
+            pending_interest_event_ids: HashSet::new(),
             copied_external_event_id: None,
             copy_reset_task: None,
+            image_cache,
         }
     }
 
@@ -96,6 +113,33 @@ impl ClanEventsModal {
             })
             .ok();
         }));
+    }
+
+    fn update_interest(
+        &mut self,
+        event_id: i64,
+        user_id: UserId,
+        interested: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pending_interest_event_ids.insert(event_id) {
+            return;
+        }
+        cx.notify();
+        let task = EventsStore::global(cx).update(cx, |store, cx| {
+            store.set_user_interested(self.clan_id, event_id, user_id, interested, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, event_id, "failed to update event interest");
+            }
+            this.update(cx, |this, cx| {
+                this.pending_interest_event_ids.remove(&event_id);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn event_card(&self, event: &ClanEventItem, cx: &Context<Self>) -> AnyElement {
@@ -137,6 +181,7 @@ impl ClanEventsModal {
         let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
         let user_is_interested =
             current_user.is_some_and(|user_id| event.user_ids.contains(&user_id));
+        let interest_pending = self.pending_interest_event_ids.contains(&event.id);
         let now = chrono::Utc::now().timestamp().max(0) as u32;
         let end = if event.end_time_seconds == 0 {
             event.start_time_seconds.saturating_add(2 * 60 * 60)
@@ -331,7 +376,10 @@ impl ClanEventsModal {
             }),
         )
         .id(("event-interest", event.id as usize))
-        .cursor_pointer();
+        .when(interest_pending, |action| {
+            action.cursor_not_allowed().opacity(0.5)
+        })
+        .when(!interest_pending, |action| action.cursor_pointer());
 
         let permissions = PermissionStore::try_global(cx)
             .map(|store| store.read(cx).clan_settings_permissions(self.clan_id, cx));
@@ -438,7 +486,7 @@ impl ClanEventsModal {
                                                     }),
                                             ),
                                     )
-                                    .when(!is_location, |actions| {
+                                    .when(!is_location && !share_link.is_empty(), |actions| {
                                         actions.child(
                                             action(
                                                 "event-share-action",
@@ -501,40 +549,25 @@ impl ClanEventsModal {
                                         )
                                     })
                                     .when(!ongoing, |actions| {
-                                        actions.child(interest_action.on_click(cx.listener(
-                                            move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                let Some(user_id) = current_user else {
-                                                    return;
-                                                };
-                                                let task = EventsStore::global(cx).update(
-                                                    cx,
-                                                    |store, cx| {
-                                                        store.set_user_interested(
-                                                            this.clan_id,
+                                        actions.child(interest_action.when(
+                                            !interest_pending,
+                                            |action| {
+                                                action.on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        let Some(user_id) = current_user else {
+                                                            return;
+                                                        };
+                                                        this.update_interest(
                                                             event_id,
                                                             user_id,
                                                             !user_is_interested,
                                                             cx,
-                                                        )
+                                                        );
                                                     },
-                                                );
-                                                this.event_action_task =
-                                                    Some(cx.spawn(async move |this, cx| {
-                                                        if let Err(error) = task.await {
-                                                            tracing::warn!(
-                                                                %error,
-                                                                event_id,
-                                                                "failed to update event interest"
-                                                            );
-                                                        }
-                                                        this.update(cx, |this, _| {
-                                                            this.event_action_task = None;
-                                                        })
-                                                        .ok();
-                                                    }));
+                                                ))
                                             },
-                                        )))
+                                        ))
                                     }),
                             ),
                     )
@@ -782,20 +815,22 @@ impl ClanEventsModal {
             );
         }
 
-        let weak_copy = weak.clone();
-        menu = menu.item(
-            mezon_i18n::t(&locale, "eventCreator.actions.copyEventLink"),
-            move |_window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(event_link.clone()));
-                weak_copy
-                    .update(cx, |this, cx| {
-                        this.menu_event_id = None;
-                        this.menu_position = None;
-                        cx.notify();
-                    })
-                    .ok();
-            },
-        );
+        if !event_link.is_empty() {
+            let weak_copy = weak.clone();
+            menu = menu.item(
+                mezon_i18n::t(&locale, "eventCreator.actions.copyEventLink"),
+                move |_window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(event_link.clone()));
+                    weak_copy
+                        .update(cx, |this, cx| {
+                            this.menu_event_id = None;
+                            this.menu_position = None;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+            );
+        }
 
         menu = menu.on_dismiss(move |_window, cx| {
             weak.update(cx, |this, cx| {
@@ -854,9 +889,8 @@ impl ClanEventsModal {
             voice_name.unwrap_or_else(|| tr("eventCreator.tabs.location").to_string())
         };
         let date = DateTime::from_timestamp(event.start_time_seconds as i64, 0)
-            .map(|value| {
-                value
-                    .with_timezone(&Local)
+            .map(|date| {
+                date.with_timezone(&Local)
                     .format("%a, %b %-d - %H:%M")
                     .to_string()
             })
@@ -1023,6 +1057,7 @@ impl ClanEventsModal {
         div()
             .w(px(600.))
             .max_h(px(600.))
+            .image_cache(self.image_cache.clone())
             .rounded_lg()
             .overflow_hidden()
             .bg(theme.bg_primary)
@@ -1228,6 +1263,7 @@ impl Render for ClanEventsModal {
 
         div()
             .relative()
+            .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {

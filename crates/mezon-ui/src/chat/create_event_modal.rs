@@ -30,18 +30,20 @@ enum LocationKind {
     External,
 }
 
-fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedString> {
-    let t = |key| mezon_i18n::t(locale, key).to_string();
-    let weekday_key = match date.weekday() {
-        chrono::Weekday::Mon => "common.dateTime.daysShort.mon",
-        chrono::Weekday::Tue => "common.dateTime.daysShort.tue",
-        chrono::Weekday::Wed => "common.dateTime.daysShort.wed",
-        chrono::Weekday::Thu => "common.dateTime.daysShort.thu",
-        chrono::Weekday::Fri => "common.dateTime.daysShort.fri",
-        chrono::Weekday::Sat => "common.dateTime.daysShort.sat",
-        chrono::Weekday::Sun => "common.dateTime.daysShort.sun",
-    };
-    let month_key = [
+fn event_weekday_key(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "eventCreator.fields.eventFrequency.weekday.mon",
+        chrono::Weekday::Tue => "eventCreator.fields.eventFrequency.weekday.tue",
+        chrono::Weekday::Wed => "eventCreator.fields.eventFrequency.weekday.wed",
+        chrono::Weekday::Thu => "eventCreator.fields.eventFrequency.weekday.thu",
+        chrono::Weekday::Fri => "eventCreator.fields.eventFrequency.weekday.fri",
+        chrono::Weekday::Sat => "eventCreator.fields.eventFrequency.weekday.sat",
+        chrono::Weekday::Sun => "eventCreator.fields.eventFrequency.weekday.sun",
+    }
+}
+
+fn event_month_key(month0: u32) -> &'static str {
+    [
         "common.dateTime.monthsShort.jan",
         "common.dateTime.monthsShort.feb",
         "common.dateTime.monthsShort.mar",
@@ -54,21 +56,33 @@ fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedStrin
         "common.dateTime.monthsShort.oct",
         "common.dateTime.monthsShort.nov",
         "common.dateTime.monthsShort.dec",
-    ][date.month0() as usize];
-    let weekday = t(weekday_key);
-    let month_day = format!("{} {}", t(month_key), date.day());
-    [
+    ][month0 as usize]
+}
+
+fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedString> {
+    let t = |key| mezon_i18n::t(locale, key).to_string();
+    let weekday = t(event_weekday_key(date.weekday()));
+    let occurrence_key = match (date.day() - 1) / 7 {
+        0 => "eventCreator.fields.eventFrequency.occurrence.first",
+        1 => "eventCreator.fields.eventFrequency.occurrence.second",
+        2 => "eventCreator.fields.eventFrequency.occurrence.third",
+        3 => "eventCreator.fields.eventFrequency.occurrence.fourth",
+        _ => "eventCreator.fields.eventFrequency.occurrence.fifth",
+    };
+    let weekday_occurrence = t(occurrence_key);
+    let month_day = format!("{} {}", date.day(), t(event_month_key(date.month0())));
+    let mut labels = vec![
         t("eventCreator.fields.eventFrequency.noRepeat"),
         t("eventCreator.fields.eventFrequency.weeklyOn").replace("{{name}}", &weekday),
         t("eventCreator.fields.eventFrequency.everyOther").replace("{{name}}", &weekday),
         t("eventCreator.fields.eventFrequency.monthlyOn")
-            .replace("{{name}}", &date.day().to_string()),
+            .replace("{{name}}", &format!("{weekday_occurrence} {weekday}")),
         t("eventCreator.fields.eventFrequency.annuallyOn").replace("{{name}}", &month_day),
-        t("eventCreator.fields.eventFrequency.everyWeekday"),
-    ]
-    .into_iter()
-    .map(Into::into)
-    .collect()
+    ];
+    if !matches!(date.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+        labels.push(t("eventCreator.fields.eventFrequency.everyWeekday"));
+    }
+    labels.into_iter().map(Into::into).collect()
 }
 
 pub enum EventSelectEvent {
@@ -537,6 +551,11 @@ impl CreateEventModal {
             .timestamp_opt(event.start_time_seconds as i64, 0)
             .single()
         {
+            let repeat_labels =
+                event_repeat_labels(&modal.settings.read(cx).language, start.date_naive());
+            modal.repeat_select.update(cx, |select, cx| {
+                select.set_items(repeat_labels, Vec::new(), cx)
+            });
             modal.start_date.update(cx, |picker, cx| {
                 picker.set_selected_silent(Some(start.date_naive()), cx)
             });
@@ -696,10 +715,10 @@ impl CreateEventModal {
     fn time_error(&self, cx: &App) -> Option<String> {
         let (start, end) = self.timestamps(cx)?;
         if start <= chrono::Utc::now().timestamp().max(0) as u32
-            && !self
+            && self
                 .original_event
                 .as_ref()
-                .is_some_and(|event| start == event.start_time_seconds)
+                .is_none_or(|event| start != event.start_time_seconds)
         {
             Some(self.tr("eventCreator.errorMessages.startTimeFuture", cx))
         } else if end <= start {
@@ -949,6 +968,7 @@ impl CreateEventModal {
         icon: IconName,
         title: &'static str,
         description: &'static str,
+        enabled: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -965,13 +985,17 @@ impl CreateEventModal {
             .flex()
             .items_center()
             .justify_between()
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.location_kind = Some(kind);
-                this.error = None;
-                cx.notify();
-            }))
+            .when(enabled, |option| {
+                option
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.location_kind = Some(kind);
+                        this.error = None;
+                        cx.notify();
+                    }))
+            })
+            .when(!enabled, |option| option.cursor_not_allowed().opacity(0.5))
             .child(
                 div()
                     .flex()
@@ -1082,9 +1106,10 @@ impl CreateEventModal {
             .original_event
             .as_ref()
             .is_some_and(|event| !event.is_private);
-        let can_select_audience = self.original_event.as_ref().map_or(true, |event| {
-            !event.is_private && event.channel_id.is_some()
-        });
+        let can_select_audience = self
+            .original_event
+            .as_ref()
+            .is_none_or(|event| !event.is_private && event.channel_id.is_some());
         div()
             .child(
                 div()
@@ -1115,6 +1140,7 @@ impl CreateEventModal {
                                 IconName::Speaker,
                                 "eventCreator.fields.channelType.voiceChannel.title",
                                 "eventCreator.fields.channelType.voiceChannel.description",
+                                self.original_event.is_some() || !self.voice_channels.is_empty(),
                                 cx,
                             ))
                             .child(self.option(
@@ -1122,6 +1148,7 @@ impl CreateEventModal {
                                 IconName::Location,
                                 "eventCreator.fields.channelType.somewhere.title",
                                 "eventCreator.fields.channelType.somewhere.description",
+                                true,
                                 cx,
                             ))
                     })
@@ -1131,6 +1158,7 @@ impl CreateEventModal {
                             IconName::Speaker,
                             "eventCreator.fields.channelType.privateEvent.title",
                             "eventCreator.fields.channelType.privateEvent.description",
+                            true,
                             cx,
                         ))
                     }),
@@ -1669,4 +1697,32 @@ pub fn open_edit_event_modal(
     Shell::global(cx).update(cx, |shell, cx| {
         shell.show_fullscreen_modal(modal.into(), cx)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_repeat_labels;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn repeat_labels_match_the_selected_weekday_and_occurrence() {
+        let friday = NaiveDate::from_ymd_opt(2026, 8, 28).expect("valid date");
+        let labels = event_repeat_labels("en", friday);
+
+        assert_eq!(labels[1], "Weekly on Friday");
+        assert_eq!(labels[2], "Every other Friday");
+        assert_eq!(labels[3], "Monthly on Fourth Friday");
+        assert_eq!(labels[4], "Annually on 28 Aug");
+        assert_eq!(labels[5], "Every weekday (Monday to Friday)");
+    }
+
+    #[test]
+    fn weekend_repeat_labels_exclude_every_weekday() {
+        let saturday = NaiveDate::from_ymd_opt(2026, 8, 29).expect("valid date");
+        let labels = event_repeat_labels("en", saturday);
+
+        assert_eq!(labels[1], "Weekly on Saturday");
+        assert_eq!(labels[3], "Monthly on Fifth Saturday");
+        assert_eq!(labels.len(), 5);
+    }
 }

@@ -108,6 +108,12 @@ impl ClanEventItem {
         }
     }
 
+    fn from_create_response(event: api::EventManagement, requested_repeat_type: i32) -> Self {
+        let mut item = Self::from_api(event);
+        item.repeat_type = requested_repeat_type;
+        item
+    }
+
     fn apply_realtime(&mut self, event: &api::CreateEventRequest) {
         self.title.clone_from(&event.title);
         self.logo.clone_from(&event.logo);
@@ -236,6 +242,7 @@ impl EventsStore {
     ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
         let requested_clan_id = draft.clan_id;
+        let requested_repeat_type = draft.repeat_type;
         let request = api::CreateEventRequest {
             title: draft.title,
             logo: draft.logo,
@@ -258,7 +265,7 @@ impl EventsStore {
                 } else {
                     ClanId(event.clan_id)
                 };
-                let mut item = ClanEventItem::from_api(event);
+                let mut item = ClanEventItem::from_create_response(event, requested_repeat_type);
                 if item.creator_id.0 != 0 && !item.user_ids.contains(&item.creator_id) {
                     item.user_ids.push(item.creator_id);
                 }
@@ -629,5 +636,23 @@ impl EventsStore {
         cx: &App,
     ) -> usize {
         self.visible_in_clan(clan_id, current_user, cx).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClanEventItem;
+    use mezon_proto::api;
+
+    #[test]
+    fn create_response_preserves_the_requested_repeat_type() {
+        let response = api::EventManagement {
+            repeat_type: 0,
+            ..Default::default()
+        };
+
+        let item = ClanEventItem::from_create_response(response, 4);
+
+        assert_eq!(item.repeat_type, 4);
     }
 }
