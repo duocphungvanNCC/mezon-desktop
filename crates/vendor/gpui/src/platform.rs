@@ -731,6 +731,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
+    fn set_ime_surrounding_hint(&self, _surrounding: Option<ImeSurroundingText>) {}
+
     fn play_system_bell(&self) {}
 
     /// Initialize the accessibility adapter with callbacks.
@@ -1338,6 +1340,14 @@ impl PlatformInputHandler {
         Self::compute_ime_candidate_bounds(marked_range, &selection, |range| {
             self.handler.bounds_for_range(range, window, cx)
         })
+    }
+
+    pub fn surrounding_text_in(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<ImeSurroundingText> {
+        self.handler.surrounding_text(window, cx)
     }
 
     pub fn ime_candidate_bounds(&mut self) -> Option<Bounds<Pixels>> {

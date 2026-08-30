@@ -112,6 +112,7 @@ pub struct WaylandWindowState {
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
+    ime_surrounding_hint: Option<ImeSurroundingText>,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
@@ -390,6 +391,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
+            ime_surrounding_hint: None,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
@@ -1142,6 +1144,9 @@ impl WaylandWindowStatePtr {
 
     pub fn get_ime_surrounding(&self) -> Option<ImeSurroundingText> {
         let mut state = self.state.borrow_mut();
+        if let Some(hint) = state.ime_surrounding_hint.take() {
+            return Some(hint);
+        }
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
             let surrounding = input_handler.surrounding_text();
@@ -1451,6 +1456,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.borrow_mut().input_handler.take()
+    }
+
+    fn set_ime_surrounding_hint(&self, surrounding: Option<ImeSurroundingText>) {
+        self.borrow_mut().ime_surrounding_hint = surrounding;
     }
 
     fn prompt(

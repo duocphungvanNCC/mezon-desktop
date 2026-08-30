@@ -271,6 +271,7 @@ pub struct X11WindowState {
     renderer: WgpuRenderer,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
+    ime_surrounding_hint: Option<gpui::ImeSurroundingText>,
     appearance: WindowAppearance,
     background_appearance: WindowBackgroundAppearance,
     maximized_vertical: bool,
@@ -819,6 +820,7 @@ impl X11WindowState {
                 renderer,
                 atoms: *atoms,
                 input_handler: None,
+                ime_surrounding_hint: None,
                 active: false,
                 hovered: false,
                 force_render_after_recovery: false,
@@ -1275,6 +1277,9 @@ impl X11WindowStatePtr {
 
     pub fn get_ime_surrounding(&self) -> Option<gpui::ImeSurroundingText> {
         let mut state = self.state.borrow_mut();
+        if let Some(hint) = state.ime_surrounding_hint.take() {
+            return Some(hint);
+        }
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
             let surrounding = input_handler.surrounding_text();
@@ -1607,6 +1612,10 @@ impl PlatformWindow for X11Window {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.0.state.borrow_mut().input_handler.take()
+    }
+
+    fn set_ime_surrounding_hint(&self, surrounding: Option<gpui::ImeSurroundingText>) {
+        self.0.state.borrow_mut().ime_surrounding_hint = surrounding;
     }
 
     fn prompt(

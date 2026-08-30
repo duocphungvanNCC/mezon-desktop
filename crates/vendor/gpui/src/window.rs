@@ -5419,8 +5419,10 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 let bounds = input_handler.selected_bounds(window, cx);
+                let surrounding = input_handler.surrounding_text_in(window, cx);
                 window.platform_window.set_input_handler(input_handler);
                 if let Some(bounds) = bounds {
+                    window.platform_window.set_ime_surrounding_hint(surrounding);
                     window.platform_window.update_ime_position(bounds);
                 }
             }
