@@ -1108,7 +1108,7 @@ impl CreateEventModal {
         let can_select_audience = self
             .original_event
             .as_ref()
-            .is_none_or(|event| !event.is_private && event.channel_id.is_some());
+            .is_none_or(|event| !event.is_private);
         div()
             .child(
                 div()
