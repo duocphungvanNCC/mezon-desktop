@@ -75,13 +75,7 @@ pub async fn write_bytes_to_downloads(filename: &str, bytes: &[u8]) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("file write task failed: {e}"))?
 }
 
-fn write_bytes_to_downloads_sync(
-    dir: &Path,
-    filename: &str,
-    bytes: &[u8],
-) -> anyhow::Result<PathBuf> {
-    std::fs::create_dir_all(dir).ok();
-
+pub fn unique_path_in(dir: &Path, filename: &str) -> PathBuf {
     let path = Path::new(filename);
     let stem = path
         .file_stem()
@@ -102,7 +96,16 @@ fn write_bytes_to_downloads_sync(
             break;
         }
     }
+    candidate
+}
 
+fn write_bytes_to_downloads_sync(
+    dir: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir).ok();
+    let candidate = unique_path_in(dir, filename);
     std::fs::write(&candidate, bytes)?;
     Ok(candidate)
 }
