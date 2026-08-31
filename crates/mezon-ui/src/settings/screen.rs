@@ -572,6 +572,27 @@ impl Render for SettingsScreen {
                 &theme,
                 "/settings/advanced",
             ))
+            .child(
+                div()
+                    .id("guided-tour-btn")
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .mb(px(4.0))
+                    .rounded(px(4.0))
+                    .text_base()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .child(mezon_i18n::t(&locale, "tour.settingsEntry"))
+                    .on_click(|_, window, cx| {
+                        crate::router::go_back(cx);
+                        crate::tour::TourLauncher::open(window, cx);
+                    }),
+            )
             .child(div().mt(px(4.0)).border_b_1().border_color(theme.border))
             .child(
                 div()

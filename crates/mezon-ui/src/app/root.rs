@@ -40,6 +40,8 @@ pub struct RootView {
     call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
+    tour_autostart: Option<Task<()>>,
+    tour_autostart_for: Option<&'static str>,
 }
 
 fn surface_recording_toast(
@@ -296,7 +298,28 @@ impl RootView {
             network_online,
             _splash_delay: splash_delay,
             _recording_toasts: recording_toasts,
+            tour_autostart: None,
+            tour_autostart_for: None,
         }
+    }
+
+    fn schedule_tour_autostart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = crate::tour::pending_core_track(cx) else {
+            return;
+        };
+        if self.tour_autostart_for == Some(id) {
+            return;
+        }
+        self.tour_autostart_for = Some(id);
+        self.tour_autostart = Some(cx.spawn_in(window, async move |_, cx| {
+            cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
+            cx.update(|window, cx| {
+                if crate::tour::pending_core_track(cx) == Some(id) {
+                    crate::tour::auto_start_core(window, cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
@@ -364,6 +387,9 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
+        if matches!(self.auth_state.read(cx), AuthState::Authenticated(_)) {
+            self.schedule_tour_autostart(window, cx);
+        }
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
         let locale = self.cached_locale.as_str();
@@ -497,6 +523,7 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;

@@ -395,6 +395,10 @@ pub struct Settings {
     pub mcp_read_only: bool,
     #[serde(default)]
     pub age_restricted_confirmed: Vec<ChannelId>,
+    #[serde(default)]
+    pub tour_seen_version: u32,
+    #[serde(default)]
+    pub tour_done_tracks: Vec<String>,
 }
 
 impl Default for Settings {
@@ -420,6 +424,8 @@ impl Default for Settings {
             last_channel_id: None,
             mcp_read_only: false,
             age_restricted_confirmed: Vec::new(),
+            tour_seen_version: 0,
+            tour_done_tracks: Vec::new(),
         }
     }
 }
@@ -603,5 +609,32 @@ impl AuthState {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn a_settings_file_written_before_the_tour_existed_still_parses() {
+        let legacy = r#"{"auto_start":false,"hardware_acceleration":true,"zoom_factor":1.0,"theme":"dark","language":"vi"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(settings.language, "vi");
+    }
+
+    #[test]
+    fn tour_progress_survives_a_roundtrip() {
+        let settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "wallet".to_string()],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(restored.tour_seen_version, 1);
+        assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
     }
 }

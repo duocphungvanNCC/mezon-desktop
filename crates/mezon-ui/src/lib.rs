@@ -17,6 +17,7 @@ pub mod router;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
+pub mod tour;
 pub mod util;
 pub mod window_layout;
 
@@ -106,6 +107,7 @@ pub fn init(cx: &mut gpui::App) {
     canvas_navigation::init(cx);
     chat::message_search::init(cx);
     command_palette::init(cx);
+    tour::init(cx);
     router::Router::init(cx);
     init_menus(cx);
 }

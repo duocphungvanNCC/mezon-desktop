@@ -632,17 +632,22 @@ impl Render for ClanSettingScreen {
             .is_some_and(|clan| clan.is_onboarding);
 
         fn nav_item(
-            id: &str,
+            id: &'static str,
             label: SharedString,
             is_active: bool,
             theme: &Theme,
             path: String,
             status: Option<bool>,
             status_label: Option<SharedString>,
+            cx: &App,
         ) -> impl IntoElement {
-            let id = id.to_string();
             div()
                 .id(id)
+                .relative()
+                .children(crate::tour::probe(
+                    cx,
+                    crate::tour::TourAnchor::ClanSettingsRow(id),
+                ))
                 .flex()
                 .items_center()
                 .w_full()
@@ -735,10 +740,28 @@ impl Render for ClanSettingScreen {
                         )
                         .into()
                     }),
+                    cx,
                 ));
             }
             nav = nav.child(div().mt(px(4.0)).border_b_1().border_color(theme.border));
         }
+
+        nav = nav.child(
+            div()
+                .id("clan-settings-tour")
+                .mt(px(4.0))
+                .w_full()
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.tokens.text_theme_primary)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .child(mezon_i18n::t(&locale, "tour.settingsEntry"))
+                .on_click(|_, window, cx| crate::tour::TourLauncher::open(window, cx)),
+        );
 
         let locale_for_delete = locale.clone();
         if perms.is_clan_owner {
@@ -780,6 +803,11 @@ impl Render for ClanSettingScreen {
             .child(
                 v_flex()
                     .id("clan-settings-nav")
+                    .relative()
+                    .children(crate::tour::probe(
+                        cx,
+                        crate::tour::TourAnchor::ClanSettingsNav,
+                    ))
                     .flex_shrink_0()
                     .w(gpui::relative(0.25))
                     .min_w(px(220.0))

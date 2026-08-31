@@ -3289,6 +3289,11 @@ fn control_bar(
         .child(leave_button);
 
     div()
+        .relative()
+        .children(crate::tour::probe(
+            cx,
+            crate::tour::TourAnchor::VoiceControls,
+        ))
         .flex()
         .flex_row()
         .items_center()

@@ -297,6 +297,10 @@ impl Router {
         self.current.clone()
     }
 
+    pub fn route_ref(&self) -> &Route {
+        &self.current
+    }
+
     pub fn conversation_channel_id(&self) -> Option<ChannelId> {
         match &self.current {
             Route::Channel { channel_id, .. }

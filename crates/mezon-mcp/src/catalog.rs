@@ -166,6 +166,36 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "tour_state",
+        description: "\
+Report the guided tour's current step.
+
+Returns null when no tour is running. Otherwise track, index, position, total, title_key,
+anchor and has_hole. has_hole is false when the step fell back to a centered card because
+its anchor is not on screen.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "tour_start",
+        description: "\
+Start a guided tour track.
+
+Parameters:
+- track (optional): track id. Omitted starts the track matching the current route.",
+        write: true,
+    },
+    ToolSpec {
+        name: "tour_advance",
+        description: "\
+Move the running guided tour one step.
+
+Parameters:
+- forward (optional, default true): false steps back.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_scroll_state",
         description: "\
 Report what the open channel's message list currently holds.
