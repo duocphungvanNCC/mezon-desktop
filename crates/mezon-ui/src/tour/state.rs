@@ -419,7 +419,8 @@ pub fn shutdown(cx: &mut App) {
 }
 
 pub fn layer(cx: &App) -> Option<AnyView> {
-    TourState::try_global(cx).map(AnyView::from)
+    let entity = TourState::try_global(cx)?;
+    entity.read(cx).is_active().then(|| AnyView::from(entity))
 }
 
 #[derive(IntoElement)]

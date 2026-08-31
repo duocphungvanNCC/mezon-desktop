@@ -1,5 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static PROBING: AtomicBool = AtomicBool::new(false);
 
 use gpui::{App, Bounds, Global, IntoElement, Pixels, Size, canvas, prelude::*};
 
@@ -55,11 +58,12 @@ pub struct TourAnchors {
 impl Global for TourAnchors {}
 
 impl TourAnchors {
-    pub fn is_probing(cx: &App) -> bool {
-        cx.try_global::<Self>().is_some_and(|this| this.probing)
+    pub fn is_probing(_cx: &App) -> bool {
+        PROBING.load(Ordering::Relaxed)
     }
 
     pub fn set_probing(cx: &mut App, probing: bool) {
+        PROBING.store(probing, Ordering::Relaxed);
         let this = cx.default_global::<Self>();
         this.probing = probing;
         if !probing {

@@ -19,14 +19,19 @@ pub fn mcp_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Option<&'s
     {
         anyhow::bail!("unknown tour track: {id}");
     }
-    let track = track.map(str::to_string);
-    cx.update_window(handle, |_, window, cx| match track.as_deref() {
+    let requested = track.map(str::to_string);
+    cx.update_window(handle, |_, window, cx| match requested.as_deref() {
         Some(id) => TourState::start_track(id, window, cx),
         None => {
             auto_start_core(window, cx);
         }
     })?;
-    Ok(TourState::try_global(cx).and_then(|entity| entity.read(cx).running_track()))
+    let running = TourState::try_global(cx).and_then(|entity| entity.read(cx).running_track());
+    Ok(match (requested.as_deref(), running) {
+        (Some(id), Some(started)) if started == id => Some(started),
+        (Some(_), _) => None,
+        (None, running) => running,
+    })
 }
 
 pub fn auto_start_if_context_holds(expected: &'static str, cx: &mut App) -> bool {
