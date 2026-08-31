@@ -849,10 +849,9 @@ impl CreateEventModal {
         self.error = None;
         cx.notify();
         self._cover_task = Some(cx.spawn(async move |this, cx| {
-            let path = match rx.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
+            let path = crate::util::file_dialog::resolve(rx, cx)
+                .await
+                .and_then(|paths| paths.into_iter().next());
             let Some(path) = path else {
                 let _ = this.update(cx, |this, cx| {
                     this.uploading_cover = false;
