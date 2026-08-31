@@ -8,10 +8,10 @@ use gpui::{App, AppContext as _, KeyBinding};
 
 pub use anchor::{TourAnchor, probe};
 pub use launcher::TourLauncher;
-pub use state::{TourState, TourStatus, auto_start_core, layer, pending_core_track};
+pub use state::{TourState, TourStatus, auto_start_core, layer, pending_core_track, shutdown};
 pub use tracks::TRACKS;
 
-pub fn mcp_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<bool> {
+pub fn mcp_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Option<&'static str>> {
     let handle = crate::app::main_window::handle(cx)
         .ok_or_else(|| anyhow::anyhow!("main window not found"))?;
     if let Some(id) = track
@@ -22,9 +22,22 @@ pub fn mcp_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<bool> {
     let track = track.map(str::to_string);
     cx.update_window(handle, |_, window, cx| match track.as_deref() {
         Some(id) => TourState::start_track(id, window, cx),
-        None => auto_start_core(window, cx),
+        None => {
+            auto_start_core(window, cx);
+        }
     })?;
-    Ok(TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active()))
+    Ok(TourState::try_global(cx).and_then(|entity| entity.read(cx).running_track()))
+}
+
+pub fn auto_start_if_context_holds(expected: &'static str, cx: &mut App) -> bool {
+    if pending_core_track(cx) != Some(expected) {
+        return false;
+    }
+    let Some(handle) = crate::app::main_window::handle(cx) else {
+        return false;
+    };
+    cx.update_window(handle, |_, window, cx| auto_start_core(window, cx))
+        .unwrap_or(false)
 }
 
 pub fn mcp_advance(forward: bool, cx: &mut App) -> anyhow::Result<bool> {
@@ -36,10 +49,10 @@ pub fn mcp_advance(forward: bool, cx: &mut App) -> anyhow::Result<bool> {
     if !entity.read(cx).is_active() {
         return Ok(false);
     }
-    cx.update_window(handle, |_, window, cx| {
-        entity.update(cx, |this, cx| this.advance(forward, window, cx));
+    let moved = cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |this, cx| this.advance(forward, window, cx))
     })?;
-    Ok(true)
+    Ok(moved)
 }
 
 pub fn init(cx: &mut App) {

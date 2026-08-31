@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use gpui::{App, Bounds, Global, IntoElement, Pixels, canvas, prelude::*};
+use gpui::{App, Bounds, Global, IntoElement, Pixels, Size, canvas, prelude::*};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TourAnchor {
@@ -24,6 +24,19 @@ pub enum TourAnchor {
     ClanMembersRow,
     AddFriendButton,
     ClanSettingsRow(&'static str),
+}
+
+fn area(bounds: Bounds<Pixels>) -> f32 {
+    bounds.size.width.as_f32() * bounds.size.height.as_f32()
+}
+
+fn is_usable(bounds: Bounds<Pixels>, viewport: Size<Pixels>) -> bool {
+    bounds.size.width > Pixels::ZERO
+        && bounds.size.height > Pixels::ZERO
+        && bounds.right() > Pixels::ZERO
+        && bounds.bottom() > Pixels::ZERO
+        && bounds.left() < viewport.width
+        && bounds.top() < viewport.height
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -64,17 +77,25 @@ impl TourAnchors {
         let this = cx.try_global::<Self>()?;
         let records = this.records.borrow();
         let record = records.get(&anchor)?;
-        (record.epoch == epoch && record.bounds.size.width > Pixels::ZERO).then_some(record.bounds)
+        (record.epoch == epoch).then_some(record.bounds)
     }
 
-    fn record(cx: &App, anchor: TourAnchor, bounds: Bounds<Pixels>) {
+    fn record(cx: &App, anchor: TourAnchor, bounds: Bounds<Pixels>, viewport: Size<Pixels>) {
         let Some(this) = cx.try_global::<Self>() else {
             return;
         };
+        if !this.probing || !is_usable(bounds, viewport) {
+            return;
+        }
         let epoch = this.epoch;
-        this.records
-            .borrow_mut()
-            .insert(anchor, AnchorRecord { bounds, epoch });
+        let mut records = this.records.borrow_mut();
+        if let Some(existing) = records.get(&anchor)
+            && existing.epoch == epoch
+            && area(existing.bounds) >= area(bounds)
+        {
+            return;
+        }
+        records.insert(anchor, AnchorRecord { bounds, epoch });
     }
 }
 
@@ -84,7 +105,9 @@ pub fn probe(cx: &App, anchor: TourAnchor) -> Option<impl IntoElement + use<>> {
     }
     Some(
         canvas(
-            move |bounds, _, cx| TourAnchors::record(cx, anchor, bounds),
+            move |bounds, window, cx| {
+                TourAnchors::record(cx, anchor, bounds, window.viewport_size())
+            },
             |_, _, _, _| {},
         )
         .absolute()

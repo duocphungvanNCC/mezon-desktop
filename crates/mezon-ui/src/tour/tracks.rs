@@ -496,7 +496,8 @@ mod tests {
 
     fn guaranteed_on_route(precondition: TrackPrecondition) -> &'static [TourAnchor] {
         match precondition {
-            TrackPrecondition::Conversation | TrackPrecondition::DirectSpace => &[
+            TrackPrecondition::Conversation => &[TourAnchor::ClanRail, TourAnchor::UserInfoBar],
+            TrackPrecondition::DirectSpace => &[
                 TourAnchor::ClanRail,
                 TourAnchor::DirectList,
                 TourAnchor::UserInfoBar,
@@ -514,6 +515,41 @@ mod tests {
                 TourAnchor::UserInfoBar,
             ],
             TrackPrecondition::ClanSettings => &[TourAnchor::ClanSettingsNav],
+        }
+    }
+
+    #[test]
+    fn every_anchor_a_track_uses_is_probed_somewhere_in_the_ui() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = String::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && !path.ends_with("tour/tracks.rs")
+                    && !path.ends_with("tour/anchor.rs")
+                {
+                    sources.push_str(&std::fs::read_to_string(&path).expect("read source"));
+                }
+            }
+        }
+        for track in TRACKS {
+            for step in track.steps {
+                let Some(anchor) = step.anchor else { continue };
+                let rendered = format!("{anchor:?}");
+                let variant = rendered.split('(').next().expect("variant name");
+                let needle = format!("TourAnchor::{variant}");
+                assert!(
+                    sources.contains(&needle),
+                    "{} step {} points at {anchor:?} but no probe() call site mentions it; \
+                     deleting a probe must fail this test, not pass silently",
+                    track.id,
+                    step.title_key
+                );
+            }
         }
     }
 

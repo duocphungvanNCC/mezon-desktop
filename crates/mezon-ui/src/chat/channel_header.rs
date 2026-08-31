@@ -347,10 +347,6 @@ impl ChannelHeader {
         );
 
         div()
-            .children(crate::tour::probe(
-                cx,
-                crate::tour::TourAnchor::ChannelHeaderTools,
-            ))
             .flex()
             .flex_row()
             .items_center()
@@ -496,6 +492,11 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(
                 div()
+                    .relative()
+                    .children(crate::tour::probe(
+                        cx,
+                        crate::tour::TourAnchor::ChannelHeaderTools,
+                    ))
                     .flex()
                     .flex_row()
                     .items_center()

@@ -589,7 +589,6 @@ impl Render for SettingsScreen {
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "tour.settingsEntry"))
                     .on_click(|_, window, cx| {
-                        crate::router::go_back(cx);
                         crate::tour::TourLauncher::open(window, cx);
                     }),
             )

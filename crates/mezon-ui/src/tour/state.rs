@@ -42,7 +42,7 @@ enum Phase {
     Showing {
         track: &'static TourTrack,
         index: usize,
-        hole: Option<Bounds<Pixels>>,
+        visible: Vec<usize>,
     },
 }
 
@@ -79,6 +79,13 @@ impl TourState {
         !matches!(self.phase, Phase::Idle)
     }
 
+    pub fn running_track(&self) -> Option<&'static str> {
+        match &self.phase {
+            Phase::Arming { track, .. } | Phase::Showing { track, .. } => Some(track.id),
+            Phase::Idle => None,
+        }
+    }
+
     pub fn status(&self, cx: &App) -> Option<TourStatus> {
         if let Phase::Arming { track, index, .. } = &self.phase {
             return Some(TourStatus {
@@ -93,15 +100,22 @@ impl TourState {
                 has_hole: false,
             });
         }
-        let Phase::Showing { track, index, hole } = &self.phase else {
+        let Phase::Showing {
+            track,
+            index,
+            visible,
+        } = &self.phase
+        else {
             return None;
         };
         let step = &track.steps[*index];
-        let visible = self.visible_steps(track, cx);
         let position = visible
             .iter()
             .position(|candidate| candidate == index)
             .map_or(1, |offset| offset + 1);
+        let hole = step
+            .anchor
+            .and_then(|anchor| TourAnchors::live(cx, anchor, self.epoch));
         Some(TourStatus {
             resolving: false,
             hole: hole.map(|h| {
@@ -122,11 +136,19 @@ impl TourState {
         })
     }
 
-    pub fn advance(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn advance(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let before = match &self.phase {
+            Phase::Showing { index, .. } => Some(*index),
+            _ => None,
+        };
         if forward {
             self.next(window, cx);
         } else {
             self.back(window, cx);
+        }
+        match &self.phase {
+            Phase::Showing { index, .. } => Some(*index) != before,
+            _ => before.is_some(),
         }
     }
 
@@ -141,11 +163,16 @@ impl TourState {
         let Some(track) = track(id) else {
             return;
         };
+        if entity.read(cx).is_active() {
+            return;
+        }
         entity.update(cx, |this, cx| this.start(track, window, cx));
     }
 
     fn start(&mut self, track: &'static TourTrack, window: &mut Window, cx: &mut Context<Self>) {
-        self.restore_focus = window.focused(cx);
+        if self.restore_focus.is_none() {
+            self.restore_focus = window.focused(cx);
+        }
         self.context = current_context(cx);
         TourAnchors::set_probing(cx, true);
         self.epoch = TourAnchors::begin_epoch(cx);
@@ -167,18 +194,15 @@ impl TourState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let _ = window;
         let visible = self.visible_steps(track, cx);
         let Some(landed) = land(&visible, index, forward) else {
             return false;
         };
-        let hole = track.steps[landed].anchor.and_then(|anchor| {
-            TourAnchors::live(cx, anchor, self.epoch)
-                .map(|target| hole_for(target, window.viewport_size()))
-        });
         self.phase = Phase::Showing {
             track,
             index: landed,
-            hole,
+            visible,
         };
         cx.notify();
         true
@@ -207,7 +231,10 @@ impl TourState {
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let completed = match &self.phase {
-            Phase::Arming { track, .. } | Phase::Showing { track, .. } => Some(track.id),
+            Phase::Arming { track, .. } | Phase::Showing { track, .. } => {
+                let shown = self.visible_steps(track, cx).len();
+                (shown * 2 >= track.steps.len()).then_some(track.id)
+            }
             Phase::Idle => None,
         };
         self.phase = Phase::Idle;
@@ -339,7 +366,11 @@ fn track_done(track_id: &str, cx: &App) -> bool {
 
 pub fn pending_core_track(cx: &App) -> Option<&'static str> {
     let router = Router::global(cx);
-    let track = core_track_for(router.read(cx).route_ref())?;
+    let route = router.read(cx).route_ref();
+    let track = core_track_for(route)?;
+    if !track.precondition.is_met(route) {
+        return None;
+    }
     if !(cfg!(debug_assertions) && ALWAYS_AUTO_START_IN_DEBUG) && track_done(track.id, cx) {
         return None;
     }
@@ -355,14 +386,36 @@ pub fn available_tracks(cx: &App) -> Vec<&'static TourTrack> {
         .collect()
 }
 
-pub fn auto_start_core(window: &mut Window, cx: &mut App) {
+pub fn composer_is_composing(cx: &App) -> bool {
+    crate::chat::mention_input::MentionInput::active_composer(cx)
+        .is_some_and(|composer| composer.read(cx).is_composing(cx))
+}
+
+pub fn auto_start_core(window: &mut Window, cx: &mut App) -> bool {
     let Some(id) = pending_core_track(cx) else {
-        return;
+        return false;
     };
     if TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active()) {
-        return;
+        return false;
+    }
+    if composer_is_composing(cx) {
+        return false;
     }
     TourState::start_track(id, window, cx);
+    TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active())
+}
+
+pub fn shutdown(cx: &mut App) {
+    TourAnchors::set_probing(cx, false);
+    let Some(entity) = TourState::try_global(cx) else {
+        return;
+    };
+    entity.update(cx, |this, cx| {
+        this.phase = Phase::Idle;
+        this.context = None;
+        this.restore_focus = None;
+        cx.notify();
+    });
 }
 
 pub fn layer(cx: &App) -> Option<AnyView> {
@@ -434,17 +487,26 @@ impl Render for TourState {
             return div();
         }
 
-        let Phase::Showing { track, index, hole } = &self.phase else {
+        let Phase::Showing {
+            track,
+            index,
+            visible,
+        } = &self.phase
+        else {
             return div();
         };
-        let (track, index, hole) = (*track, *index, *hole);
+        let (track, index) = (*track, *index);
+        let visible = visible.clone();
 
         let viewport = window.viewport_size();
+        let hole = track.steps[index]
+            .anchor
+            .and_then(|anchor| TourAnchors::live(cx, anchor, self.epoch))
+            .map(|target| hole_for(target, viewport));
         let theme = cx.theme();
         let ring: Hsla = theme.tokens.bg_button_primary.into();
         let locale = locale(cx);
         let step = &track.steps[index];
-        let visible = self.visible_steps(track, cx);
         let position = visible
             .iter()
             .position(|candidate| *candidate == index)
@@ -479,6 +541,7 @@ impl Render for TourState {
             .border_color(theme.border)
             .bg(theme.bg_floating)
             .shadow_lg()
+            .overflow_hidden()
             .occlude()
             .child(
                 div()
@@ -489,7 +552,7 @@ impl Render for TourState {
                     .rounded_md()
                     .bg(theme.bg_hover)
                     .text_xs()
-                    .text_color(theme.text_muted)
+                    .text_color(theme.tokens.text_secondary)
                     .child(format!("{position} / {total}")),
             )
             .child(
@@ -497,15 +560,16 @@ impl Render for TourState {
                     .flex_none()
                     .text_base()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
+                    .text_color(theme.tokens.text_theme_primary)
                     .child(SharedString::from(mezon_i18n::t(&locale, step.title_key))),
             )
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
                     .text_sm()
-                    .text_color(theme.text_secondary)
+                    .text_color(theme.tokens.text_secondary)
                     .child(SharedString::from(mezon_i18n::t(&locale, step.body_key))),
             )
             .child(
@@ -555,28 +619,33 @@ impl Render for TourState {
 
         let caret = hole.and_then(|hole| caret_for(side, hole, origin, theme.bg_floating.into()));
 
-        div().child(deferred(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .occlude()
-                .track_focus(&self.focus_handle)
-                .key_context("tour")
-                .on_action(
-                    cx.listener(|this, _: &::menu::Cancel, window, cx| this.finish(window, cx)),
-                )
-                .on_action(cx.listener(|this, _: &TourNext, window, cx| this.next(window, cx)))
-                .on_action(cx.listener(|this, _: &TourBack, window, cx| this.back(window, cx)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.next(window, cx)),
-                )
-                .child(scrim)
-                .children(caret)
-                .child(bubble),
-        ))
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(deferred(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .occlude()
+                    .track_focus(&self.focus_handle)
+                    .key_context("tour")
+                    .on_action(
+                        cx.listener(|this, _: &::menu::Cancel, window, cx| this.cancel(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &TourNext, window, cx| this.next(window, cx)))
+                    .on_action(cx.listener(|this, _: &TourBack, window, cx| this.back(window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.next(window, cx)),
+                    )
+                    .child(scrim)
+                    .children(caret)
+                    .child(bubble),
+            ))
     }
 }
 

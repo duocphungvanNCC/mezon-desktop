@@ -170,9 +170,11 @@ Parameters: none.",
         description: "\
 Report the guided tour's current step.
 
-Returns null when no tour is running. Otherwise track, index, position, total, title_key,
-anchor and has_hole. has_hole is false when the step fell back to a centered card because
-its anchor is not on screen.
+Always returns an object. `active` is false when no tour is running. While a tour runs it
+also carries `resolving` (true for the frame after start, before the first step resolves),
+`track`, `index`, `position`, `total`, `title_key`, `anchor`, `has_hole` and `hole`
+([x, y, w, h] in window points, null for a centered step). `has_hole` is false when the
+step's anchor was not recorded on screen this run and it fell back to a centered card.
 
 Parameters: none.",
         write: false,

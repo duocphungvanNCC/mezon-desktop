@@ -101,6 +101,7 @@ impl McpBackend {
             "get_scroll_state" => self.get_scroll_state().await,
             "tour_state" => self.send_ui_result(|reply| McpCommand::TourState { reply }).await,
             "tour_start" => {
+                self.require_write_mode("tour_start")?;
                 let track = arguments
                     .get("track")
                     .and_then(Value::as_str)
@@ -109,6 +110,7 @@ impl McpBackend {
                     .await
             }
             "tour_advance" => {
+                self.require_write_mode("tour_advance")?;
                 let forward = arguments
                     .get("forward")
                     .and_then(Value::as_bool)

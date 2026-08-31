@@ -42,6 +42,7 @@ pub struct RootView {
     _recording_toasts: Option<gpui::Subscription>,
     tour_autostart: Option<Task<()>>,
     tour_autostart_for: Option<&'static str>,
+    tour_autostart_armed: bool,
 }
 
 fn surface_recording_toast(
@@ -142,6 +143,7 @@ impl RootView {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
+            this.schedule_tour_autostart(cx);
             cx.notify();
         })
         .detach();
@@ -156,7 +158,15 @@ impl RootView {
                 this.connecting_since = None;
                 this._splash_delay = None;
             }
+            if matches!(*auth_state.read(cx), AuthState::Authenticated(_)) {
+                this.tour_autostart_armed = true;
+                this.schedule_tour_autostart(cx);
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                this.tour_autostart_armed = false;
+                this.tour_autostart = None;
+                this.tour_autostart_for = None;
+                crate::tour::shutdown(cx);
                 crate::image_viewer::close_image_viewer(cx);
                 crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
@@ -300,10 +310,14 @@ impl RootView {
             _recording_toasts: recording_toasts,
             tour_autostart: None,
             tour_autostart_for: None,
+            tour_autostart_armed: false,
         }
     }
 
-    fn schedule_tour_autostart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn schedule_tour_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.tour_autostart_armed {
+            return;
+        }
         let Some(id) = crate::tour::pending_core_track(cx) else {
             return;
         };
@@ -311,14 +325,17 @@ impl RootView {
             return;
         }
         self.tour_autostart_for = Some(id);
-        self.tour_autostart = Some(cx.spawn_in(window, async move |_, cx| {
+        self.tour_autostart = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
-            cx.update(|window, cx| {
-                if crate::tour::pending_core_track(cx) == Some(id) {
-                    crate::tour::auto_start_core(window, cx);
-                }
-            })
-            .ok();
+            let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
+            if !started {
+                this.update(cx, |this, _| {
+                    if this.tour_autostart_for == Some(id) {
+                        this.tour_autostart_for = None;
+                    }
+                })
+                .ok();
+            }
         }));
     }
 
@@ -387,9 +404,6 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
-        if matches!(self.auth_state.read(cx), AuthState::Authenticated(_)) {
-            self.schedule_tour_autostart(window, cx);
-        }
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
         let locale = self.cached_locale.as_str();

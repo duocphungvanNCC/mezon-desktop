@@ -1435,6 +1435,7 @@ impl Shell {
             .top_0()
             .left_0()
             .size_full()
+            .children(crate::tour::layer(cx))
             .when_some(modal_underlay, |el, (view, fullscreen)| {
                 el.child(deferred(if fullscreen {
                     div()
@@ -1528,7 +1529,6 @@ impl Shell {
                         })),
                 ))
             })
-            .children(crate::tour::layer(cx))
     }
 }
 

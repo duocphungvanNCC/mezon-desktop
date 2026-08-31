@@ -26,17 +26,34 @@ fn clamp(value: Pixels, low: Pixels, high: Pixels) -> Pixels {
     value.max(low).min(high)
 }
 
+fn fit_span(low: Pixels, high: Pixels, limit: Pixels) -> (Pixels, Pixels) {
+    let mut low = clamp(low, Pixels::ZERO, limit);
+    let mut high = clamp(high, low, limit);
+    let want = MIN_HOLE_SIZE.min(limit);
+    if high - low >= want {
+        return (low, high);
+    }
+    let room_below = low;
+    let take_below = ((want - (high - low)) / 2.).min(room_below);
+    low -= take_below;
+    high = (low + want).min(limit);
+    if high - low < want {
+        low = (high - want).max(Pixels::ZERO);
+    }
+    (low, high)
+}
+
 pub fn hole_for(target: Bounds<Pixels>, viewport: Size<Pixels>) -> Bounds<Pixels> {
-    let grow_x = (MIN_HOLE_SIZE - target.size.width).max(Pixels::ZERO) / 2.;
-    let grow_y = (MIN_HOLE_SIZE - target.size.height).max(Pixels::ZERO) / 2.;
-    let pad_x = HOLE_PADDING + grow_x;
-    let pad_y = HOLE_PADDING + grow_y;
-
-    let left = clamp(target.left() - pad_x, Pixels::ZERO, viewport.width);
-    let top = clamp(target.top() - pad_y, Pixels::ZERO, viewport.height);
-    let right = clamp(target.right() + pad_x, left, viewport.width);
-    let bottom = clamp(target.bottom() + pad_y, top, viewport.height);
-
+    let (left, right) = fit_span(
+        target.left() - HOLE_PADDING,
+        target.right() + HOLE_PADDING,
+        viewport.width,
+    );
+    let (top, bottom) = fit_span(
+        target.top() - HOLE_PADDING,
+        target.bottom() + HOLE_PADDING,
+        viewport.height,
+    );
     bounds(point(left, top), size(right - left, bottom - top))
 }
 
@@ -202,6 +219,38 @@ mod tests {
         let hole = hole_for(target, view);
         assert!(hole.size.width >= MIN_HOLE_SIZE);
         assert!(hole.size.height >= MIN_HOLE_SIZE);
+    }
+
+    #[test]
+    fn the_minimum_still_holds_for_a_target_pinned_to_every_edge() {
+        let view = viewport();
+        for target in [
+            bounds(point(px(0.), px(100.)), size(px(8.), px(8.))),
+            bounds(point(px(100.), px(0.)), size(px(8.), px(8.))),
+            bounds(point(view.width - px(8.), px(100.)), size(px(8.), px(8.))),
+            bounds(point(px(100.), view.height - px(8.)), size(px(8.), px(8.))),
+        ] {
+            let hole = hole_for(target, view);
+            assert!(
+                hole.size.width >= MIN_HOLE_SIZE,
+                "width {:?} for {target:?}",
+                hole.size.width
+            );
+            assert!(
+                hole.size.height >= MIN_HOLE_SIZE,
+                "height {:?} for {target:?}",
+                hole.size.height
+            );
+            assert!(hole.left() >= Pixels::ZERO && hole.right() <= view.width);
+            assert!(hole.top() >= Pixels::ZERO && hole.bottom() <= view.height);
+        }
+    }
+
+    #[test]
+    fn a_hole_never_exceeds_a_viewport_smaller_than_the_minimum() {
+        let tiny = size(px(16.), px(16.));
+        let hole = hole_for(bounds(point(px(4.), px(4.)), size(px(2.), px(2.))), tiny);
+        assert!(hole.right() <= tiny.width && hole.bottom() <= tiny.height);
     }
 
     #[test]

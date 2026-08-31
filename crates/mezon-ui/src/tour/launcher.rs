@@ -53,15 +53,27 @@ impl Render for TourLauncher {
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
+                    .text_color(theme.tokens.text_theme_primary)
                     .child(SharedString::from(mezon_i18n::t(&locale, "tour.title"))),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(theme.text_secondary)
+                    .text_color(theme.tokens.text_secondary)
                     .child(SharedString::from(mezon_i18n::t(&locale, "tour.subtitle"))),
             )
+            .when(tracks.is_empty(), |el| {
+                el.child(
+                    div()
+                        .p(px(12.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .text_color(theme.tokens.text_secondary)
+                        .child(SharedString::from(mezon_i18n::t(&locale, "tour.empty"))),
+                )
+            })
             .children(tracks.into_iter().map(|track| {
                 let id = track.id;
                 let seen = done.iter().any(|entry| entry == id);
@@ -76,7 +88,7 @@ impl Render for TourLauncher {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg_hover))
                     .on_click(move |_, window, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         TourState::start_track(id, window, cx);
                     })
                     .child(
@@ -88,15 +100,21 @@ impl Render for TourLauncher {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_primary)
+                                    .text_color(theme.tokens.text_theme_primary)
                                     .child(SharedString::from(mezon_i18n::t(
                                         &locale,
                                         track.name_key,
                                     ))),
                             )
-                            .child(div().text_xs().text_color(theme.text_muted).child(
-                                SharedString::from(mezon_i18n::t(&locale, track.summary_key)),
-                            )),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(SharedString::from(mezon_i18n::t(
+                                        &locale,
+                                        track.summary_key,
+                                    ))),
+                            ),
                     )
                     .when(seen, |el| {
                         el.child(

@@ -2132,6 +2132,10 @@ impl MentionInput {
         cx.set_global(ActiveComposer(entity.downgrade()));
     }
 
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<ActiveComposer>()
             .and_then(|composer| composer.0.upgrade())
