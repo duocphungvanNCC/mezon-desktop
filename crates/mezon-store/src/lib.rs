@@ -22,6 +22,7 @@ pub mod clan_members;
 pub mod compose;
 pub mod config;
 pub mod connection;
+pub mod dialog;
 pub mod direct;
 pub mod emoji;
 pub mod events;

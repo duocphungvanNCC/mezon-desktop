@@ -50,7 +50,9 @@ pub fn save_with_progress_toast(url: SharedString, filename: SharedString, cx: &
                     shell.finish_toast(key, ToastKind::Error, message, cx);
                 }
                 DownloadEvent::DialogFailed => {
-                    let message = crate::util::file_dialog::unavailable_message(cx);
+                    // Reaching here means the dialog failed *and* there was nowhere to fall
+                    // back to, which is not a portal problem to send the user after.
+                    let message = crate::util::file_dialog::unavailable_message(cx, false);
                     shell.error_once(crate::util::file_dialog::TOAST_KEY, message, cx);
                 }
             });

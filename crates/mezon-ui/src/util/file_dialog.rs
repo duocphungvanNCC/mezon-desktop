@@ -1,42 +1,42 @@
+//! What the user sees when a native file dialog does not open.
+//!
+//! [`mezon_store::dialog`] decides *what happened*; this decides what to show. The
+//! split exists because mezon-store cannot depend on mezon-ui, and the store needs
+//! the same reading of a dialog result for the download and call-recording paths.
+
 use futures::channel::oneshot;
 use gpui::{App, AsyncApp};
 use mezon_store::Settings;
+use mezon_store::dialog::{DialogOutcome, classify_dialog};
 
 use crate::app::shell::Shell;
 
 pub(crate) const TOAST_KEY: &str = "file-dialog-unavailable";
 
-const CLOSED_WITHOUT_ANSWERING: &str = "the file dialog closed without answering";
-
-enum Outcome<T> {
-    Picked(T),
-    Cancelled,
-    Unavailable(Option<String>),
-}
-
-fn classify<T>(result: Result<anyhow::Result<Option<T>>, oneshot::Canceled>) -> Outcome<T> {
-    match result {
-        Ok(Ok(Some(picked))) => Outcome::Picked(picked),
-        Ok(Ok(None)) => Outcome::Cancelled,
-        Ok(Err(error)) => Outcome::Unavailable(Some(error.to_string())),
-        Err(_) => Outcome::Unavailable(None),
-    }
-}
-
+/// Await a file dialog, returning what the user picked.
+///
+/// Cancelling gives `None` in silence. A dialog that never opened gives `None` too,
+/// but logs the platform's own reason and shows the user one translated sentence —
+/// the failure that used to be dropped on the floor.
 pub(crate) async fn resolve<T>(
     receiver: oneshot::Receiver<anyhow::Result<Option<T>>>,
     cx: &AsyncApp,
 ) -> Option<T> {
-    match classify(receiver.await) {
-        Outcome::Picked(picked) => Some(picked),
-        Outcome::Cancelled => None,
-        Outcome::Unavailable(reason) => {
-            tracing::warn!(
-                "file dialog unavailable: {}",
-                reason.as_deref().unwrap_or(CLOSED_WITHOUT_ANSWERING)
-            );
+    match classify_dialog(receiver.await) {
+        DialogOutcome::Picked(picked) => Some(picked),
+        DialogOutcome::Cancelled => None,
+        DialogOutcome::Lost => {
+            // The request was dropped without an answer, which happens while the app
+            // is shutting down. The user is not waiting on anything, and touching the
+            // app from here can outlive it, so log and stop.
+            tracing::warn!("the file dialog went away before answering");
+            None
+        }
+        DialogOutcome::Unavailable(failure) => {
+            tracing::warn!("file dialog unavailable: {}", failure.reason);
+            let portal_missing = failure.portal_missing;
             cx.update(|cx| {
-                let message = unavailable_message(cx);
+                let message = unavailable_message(cx, portal_missing);
                 if let Some(shell) = Shell::try_global(cx) {
                     shell.update(cx, |shell, cx| shell.error_once(TOAST_KEY, message, cx));
                 }
@@ -46,15 +46,18 @@ pub(crate) async fn resolve<T>(
     }
 }
 
-pub(crate) fn unavailable_message(cx: &App) -> &'static str {
+pub(crate) fn unavailable_message(cx: &App, portal_missing: bool) -> &'static str {
     let locale = Settings::try_global(cx)
         .map(|settings| settings.read(cx).language.clone())
         .unwrap_or_default();
-    message_for(&locale)
+    message_for(&locale, portal_missing)
 }
 
-fn message_for(locale: &str) -> &'static str {
-    let key = if cfg!(target_os = "linux") {
+/// Only name the package when a missing portal is the actual cause. A dialog that
+/// timed out or was refused is not fixed by installing anything, and the platform
+/// this runs on is not the question — the reason is.
+fn message_for(locale: &str, portal_missing: bool) -> &'static str {
+    let key = if portal_missing {
         "file.dialogPortalMissing"
     } else {
         "file.dialogUnavailable"
@@ -65,110 +68,62 @@ fn message_for(locale: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    const PORTAL_MISSING: &str =
-        "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
-
-    fn picked(
-        paths: Vec<PathBuf>,
-    ) -> Result<anyhow::Result<Option<Vec<PathBuf>>>, oneshot::Canceled> {
-        Ok(Ok(Some(paths)))
-    }
-
-    #[test]
-    fn a_chosen_path_comes_back_untouched() {
-        let chosen = vec![PathBuf::from("/tmp/ca.crt")];
-        match classify(picked(chosen.clone())) {
-            Outcome::Picked(paths) => assert_eq!(paths, chosen),
-            _ => panic!("choosing a file must not be treated as a failure"),
-        }
-    }
-
-    #[test]
-    fn cancelling_the_dialog_is_an_answer_not_a_failure() {
-        let cancelled: Result<anyhow::Result<Option<Vec<PathBuf>>>, oneshot::Canceled> =
-            Ok(Ok(None));
-        match classify(cancelled) {
-            Outcome::Cancelled => {}
-            Outcome::Picked(_) => panic!("a cancelled dialog has no path to hand back"),
-            Outcome::Unavailable(reason) => {
-                panic!("dismissing the dialog must stay silent, got a toast saying {reason:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn a_dialog_that_never_opened_keeps_the_reason_it_gave() {
-        let failed: Result<anyhow::Result<Option<Vec<PathBuf>>>, oneshot::Canceled> =
-            Ok(Err(anyhow::anyhow!(PORTAL_MISSING)));
-        match classify(failed) {
-            Outcome::Unavailable(Some(reason)) => assert_eq!(reason, PORTAL_MISSING),
-            _ => panic!("a picker that could not run must be reported with its reason"),
-        }
-    }
-
-    #[test]
-    fn a_dialog_dropped_without_answering_is_reported_with_no_reason_to_show() {
-        let (sender, mut receiver) = oneshot::channel::<anyhow::Result<Option<Vec<PathBuf>>>>();
-        drop(sender);
-        let dropped = receiver
-            .try_recv()
-            .map(|value| value.expect("a dropped sender delivers nothing"));
-        match classify(dropped) {
-            Outcome::Unavailable(None) => {}
-            Outcome::Unavailable(Some(reason)) => {
-                panic!("the platform gave no reason here, so none may be invented: got {reason:?}")
-            }
-            _ => panic!("losing the dialog channel leaves the user with no feedback otherwise"),
-        }
-    }
+    const LOCALES: [&str; 16] = [
+        "vi", "en", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+        "fr", "nl",
+    ];
 
     #[test]
     fn the_toast_is_one_translated_sentence_with_no_raw_platform_text() {
         for locale in ["vi", "en", "jpn", "does-not-exist"] {
-            let message = message_for(locale);
-            assert!(
-                !message.contains("xdg-desktop-portal implementation"),
-                "{locale} leaks gpui's raw sentence into a toast that already says it: {message}"
-            );
-            assert!(
-                !message.contains(": Couldn't") && !message.contains(": Could not"),
-                "{locale} states the same failure twice: {message}"
-            );
-            assert!(
-                !message.ends_with(':'),
-                "{locale} ends mid-sentence: {message}"
-            );
+            for portal_missing in [true, false] {
+                let message = message_for(locale, portal_missing);
+                assert!(
+                    !message.contains("xdg-desktop-portal implementation"),
+                    "{locale} leaks gpui's raw sentence into a toast that already says it: {message}"
+                );
+                assert!(
+                    !message.contains(": Couldn't") && !message.contains(": Could not"),
+                    "{locale} states the same failure twice: {message}"
+                );
+                assert!(
+                    !message.ends_with(':'),
+                    "{locale} ends mid-sentence: {message}"
+                );
+            }
         }
     }
 
     #[test]
-    fn every_locale_translates_the_message_this_platform_shows() {
-        for locale in [
-            "vi", "en", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
-            "fr", "nl",
-        ] {
-            let message = message_for(locale);
-            assert!(
-                !message.starts_with("file.dialog"),
-                "locale {locale} falls through to the raw key: {message}"
-            );
+    fn every_locale_translates_both_messages() {
+        for locale in LOCALES {
+            for portal_missing in [true, false] {
+                let message = message_for(locale, portal_missing);
+                assert!(
+                    !message.starts_with("file.dialog"),
+                    "locale {locale} falls through to the raw key: {message}"
+                );
+            }
         }
     }
 
     #[test]
-    fn linux_tells_the_user_what_to_install() {
-        let message = message_for("en");
-        if cfg!(target_os = "linux") {
-            assert!(
-                message.contains("xdg-desktop-portal"),
-                "the only fix is installing a portal backend, so name it: {message}"
-            );
-        } else {
+    fn a_missing_portal_names_the_package_to_install() {
+        let message = message_for("en", true);
+        assert!(
+            message.contains("xdg-desktop-portal"),
+            "the only fix is installing a portal backend, so name it: {message}"
+        );
+    }
+
+    #[test]
+    fn any_other_failure_does_not_send_the_user_after_a_package() {
+        for locale in LOCALES {
+            let message = message_for(locale, false);
             assert!(
                 !message.contains("xdg-desktop-portal"),
-                "a portal is a Linux concept and means nothing here: {message}"
+                "{locale} blames a portal for a failure that has nothing to do with one: {message}"
             );
         }
     }
