@@ -238,6 +238,26 @@ impl InputState {
         self.marked_range.is_some()
     }
 
+    pub fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let start = marked.start.min(self.content.len());
+        let end = marked.end.min(self.content.len()).max(start);
+        if start >= end {
+            return;
+        }
+        self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
+        let mut next = String::with_capacity(self.content.len() - (end - start));
+        next.push_str(&self.content[..start]);
+        next.push_str(&self.content[end..]);
+        self.content = next.into();
+        self.selected_range = start..start;
+        self.refresh_filter_token_chips(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
+    }
+
     pub fn set_value(
         &mut self,
         value: impl Into<SharedString>,

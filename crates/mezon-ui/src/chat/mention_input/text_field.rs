@@ -334,6 +334,25 @@ impl MentionInputState {
         }
     }
 
+    pub(crate) fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let marked = self.clamp_range(marked);
+        if marked.start >= marked.end {
+            return;
+        }
+        self.discard_ime_commit = self.content.get(marked.clone()).map(str::to_string);
+        let mut next = String::with_capacity(self.content.len() - (marked.end - marked.start));
+        next.push_str(&self.content[..marked.start]);
+        next.push_str(&self.content[marked.end..]);
+        self.set_content(next);
+        self.selected_range = marked.start..marked.start;
+        self.selection_reversed = false;
+        cx.notify();
+        cx.emit(MentionFieldEvent::Change);
+    }
+
     pub(crate) fn pending_send_ime_token(&self) -> Option<String> {
         if let Some(marked) = self.marked_range.clone() {
             let marked = self.clamp_range(marked);
@@ -809,7 +828,10 @@ impl MentionInputState {
         self.replace_text_in_range(None, text, window, cx);
     }
 
-    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.keystroke.key == "enter" {
+            return;
+        }
         self.discard_ime_commit = None;
     }
 

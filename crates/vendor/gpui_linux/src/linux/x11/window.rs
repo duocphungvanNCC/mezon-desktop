@@ -271,6 +271,7 @@ pub struct X11WindowState {
     renderer: WgpuRenderer,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
+    /// mezon vendor edit: one-shot surrounding for IME position sync only.
     ime_surrounding_hint: Option<gpui::ImeSurroundingText>,
     appearance: WindowAppearance,
     background_appearance: WindowBackgroundAppearance,
@@ -1276,10 +1277,20 @@ impl X11WindowStatePtr {
     }
 
     pub fn get_ime_surrounding(&self) -> Option<gpui::ImeSurroundingText> {
+        self.ime_surrounding_from_handler()
+    }
+
+    pub fn take_ime_surrounding_for_position_sync(&self) -> Option<gpui::ImeSurroundingText> {
         let mut state = self.state.borrow_mut();
         if let Some(hint) = state.ime_surrounding_hint.take() {
             return Some(hint);
         }
+        drop(state);
+        self.ime_surrounding_from_handler()
+    }
+
+    fn ime_surrounding_from_handler(&self) -> Option<gpui::ImeSurroundingText> {
+        let mut state = self.state.borrow_mut();
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
             let surrounding = input_handler.surrounding_text();
@@ -1611,7 +1622,9 @@ impl PlatformWindow for X11Window {
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
-        self.0.state.borrow_mut().input_handler.take()
+        let mut state = self.0.state.borrow_mut();
+        state.ime_surrounding_hint = None;
+        state.input_handler.take()
     }
 
     fn set_ime_surrounding_hint(&self, surrounding: Option<gpui::ImeSurroundingText>) {
@@ -2081,6 +2094,11 @@ impl PlatformWindow for X11Window {
         let client = state.client.clone();
         drop(state);
         client.update_ime_position(bounds);
+    }
+
+    fn reset_ime(&self) {
+        let client = self.0.state.borrow().client.clone();
+        client.reset_ime();
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

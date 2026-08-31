@@ -435,6 +435,12 @@ impl X11ClientStatePtr {
         state.cursor_styles.remove(&x_window);
     }
 
+    pub fn reset_ime(&self) {
+        if let Some(client) = self.get_client() {
+            client.reset_ime();
+        }
+    }
+
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let Some(client) = self.get_client() else {
             return;
@@ -1106,6 +1112,8 @@ impl X11Client {
         state.composing = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
+            drop(state);
+            self.drain_dbus_im();
             return;
         }
         if let Some(mut ximc) = state.ximc.take() {
@@ -1447,7 +1455,7 @@ impl X11Client {
         if sync_surrounding && !composing {
             if let Some(window) = window.as_ref() {
                 let surrounding = window
-                    .get_ime_surrounding()
+                    .take_ime_surrounding_for_position_sync()
                     .unwrap_or_else(|| ImeSurroundingText::from_document("", 0, 0, None));
                 im.set_surrounding(&surrounding);
             }
@@ -1775,6 +1783,15 @@ impl X11Client {
                 }
                 let window = self.get_window(event.event)?;
                 window.set_active(false);
+                let fcitx_shim = self
+                    .0
+                    .borrow()
+                    .im
+                    .as_ref()
+                    .is_some_and(|im| im.ibus_fcitx_shim());
+                if !fcitx_shim {
+                    self.reset_ime();
+                }
                 let mut state = self.0.borrow_mut();
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 if let Some(compose_state) = state.compose_state.as_mut() {
@@ -1784,7 +1801,6 @@ impl X11Client {
                 state.restore_cursor_after_hide();
                 state.dbus_im_focused = false;
                 state.ime_resync = true;
-                let fcitx_shim = state.im.as_ref().is_some_and(|im| im.ibus_fcitx_shim());
                 if !fcitx_shim {
                     state.ime_stale = true;
                     if let Some(im) = state.im.as_mut() {

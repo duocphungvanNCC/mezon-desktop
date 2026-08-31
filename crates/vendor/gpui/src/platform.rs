@@ -731,7 +731,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
+    /// mezon vendor edit: one-shot surrounding snapshot for Linux IME position
+    /// sync while App is already borrowed. Default is a no-op on other platforms.
     fn set_ime_surrounding_hint(&self, _surrounding: Option<ImeSurroundingText>) {}
+
+    fn reset_ime(&self) {}
 
     fn play_system_bell(&self) {}
 

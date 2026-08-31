@@ -2055,8 +2055,15 @@ impl MentionInput {
     }
 
     fn open_popup(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.drop_uncommitted_preedit(cx);
+        });
+        window.reset_ime();
         let locale = self.locale(cx);
         let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, locale, window, cx));
+        popup.update(cx, |popup, cx| {
+            popup.focus_search(window, cx);
+        });
         let pick_sub = cx.subscribe_in(
             &popup,
             window,
@@ -2071,6 +2078,7 @@ impl MentionInput {
                     cx,
                 ),
                 GifStickerEmojiEvent::Sticker { url, filename } => {
+                    this.abandon_search_ime(window, cx);
                     this.close_popup();
                     cx.emit(MentionInputEvent::SendSticker {
                         url: url.clone(),
@@ -2079,6 +2087,7 @@ impl MentionInput {
                     cx.notify();
                 }
                 GifStickerEmojiEvent::Gif { url, width, height } => {
+                    this.abandon_search_ime(window, cx);
                     this.close_popup();
                     cx.emit(MentionInputEvent::SendGif {
                         url: url.clone(),
@@ -2088,6 +2097,7 @@ impl MentionInput {
                     cx.notify();
                 }
                 GifStickerEmojiEvent::Sound { url, filename } => {
+                    this.abandon_search_ime(window, cx);
                     this.close_popup();
                     cx.emit(MentionInputEvent::SendSound {
                         url: url.clone(),
@@ -2214,12 +2224,21 @@ impl MentionInput {
         Ok(())
     }
 
+    fn abandon_search_ime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = &self.popup {
+            popup.update(cx, |popup, cx| popup.drop_search_preedit(window, cx));
+        } else {
+            window.reset_ime();
+        }
+    }
+
     fn insert_emoji(
         &mut self,
         emoji: EmojiSuggestRaw,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.abandon_search_ime(window, cx);
         let content_len = self.input.read(cx).value().len();
         let at = self.input.read(cx).cursor().min(content_len);
         let display = emoji.shortname;

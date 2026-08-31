@@ -355,7 +355,7 @@ fn sync_text_input(
     cause: ChangeCause,
 ) {
     text_input.set_text_change_cause(cause);
-    if let Some(surrounding) = window.get_ime_surrounding() {
+    if let Some(surrounding) = window.take_ime_surrounding_for_position_sync() {
         let cursor = surrounding.cursor.min(i32::MAX as usize) as i32;
         let anchor = surrounding.anchor.min(i32::MAX as usize) as i32;
         text_input.set_surrounding_text(surrounding.text, cursor, anchor);
@@ -513,6 +513,19 @@ impl WaylandClientStatePtr {
     pub fn ime_enabled(&self) -> Option<bool> {
         let client = self.get_client();
         client.borrow().ime_enabled
+    }
+
+    pub fn reset_ime(&self) {
+        let client = self.get_client();
+        let composing = {
+            let state = client.borrow();
+            state.composing || state.pre_edit_text.is_some()
+        };
+        if !composing {
+            return;
+        }
+        self.disable_ime();
+        self.enable_ime();
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
