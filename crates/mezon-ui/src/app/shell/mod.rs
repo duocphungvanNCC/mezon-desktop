@@ -462,6 +462,12 @@ impl Shell {
             .read(cx)
             .channel(clan_id, channel_id)
             .and_then(|channel| channel.parent_id)
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.parent_id)
+            })
             .unwrap_or(mezon_store::ChannelId(0));
         let view = cx.new(|cx| ConfirmArchiveChannelModal {
             focus_handle: cx.focus_handle(),
@@ -497,6 +503,12 @@ impl Shell {
                     channel.name.clone(),
                     channel.parent_id.unwrap_or(mezon_store::ChannelId(0)),
                 )
+            })
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| (row.label.clone(), row.parent_id))
             })
             .unwrap_or_else(|| ("Unknown Channel".to_string(), mezon_store::ChannelId(0)));
         let title: SharedString =
@@ -541,6 +553,12 @@ impl Shell {
             .read(cx)
             .channel(clan_id, channel_id)
             .map(|channel| channel.name.clone())
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.label.clone())
+            })
             .unwrap_or_else(|| "Unknown Channel".to_string());
         let title: SharedString =
             mezon_i18n::t(locale, "channelSetting.confirm.deleteChannel.title")

@@ -266,7 +266,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -277,7 +277,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2412,7 +2412,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2671,7 +2671,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3397,7 +3397,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -4014,6 +4014,7 @@ dependencies = [
  "raw-window-handle",
  "smallvec",
  "swash",
+ "unicode-bidi",
  "unicode-segmentation",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -5769,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5782,7 +5783,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5813,7 +5814,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "flume",
@@ -5828,7 +5829,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5846,7 +5847,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5868,7 +5869,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "clap",
@@ -5884,7 +5885,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5921,14 +5922,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "axum",
@@ -5949,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5976,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5989,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -6000,7 +6001,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6023,7 +6024,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6056,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "flume",
@@ -6074,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "gpui",
  "theme",
@@ -6082,7 +6083,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6121,12 +6122,13 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "windows 0.61.3",
+ "x11rb",
  "zed-scap",
 ]
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6147,7 +6149,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6169,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "block",
@@ -6189,6 +6191,7 @@ dependencies = [
  "nokhwa",
  "objc",
  "parking_lot",
+ "pipewire",
  "screencapturekit",
  "screencapturekit-sys",
  "tiny-skia",
@@ -6203,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6267,7 +6270,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.17"
+version = "2.0.19"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -6588,7 +6591,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8783,7 +8786,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9408,7 +9411,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9477,7 +9480,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10028,7 +10031,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10667,7 +10670,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11557,7 +11560,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

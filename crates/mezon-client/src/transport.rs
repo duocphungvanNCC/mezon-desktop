@@ -1613,9 +1613,42 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if let Some(value) = message_field_json(bytes) {
         return parse_references_json_value(&value);
     }
-    match api::MessageRefList::decode(bytes) {
-        Ok(list) => list
-            .refs
+    if let Some(refs) = decode_message_ref_list(bytes) {
+        return refs;
+    }
+    if let Some(inner) = base64_blob(bytes) {
+        if let Some(value) = message_field_json(&inner) {
+            return parse_references_json_value(&value);
+        }
+        if let Some(refs) = decode_message_ref_list(&inner) {
+            return refs;
+        }
+    }
+    let salvaged = salvage_message_refs(bytes);
+    if !salvaged.is_empty() {
+        tracing::warn!(
+            "salvaged {} message reference(s) from a malformed blob ({} bytes)",
+            salvaged.len(),
+            bytes.len()
+        );
+        return salvaged;
+    }
+    tracing::warn!(
+        "failed to decode message references ({} bytes, leading bytes {}, utf8 {}, json {:?})",
+        bytes.len(),
+        blob_prefix(bytes),
+        std::str::from_utf8(bytes).is_ok(),
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .err()
+            .map(|e| e.to_string())
+    );
+    Vec::new()
+}
+
+fn decode_message_ref_list(bytes: &[u8]) -> Option<Vec<ApiMessageRef>> {
+    let list = api::MessageRefList::decode(bytes).ok()?;
+    Some(
+        list.refs
             .into_iter()
             .map(|r| ApiMessageRef {
                 message_ref_id: r.message_ref_id,
@@ -1628,14 +1661,86 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
                 message_sender_display_name: r.message_sender_display_name,
             })
             .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "failed to decode message references ({} bytes): {e}",
-                bytes.len()
-            );
-            Vec::new()
+    )
+}
+
+fn base64_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+    {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
+        .ok()
+}
+
+fn salvage_scalar(text: &str, key: &str) -> Option<String> {
+    let start = text.find(key)? + key.len();
+    let rest = text[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(rest.len());
+        if end == 0 {
+            None
+        } else {
+            Some(rest[..end].to_string())
         }
     }
+}
+
+fn salvage_message_refs(bytes: &[u8]) -> Vec<ApiMessageRef> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut refs = Vec::new();
+    for chunk in text.split("\"message_ref_id\"").skip(1) {
+        let chunk = format!("\"message_ref_id\"{chunk}");
+        let Some(id) = salvage_scalar(&chunk, "\"message_ref_id\"") else {
+            continue;
+        };
+        let Ok(message_ref_id) = id.parse::<i64>() else {
+            continue;
+        };
+        if message_ref_id == 0 {
+            continue;
+        }
+        refs.push(ApiMessageRef {
+            message_ref_id,
+            content: String::new(),
+            has_attachment: false,
+            message_sender_id: salvage_scalar(&chunk, "\"message_sender_id\"")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or_default(),
+            message_sender_username: salvage_scalar(&chunk, "\"message_sender_username\"")
+                .unwrap_or_default(),
+            message_sender_avatar: salvage_scalar(&chunk, "\"message_sender_avatar\"")
+                .or_else(|| salvage_scalar(&chunk, "\"mesages_sender_avatar\""))
+                .unwrap_or_default(),
+            message_sender_clan_nick: salvage_scalar(&chunk, "\"message_sender_clan_nick\"")
+                .unwrap_or_default(),
+            message_sender_display_name: salvage_scalar(&chunk, "\"message_sender_display_name\"")
+                .unwrap_or_default(),
+        });
+    }
+    refs
+}
+
+fn blob_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
@@ -4550,7 +4655,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4605,7 +4712,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -10996,6 +11105,35 @@ mod tests {
             Some(&1),
             "an expired token must be renewed before the send"
         );
+    }
+
+    #[tokio::test]
+    async fn message_fetches_fall_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let channel_page = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap();
+        let topic_page = t.list_topic_messages(1, 2, 3, 0, 3, 50).await.unwrap();
+
+        assert!(channel_page.messages.is_empty());
+        assert!(topic_page.messages.is_empty());
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/ListChannelMessages"), Some(&2));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn message_fetch_keeps_using_an_open_socket() {
+        let (port, hits) = fake_api().await;
+        let t = transport(false);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let error = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap_err();
+
+        assert!(error.to_string().contains("mock send failed"));
+        assert!(hits.lock().is_empty());
     }
 
     /// A burst of sends must share one refresh, not spend the refresh token once per message.
