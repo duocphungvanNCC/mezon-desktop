@@ -356,6 +356,33 @@ fn mark_seen(track_id: &str, cx: &mut App) {
 
 pub const ALWAYS_AUTO_START_IN_DEBUG: bool = false;
 
+/// Decided once, the first time the clan list has actually been fetched, and then kept:
+/// a fresh account with no clans is the audience for the tour, and an account that already
+/// has clans is not. Deciding once rather than per launch keeps the clan and clan-settings
+/// tours available later, when the new user finally joins a clan.
+fn tour_eligible(cx: &mut App) -> bool {
+    let Some(settings) = Settings::try_global(cx) else {
+        return false;
+    };
+    if let Some(decided) = settings.read(cx).tour_eligible {
+        return decided;
+    }
+    let Some(clans) = mezon_store::ClanList::try_global(cx) else {
+        return false;
+    };
+    let clans = clans.read(cx);
+    if !clans.has_listed() {
+        return false;
+    }
+    let eligible = clans.clans.is_empty();
+    settings.update(cx, |settings, cx| {
+        settings.tour_eligible = Some(eligible);
+        cx.notify();
+    });
+    mezon_store::schedule_settings_save(&settings, cx);
+    eligible
+}
+
 fn track_done(track_id: &str, cx: &App) -> bool {
     Settings::try_global(cx).is_some_and(|settings| {
         let settings = settings.read(cx);
@@ -364,11 +391,14 @@ fn track_done(track_id: &str, cx: &App) -> bool {
     })
 }
 
-pub fn pending_core_track(cx: &App) -> Option<&'static str> {
+pub fn pending_core_track(cx: &mut App) -> Option<&'static str> {
     let router = Router::global(cx);
-    let route = router.read(cx).route_ref();
-    let track = core_track_for(route)?;
-    if !track.precondition.is_met(route) {
+    let route = router.read(cx).route_ref().clone();
+    let track = core_track_for(&route)?;
+    if !track.precondition.is_met(&route) {
+        return None;
+    }
+    if !tour_eligible(cx) {
         return None;
     }
     if !(cfg!(debug_assertions) && ALWAYS_AUTO_START_IN_DEBUG) && track_done(track.id, cx) {

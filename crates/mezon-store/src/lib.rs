@@ -399,6 +399,8 @@ pub struct Settings {
     pub tour_seen_version: u32,
     #[serde(default)]
     pub tour_done_tracks: Vec<String>,
+    #[serde(default)]
+    pub tour_eligible: Option<bool>,
 }
 
 impl Default for Settings {
@@ -426,6 +428,7 @@ impl Default for Settings {
             age_restricted_confirmed: Vec::new(),
             tour_seen_version: 0,
             tour_done_tracks: Vec::new(),
+            tour_eligible: None,
         }
     }
 }

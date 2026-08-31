@@ -464,6 +464,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    listed: bool,
     badges_loaded: bool,
     reload_pending: bool,
     reset_generation: u64,
@@ -491,6 +492,10 @@ impl ClanList {
     /// The global clan store. Panics if [`ClanList::init`] hasn't run. Cf. `ChannelStore::global`.
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalClanList>().0.clone()
+    }
+
+    pub fn has_listed(&self) -> bool {
+        self.listed
     }
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
@@ -531,6 +536,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            listed: false,
             badges_loaded: false,
             reload_pending: false,
             reset_generation: 0,
@@ -670,6 +676,7 @@ impl ClanList {
                     return;
                 }
                 this.loading = false;
+                this.listed = true;
                 this.badges_loaded = this.badges_loaded || badges_fetched;
                 this.update_clans_inner(mapped, badges_fetched, cx);
                 // No `clan_join` from here. The clan listing has not been fetched

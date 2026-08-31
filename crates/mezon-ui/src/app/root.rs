@@ -148,6 +148,11 @@ impl RootView {
         })
         .detach();
 
+        cx.observe(&ClanList::global(cx), |this, _clans, cx| {
+            this.schedule_tour_autostart(cx);
+        })
+        .detach();
+
         cx.observe(&auth_state, |this, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::Connecting(_)) {
                 if this.connecting_since.is_none() {
