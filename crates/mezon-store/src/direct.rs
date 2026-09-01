@@ -334,7 +334,11 @@ impl DirectMessageStore {
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [RealtimeKind::UserChannelAdded, RealtimeKind::ChannelUpdated] {
+            for kind in [
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
+                RealtimeKind::ChannelUpdated,
+            ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -908,6 +912,20 @@ impl DirectMessageStore {
                 cx.emit(DirectEvent::Changed { channel_id: None });
                 cx.notify();
             }
+            RealtimeEvent::UserChannelRemoved(e) => {
+                let channel_id = ChannelId(e.channel_id);
+                if self.channels.find(channel_id).is_none() {
+                    return;
+                }
+                let me = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badge| badge.read(cx).current_user_id(cx));
+                let Some(me) = me else {
+                    return;
+                };
+                if e.user_ids.iter().any(|id| UserId(*id) == me) {
+                    self.forget_conversation(channel_id, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -1377,7 +1395,10 @@ fn enrich_direct_from_event_users(
 }
 
 fn apply_member_count(channel: &mut DirectChannel, member_count: u32) -> bool {
-    if member_count == 0 || channel.member_count == member_count {
+    if channel.kind != DirectKind::Group
+        || member_count == 0
+        || channel.member_count == member_count
+    {
         return false;
     }
     channel.member_count = member_count;
@@ -1418,7 +1439,10 @@ fn direct_from_message(
         avatar: m.avatar.clone(),
         peer_user_id,
         peer_username,
-        creator_id: (m.sender_id != 0).then_some(UserId(m.sender_id)),
+        creator_id: match kind {
+            DirectKind::Dm => (m.sender_id != 0).then_some(UserId(m.sender_id)),
+            DirectKind::Group => None,
+        },
         online: true,
         member_count: 0,
         unread_count: u32::from(increment_unread),
@@ -1632,6 +1656,26 @@ mod tests {
         assert!(!apply_member_count(&mut channel, 5));
         assert!(!apply_member_count(&mut channel, 0));
         assert_eq!(channel.member_count, 5);
+    }
+
+    #[test]
+    fn member_count_leaves_a_one_to_one_dm_alone() {
+        let mut channel = group_channel_with_members(2);
+        channel.kind = DirectKind::Dm;
+        assert!(!apply_member_count(&mut channel, 1));
+        assert_eq!(channel.member_count, 2);
+    }
+
+    #[test]
+    fn a_group_row_from_a_message_claims_no_creator() {
+        let mut m = incoming_dm_message();
+        m.mode = STREAM_MODE_GROUP;
+        let group = direct_from_message(&m, false, true);
+        assert_eq!(group.kind, DirectKind::Group);
+        assert_eq!(group.creator_id, None);
+
+        let dm = direct_from_message(&incoming_dm_message(), false, true);
+        assert_eq!(dm.creator_id, Some(UserId(dm.peer_user_id.unwrap().0)));
     }
 
     fn group_channel_with_members(member_count: u32) -> DirectChannel {

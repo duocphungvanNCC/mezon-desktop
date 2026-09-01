@@ -7188,7 +7188,7 @@ impl MezonTransport {
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }

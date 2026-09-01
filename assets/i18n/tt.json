@@ -2518,6 +2518,7 @@
   "directMessage.remove.button": "Раслау",
   "directMessage.remove.content": "Бу сөйләшү инде доступлы түгел!",
   "directMessage.remove.title": "Чат доступлы түгел",
+  "directMessage.removeFromGroup.description": "Сез {{username}} бу төркемнән чыгарырга телисезме?",
   "directMessage.selectConversation": "Хат алышу башлау өчен сөйләшүне сайлагыз",
   "directMessage.yourMessages": "Сезнең хәбәрләрегез",
   "discover.about": "Турында",

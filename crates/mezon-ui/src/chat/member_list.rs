@@ -718,6 +718,7 @@ fn member_menu_json(panel: &Entity<MemberListPanel>, cx: &App) -> serde_json::Va
             "show_ban": permissions.show_ban,
             "show_kick": permissions.show_kick,
             "show_remove_from_thread": permissions.show_remove_from_thread,
+            "show_remove_from_group": permissions.show_remove_from_group,
             "clan_id": permissions.clan_id.map(|id| id.to_string()),
             "channel_id": permissions.channel_id.map(|id| id.to_string()),
         },
@@ -1726,9 +1727,19 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
             .danger_item(t("directMessage.contextMenu.removeFromGroup"), {
                 let panel = panel.clone();
                 let locale = locale.clone();
-                move |_window: &mut Window, cx: &mut App| {
-                    remove_member_from_group(channel_id, user_id, &locale, cx);
+                let display_name = display_name.clone();
+                move |window: &mut Window, cx: &mut App| {
                     close_member_menu(&panel, cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_remove_group_member(
+                            channel_id,
+                            user_id,
+                            display_name.as_ref(),
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
                 }
             });
     }
@@ -1743,30 +1754,6 @@ fn can_remove_from_group(
     creator_id: Option<UserId>,
 ) -> bool {
     !is_self && me.is_some() && kind == DirectKind::Group && creator_id == me
-}
-
-fn remove_member_from_group(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
-    let success: SharedString =
-        mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeSuccess").into();
-    let failure: SharedString =
-        mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeFailed").into();
-    let task = GroupMembersStore::global(cx)
-        .update(cx, |store, cx| store.remove_member(channel_id, user_id, cx));
-    cx.spawn(async move |cx| {
-        let result = task.await;
-        cx.update(|cx| {
-            Shell::global(cx).update(cx, |shell, cx| match result {
-                Ok(()) => shell.success(success, cx),
-                Err(error) => {
-                    tracing::error!(
-                        "remove member {user_id} from group {channel_id} failed: {error}"
-                    );
-                    shell.error(failure, cx);
-                }
-            });
-        });
-    })
-    .detach();
 }
 
 fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
@@ -1824,6 +1811,11 @@ mod permission_tests {
     #[test]
     fn the_owner_does_not_get_the_item_on_themselves() {
         assert!(!can_remove_from_group(true, ME, DirectKind::Group, ME));
+    }
+
+    #[test]
+    fn a_group_with_no_known_creator_offers_nothing() {
+        assert!(!can_remove_from_group(false, ME, DirectKind::Group, None));
     }
 
     #[test]

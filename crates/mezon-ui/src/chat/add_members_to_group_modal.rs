@@ -11,8 +11,8 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AddGroupMembersError, ChannelId, DirectMessageStore, FriendEvent, FriendState, FriendStore,
-    GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS, UserId,
+    AddGroupMembersError, ChannelId, FriendEvent, FriendState, FriendStore, GroupMembersEvent,
+    GroupMembersStore, MAX_GROUP_MEMBERS, UserId,
 };
 
 pub struct AddMembersToGroupModal {
@@ -25,7 +25,7 @@ pub struct AddMembersToGroupModal {
     all_rows: Vec<FriendPickRow>,
     visible: Vec<usize>,
     selected: Vec<UserId>,
-    member_count: usize,
+    roster_size: Option<usize>,
     adding: bool,
     scroll: UniformListScrollHandle,
     _input_sub: Subscription,
@@ -116,7 +116,7 @@ impl AddMembersToGroupModal {
             all_rows: Vec::new(),
             visible: Vec::new(),
             selected: Vec::new(),
-            member_count: 0,
+            roster_size: None,
             adding: false,
             scroll: UniformListScrollHandle::new(),
             _input_sub: input_sub,
@@ -128,8 +128,8 @@ impl AddMembersToGroupModal {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let (current, member_count) = self.current_members(cx);
-        self.member_count = member_count;
+        let (current, roster_size) = self.current_members(cx);
+        self.roster_size = roster_size;
         let friends = FriendStore::global(cx);
         let friends = friends.read(cx);
         self.all_rows = friends
@@ -146,30 +146,21 @@ impl AddMembersToGroupModal {
         self.refilter(cx);
     }
 
-    fn current_members(&self, cx: &App) -> (HashSet<UserId>, usize) {
-        let members: Vec<UserId> = GroupMembersStore::try_global(cx)
-            .map(|store| {
-                store
-                    .read(cx)
-                    .members(self.channel_id)
-                    .iter()
-                    .map(|member| member.id())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let member_count = if members.is_empty() {
-            DirectMessageStore::try_global(cx)
-                .and_then(|store| {
-                    store
-                        .read(cx)
-                        .find(self.channel_id)
-                        .map(|dm| dm.member_count as usize)
-                })
-                .unwrap_or(0)
-        } else {
-            members.len()
+    fn current_members(&self, cx: &App) -> (HashSet<UserId>, Option<usize>) {
+        let Some(store) = GroupMembersStore::try_global(cx) else {
+            return (HashSet::new(), None);
         };
-        (members.into_iter().collect(), member_count)
+        let store = store.read(cx);
+        if !store.is_loaded(self.channel_id) {
+            return (HashSet::new(), None);
+        }
+        let members: HashSet<UserId> = store
+            .members(self.channel_id)
+            .iter()
+            .map(|member| member.id())
+            .collect();
+        let size = members.len();
+        (members, Some(size))
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
@@ -178,13 +169,16 @@ impl AddMembersToGroupModal {
             .all_rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.matches_query(&query))
+            .filter(|(_, row)| row.matches_lowercase_query(&query))
             .map(|(ix, _)| ix)
             .collect();
     }
 
     fn capacity(&self) -> usize {
-        addable_slots(self.member_count, self.all_rows.len())
+        match self.roster_size {
+            Some(size) => addable_slots(size, self.all_rows.len()),
+            None => 0,
+        }
     }
 
     fn remaining_can_add(&self) -> usize {
@@ -219,6 +213,7 @@ impl AddMembersToGroupModal {
         };
         let channel_id = self.channel_id;
         let modal_id = cx.entity_id();
+        let locale = self.locale.clone();
         let user_ids = self.selected.clone();
         let failed: SharedString = mezon_i18n::t(&self.locale, "common.somethingWentWrong").into();
         let group_full: SharedString =
@@ -232,6 +227,10 @@ impl AddMembersToGroupModal {
         let task = store.update(cx, |store, cx| store.add_members(channel_id, user_ids, cx));
         cx.spawn(async move |this, cx| match task.await {
             Ok(()) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.adding = false;
+                    cx.notify();
+                });
                 cx.update(|cx| {
                     Shell::global(cx).update(cx, |shell, cx| shell.close_modal_view(modal_id, cx));
                 });
@@ -239,7 +238,10 @@ impl AddMembersToGroupModal {
             Err(err) => {
                 let message = match err {
                     AddGroupMembersError::GroupFull => group_full,
-                    _ => failed,
+                    AddGroupMembersError::Api(code) => {
+                        SharedString::from(mezon_i18n::api_error(&locale, code))
+                    }
+                    AddGroupMembersError::Other(_) => failed,
                 };
                 let _ = this.update(cx, |this, cx| {
                     this.adding = false;
@@ -279,7 +281,12 @@ impl Render for AddMembersToGroupModal {
         const LIST_HEIGHT: f32 = 190.;
 
         let row_count = self.visible.len();
-        let list_body = if row_count == 0 {
+        let list_body = if self.roster_size.is_none() || row_count == 0 {
+            let key = if self.roster_size.is_none() {
+                "root.loading"
+            } else {
+                "directMessage.createMessageGroup.noFriendsFound"
+            };
             div()
                 .h(px(LIST_HEIGHT))
                 .flex()
@@ -289,10 +296,7 @@ impl Render for AddMembersToGroupModal {
                 .text_center()
                 .text_size(px(14.))
                 .text_color(theme.text_secondary)
-                .child(mezon_i18n::t(
-                    &self.locale,
-                    "directMessage.createMessageGroup.noFriendsFound",
-                ))
+                .child(mezon_i18n::t(&self.locale, key))
                 .into_any_element()
         } else {
             let list_entity = entity.clone();

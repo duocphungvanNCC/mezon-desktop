@@ -2509,6 +2509,7 @@
   "directMessage.remove.button": "Xác nhận",
   "directMessage.remove.content": "Cuộc trò chuyện ở kênh này không còn khả dụng!",
   "directMessage.remove.title": "Trò chuyện không khả dụng",
+  "directMessage.removeFromGroup.description": "Bạn có chắc muốn xóa {{username}} khỏi nhóm này?",
   "directMessage.selectConversation": "Chọn một cuộc trò chuyện để bắt đầu nhắn tin",
   "directMessage.yourMessages": "Tin nhắn của bạn",
   "discover.about": "Giới thiệu",

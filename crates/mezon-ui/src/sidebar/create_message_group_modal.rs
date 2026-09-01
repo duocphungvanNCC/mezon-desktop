@@ -101,7 +101,7 @@ impl CreateMessageGroupModal {
             .all_rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.matches_query(&query))
+            .filter(|(_, row)| row.matches_lowercase_query(&query))
             .map(|(ix, _)| ix)
             .collect();
     }

@@ -2510,6 +2510,7 @@
   "directMessage.remove.button": "確認",
   "directMessage.remove.content": "このチャンネルの会話は利用できません!",
   "directMessage.remove.title": "会話が利用できません",
+  "directMessage.removeFromGroup.description": "{{username}} をこのグループから削除してもよろしいですか？",
   "directMessage.selectConversation": "チャットを開始するには会話を選択",
   "directMessage.yourMessages": "あなたのメッセージ",
   "discover.about": "概要",

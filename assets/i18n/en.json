@@ -2510,6 +2510,7 @@
   "directMessage.remove.button": "Confirm",
   "directMessage.remove.content": "This conversation is no longer available!",
   "directMessage.remove.title": "Chat Unavailable",
+  "directMessage.removeFromGroup.description": "Are you sure you want to remove {{username}} from this group?",
   "directMessage.selectConversation": "Select a conversation to start messaging",
   "directMessage.yourMessages": "Your messages",
   "discover.about": "About",

@@ -106,6 +106,7 @@ impl GroupBucket {
 pub struct GroupMembersStore {
     cache: KeyedCache<ChannelId, GroupBucket>,
     loading: HashSet<ChannelId>,
+    mutations: HashMap<ChannelId, u64>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -134,6 +135,7 @@ impl GroupMembersStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.cache.clear();
         self.loading.clear();
+        self.mutations.clear();
         cx.notify();
     }
 
@@ -143,6 +145,7 @@ impl GroupMembersStore {
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_GROUPS)),
             loading: HashSet::new(),
+            mutations: HashMap::new(),
             api,
             _conn_watch: conn_watch,
         }
@@ -188,6 +191,10 @@ impl GroupMembersStore {
         self.cache.mark_all_stale();
     }
 
+    pub fn is_loaded(&self, channel_id: ChannelId) -> bool {
+        self.cache.contains(&channel_id)
+    }
+
     pub fn members(&self, channel_id: ChannelId) -> &[GroupMember] {
         self.cache
             .get(&channel_id)
@@ -226,8 +233,7 @@ impl GroupMembersStore {
                 tracing::warn!("add_channel_users failed for group {channel_id}: {err}");
                 return Err(map_add_members_error(err));
             }
-            this.update(cx, |this, _| this.cache.mark_stale(&channel_id))
-                .map_err(|err| AddGroupMembersError::Other(err.to_string()))?;
+            let _ = this.update(cx, |this, cx| this.note_mutation(channel_id, cx));
             Ok(())
         })
     }
@@ -242,7 +248,7 @@ impl GroupMembersStore {
         cx.spawn(async move |this, cx| {
             api.remove_channel_users(channel_id.get(), vec![user_id.get().to_string()])
                 .await?;
-            this.update(cx, |this, _| this.cache.mark_stale(&channel_id))?;
+            let _ = this.update(cx, |this, cx| this.note_mutation(channel_id, cx));
             Ok(())
         })
     }
@@ -252,6 +258,7 @@ impl GroupMembersStore {
             return;
         }
         let api = self.api.clone();
+        let started_at = self.mutation_count(channel_id);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_users_uc(channel_id.get(), GROUP_MEMBER_FETCH_LIMIT)
@@ -260,6 +267,10 @@ impl GroupMembersStore {
                 this.loading.remove(&channel_id);
                 match result {
                     Ok(resp) => {
+                        if this.mutation_count(channel_id) != started_at {
+                            this.fetch(channel_id, cx);
+                            return;
+                        }
                         let members = group_members_from_proto(&resp);
                         this.cache
                             .insert(channel_id, GroupBucket::from_members(members), None);
@@ -273,6 +284,17 @@ impl GroupMembersStore {
             });
         })
         .detach();
+    }
+
+    fn mutation_count(&self, channel_id: ChannelId) -> u64 {
+        self.mutations.get(&channel_id).copied().unwrap_or(0)
+    }
+
+    fn note_mutation(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let next = self.mutation_count(channel_id).wrapping_add(1);
+        self.mutations.insert(channel_id, next);
+        self.cache.mark_stale(&channel_id);
+        self.fetch(channel_id, cx);
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {

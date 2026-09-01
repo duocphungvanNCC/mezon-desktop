@@ -2509,6 +2509,7 @@
   "directMessage.remove.button": "Пацвердзіць",
   "directMessage.remove.content": "Размова ў гэтым канале больш недаступная!",
   "directMessage.remove.title": "Размова недаступная",
+  "directMessage.removeFromGroup.description": "Вы ўпэўнены, што хочаце выдаліць {{username}} з гэтай групы?",
   "directMessage.selectConversation": "Абярыце размову для пачатку зносін",
   "directMessage.yourMessages": "Вашы паведамленні",
   "discover.about": "Пра",

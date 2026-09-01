@@ -2510,6 +2510,7 @@
   "directMessage.remove.button": "Confirmar",
   "directMessage.remove.content": "A conversa neste canal não está mais disponível!",
   "directMessage.remove.title": "Conversa indisponível",
+  "directMessage.removeFromGroup.description": "Tem certeza de que deseja remover {{username}} deste grupo?",
   "directMessage.selectConversation": "Selecione uma conversa para começar a conversar",
   "directMessage.yourMessages": "Suas mensagens",
   "discover.about": "Sobre",

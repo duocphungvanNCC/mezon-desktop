@@ -2509,6 +2509,7 @@
   "directMessage.remove.button": "Bevestigen",
   "directMessage.remove.content": "Dit gesprek in het kanaal is niet meer beschikbaar!",
   "directMessage.remove.title": "Gesprek niet beschikbaar",
+  "directMessage.removeFromGroup.description": "Weet je zeker dat je {{username}} uit deze groep wilt verwijderen?",
   "directMessage.selectConversation": "Kies een gesprek om te beginnen met chatten",
   "directMessage.yourMessages": "Jouw berichten",
   "discover.about": "Over",

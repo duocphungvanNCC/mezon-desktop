@@ -2510,6 +2510,7 @@
   "directMessage.remove.button": "Bekräfta",
   "directMessage.remove.content": "Samtal i denna kanal är inte längre tillgänglig!",
   "directMessage.remove.title": "Samtal inte tillgänglig",
+  "directMessage.removeFromGroup.description": "Är du säker på att du vill ta bort {{username}} från den här gruppen?",
   "directMessage.selectConversation": "Välj ett samtal för att börja chatta",
   "directMessage.yourMessages": "Dina meddelanden",
   "discover.about": "Om",

@@ -2509,6 +2509,7 @@
   "directMessage.remove.button": "Підтвердити",
   "directMessage.remove.content": "Розмова в цьому каналі більше недоступна!",
   "directMessage.remove.title": "Розмова недоступна",
+  "directMessage.removeFromGroup.description": "Ви впевнені, що хочете видалити {{username}} з цієї групи?",
   "directMessage.selectConversation": "Оберіть розмову для початку спілкування",
   "directMessage.yourMessages": "Ваші повідомлення",
   "discover.about": "Про",

@@ -2748,6 +2748,7 @@
   "directMessage.remove.button": "Подтвердить",
   "directMessage.remove.content": "Этот разговор больше недоступен!",
   "directMessage.remove.title": "Чат недоступен",
+  "directMessage.removeFromGroup.description": "Вы уверены, что хотите удалить {{username}} из этой группы?",
   "directMessage.selectConversation": "Выберите разговор, чтобы начать переписку",
   "directMessage.yourMessages": "Ваши сообщения",
   "discover.about": "О",

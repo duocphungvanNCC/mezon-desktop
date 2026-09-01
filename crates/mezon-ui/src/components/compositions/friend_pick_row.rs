@@ -37,7 +37,7 @@ impl FriendPickRow {
         }
     }
 
-    pub fn matches_query(&self, query: &str) -> bool {
+    pub fn matches_lowercase_query(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
         }
@@ -155,14 +155,14 @@ mod tests {
 
     #[test]
     fn empty_query_matches_everything() {
-        assert!(row("Alice", "alice").matches_query(""));
+        assert!(row("Alice", "alice").matches_lowercase_query(""));
     }
 
     #[test]
     fn matches_display_name_and_username_case_insensitively() {
         let row = row("Alice Nguyen", "alice99");
-        assert!(row.matches_query("nguyen"));
-        assert!(row.matches_query("alice9"));
-        assert!(!row.matches_query("bob"));
+        assert!(row.matches_lowercase_query("nguyen"));
+        assert!(row.matches_lowercase_query("alice9"));
+        assert!(!row.matches_lowercase_query("bob"));
     }
 }
