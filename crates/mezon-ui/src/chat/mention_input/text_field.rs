@@ -36,6 +36,7 @@ use crate::util::text_edit::{
 };
 
 const MASK: char = '\u{2022}';
+const MEASURE_CACHE_ENTRIES: usize = 4;
 const MAX_VISIBLE_LINES: usize = 10;
 
 struct DocLine {
@@ -192,7 +193,7 @@ pub(crate) struct MentionInputState {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
-    measured_for: Option<(SharedString, Pixels)>,
+    measure_cache: Vec<(SharedString, Pixels, usize)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -241,7 +242,7 @@ impl MentionInputState {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
-            measured_for: None,
+            measure_cache: Vec::new(),
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -1429,13 +1430,14 @@ impl MentionTextElement {
             return input.visible_line_count();
         }
         let display_text = input.display_text();
-        if input
-            .measured_for
-            .as_ref()
-            .is_some_and(|(text, measured)| *measured == width && *text == display_text)
+        if let Some((_, _, rows)) = input
+            .measure_cache
+            .iter()
+            .find(|(text, cached_width, _)| *cached_width == width && *text == display_text)
         {
-            return input.visible_line_count();
+            return (*rows).max(input.line_count);
         }
+        let hard_lines = input.line_count;
         let marked_range = input.marked_range.clone();
         let brand_color: Hsla = cx.theme().brand.into();
         let emoji_color: Hsla = rgb(EMOJI_SPAN_COLOR).into();
@@ -1478,10 +1480,10 @@ impl MentionTextElement {
             .max(line_height);
         let rows = (total_h / line_height).round().max(1.) as usize;
         state.update(cx, |input, _| {
-            input.measured_rows = rows;
-            input.measured_for = Some((display_text, width));
+            input.measure_cache.insert(0, (display_text, width, rows));
+            input.measure_cache.truncate(MEASURE_CACHE_ENTRIES);
         });
-        state.read(cx).visible_line_count()
+        rows.max(hard_lines)
     }
 }
 
