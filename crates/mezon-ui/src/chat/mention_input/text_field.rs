@@ -780,10 +780,13 @@ impl MentionInputState {
         window.show_character_palette();
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let images: Vec<Image> = item
             .entries()
             .iter()
