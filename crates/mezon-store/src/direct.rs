@@ -81,6 +81,10 @@ pub enum DirectEvent {
     /// message, read-state change) so consumers can skip irrelevant channels;
     /// `None` means a bulk change (fetch page, reset) — treat as "anything".
     Changed { channel_id: Option<ChannelId> },
+    /// The signed-in user is no longer part of `channel_id` — removed, or left
+    /// on their own. The conversation is already gone from the store, so a view
+    /// sitting on it has to leave.
+    Removed { channel_id: ChannelId },
 }
 
 const DM_PAGE_SIZE: i32 = 500;
@@ -1045,6 +1049,7 @@ impl DirectMessageStore {
         if self.current.map(|(id, _)| id) == Some(channel_id) {
             self.current = None;
         }
+        cx.emit(DirectEvent::Removed { channel_id });
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -2744,7 +2749,9 @@ mod tests {
             let store = dm_store(cx);
             let collected = seen.clone();
             let sub = cx.subscribe(&store, move |_, event: &DirectEvent, _| {
-                let DirectEvent::Changed { channel_id } = event;
+                let DirectEvent::Changed { channel_id } = event else {
+                    return;
+                };
                 collected.lock().expect("lock").push(*channel_id);
             });
             store.update(cx, |store, cx| {

@@ -298,7 +298,9 @@ impl MemberListPanel {
                 );
                 subs.push(
                     cx.subscribe(&DirectMessageStore::global(cx), |this, _, event, cx| {
-                        let DirectEvent::Changed { channel_id } = event;
+                        let DirectEvent::Changed { channel_id } = event else {
+                            return;
+                        };
                         let relevant = match channel_id {
                             Some(id) => shows_group(*id, cx),
                             None => true,
