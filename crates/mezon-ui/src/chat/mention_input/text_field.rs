@@ -208,6 +208,12 @@ pub(crate) struct MentionInputState {
     _window_activation_sub: Subscription,
 }
 
+impl MentionInputState {
+    pub(crate) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+}
+
 impl EventEmitter<MentionFieldEvent> for MentionInputState {}
 
 impl MentionInputState {

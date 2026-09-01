@@ -2132,6 +2132,10 @@ impl MentionInput {
         cx.set_global(ActiveComposer(entity.downgrade()));
     }
 
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<ActiveComposer>()
             .and_then(|composer| composer.0.upgrade())
@@ -2963,6 +2967,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -3031,6 +3036,8 @@ impl Render for MentionInput {
             });
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()

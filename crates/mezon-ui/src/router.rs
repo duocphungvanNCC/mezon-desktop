@@ -297,6 +297,10 @@ impl Router {
         self.current.clone()
     }
 
+    pub fn route_ref(&self) -> &Route {
+        &self.current
+    }
+
     pub fn conversation_channel_id(&self) -> Option<ChannelId> {
         match &self.current {
             Route::Channel { channel_id, .. }
@@ -356,6 +360,10 @@ impl Router {
                 self.backward.pop_front();
             }
         }
+    }
+
+    pub fn recently_visited(&self) -> impl DoubleEndedIterator<Item = &Route> {
+        self.backward.iter().rev()
     }
 
     pub fn can_go_back(&self) -> bool {

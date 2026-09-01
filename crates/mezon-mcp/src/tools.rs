@@ -99,6 +99,25 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "tour_state" => self.send_ui_result(|reply| McpCommand::TourState { reply }).await,
+            "tour_start" => {
+                self.require_write_mode("tour_start")?;
+                let track = arguments
+                    .get("track")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::TourStart { track, reply })
+                    .await
+            }
+            "tour_advance" => {
+                self.require_write_mode("tour_advance")?;
+                let forward = arguments
+                    .get("forward")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::TourAdvance { forward, reply })
+                    .await
+            }
             "scroll_wheel" => {
                 let delta_y = arguments
                     .get("delta_y")

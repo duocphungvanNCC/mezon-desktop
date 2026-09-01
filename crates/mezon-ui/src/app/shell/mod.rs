@@ -93,8 +93,8 @@ impl Render for StackedModalHost {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_overlay()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_overlay(cx)
     }
 }
 
@@ -1448,7 +1448,7 @@ impl Shell {
     }
 
     /// The overlay (modal backdrop + toast stack), rendered on top by `RootView`.
-    pub fn render_overlay(&self) -> impl IntoElement {
+    pub fn render_overlay(&self, cx: &App) -> impl IntoElement {
         let modal = self.modal.clone();
         let fullscreen = self.modal_fullscreen;
         let modal_underlay = self
@@ -1529,6 +1529,7 @@ impl Shell {
                         .into_any_element()
                 }))
             })
+            .children(crate::tour::layer(cx))
             .when(has_toasts, |el| {
                 el.child(deferred(
                     div()

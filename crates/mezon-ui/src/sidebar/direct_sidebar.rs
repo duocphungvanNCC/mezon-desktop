@@ -670,6 +670,7 @@ impl DirectSidebar {
         div()
             .id("dm-friends")
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsButton))
             .w_full()
             .flex()
             .flex_row()
@@ -867,6 +868,7 @@ impl Render for DirectSidebar {
         });
 
         div()
+            .children(crate::tour::probe(crate::tour::TourAnchor::DirectList))
             .flex()
             .flex_col()
             .size_full()
