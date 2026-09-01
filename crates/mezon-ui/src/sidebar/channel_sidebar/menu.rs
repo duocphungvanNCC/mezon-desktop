@@ -24,7 +24,7 @@ pub(super) struct ChannelMenuPermissions {
 
 impl ChannelMenuPermissions {
     pub(super) fn resolve(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> Self {
-        let can_manage_channel = can_manage_channel(clan_id, cx);
+        let can_manage_channel = can_manage_channel(clan_id, channel_id, cx);
         let is_welcome_channel = mezon_store::ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(clan_id)

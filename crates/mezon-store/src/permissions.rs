@@ -17,14 +17,6 @@ pub const PERMISSION_MANAGE_CLAN: &str = "manage-clan";
 
 pub const PERMISSION_SCOPE_CHANNEL: i32 = 2;
 
-pub fn can_manage_channel(clan_id: ClanId, cx: &App) -> bool {
-    PermissionStore::try_global(cx).is_some_and(|permissions| {
-        let permissions = permissions.read(cx);
-        permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-            || permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx)
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDefinition {
     pub id: i64,
@@ -444,23 +436,25 @@ mod tests {
         });
     }
 
+    /// `check` is level-based, and mezon-api seeds manage-channel below manage-clan
+    /// (`migrate/sql/20260408173801_initial_insert.sql`), so holding manage-clan already grants
+    /// manage-channel. Anything that ORs the two slugs together is testing nothing.
     #[gpui::test]
-    fn manage_clan_grants_channel_management_without_manage_channel(cx: &mut TestAppContext) {
+    fn manage_clan_level_already_covers_manage_channel(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = init_stores(AuthState::NotAuthenticated, cx);
-            store.update(cx, |store, _| {
-                store.catalog.insert(PERMISSION_MANAGE_CLAN.into(), 5);
-                store.catalog.insert(PERMISSION_MANAGE_CHANNEL.into(), 7);
-                store.max_level_by_clan.insert(TEST_CLAN, 5);
+            store.update(cx, |store, cx| {
+                store.catalog.insert(PERMISSION_MANAGE_CHANNEL.into(), 2);
+                store.catalog.insert(PERMISSION_MANAGE_CLAN.into(), 3);
+
+                store.max_level_by_clan.insert(TEST_CLAN, 3);
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CHANNEL, cx));
+
+                store.max_level_by_clan.insert(TEST_CLAN, 1);
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_CHANNEL, cx));
             });
-
-            assert!(can_manage_channel(TEST_CLAN, cx));
-
-            store.update(cx, |store, _| {
-                store.max_level_by_clan.insert(TEST_CLAN, 4);
-            });
-
-            assert!(!can_manage_channel(TEST_CLAN, cx));
         });
     }
 

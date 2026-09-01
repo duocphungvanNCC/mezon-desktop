@@ -318,7 +318,7 @@ impl ChannelSettingScreen {
         let welcome_channel_id = ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(self.clan_id);
-        let has_manage_channel = can_manage_channel(self.clan_id, cx);
+        let has_manage_channel = can_manage_channel(self.clan_id, self.channel_id, cx);
         ChannelTabContext {
             channel_type,
             is_thread: channel.is_thread(),
