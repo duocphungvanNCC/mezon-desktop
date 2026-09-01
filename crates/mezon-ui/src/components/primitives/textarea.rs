@@ -1193,24 +1193,26 @@ impl IntoElement for TextAreaElement {
 }
 
 impl TextAreaElement {
-    fn measure_rows_for_layout(&mut self, window: &mut Window, cx: &mut App) {
-        let input = self.input.read(cx);
+    fn measured_rows(
+        state: &Entity<TextArea>,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> usize {
+        let input = state.read(cx);
         if input.single_line || input.content.is_empty() {
-            return;
+            return 1;
         }
-        let Some(width) = input.last_bounds.map(|bounds| bounds.size.width) else {
-            return;
-        };
         if width <= Pixels::ZERO {
-            return;
+            return input.visible_line_count();
         }
         let display_text = input.content.clone();
         if input
             .measured_for
             .as_ref()
-            .is_some_and(|(text, measured_width)| *measured_width == width && *text == display_text)
+            .is_some_and(|(text, measured)| *measured == width && *text == display_text)
         {
-            return;
+            return input.visible_line_count();
         }
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1227,10 +1229,11 @@ impl TextAreaElement {
             .shape_text(display_text.clone(), font_size, &[run], Some(width), None)
             .unwrap_or_default();
         let rows = wrapped.len().max(1);
-        self.input.update(cx, |input, _| {
+        state.update(cx, |input, _| {
             input.measured_rows = rows;
             input.measured_for = Some((display_text, width));
         });
+        state.read(cx).visible_line_count()
     }
 }
 
@@ -1253,13 +1256,29 @@ impl Element for TextAreaElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        self.measure_rows_for_layout(window, cx);
-        let input = self.input.read(cx);
-        let visible = input.visible_line_count().clamp(1, input.max_visible_lines);
+        let max_visible_lines = self.input.read(cx).max_visible_lines;
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
-        style.size.height = (window.line_height() * visible as f32).into();
-        (window.request_layout(style, [], cx), ())
+        let state = self.input.clone();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                let width = known_dimensions.width.or(match available_space.width {
+                    gpui::AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                });
+                let line_count = match width {
+                    Some(width) => Self::measured_rows(&state, width, window, cx),
+                    None => state.read(cx).visible_line_count(),
+                };
+                let visible = line_count.clamp(1, max_visible_lines);
+                let height = known_dimensions
+                    .height
+                    .unwrap_or(window.line_height() * visible as f32);
+                gpui::size(width.unwrap_or(Pixels::ZERO), height)
+            },
+        );
+        (layout_id, ())
     }
 
     fn prepaint(
