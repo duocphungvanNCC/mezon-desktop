@@ -198,6 +198,9 @@ impl TourState {
         let Some(track) = track(id) else {
             return;
         };
+        if !track.precondition.is_met(&current_route(cx)) {
+            return;
+        }
         if entity.read(cx).is_active() {
             return;
         }
