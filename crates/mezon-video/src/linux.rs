@@ -215,7 +215,7 @@ fn gstreamer_probe(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
             return None;
         }
     };
-    let pipeline = PosterPipeline::open(uri.as_str())?;
+    let pipeline = PosterPipeline::open(uri.as_str(), max_poster_edge)?;
     let probe = pipeline.probe(max_poster_edge);
     if probe.is_none() {
         report_bus_errors(&pipeline.playbin, "video probe");
@@ -264,14 +264,25 @@ struct PosterPipeline {
 }
 
 impl PosterPipeline {
-    fn open(uri: &str) -> Option<Self> {
+    fn open(uri: &str, max_poster_edge: u32) -> Option<Self> {
         let playbin = gst::ElementFactory::make("playbin").build().ok()?;
+        // Ask playsink for a frame no larger than the poster, so a 4k clip is scaled
+        // down inside the pipeline instead of materialising a full-size BGRA buffer
+        // we would only throw away. A range (not a fixed size) leaves anything
+        // already small alone; square pixels are what makes videoscale spend the
+        // range on the pixel count -- left free it keeps the aspect ratio in the
+        // pixel-aspect-ratio instead, and the jpeg we write has nowhere to put that.
+        let mut caps = gst_video::VideoCapsBuilder::new().format(gst_video::VideoFormat::Bgra);
+        if let Ok(edge) = i32::try_from(max_poster_edge)
+            && edge > 0
+        {
+            caps = caps
+                .width_range(1..=edge)
+                .height_range(1..=edge)
+                .pixel_aspect_ratio(gst::Fraction::new(1, 1));
+        }
         let appsink = gst_app::AppSink::builder()
-            .caps(
-                &gst_video::VideoCapsBuilder::new()
-                    .format(gst_video::VideoFormat::Bgra)
-                    .build(),
-            )
+            .caps(&caps.build())
             .max_buffers(1)
             .drop(false)
             .sync(false)
@@ -312,11 +323,24 @@ impl PosterPipeline {
             false,
             max_poster_edge,
         );
+        let (width, height) = self.natural_size().unwrap_or((width, height));
         Some(crate::VideoProbe {
             width,
             height,
             poster_jpeg,
         })
+    }
+
+    /// The decoded size, before the caps above scaled the frame down. The sample we
+    /// prerolled carries the scaled size, but `width`/`height` go on the wire for
+    /// every other client to lay the video out with, so they must be the real ones.
+    fn natural_size(&self) -> Option<(u32, u32)> {
+        let pad = self
+            .playbin
+            .emit_by_name::<Option<gst::Pad>>("get-video-pad", &[&0i32])?;
+        let caps = pad.current_caps()?;
+        let info = gst_video::VideoInfo::from_caps(&caps).ok()?;
+        Some((info.width(), info.height()))
     }
 }
 
