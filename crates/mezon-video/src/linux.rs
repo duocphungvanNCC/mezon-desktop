@@ -72,15 +72,21 @@ impl PlayerImpl {
         if let Some(bus) = self.playbin.bus() {
             while let Some(message) = bus.pop() {
                 match message.view() {
-                    gst::message::MessageView::Error(_) => {
-                        self.failed.set(true);
-                    }
+                    gst::message::MessageView::Error(error) => self.note_error(error),
                     gst::message::MessageView::Eos(_) => {
                         let _ = self.playbin.set_state(gst::State::Paused);
                     }
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Latch the failure, logging only the first: `copy_frame` drains the bus on
+    /// every frame and the same error stays there for the life of the pipeline.
+    fn note_error(&self, error: &gst::message::Error) {
+        if !self.failed.replace(true) {
+            log_pipeline_error(error, "playback");
         }
     }
 
@@ -198,11 +204,47 @@ pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
             return None;
         }
     };
-    let probe = PosterPipeline::open(uri.as_str())?.probe(max_poster_edge);
+    let pipeline = PosterPipeline::open(uri.as_str())?;
+    let probe = pipeline.probe(max_poster_edge);
     if probe.is_none() {
+        report_bus_errors(&pipeline.playbin, "video probe");
         tracing::warn!(target: "mezon_video", "video probe produced no frame");
     }
     probe
+}
+
+/// Log a pipeline failure, naming the codec when the cause is a decoder this box
+/// does not have. Unlike macOS and Windows, Linux ships no decoder of its own: with
+/// no h264 plugin installed `playbin` simply never prerolls, so without this the
+/// probe is indistinguishable from a corrupt file.
+fn log_pipeline_error(error: &gst::message::Error, what: &str) {
+    let detail = error.debug().unwrap_or_default();
+    tracing::warn!(
+        target: "mezon_video",
+        error = %error.error(),
+        detail = %detail,
+        "gstreamer {what} failed"
+    );
+    if error.error().matches(gst::CoreError::MissingPlugin) {
+        tracing::warn!(
+            target: "mezon_video",
+            "no gstreamer decoder installed for this video: install gstreamer1.0-libav \
+             (Debian/Ubuntu), gstreamer1-plugin-libav (Fedora) or gst-libav (Arch)"
+        );
+    }
+}
+
+/// Drain whatever the pipeline left on its bus into the log. GStreamer reports a
+/// missing decoder there and nowhere else.
+fn report_bus_errors(element: &gst::Element, what: &str) {
+    let Some(bus) = element.bus() else {
+        return;
+    };
+    while let Some(message) = bus.pop() {
+        if let gst::message::MessageView::Error(error) = message.view() {
+            log_pipeline_error(error, what);
+        }
+    }
 }
 
 struct PosterPipeline {

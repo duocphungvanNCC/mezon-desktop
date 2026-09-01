@@ -8,6 +8,68 @@ for tool in curl tar openssl; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' is required" >&2; exit 1; }
 done
 
+# The tarball holds only the binary: unlike the .deb, nothing here pulls in the
+# GStreamer decoders Mezon needs at runtime. Without one the app still starts, but
+# videos neither play nor get a thumbnail, and GStreamer reports that only in the
+# log -- so install it here, the same way `scripts/linux-deps` installs build deps,
+# and fall back to naming the package if we cannot.
+if [ "$(id -u)" -eq 0 ]; then
+  maysudo=''
+else
+  maysudo="$(command -v sudo || true)"
+fi
+
+video_decoder_installed() {
+  if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    if gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 ||
+       gst-inspect-1.0 openh264dec >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+  local dir
+  for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
+             /usr/lib/*/gstreamer-1.0 /usr/local/lib/gstreamer-1.0; do
+    if [[ -e "${dir}/libgstlibav.so" || -e "${dir}/libgstopenh264.so" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+video_decoder_hint() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "sudo apt-get install -y gstreamer1.0-libav gstreamer1.0-plugins-good"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "sudo pacman -S --needed gst-libav gst-plugins-good"
+  elif command -v zypper >/dev/null 2>&1; then
+    echo "sudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good"
+  else
+    echo "install your distribution's GStreamer libav (or openh264) plugin"
+  fi
+}
+
+install_video_decoder() {
+  if [ "$(id -u)" -ne 0 ] && [ -z "$maysudo" ]; then
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    $maysudo apt-get update
+    $maysudo apt-get install -y --no-install-recommends \
+      gstreamer1.0-libav gstreamer1.0-plugins-good
+  elif command -v dnf >/dev/null 2>&1; then
+    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good
+  elif command -v pacman >/dev/null 2>&1; then
+    $maysudo pacman -S --needed --noconfirm gst-libav gst-plugins-good
+  elif command -v zypper >/dev/null 2>&1; then
+    $maysudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good
+  else
+    return 1
+  fi
+}
+
 arch="$(uname -m)"
 case "$arch" in
   x86_64 | aarch64) ;;
@@ -87,3 +149,16 @@ case ":$PATH:" in
   *":${bin_dir}:"*) echo "Run: mezon" ;;
   *) echo "Note: ${bin_dir} is not in PATH; run ${app_dir}/mezon or add it to PATH" ;;
 esac
+
+if ! video_decoder_installed; then
+  echo ""
+  echo "==> No GStreamer H.264 decoder found; installing one (videos need it)"
+  if install_video_decoder && video_decoder_installed; then
+    echo "==> Video decoder installed"
+  else
+    echo ""
+    echo "Warning: could not install a GStreamer H.264 decoder automatically."
+    echo "Videos will not play, and videos you send will have no thumbnail, until you run:"
+    echo "    $(video_decoder_hint)"
+  fi
+fi
