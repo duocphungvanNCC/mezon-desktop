@@ -23,7 +23,7 @@ use super::sound_setting_page::SoundSettingPage;
 use super::sticker_setting_page::StickerSettingPage;
 use crate::theme::{ActiveTheme, Theme};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClanSettingsPage {
     Overview,
     Roles,
@@ -632,21 +632,19 @@ impl Render for ClanSettingScreen {
             .is_some_and(|clan| clan.is_onboarding);
 
         fn nav_item(
-            id: &'static str,
+            page: ClanSettingsPage,
             label: SharedString,
             is_active: bool,
             theme: &Theme,
             path: String,
             status: Option<bool>,
             status_label: Option<SharedString>,
-            cx: &App,
         ) -> impl IntoElement {
             div()
-                .id(id)
+                .id(page.slug())
                 .relative()
                 .children(crate::tour::probe(
-                    cx,
-                    crate::tour::TourAnchor::ClanSettingsRow(id),
+                    crate::tour::TourAnchor::ClanSettingsRow(page),
                 ))
                 .flex()
                 .items_center()
@@ -723,7 +721,7 @@ impl Render for ClanSettingScreen {
             for item in visible_pages {
                 let path = format!("/chat/clans/{}/settings/{}", clan_id.get(), item.slug());
                 nav = nav.child(nav_item(
-                    item.slug(),
+                    item,
                     self.page_title(item, &locale),
                     page == item,
                     &theme,
@@ -740,27 +738,13 @@ impl Render for ClanSettingScreen {
                         )
                         .into()
                     }),
-                    cx,
                 ));
             }
             nav = nav.child(div().mt(px(4.0)).border_b_1().border_color(theme.border));
         }
 
         nav = nav.child(
-            div()
-                .id("clan-settings-tour")
-                .mt(px(4.0))
-                .w_full()
-                .px(px(10.0))
-                .py(px(4.0))
-                .rounded(px(4.0))
-                .text_base()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.tokens.text_theme_primary)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.bg_hover))
-                .child(mezon_i18n::t(&locale, "tour.settingsEntry"))
-                .on_click(|_, window, cx| crate::tour::TourLauncher::open(window, cx)),
+            crate::tour::settings_entry_row("clan-settings-tour", &locale, &theme).mt(px(4.0)),
         );
 
         let locale_for_delete = locale.clone();
@@ -804,10 +788,7 @@ impl Render for ClanSettingScreen {
                 v_flex()
                     .id("clan-settings-nav")
                     .relative()
-                    .children(crate::tour::probe(
-                        cx,
-                        crate::tour::TourAnchor::ClanSettingsNav,
-                    ))
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanSettingsNav))
                     .flex_shrink_0()
                     .w(gpui::relative(0.25))
                     .min_w(px(220.0))

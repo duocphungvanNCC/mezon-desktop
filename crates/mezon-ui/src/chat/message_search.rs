@@ -1508,7 +1508,6 @@ pub fn render_header_search_bar(
     div()
         .relative()
         .children(crate::tour::probe(
-            cx,
             crate::tour::TourAnchor::ChannelHeaderSearch,
         ))
         .flex_shrink_0()

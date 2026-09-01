@@ -362,6 +362,10 @@ impl Router {
         }
     }
 
+    pub fn recently_visited(&self) -> impl DoubleEndedIterator<Item = &Route> {
+        self.backward.iter().rev()
+    }
+
     pub fn can_go_back(&self) -> bool {
         !self.backward.is_empty()
     }

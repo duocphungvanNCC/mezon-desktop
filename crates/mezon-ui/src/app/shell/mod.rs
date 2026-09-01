@@ -1435,7 +1435,6 @@ impl Shell {
             .top_0()
             .left_0()
             .size_full()
-            .children(crate::tour::layer(cx))
             .when_some(modal_underlay, |el, (view, fullscreen)| {
                 el.child(deferred(if fullscreen {
                     div()
@@ -1503,6 +1502,7 @@ impl Shell {
                         .into_any_element()
                 }))
             })
+            .children(crate::tour::layer(cx))
             .when(has_toasts, |el| {
                 el.child(deferred(
                     div()

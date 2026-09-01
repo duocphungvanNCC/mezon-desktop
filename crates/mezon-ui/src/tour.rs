@@ -7,9 +7,16 @@ mod tracks;
 use gpui::{App, AppContext as _, KeyBinding};
 
 pub use anchor::{TourAnchor, probe};
-pub use launcher::TourLauncher;
-pub use state::{TourState, TourStatus, auto_start_core, layer, pending_core_track, shutdown};
-pub use tracks::TRACKS;
+pub use launcher::{TourLauncher, settings_entry_row};
+pub use state::{
+    TourState, TourStatus, auto_start_core, eligibility_undecided, layer, pending_core_track,
+    shutdown,
+};
+
+pub struct McpAdvance {
+    pub moved: bool,
+    pub still_active: bool,
+}
 
 pub fn mcp_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Option<&'static str>> {
     let handle = crate::app::main_window::handle(cx)
@@ -45,19 +52,22 @@ pub fn auto_start_if_context_holds(expected: &'static str, cx: &mut App) -> bool
         .unwrap_or(false)
 }
 
-pub fn mcp_advance(forward: bool, cx: &mut App) -> anyhow::Result<bool> {
+pub fn mcp_advance(forward: bool, cx: &mut App) -> anyhow::Result<Option<McpAdvance>> {
     let handle = crate::app::main_window::handle(cx)
         .ok_or_else(|| anyhow::anyhow!("main window not found"))?;
     let Some(entity) = TourState::try_global(cx) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !entity.read(cx).is_active() {
-        return Ok(false);
+        return Ok(None);
     }
-    let moved = cx.update_window(handle, |_, window, cx| {
+    let advance = cx.update_window(handle, |_, window, cx| {
         entity.update(cx, |this, cx| this.advance(forward, window, cx))
     })?;
-    Ok(moved)
+    Ok(Some(McpAdvance {
+        moved: advance.moved,
+        still_active: advance.still_active,
+    }))
 }
 
 pub fn init(cx: &mut App) {

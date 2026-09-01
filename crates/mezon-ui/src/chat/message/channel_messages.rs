@@ -4933,7 +4933,7 @@ impl Render for ChannelMessages {
         });
         let selection_host = cx.entity().downgrade();
         let selection_state = self.selection.clone();
-        let tour_probe = crate::tour::probe(cx, crate::tour::TourAnchor::MessageTimeline);
+        let tour_probe = crate::tour::probe(crate::tour::TourAnchor::MessageTimeline);
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
         let content = div()

@@ -694,7 +694,7 @@ impl Render for FriendsPage {
 
         div()
             .relative()
-            .children(crate::tour::probe(cx, crate::tour::TourAnchor::FriendsPage))
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsPage))
             .flex()
             .flex_col()
             .flex_1()
@@ -786,10 +786,7 @@ impl FriendsPage {
         let add_button = div()
             .id("friend-add")
             .relative()
-            .children(crate::tour::probe(
-                cx,
-                crate::tour::TourAnchor::AddFriendButton,
-            ))
+            .children(crate::tour::probe(crate::tour::TourAnchor::AddFriendButton))
             .px_2()
             .py(px(6.))
             .rounded_lg()

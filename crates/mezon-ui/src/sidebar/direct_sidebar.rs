@@ -665,16 +665,12 @@ impl DirectSidebar {
         locale: &str,
         active: bool,
         pending: usize,
-        cx: &App,
     ) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
             .relative()
-            .children(crate::tour::probe(
-                cx,
-                crate::tour::TourAnchor::FriendsButton,
-            ))
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsButton))
             .w_full()
             .flex()
             .flex_row()
@@ -872,7 +868,7 @@ impl Render for DirectSidebar {
         });
 
         div()
-            .children(crate::tour::probe(cx, crate::tour::TourAnchor::DirectList))
+            .children(crate::tour::probe(crate::tour::TourAnchor::DirectList))
             .flex()
             .flex_col()
             .size_full()
@@ -883,7 +879,6 @@ impl Render for DirectSidebar {
                 &locale,
                 on_friends,
                 friend_pending,
-                cx,
             )))
             .when_some(pinned_rows, |el, rows| {
                 el.child(

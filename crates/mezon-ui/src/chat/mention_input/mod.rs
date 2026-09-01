@@ -2967,10 +2967,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
-                    .children(crate::tour::probe(
-                        cx,
-                        crate::tour::TourAnchor::ComposerTools,
-                    ))
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -3040,7 +3037,7 @@ impl Render for MentionInput {
 
         div()
             .relative()
-            .children(crate::tour::probe(cx, crate::tour::TourAnchor::Composer))
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()

@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Entity, FocusHandle, FontWeight, Global, Hsla,
-    IntoElement, MouseButton, Pixels, Point, RenderOnce, SharedString, Size, Window, deferred, div,
-    hsla, prelude::*, px, relative, size, svg,
+    AnyElement, AnyView, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight, Global,
+    Hsla, IntoElement, Pixels, Point, RenderOnce, SharedString, Size, Window, deferred, div, hsla,
+    prelude::*, px, relative, size, svg,
 };
 use mezon_store::Settings;
 
@@ -13,7 +13,7 @@ use super::overlay::{
 use super::tracks::{TOUR_VERSION, TRACKS, TourTrack, core_track_for, track};
 use crate::app::shell::Shell;
 use crate::components::primitives::{Button, ButtonVariants, ToastKind, h_flex, v_flex};
-use crate::router::Router;
+use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
 const CARET: Pixels = px(12.);
@@ -32,6 +32,11 @@ pub struct TourStatus {
     pub has_hole: bool,
 }
 
+pub struct TourAdvance {
+    pub moved: bool,
+    pub still_active: bool,
+}
+
 enum Phase {
     Idle,
     Arming {
@@ -46,10 +51,17 @@ enum Phase {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TourTrigger {
+    Auto,
+    Manual,
+}
+
 pub struct TourState {
     phase: Phase,
-    context: Option<&'static str>,
+    trigger: TourTrigger,
     epoch: u64,
+    probed_viewport: Size<Pixels>,
     restore_focus: Option<FocusHandle>,
     focus_handle: FocusHandle,
 }
@@ -61,8 +73,9 @@ impl TourState {
     pub fn init(cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| Self {
             phase: Phase::Idle,
-            context: None,
+            trigger: TourTrigger::Manual,
             epoch: 0,
+            probed_viewport: Size::default(),
             restore_focus: None,
             focus_handle: cx.focus_handle(),
         });
@@ -82,6 +95,13 @@ impl TourState {
     pub fn running_track(&self) -> Option<&'static str> {
         match &self.phase {
             Phase::Arming { track, .. } | Phase::Showing { track, .. } => Some(track.id),
+            Phase::Idle => None,
+        }
+    }
+
+    fn running(&self) -> Option<&'static TourTrack> {
+        match &self.phase {
+            Phase::Arming { track, .. } | Phase::Showing { track, .. } => Some(track),
             Phase::Idle => None,
         }
     }
@@ -136,7 +156,12 @@ impl TourState {
         })
     }
 
-    pub fn advance(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn advance(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> TourAdvance {
         let before = match &self.phase {
             Phase::Showing { index, .. } => Some(*index),
             _ => None,
@@ -144,19 +169,29 @@ impl TourState {
         if forward {
             self.next(window, cx);
         } else {
-            self.back(window, cx);
+            self.back(cx);
         }
-        match &self.phase {
-            Phase::Showing { index, .. } => Some(*index) != before,
-            _ => before.is_some(),
+        let after = match &self.phase {
+            Phase::Showing { index, .. } => Some(*index),
+            _ => None,
+        };
+        TourAdvance {
+            moved: after.is_some() && after != before,
+            still_active: self.is_active(),
         }
-    }
-
-    pub fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel(window, cx);
     }
 
     pub fn start_track(id: &str, window: &mut Window, cx: &mut App) {
+        Self::start_track_restoring(id, TourTrigger::Manual, None, window, cx);
+    }
+
+    pub fn start_track_restoring(
+        id: &str,
+        trigger: TourTrigger,
+        restore_focus: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let Some(entity) = Self::try_global(cx) else {
             return;
         };
@@ -166,22 +201,34 @@ impl TourState {
         if entity.read(cx).is_active() {
             return;
         }
-        entity.update(cx, |this, cx| this.start(track, window, cx));
+        entity.update(cx, |this, cx| {
+            this.trigger = trigger;
+            this.restore_focus = restore_focus.or_else(|| window.focused(cx));
+            this.start(track, window, cx);
+        });
     }
 
     fn start(&mut self, track: &'static TourTrack, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restore_focus.is_none() {
-            self.restore_focus = window.focused(cx);
-        }
-        self.context = current_context(cx);
+        self.arm(track, 0, true, window, cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    fn arm(
+        &mut self,
+        track: &'static TourTrack,
+        index: usize,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         TourAnchors::set_probing(cx, true);
         self.epoch = TourAnchors::begin_epoch(cx);
+        self.probed_viewport = window.viewport_size();
         self.phase = Phase::Arming {
             track,
-            index: 0,
-            forward: true,
+            index,
+            forward,
         };
-        window.focus(&self.focus_handle, cx);
         window.refresh();
         cx.notify();
     }
@@ -191,10 +238,8 @@ impl TourState {
         track: &'static TourTrack,
         index: usize,
         forward: bool,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let _ = window;
         let visible = self.visible_steps(track, cx);
         let Some(landed) = land(&visible, index, forward) else {
             return false;
@@ -213,12 +258,12 @@ impl TourState {
             return;
         };
         let (track, index) = (*track, *index);
-        if index + 1 >= track.steps.len() || !self.show(track, index + 1, true, window, cx) {
+        if index + 1 >= track.steps.len() || !self.show(track, index + 1, true, cx) {
             self.finish(window, cx);
         }
     }
 
-    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn back(&mut self, cx: &mut Context<Self>) {
         let Phase::Showing { track, index, .. } = &self.phase else {
             return;
         };
@@ -226,44 +271,36 @@ impl TourState {
         let Some(previous) = index.checked_sub(1) else {
             return;
         };
-        self.show(track, previous, false, window, cx);
+        self.show(track, previous, false, cx);
     }
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let completed = match &self.phase {
-            Phase::Arming { track, .. } | Phase::Showing { track, .. } => {
-                let shown = self.visible_steps(track, cx).len();
-                (shown * 2 >= track.steps.len()).then_some(track.id)
-            }
-            Phase::Idle => None,
+        self.end(Ending::Dismissed, window, cx);
+    }
+
+    fn abandon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end(Ending::Interrupted, window, cx);
+    }
+
+    fn end(&mut self, ending: Ending, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(track) = self.running() else {
+            return;
         };
+        let id = track.id;
         self.phase = Phase::Idle;
-        self.context = None;
         TourAnchors::set_probing(cx, false);
-        if let Some(focus) = self.restore_focus.take() {
-            window.focus(&focus, cx);
+        match (ending, self.restore_focus.take()) {
+            (Ending::Dismissed, Some(focus)) => window.focus(&focus, cx),
+            _ => window.blur(),
         }
-        if let Some(id) = completed {
+        if ending == Ending::Dismissed {
             mark_seen(id, cx);
         }
         cx.notify();
     }
 
-    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.phase, Phase::Idle) {
-            return;
-        }
-        self.phase = Phase::Idle;
-        self.context = None;
-        TourAnchors::set_probing(cx, false);
-        if let Some(focus) = self.restore_focus.take() {
-            window.focus(&focus, cx);
-        }
-        cx.notify();
-    }
-
     fn visible_steps(&self, track: &'static TourTrack, cx: &App) -> Vec<usize> {
-        let filtered = track
+        track
             .steps
             .iter()
             .enumerate()
@@ -272,8 +309,7 @@ impl TourState {
                 Some(anchor) => TourAnchors::live(cx, anchor, self.epoch).is_some(),
             })
             .map(|(index, _)| index)
-            .collect();
-        never_empty(filtered, track.steps.len())
+            .collect()
     }
 
     fn resolve(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -286,21 +322,30 @@ impl TourState {
             return;
         };
         let (track, index, forward) = (*track, *index, *forward);
-        if self.show(track, index, forward, window, cx) {
+        if self.show(track, index, forward, cx) {
             return;
         }
-        self.finish(window, cx);
-        let message = mezon_i18n::t(&locale(cx), "tour.empty").to_string();
-        Shell::global(cx).update(cx, |shell, cx| shell.toast(ToastKind::Info, message, cx));
+        let announce = self.trigger == TourTrigger::Manual;
+        self.abandon(window, cx);
+        if announce {
+            let message = mezon_i18n::t(&locale(cx), "tour.empty").to_string();
+            Shell::global(cx).update(cx, |shell, cx| shell.toast(ToastKind::Info, message, cx));
+        }
+    }
+
+    fn reprobe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Phase::Showing { track, index, .. } = &self.phase else {
+            return;
+        };
+        let (track, index) = (*track, *index);
+        self.arm(track, index, true, window, cx);
     }
 }
 
-fn never_empty(visible: Vec<usize>, step_count: usize) -> Vec<usize> {
-    if visible.is_empty() {
-        (0..step_count).collect()
-    } else {
-        visible
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Dismissed,
+    Interrupted,
 }
 
 fn land(visible: &[usize], index: usize, forward: bool) -> Option<usize> {
@@ -318,9 +363,8 @@ fn land(visible: &[usize], index: usize, forward: bool) -> Option<usize> {
     }
 }
 
-fn current_context(cx: &App) -> Option<&'static str> {
-    let router = Router::global(cx);
-    core_track_for(router.read(cx).route_ref()).map(|track| track.id)
+fn current_route(cx: &App) -> Route {
+    Router::global(cx).read(cx).route()
 }
 
 fn locale(cx: &App) -> String {
@@ -354,12 +398,10 @@ fn mark_seen(track_id: &str, cx: &mut App) {
     }
 }
 
-pub const ALWAYS_AUTO_START_IN_DEBUG: bool = false;
+pub fn eligibility_undecided(cx: &App) -> bool {
+    Settings::try_global(cx).is_some_and(|settings| settings.read(cx).tour_eligible.is_none())
+}
 
-/// Decided once, the first time the clan list has actually been fetched, and then kept:
-/// a fresh account with no clans is the audience for the tour, and an account that already
-/// has clans is not. Deciding once rather than per launch keeps the clan and clan-settings
-/// tours available later, when the new user finally joins a clan.
 fn tour_eligible(cx: &mut App) -> bool {
     let Some(settings) = Settings::try_global(cx) else {
         return false;
@@ -383,7 +425,7 @@ fn tour_eligible(cx: &mut App) -> bool {
     eligible
 }
 
-fn track_done(track_id: &str, cx: &App) -> bool {
+pub fn track_done(track_id: &str, cx: &App) -> bool {
     Settings::try_global(cx).is_some_and(|settings| {
         let settings = settings.read(cx);
         settings.tour_seen_version >= TOUR_VERSION
@@ -392,8 +434,7 @@ fn track_done(track_id: &str, cx: &App) -> bool {
 }
 
 pub fn pending_core_track(cx: &mut App) -> Option<&'static str> {
-    let router = Router::global(cx);
-    let route = router.read(cx).route_ref().clone();
+    let route = current_route(cx);
     let track = core_track_for(&route)?;
     if !track.precondition.is_met(&route) {
         return None;
@@ -401,24 +442,48 @@ pub fn pending_core_track(cx: &mut App) -> Option<&'static str> {
     if !tour_eligible(cx) {
         return None;
     }
-    if !(cfg!(debug_assertions) && ALWAYS_AUTO_START_IN_DEBUG) && track_done(track.id, cx) {
+    if track_done(track.id, cx) {
         return None;
     }
     Some(track.id)
 }
 
-pub fn available_tracks(cx: &App) -> Vec<&'static TourTrack> {
+fn runs_a_track(route: &Route) -> bool {
+    TRACKS.iter().any(|track| track.precondition.is_met(route))
+}
+
+fn pick_host_route<'a>(
+    current: &'a Route,
+    mut recent: impl Iterator<Item = &'a Route>,
+) -> &'a Route {
+    if runs_a_track(current) {
+        return current;
+    }
+    recent.find(|route| runs_a_track(route)).unwrap_or(current)
+}
+
+pub fn host_route(cx: &App) -> Route {
     let router = Router::global(cx);
-    let route = router.read(cx).route_ref();
+    let router = router.read(cx);
+    pick_host_route(router.route_ref(), router.recently_visited()).clone()
+}
+
+pub fn available_tracks_for(route: &Route) -> Vec<&'static TourTrack> {
     TRACKS
         .iter()
         .filter(|track| track.precondition.is_met(route))
         .collect()
 }
 
-pub fn composer_is_composing(cx: &App) -> bool {
-    crate::chat::mention_input::MentionInput::active_composer(cx)
-        .is_some_and(|composer| composer.read(cx).is_composing(cx))
+fn composer_is_busy(cx: &App) -> bool {
+    crate::chat::mention_input::MentionInput::active_composer(cx).is_some_and(|composer| {
+        let composer = composer.read(cx);
+        if composer.is_composing(cx) {
+            return true;
+        }
+        let (text, _, attachments) = composer.current_content(cx);
+        !text.is_empty() || !attachments.is_empty()
+    })
 }
 
 pub fn auto_start_core(window: &mut Window, cx: &mut App) -> bool {
@@ -428,10 +493,13 @@ pub fn auto_start_core(window: &mut Window, cx: &mut App) -> bool {
     if TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active()) {
         return false;
     }
-    if composer_is_composing(cx) {
+    if Shell::global(cx).read(cx).has_modal() {
         return false;
     }
-    TourState::start_track(id, window, cx);
+    if composer_is_busy(cx) {
+        return false;
+    }
+    TourState::start_track_restoring(id, TourTrigger::Auto, None, window, cx);
     TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active())
 }
 
@@ -440,12 +508,18 @@ pub fn shutdown(cx: &mut App) {
     let Some(entity) = TourState::try_global(cx) else {
         return;
     };
+    if !entity.read(cx).is_active() {
+        return;
+    }
+    let handle = crate::app::main_window::handle(cx);
     entity.update(cx, |this, cx| {
         this.phase = Phase::Idle;
-        this.context = None;
         this.restore_focus = None;
         cx.notify();
     });
+    if let Some(handle) = handle {
+        handle.update(cx, |_, window, _| window.blur()).ok();
+    }
 }
 
 pub fn layer(cx: &App) -> Option<AnyView> {
@@ -508,13 +582,23 @@ impl RenderOnce for Scrim {
 
 impl Render for TourState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !matches!(self.phase, Phase::Idle) && self.context != current_context(cx) {
-            cx.defer_in(window, |this, window, cx| this.cancel(window, cx));
+        let router = Router::global(cx);
+        let off_route = self
+            .running()
+            .is_some_and(|track| !track.precondition.is_met(router.read(cx).route_ref()));
+        if off_route {
+            cx.defer_in(window, |this, window, cx| this.abandon(window, cx));
             return div();
         }
 
         if matches!(self.phase, Phase::Arming { .. }) {
             cx.defer_in(window, |this, window, cx| this.resolve(window, cx));
+            return div();
+        }
+
+        let viewport = window.viewport_size();
+        if viewport != self.probed_viewport {
+            cx.defer_in(window, |this, window, cx| this.reprobe(window, cx));
             return div();
         }
 
@@ -529,7 +613,6 @@ impl Render for TourState {
         let (track, index) = (*track, *index);
         let visible = visible.clone();
 
-        let viewport = window.viewport_size();
         let hole = track.steps[index]
             .anchor
             .and_then(|anchor| TourAnchors::live(cx, anchor, self.epoch))
@@ -634,7 +717,7 @@ impl Render for TourState {
                         el.child(
                             Button::new("tour-back")
                                 .label(mezon_i18n::t(&locale, "tour.back"))
-                                .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
                         )
                     })
                     .child(
@@ -657,6 +740,7 @@ impl Render for TourState {
             .size_full()
             .child(deferred(
                 div()
+                    .id("tour-scrim")
                     .absolute()
                     .top_0()
                     .left_0()
@@ -665,14 +749,15 @@ impl Render for TourState {
                     .track_focus(&self.focus_handle)
                     .key_context("tour")
                     .on_action(
-                        cx.listener(|this, _: &::menu::Cancel, window, cx| this.cancel(window, cx)),
+                        cx.listener(|this, _: &::menu::Cancel, window, cx| this.finish(window, cx)),
                     )
                     .on_action(cx.listener(|this, _: &TourNext, window, cx| this.next(window, cx)))
-                    .on_action(cx.listener(|this, _: &TourBack, window, cx| this.back(window, cx)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.next(window, cx)),
-                    )
+                    .on_action(cx.listener(|this, _: &TourBack, _, cx| this.back(cx)))
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        if event.click_count() <= 1 {
+                            this.next(window, cx);
+                        }
+                    }))
                     .child(scrim)
                     .children(caret)
                     .child(bubble),
@@ -740,22 +825,11 @@ fn caret_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{land, never_empty};
-
-    #[test]
-    fn filtering_every_step_away_falls_back_to_the_whole_track() {
-        assert_eq!(never_empty(Vec::new(), 4), vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn a_non_empty_filter_is_left_alone() {
-        assert_eq!(never_empty(vec![1, 3], 4), vec![1, 3]);
-    }
-
-    #[test]
-    fn an_empty_track_stays_empty() {
-        assert!(never_empty(Vec::new(), 0).is_empty());
-    }
+    use super::{available_tracks_for, land, pick_host_route};
+    use crate::clan::settings::ClanSettingsPage;
+    use crate::router::Route;
+    use crate::tour::tracks::{CLAN_SETTINGS_TRACK_ID, TrackPrecondition};
+    use mezon_store::{ChannelId, ClanId};
 
     #[test]
     fn forward_lands_on_the_requested_step_when_it_is_visible() {
@@ -788,5 +862,97 @@ mod tests {
     fn an_empty_visible_set_never_lands() {
         assert_eq!(land(&[], 0, true), None);
         assert_eq!(land(&[], 0, false), None);
+    }
+
+    #[test]
+    fn a_channel_route_offers_more_than_just_the_core_track() {
+        let channel = Route::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+        };
+        let ids: Vec<_> = available_tracks_for(&channel)
+            .iter()
+            .map(|track| track.id)
+            .collect();
+        assert!(ids.len() > 1, "a channel offers only {ids:?}");
+        assert!(ids.contains(&"messaging"));
+        assert!(ids.contains(&"voice"));
+    }
+
+    #[test]
+    fn no_settings_route_can_run_a_conversation_track() {
+        for route in [
+            Route::SettingsAccount,
+            Route::SettingsAppearance,
+            Route::SettingsLanguage,
+        ] {
+            assert!(
+                available_tracks_for(&route).is_empty(),
+                "{route:?} must fall back to a host route instead of listing tracks"
+            );
+        }
+    }
+
+    #[test]
+    fn clan_settings_still_offers_only_its_own_track() {
+        let route = Route::ClanSettings {
+            clan_id: ClanId(1),
+            page: ClanSettingsPage::Overview,
+        };
+        let ids: Vec<_> = available_tracks_for(&route)
+            .iter()
+            .map(|track| track.id)
+            .collect();
+        assert_eq!(ids, vec![CLAN_SETTINGS_TRACK_ID]);
+        assert!(TrackPrecondition::ClanSettings.is_met(&route));
+    }
+
+    fn channel() -> Route {
+        Route::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+        }
+    }
+
+    #[test]
+    fn opening_the_launcher_from_settings_falls_back_to_the_conversation_behind_it() {
+        let current = Route::SettingsAdvanced;
+        let recent = [Route::SettingsAppearance, channel(), Route::Direct];
+
+        let host = pick_host_route(&current, recent.iter());
+
+        assert_eq!(
+            host,
+            &channel(),
+            "walked past the settings route to {host:?}"
+        );
+        assert!(
+            !available_tracks_for(host).is_empty(),
+            "the launcher would still be empty"
+        );
+    }
+
+    #[test]
+    fn a_route_that_runs_a_track_is_its_own_host() {
+        let current = channel();
+        let recent = [Route::Direct];
+        assert_eq!(pick_host_route(&current, recent.iter()), &current);
+
+        let clan_settings = Route::ClanSettings {
+            clan_id: ClanId(1),
+            page: ClanSettingsPage::Overview,
+        };
+        assert_eq!(
+            pick_host_route(&clan_settings, recent.iter()),
+            &clan_settings,
+            "clan settings must keep hosting its own track"
+        );
+    }
+
+    #[test]
+    fn with_no_runnable_history_the_host_stays_the_current_route() {
+        let current = Route::SettingsAccount;
+        let recent = [Route::SettingsVoice, Route::SettingsLanguage];
+        assert_eq!(pick_host_route(&current, recent.iter()), &current);
     }
 }

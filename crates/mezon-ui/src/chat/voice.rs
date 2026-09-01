@@ -3290,10 +3290,7 @@ fn control_bar(
 
     div()
         .relative()
-        .children(crate::tour::probe(
-            cx,
-            crate::tour::TourAnchor::VoiceControls,
-        ))
+        .children(crate::tour::probe(crate::tour::TourAnchor::VoiceControls))
         .flex()
         .flex_row()
         .items_center()

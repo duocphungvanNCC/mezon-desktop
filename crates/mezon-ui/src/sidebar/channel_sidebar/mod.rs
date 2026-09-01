@@ -969,7 +969,7 @@ impl Render for ChannelSidebar {
 
         div()
             .relative()
-            .children(crate::tour::probe(cx, crate::tour::TourAnchor::ChannelList))
+            .children(crate::tour::probe(crate::tour::TourAnchor::ChannelList))
             .flex()
             .flex_col()
             .w_full()
@@ -983,7 +983,7 @@ impl Render for ChannelSidebar {
                 let has_clan = self.active_clan_id.is_some();
                 div()
                     .relative()
-                    .children(crate::tour::probe(cx, crate::tour::TourAnchor::ClanHeader))
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanHeader))
                     .w_full()
                     .h(px(50.))
                     .border_b_1()
@@ -1588,10 +1588,7 @@ fn render_banner_and_events(
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
         .relative()
-        .children(crate::tour::probe(
-            cx,
-            crate::tour::TourAnchor::ClanMembersRow,
-        ))
+        .children(crate::tour::probe(crate::tour::TourAnchor::ClanMembersRow))
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
@@ -1870,10 +1867,7 @@ fn render_sidebar_item(
                         div()
                             .id(SharedString::from(format!("cat-add-{elem_id}")))
                             .relative()
-                            .children(crate::tour::probe(
-                                cx,
-                                crate::tour::TourAnchor::CreateChannel,
-                            ))
+                            .children(crate::tour::probe(crate::tour::TourAnchor::CreateChannel))
                             .flex()
                             .items_center()
                             .justify_center()

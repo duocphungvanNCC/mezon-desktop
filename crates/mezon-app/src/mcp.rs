@@ -871,8 +871,19 @@ fn tour_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Value> {
 }
 
 fn tour_advance(forward: bool, cx: &mut App) -> anyhow::Result<Value> {
-    let moved = mezon_ui::tour::mcp_advance(forward, cx)?;
-    Ok(json!({ "ok": moved, "moved": moved }))
+    match mezon_ui::tour::mcp_advance(forward, cx)? {
+        Some(advance) => Ok(json!({
+            "ok": true,
+            "moved": advance.moved,
+            "active": advance.still_active,
+        })),
+        None => Ok(json!({
+            "ok": false,
+            "moved": false,
+            "active": false,
+            "reason": "no tour is running",
+        })),
+    }
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {

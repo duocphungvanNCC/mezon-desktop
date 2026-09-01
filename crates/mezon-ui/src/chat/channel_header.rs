@@ -494,7 +494,6 @@ impl ChannelHeader {
                 div()
                     .relative()
                     .children(crate::tour::probe(
-                        cx,
                         crate::tour::TourAnchor::ChannelHeaderTools,
                     ))
                     .flex()

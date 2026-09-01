@@ -3,19 +3,51 @@ use gpui::{
 };
 use mezon_store::Settings;
 
-use super::state::{TourState, available_tracks};
+use super::state::{TourState, TourTrigger, available_tracks_for, host_route, track_done};
 use crate::app::shell::Shell;
 use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, h_flex, v_flex};
-use crate::theme::ActiveTheme;
+use crate::router::{self, Route, Router};
+use crate::theme::{ActiveTheme, Theme};
+
+pub fn settings_entry_row(
+    id: &'static str,
+    locale: &str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .w_full()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(4.0))
+        .text_base()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.tokens.text_theme_primary)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .child(SharedString::from(mezon_i18n::t(
+            locale,
+            "tour.settingsEntry",
+        )))
+        .on_click(|_, window, cx| TourLauncher::open(window, cx))
+}
 
 pub struct TourLauncher {
     focus_handle: FocusHandle,
+    host_route: Route,
+    restore_focus: Option<FocusHandle>,
 }
 
 impl TourLauncher {
     pub fn open(window: &mut Window, cx: &mut App) {
+        let host_route = host_route(cx);
+        let restore_focus = window.focused(cx);
         let view = cx.new(|cx| Self {
             focus_handle: cx.focus_handle(),
+            host_route,
+            restore_focus,
         });
         window.focus(&view.read(cx).focus_handle.clone(), cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
@@ -25,15 +57,23 @@ impl TourLauncher {
 impl Render for TourLauncher {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let settings = Settings::try_global(cx);
-        let locale = settings
-            .as_ref()
+        let locale = Settings::try_global(cx)
             .map(|settings| settings.read(cx).language.clone())
             .unwrap_or_else(|| "en".to_string());
-        let done: Vec<String> = settings
-            .map(|settings| settings.read(cx).tour_done_tracks.clone())
-            .unwrap_or_default();
-        let tracks = available_tracks(cx);
+        let tracks = available_tracks_for(&self.host_route);
+        let entries: Vec<(&'static str, SharedString, SharedString, bool)> = tracks
+            .iter()
+            .map(|track| {
+                (
+                    track.id,
+                    SharedString::from(mezon_i18n::t(&locale, track.name_key)),
+                    SharedString::from(mezon_i18n::t(&locale, track.summary_key)),
+                    track_done(track.id, cx),
+                )
+            })
+            .collect();
+        let host_route = self.host_route.clone();
+        let restore_focus = self.restore_focus.clone();
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -62,7 +102,7 @@ impl Render for TourLauncher {
                     .text_color(theme.tokens.text_secondary)
                     .child(SharedString::from(mezon_i18n::t(&locale, "tour.subtitle"))),
             )
-            .when(tracks.is_empty(), |el| {
+            .when(entries.is_empty(), |el| {
                 el.child(
                     div()
                         .p(px(12.))
@@ -74,9 +114,9 @@ impl Render for TourLauncher {
                         .child(SharedString::from(mezon_i18n::t(&locale, "tour.empty"))),
                 )
             })
-            .children(tracks.into_iter().map(|track| {
-                let id = track.id;
-                let seen = done.iter().any(|entry| entry == id);
+            .children(entries.into_iter().map(|(id, name, summary, seen)| {
+                let host_route = host_route.clone();
+                let restore_focus = restore_focus.clone();
                 h_flex()
                     .id(id)
                     .items_center()
@@ -88,8 +128,17 @@ impl Render for TourLauncher {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg_hover))
                     .on_click(move |_, window, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
-                        TourState::start_track(id, window, cx);
+                        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        if *Router::global(cx).read(cx).route_ref() != host_route {
+                            router::navigate(cx, host_route.clone());
+                        }
+                        TourState::start_track_restoring(
+                            id,
+                            TourTrigger::Manual,
+                            restore_focus.clone(),
+                            window,
+                            cx,
+                        );
                     })
                     .child(
                         v_flex()
@@ -101,19 +150,13 @@ impl Render for TourLauncher {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.tokens.text_theme_primary)
-                                    .child(SharedString::from(mezon_i18n::t(
-                                        &locale,
-                                        track.name_key,
-                                    ))),
+                                    .child(name),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.tokens.text_secondary)
-                                    .child(SharedString::from(mezon_i18n::t(
-                                        &locale,
-                                        track.summary_key,
-                                    ))),
+                                    .child(summary),
                             ),
                     )
                     .when(seen, |el| {

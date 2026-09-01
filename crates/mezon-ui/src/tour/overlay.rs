@@ -3,7 +3,7 @@ use gpui::{Bounds, Pixels, Point, Size, bounds, point, px, size};
 pub const HOLE_PADDING: Pixels = px(2.);
 pub const MIN_HOLE_SIZE: Pixels = px(24.);
 pub const BUBBLE_WIDTH: Pixels = px(320.);
-pub const BUBBLE_HEIGHT: Pixels = px(200.);
+pub const BUBBLE_HEIGHT: Pixels = px(248.);
 pub const BUBBLE_GAP: Pixels = px(12.);
 pub const VIEWPORT_MARGIN: Pixels = px(16.);
 pub const RING_RADIUS: Pixels = px(6.);

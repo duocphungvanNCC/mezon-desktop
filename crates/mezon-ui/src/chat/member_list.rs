@@ -1300,7 +1300,7 @@ impl Render for MemberListPanel {
         .pr(px(2.));
 
         div()
-            .children(crate::tour::probe(cx, crate::tour::TourAnchor::MemberList))
+            .children(crate::tour::probe(crate::tour::TourAnchor::MemberList))
             .flex()
             .flex_col()
             .w(px(245.))

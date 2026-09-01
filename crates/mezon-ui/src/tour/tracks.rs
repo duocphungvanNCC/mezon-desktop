@@ -1,4 +1,5 @@
 use super::anchor::TourAnchor;
+use crate::clan::settings::ClanSettingsPage;
 use crate::router::Route;
 
 pub const TOUR_VERSION: u32 = 1;
@@ -348,57 +349,59 @@ pub static TRACKS: &[TourTrack] = &[
                 body_key: "tour.clansettings.s1.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("overview")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::Overview)),
                 title_key: "tour.clansettings.overview.title",
                 body_key: "tour.clansettings.overview.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("roles")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::Roles)),
                 title_key: "tour.clansettings.roles.title",
                 body_key: "tour.clansettings.roles.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("category-order")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::CategoryOrder)),
                 title_key: "tour.clansettings.categoryorder.title",
                 body_key: "tour.clansettings.categoryorder.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("archived-channels")),
+                anchor: Some(TourAnchor::ClanSettingsRow(
+                    ClanSettingsPage::ArchivedChannels,
+                )),
                 title_key: "tour.clansettings.archived.title",
                 body_key: "tour.clansettings.archived.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("emoji")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::Emoji)),
                 title_key: "tour.clansettings.emoji.title",
                 body_key: "tour.clansettings.emoji.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("image-stickers")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::ImageStickers)),
                 title_key: "tour.clansettings.stickers.title",
                 body_key: "tour.clansettings.stickers.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("voice-stickers")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::VoiceStickers)),
                 title_key: "tour.clansettings.sounds.title",
                 body_key: "tour.clansettings.sounds.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("integrations")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::Integrations)),
                 title_key: "tour.clansettings.integrations.title",
                 body_key: "tour.clansettings.integrations.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("audit-log")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::AuditLog)),
                 title_key: "tour.clansettings.auditlog.title",
                 body_key: "tour.clansettings.auditlog.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("onboarding")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::Onboarding)),
                 title_key: "tour.clansettings.onboarding.title",
                 body_key: "tour.clansettings.onboarding.body",
             },
             TourStep {
-                anchor: Some(TourAnchor::ClanSettingsRow("clan-community")),
+                anchor: Some(TourAnchor::ClanSettingsRow(ClanSettingsPage::ClanCommunity)),
                 title_key: "tour.clansettings.community.title",
                 body_key: "tour.clansettings.community.body",
             },
@@ -557,14 +560,14 @@ mod tests {
     fn every_track_keeps_a_step_its_route_guarantees() {
         for track in TRACKS {
             let guaranteed = guaranteed_on_route(track.precondition);
-            let survives = track.steps.iter().any(|step| match step.anchor {
-                None => true,
-                Some(anchor) => guaranteed.contains(&anchor),
+            let survives = track.steps.iter().any(|step| {
+                step.anchor
+                    .is_some_and(|anchor| guaranteed.contains(&anchor))
             });
             assert!(
                 survives,
-                "track {} can lose every step on its own route, so it would teach about \
-                 things that are not on screen",
+                "track {} keeps no anchored step its own route guarantees, so it can \
+                 degrade to nothing but centered cards",
                 track.id
             );
         }

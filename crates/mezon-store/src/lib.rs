@@ -295,6 +295,22 @@ pub(crate) fn running_from_windows_store() -> bool {
         })
 }
 
+pub fn clear_tour_progress(cx: &mut gpui::App) {
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, cx| {
+        let changed = settings.clear_tour_progress();
+        if changed {
+            cx.notify();
+        }
+        changed
+    });
+    if changed {
+        schedule_settings_save(&settings, cx);
+    }
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
@@ -528,6 +544,19 @@ impl Settings {
         Ok(())
     }
 
+    pub fn clear_tour_progress(&mut self) -> bool {
+        if self.tour_seen_version == 0
+            && self.tour_done_tracks.is_empty()
+            && self.tour_eligible.is_none()
+        {
+            return false;
+        }
+        self.tour_seen_version = 0;
+        self.tour_done_tracks.clear();
+        self.tour_eligible = None;
+        true
+    }
+
     pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
         cx.set_global(GlobalSettings(entity.clone()));
     }
@@ -639,5 +668,31 @@ mod settings_tests {
         let restored: Settings = serde_json::from_str(&json).expect("decode");
         assert_eq!(restored.tour_seen_version, 1);
         assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn logging_out_drops_the_previous_accounts_tour_verdict() {
+        let mut settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "dmstart".to_string()],
+            tour_eligible: Some(false),
+            ..Settings::default()
+        };
+
+        assert!(settings.clear_tour_progress());
+
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(
+            settings.tour_eligible, None,
+            "a decided verdict must not survive into the next account, or a brand new \
+             one never gets the onboarding tour"
+        );
+    }
+
+    #[test]
+    fn clearing_an_untouched_tour_state_reports_no_change() {
+        let mut settings = Settings::default();
+        assert!(!settings.clear_tour_progress());
     }
 }

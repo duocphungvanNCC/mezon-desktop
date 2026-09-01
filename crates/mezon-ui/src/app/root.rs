@@ -42,6 +42,8 @@ pub struct RootView {
     _recording_toasts: Option<gpui::Subscription>,
     tour_autostart: Option<Task<()>>,
     tour_autostart_for: Option<&'static str>,
+    tour_autostart_last: Option<&'static str>,
+    tour_autostart_attempts: u8,
     tour_autostart_armed: bool,
 }
 
@@ -149,7 +151,9 @@ impl RootView {
         .detach();
 
         cx.observe(&ClanList::global(cx), |this, _clans, cx| {
-            this.schedule_tour_autostart(cx);
+            if crate::tour::eligibility_undecided(cx) {
+                this.schedule_tour_autostart(cx);
+            }
         })
         .detach();
 
@@ -171,7 +175,10 @@ impl RootView {
                 this.tour_autostart_armed = false;
                 this.tour_autostart = None;
                 this.tour_autostart_for = None;
+                this.tour_autostart_last = None;
+                this.tour_autostart_attempts = 0;
                 crate::tour::shutdown(cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 crate::image_viewer::close_image_viewer(cx);
                 crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
@@ -315,6 +322,8 @@ impl RootView {
             _recording_toasts: recording_toasts,
             tour_autostart: None,
             tour_autostart_for: None,
+            tour_autostart_last: None,
+            tour_autostart_attempts: 0,
             tour_autostart_armed: false,
         }
     }
@@ -329,6 +338,15 @@ impl RootView {
         if self.tour_autostart_for == Some(id) {
             return;
         }
+        if self.tour_autostart_last == Some(id) {
+            if self.tour_autostart_attempts >= TOUR_AUTOSTART_MAX_ATTEMPTS {
+                return;
+            }
+        } else {
+            self.tour_autostart_attempts = 0;
+        }
+        self.tour_autostart_attempts += 1;
+        self.tour_autostart_last = Some(id);
         self.tour_autostart_for = Some(id);
         self.tour_autostart = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
@@ -543,6 +561,7 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
 }
 
 const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
+const TOUR_AUTOSTART_MAX_ATTEMPTS: u8 = 3;
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;
