@@ -2488,6 +2488,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Créer un message ou un chat de groupe",
   "directMessage.createMessageGroup.createGroupChat": "Créer un chat de groupe",
   "directMessage.createMessageGroup.creating": "Création en cours...",
+  "directMessage.createMessageGroup.groupFull": "Ce groupe a déjà atteint le maximum de {{count}} membres.",
   "directMessage.createMessageGroup.noFriendsFound": "Aucun ami trouvé qui n'est pas déjà dans cette conversation.",
   "directMessage.createMessageGroup.searchPlaceholder": "Entrez le nom d'utilisateur de vos amis",
   "directMessage.createMessageGroup.selectFriends": "Sélectionnez des amis",

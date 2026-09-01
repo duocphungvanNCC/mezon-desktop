@@ -2488,6 +2488,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Tạo tin nhắn hoặc nhóm chat",
   "directMessage.createMessageGroup.createGroupChat": "Tạo nhóm chat",
   "directMessage.createMessageGroup.creating": "Đang tạo...",
+  "directMessage.createMessageGroup.groupFull": "Nhóm đã đủ tối đa {{count}} thành viên.",
   "directMessage.createMessageGroup.noFriendsFound": "Không tìm thấy bạn bè nào chưa có trong cuộc trò chuyện này.",
   "directMessage.createMessageGroup.searchPlaceholder": "Nhập tên người dùng của bạn bè",
   "directMessage.createMessageGroup.selectFriends": "Chọn bạn bè",

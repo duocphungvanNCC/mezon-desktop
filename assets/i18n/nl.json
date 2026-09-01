@@ -2488,6 +2488,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Bericht of groepschat aanmaken",
   "directMessage.createMessageGroup.createGroupChat": "Groepschat aanmaken",
   "directMessage.createMessageGroup.creating": "Aan het maken...",
+  "directMessage.createMessageGroup.groupFull": "Deze groep heeft al het maximum van {{count}} leden.",
   "directMessage.createMessageGroup.noFriendsFound": "Geen vrienden gevonden die nog niet in dit gesprek zijn.",
   "directMessage.createMessageGroup.searchPlaceholder": "Voer vriend gebruikersnaam in",
   "directMessage.createMessageGroup.selectFriends": "Vrienden selecteren",

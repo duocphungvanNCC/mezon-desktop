@@ -885,12 +885,24 @@ impl DirectMessageStore {
                 let self_id = crate::badge::BadgeService::try_global(cx)
                     .and_then(|badge| badge.read(cx).current_user_id(cx));
                 enrich_direct_from_event_users(&mut channel, &e.users, self_id);
+                let member_count = channel.member_count;
                 let inserted = self.channels.push_new(channel);
                 tracing::info!(
                     "user_channel_added: direct channel {} inserted={inserted}",
                     desc.channel_id
                 );
                 if !inserted {
+                    let channel_id = ChannelId(desc.channel_id);
+                    let recounted = self
+                        .channels
+                        .find_mut(channel_id)
+                        .is_some_and(|existing| apply_member_count(existing, member_count));
+                    if recounted {
+                        cx.emit(DirectEvent::Changed {
+                            channel_id: Some(channel_id),
+                        });
+                        cx.notify();
+                    }
                     return;
                 }
                 cx.emit(DirectEvent::Changed { channel_id: None });
@@ -1364,6 +1376,14 @@ fn enrich_direct_from_event_users(
     }
 }
 
+fn apply_member_count(channel: &mut DirectChannel, member_count: u32) -> bool {
+    if member_count == 0 || channel.member_count == member_count {
+        return false;
+    }
+    channel.member_count = member_count;
+    true
+}
+
 fn direct_from_message(
     m: &mezon_proto::api::ChannelMessage,
     from_me: bool,
@@ -1595,6 +1615,40 @@ mod tests {
         assert_eq!(channel.label, "potinoc605");
         assert_eq!(channel.peer_user_id, Some(UserId(2)));
         assert_eq!(channel.peer_username, "potinoc605");
+    }
+
+    #[test]
+    fn member_count_follows_the_roster_size_in_the_event() {
+        let mut channel = group_channel_with_members(5);
+        assert!(apply_member_count(&mut channel, 7));
+        assert_eq!(channel.member_count, 7);
+        assert!(apply_member_count(&mut channel, 6));
+        assert_eq!(channel.member_count, 6);
+    }
+
+    #[test]
+    fn member_count_ignores_a_repeat_or_missing_count() {
+        let mut channel = group_channel_with_members(5);
+        assert!(!apply_member_count(&mut channel, 5));
+        assert!(!apply_member_count(&mut channel, 0));
+        assert_eq!(channel.member_count, 5);
+    }
+
+    fn group_channel_with_members(member_count: u32) -> DirectChannel {
+        DirectChannel {
+            id: ChannelId(9),
+            label: "group".into(),
+            kind: DirectKind::Group,
+            avatar: String::new(),
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count,
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+        }
     }
 
     #[test]

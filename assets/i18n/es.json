@@ -2513,6 +2513,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Crear mensaje directo o chat grupal",
   "directMessage.createMessageGroup.createGroupChat": "Crear chat grupal",
   "directMessage.createMessageGroup.creating": "Creando...",
+  "directMessage.createMessageGroup.groupFull": "Este grupo ya tiene el máximo de {{count}} miembros.",
   "directMessage.createMessageGroup.noFriendsFound": "No se encontraron amigos que no estén ya en este DM.",
   "directMessage.createMessageGroup.searchPlaceholder": "Escribe el nombre de usuario de un amigo",
   "directMessage.createMessageGroup.selectFriends": "Seleccionar amigos",

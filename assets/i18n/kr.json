@@ -2489,6 +2489,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "메시지 또는 그룹 채팅 만들기",
   "directMessage.createMessageGroup.createGroupChat": "그룹 채팅 만들기",
   "directMessage.createMessageGroup.creating": "만드는 중...",
+  "directMessage.createMessageGroup.groupFull": "이 그룹은 이미 최대 {{count}}명의 멤버로 가득 찼습니다.",
   "directMessage.createMessageGroup.noFriendsFound": "이 대화에 없는 친구를 찾지 못했습니다.",
   "directMessage.createMessageGroup.searchPlaceholder": "친구의 사용자 이름 입력",
   "directMessage.createMessageGroup.selectFriends": "친구 선택",

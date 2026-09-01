@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, api_status_from_error};
 use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
@@ -13,6 +13,8 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const MAX_CACHED_GROUPS: usize = 64;
 
 const GROUP_MEMBER_FETCH_LIMIT: i32 = 500;
+
+pub const MAX_GROUP_MEMBERS: usize = 20;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupMember {
@@ -36,6 +38,13 @@ impl GroupMember {
     pub fn avatar(&self) -> &str {
         &self.user.avatar_url
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddGroupMembersError {
+    GroupFull,
+    Api(u32),
+    Other(String),
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +210,28 @@ impl GroupMembersStore {
         self.fetch(channel_id, cx);
     }
 
+    pub fn add_members(
+        &mut self,
+        channel_id: ChannelId,
+        user_ids: Vec<UserId>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), AddGroupMembersError>> {
+        if user_ids.is_empty() {
+            return Task::ready(Ok(()));
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let ids: Vec<String> = user_ids.iter().map(|id| id.get().to_string()).collect();
+            if let Err(err) = api.add_channel_users(channel_id.get(), ids).await {
+                tracing::warn!("add_channel_users failed for group {channel_id}: {err}");
+                return Err(map_add_members_error(err));
+            }
+            this.update(cx, |this, _| this.cache.mark_stale(&channel_id))
+                .map_err(|err| AddGroupMembersError::Other(err.to_string()))?;
+            Ok(())
+        })
+    }
+
     fn fetch(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if !self.loading.insert(channel_id) {
             return;
@@ -249,6 +280,14 @@ impl GroupMembersStore {
             cx.emit(GroupMembersEvent::Changed { channel_id });
             cx.notify();
         }
+    }
+}
+
+fn map_add_members_error(err: anyhow::Error) -> AddGroupMembersError {
+    match api_status_from_error(&err) {
+        Some(status) if status.is_invalid_argument() => AddGroupMembersError::GroupFull,
+        Some(status) => AddGroupMembersError::Api(status.code),
+        None => AddGroupMembersError::Other(err.to_string()),
     }
 }
 
@@ -364,6 +403,27 @@ mod tests {
         assert_eq!(members[0].name(), "only-one");
         assert_eq!(members[1].name(), "");
         assert!(!members[0].online);
+    }
+
+    #[test]
+    fn add_error_maps_invalid_argument_to_a_full_group() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(map_add_members_error(err), AddGroupMembersError::GroupFull);
+    }
+
+    #[test]
+    fn add_error_keeps_other_api_codes() {
+        let err = mezon_client::ApiStatusError { code: 13 }.into();
+        assert_eq!(map_add_members_error(err), AddGroupMembersError::Api(13));
+    }
+
+    #[test]
+    fn add_error_falls_back_to_the_message() {
+        let err = anyhow::anyhow!("socket closed");
+        assert_eq!(
+            map_add_members_error(err),
+            AddGroupMembersError::Other("socket closed".to_string())
+        );
     }
 
     #[test]

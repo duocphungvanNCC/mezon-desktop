@@ -2488,6 +2488,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Стварыць паведамленне або групавы чат",
   "directMessage.createMessageGroup.createGroupChat": "Стварыць групавы чат",
   "directMessage.createMessageGroup.creating": "Стварэнне...",
+  "directMessage.createMessageGroup.groupFull": "У гэтай групе ўжо максімальная колькасць удзельнікаў — {{count}}.",
   "directMessage.createMessageGroup.noFriendsFound": "Сябры, якіх яшчэ няма ў гэтай размове, не знойдзены.",
   "directMessage.createMessageGroup.searchPlaceholder": "Увядзіце імёны сяброў",
   "directMessage.createMessageGroup.selectFriends": "Абярыце сяброў",

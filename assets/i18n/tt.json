@@ -2497,6 +2497,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Язу яки төркемле чат булдыру",
   "directMessage.createMessageGroup.createGroupChat": "Төркемле чат булдыру",
   "directMessage.createMessageGroup.creating": "Булдыру...",
+  "directMessage.createMessageGroup.groupFull": "Бу төркемдә инде максималь {{count}} катнашучы бар.",
   "directMessage.createMessageGroup.noFriendsFound": "Әле бу шәхси хәбәрдә булмаган дуслар табылмады.",
   "directMessage.createMessageGroup.searchPlaceholder": "Дустыгызның кулланучы исемен керетегез",
   "directMessage.createMessageGroup.selectFriends": "Дусларны сайлау",

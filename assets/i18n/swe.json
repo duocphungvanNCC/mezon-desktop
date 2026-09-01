@@ -2489,6 +2489,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Skapa meddelande eller gruppchatt",
   "directMessage.createMessageGroup.createGroupChat": "Skapa gruppchatt",
   "directMessage.createMessageGroup.creating": "Skapar...",
+  "directMessage.createMessageGroup.groupFull": "Den här gruppen har redan max {{count}} medlemmar.",
   "directMessage.createMessageGroup.noFriendsFound": "Inga vänner hittade som inte redan finns i detta samtal.",
   "directMessage.createMessageGroup.searchPlaceholder": "Ange dina vänars användarnamn",
   "directMessage.createMessageGroup.selectFriends": "Välj vänner",

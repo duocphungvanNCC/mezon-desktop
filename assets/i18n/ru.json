@@ -2727,6 +2727,7 @@
   "directMessage.createMessageGroup.createDMOrGroupChat": "Написать или создать групповой чат",
   "directMessage.createMessageGroup.createGroupChat": "Создать групповой чат",
   "directMessage.createMessageGroup.creating": "Создание...",
+  "directMessage.createMessageGroup.groupFull": "В этой группе уже максимальное количество участников — {{count}}.",
   "directMessage.createMessageGroup.noFriendsFound": "Не найдено друзей, которые ещё не находятся в этом личном сообщении.",
   "directMessage.createMessageGroup.searchPlaceholder": "Введите имя пользователя друга",
   "directMessage.createMessageGroup.selectFriends": "Выбрать друзей",
