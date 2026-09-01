@@ -192,6 +192,7 @@ pub(crate) struct MentionInputState {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
+    measured_for: Option<(SharedString, Pixels)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -240,6 +241,7 @@ impl MentionInputState {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
+            measured_for: None,
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -1412,6 +1414,70 @@ impl IntoElement for MentionTextElement {
     }
 }
 
+impl MentionTextElement {
+    fn measure_rows_for_layout(&mut self, window: &mut Window, cx: &mut App) {
+        let input = self.input.read(cx);
+        if input.is_masked() || input.content.is_empty() {
+            return;
+        }
+        let Some(width) = input.last_bounds.map(|bounds| bounds.size.width) else {
+            return;
+        };
+        if width <= Pixels::ZERO {
+            return;
+        }
+        let display_text = input.display_text();
+        if input.measured_for.as_ref() == Some(&(display_text.clone(), width)) {
+            return;
+        }
+        let marked_range = input.marked_range.clone();
+        let brand_color: Hsla = cx.theme().brand.into();
+        let emoji_color: Hsla = rgb(EMOJI_SPAN_COLOR).into();
+        let resolved_spans: Vec<ResolvedSpan> = input
+            .mention_spans
+            .iter()
+            .map(|span| {
+                let (color, bold) = match span.kind {
+                    MentionSpanKind::Mention | MentionSpanKind::Hashtag => (brand_color, false),
+                    MentionSpanKind::Emoji => (emoji_color, true),
+                };
+                ResolvedSpan {
+                    range: span.range.clone(),
+                    color,
+                    bold,
+                }
+            })
+            .collect();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let base = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = build_text_runs(display_text.len(), &base, marked_range, &resolved_spans);
+        let wrapped = window
+            .text_system()
+            .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
+            .unwrap_or_default();
+        let total_h = wrapped
+            .iter()
+            .fold(Pixels::ZERO, |acc, line| {
+                acc + wrapped_line_height(line, line_height)
+            })
+            .max(line_height);
+        let rows = (total_h / line_height).round().max(1.) as usize;
+        self.input.update(cx, |input, _| {
+            input.measured_rows = rows;
+            input.measured_for = Some((display_text, width));
+        });
+    }
+}
+
 impl Element for MentionTextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1431,6 +1497,7 @@ impl Element for MentionTextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        self.measure_rows_for_layout(window, cx);
         let line_count = self.input.read(cx).visible_line_count();
         let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
         let mut style = Style::default();
