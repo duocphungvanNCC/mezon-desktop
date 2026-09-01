@@ -138,6 +138,9 @@ impl LoginStore {
         if let Some(e) = crate::channel_users::ChannelUsersStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::banned_users::BannedUsersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) =
             crate::channel_role_permissions::ChannelRolePermissionsStore::try_global(cx)
         {
@@ -200,11 +203,17 @@ impl LoginStore {
         if let Some(e) = crate::events::EventsStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::onboarding::OnboardingStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
             e.update(cx, |s, cx| s.logout_teardown(cx));
         }
         if let Some(e) = crate::stream::StreamStore::try_global(cx) {
             e.update(cx, |s, cx| s.on_logout(cx));
+        }
+        if let Some(e) = crate::call::CallStore::try_global(cx) {
+            e.update(cx, |s, cx| s.logout_teardown(cx));
         }
         if let Some(e) = crate::wallet::WalletStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
@@ -212,6 +221,7 @@ impl LoginStore {
         if let Some(e) = crate::audit_log::AuditLogStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        crate::clear_tour_progress(cx);
     }
 }
 

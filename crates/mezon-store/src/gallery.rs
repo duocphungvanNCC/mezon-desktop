@@ -20,12 +20,9 @@ pub const GALLERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default page size (React gallery slice `limit = 50`).
 pub const GALLERY_PAGE_SIZE: i32 = 50;
 
-/// Client-side media tab filter (React `MediaFilterType`). Switching tabs never
-/// refetches — it filters the already-loaded list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
     #[default]
-    All,
     Image,
     Video,
 }
@@ -33,7 +30,6 @@ pub enum MediaFilter {
 impl MediaFilter {
     fn matches(self, att: &ChannelAttachment) -> bool {
         match self {
-            MediaFilter::All => att.is_image || att.is_video,
             MediaFilter::Image => att.is_image,
             MediaFilter::Video => att.is_video,
         }
@@ -425,10 +421,10 @@ where
 }
 
 fn is_video_type(filetype: &str, url: &str) -> bool {
-    if filetype.starts_with("video/") {
+    let lower = filetype.to_ascii_lowercase();
+    if lower.starts_with("video/") || lower == "video" {
         return true;
     }
-    let lower = filetype.to_ascii_lowercase();
     if lower.contains("mp4") || lower.contains("mov") || lower.contains("webm") {
         return true;
     }
@@ -911,6 +907,38 @@ mod tests {
     }
 
     #[test]
+    fn bare_upload_category_is_recognised_as_media() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let video = ChannelAttachment::from_api(
+            ApiChannelAttachment {
+                url: "https://cdn.example/2016174228608389120/2072236531032002560.m4v".into(),
+                filetype: "video".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ChannelId(1),
+            ClanId(1),
+            &cfg,
+        );
+        assert!(video.is_video);
+        assert!(!video.is_image);
+
+        let image = ChannelAttachment::from_api(
+            ApiChannelAttachment {
+                url: format!("{}/2072236531032002561.png", cfg.base_img_url),
+                filetype: "image".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ChannelId(1),
+            ClanId(1),
+            &cfg,
+        );
+        assert!(image.is_image);
+        assert!(!image.is_video);
+    }
+
+    #[test]
     fn video_thumb_skips_imgproxy() {
         use mezon_client::transport::ApiChannelAttachment;
 
@@ -1040,8 +1068,6 @@ mod tests {
     fn media_filter_matches() {
         let img = att(1, 1, "image/png");
         let vid = att(2, 2, "video/mp4");
-        assert!(MediaFilter::All.matches(&img));
-        assert!(MediaFilter::All.matches(&vid));
         assert!(MediaFilter::Image.matches(&img));
         assert!(!MediaFilter::Image.matches(&vid));
         assert!(MediaFilter::Video.matches(&vid));

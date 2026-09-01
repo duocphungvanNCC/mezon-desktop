@@ -2,6 +2,7 @@ mod avatar;
 mod badge;
 mod checkbox;
 mod context_menu;
+mod copy_button;
 mod date_picker;
 mod divider;
 mod dropdown;
@@ -16,6 +17,7 @@ mod tab_bar;
 mod textarea;
 mod toast;
 mod tooltip;
+mod unsaved_changes_bar;
 
 pub mod button {
     pub use mezon_widgets::{Button, ButtonVariant, ButtonVariants};
@@ -50,6 +52,7 @@ pub(crate) use avatar::{avatar_color, name_initials};
 pub use badge::Badge;
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
+pub use copy_button::CopyButton;
 pub use date_picker::{DatePicker, DatePickerEvent, DatePickerPopupMode};
 pub use divider::Divider;
 pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
@@ -64,6 +67,7 @@ pub use tab_bar::TabBar;
 pub use textarea::{TextArea, TextAreaEvent, TextAreaField};
 pub use toast::{Toast, ToastKind};
 pub use tooltip::Tooltip;
+pub use unsaved_changes_bar::UnsavedChangesBar;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use icon::{Icon, IconName};

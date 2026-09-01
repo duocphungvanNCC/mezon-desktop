@@ -1,5 +1,5 @@
 use futures::StreamExt as _;
-use gpui::{App, AsyncApp};
+use gpui::{App, AppContext as _, AsyncApp};
 use mezon_client::AppApi;
 use mezon_mcp::{
     CaptureTarget, McpCommand, McpController, McpStartParams, ToolCallParams, is_write_tool,
@@ -78,6 +78,73 @@ impl McpRuntime {
                         let result = cx.update(|cx| navigate_path(cx, &path));
                         let _ = reply.send(result);
                     }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetChannelAgeRestricted {
+                        clan_id,
+                        channel_id,
+                        on,
+                        reply,
+                    } => {
+                        let clan_id = mezon_store::ClanId(clan_id);
+                        let channel_id = mezon_store::ChannelId(channel_id);
+                        let prepared = cx.update(|cx| {
+                            let store = mezon_store::ChannelList::global(cx);
+                            let channel = store.read(cx).channel(clan_id, channel_id).cloned();
+                            channel.map(|channel| {
+                                store.update(cx, |store, cx| {
+                                    store.update_channel_overview(
+                                        clan_id,
+                                        channel_id,
+                                        channel.name.to_string(),
+                                        channel.topic.clone(),
+                                        i32::from(on),
+                                        cx,
+                                    )
+                                })
+                            })
+                        });
+                        let result = match prepared {
+                            Some(task) => match task.await {
+                                Ok(()) => {
+                                    Ok(serde_json::json!({ "ok": true, "age_restricted": on }))
+                                }
+                                Err(e) => Err(anyhow::anyhow!("update failed: {e:?}")),
+                            },
+                            None => Err(anyhow::anyhow!("channel not loaded")),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetLocalDob { seconds, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::AccountStore::global(cx).update(cx, |store, cx| {
+                                match store.account.as_mut() {
+                                    Some(account) => {
+                                        account.dob_seconds = seconds;
+                                        cx.notify();
+                                        Ok(serde_json::json!({ "ok": true, "dob_seconds": seconds }))
+                                    }
+                                    None => Err(anyhow::anyhow!("account not loaded")),
+                                }
+                            })
+                        });
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::InjectPreviewMessage {
+                        content,
+                        sender_name,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
+                                store.inject_preview_message(content, sender_name, cx).map(
+                                    |message_id| serde_json::json!({ "message_id": message_id }),
+                                )
+                            })
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::Logout { reply } => {
                         let result = cx.update(|cx| {
                             LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));
@@ -127,8 +194,47 @@ impl McpRuntime {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
+                    McpCommand::JoinVoice {
+                        channel_id,
+                        clan_id,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::join_voice(channel_id, clan_id, cx)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::LeaveVoice { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::leave_voice);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetRecordingState { reply } => {
+                        let value = cx.update(mezon_ui::app::capture::recording_state);
+                        let _ = reply.send(value);
+                    }
+                    McpCommand::StartRecording { path, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::start_recording(path, cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::StopRecording { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::stop_recording);
+                        let _ = reply.send(result);
+                    }
                     McpCommand::GetScrollState { reply } => {
                         let result = cx.update(scroll_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourState { reply } => {
+                        let result = cx.update(tour_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourStart { track, reply } => {
+                        let result = cx.update(|cx| tour_start(track.as_deref(), cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourAdvance { forward, reply } => {
+                        let result = cx.update(|cx| tour_advance(forward, cx));
                         let _ = reply.send(result);
                     }
                     McpCommand::SetPanel { kind, reply } => {
@@ -152,6 +258,21 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::OpenPdfViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_pdf_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ScrollWheel {
                         delta_y,
                         ticks,
@@ -163,6 +284,132 @@ impl McpRuntime {
                     McpCommand::ScrollMessages { to_top, reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::scroll_messages(cx, to_top));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerType { text, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerState { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::composer_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerPick { index, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerSubmit { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::composer_submit);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::OpenTopic { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::open_topic(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CloseTopic { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::close_topic);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicType { text, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicPick { index, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::topic_drop_paths(cx, paths));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicSubmit { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::topic_submit);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicScrollWheel {
+                        delta_y,
+                        ticks,
+                        reply,
+                    } => {
+                        let result = topic_scroll_wheel(cx, delta_y, ticks).await;
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditBegin { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::edit_begin(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditType { text, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::edit_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditPick { index, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::edit_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditState { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::edit_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditSave { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::edit_save);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerPanelSend {
+                        kind,
+                        url,
+                        filename,
+                        width,
+                        height,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::composer_panel_send(
+                                cx, &kind, url, filename, width, height,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_drop_paths(cx, paths));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SendBuzz { text, reply } => {
+                        let result = cx.update(|cx| send_buzz(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SendAttachment {
+                        paths,
+                        content,
+                        anonymous,
+                        reply_to,
+                        reply,
+                    } => {
+                        let prepared = cx
+                            .background_spawn(async move { outgoing_attachments(&paths) })
+                            .await;
+                        let result = match prepared {
+                            Ok(attachments) => cx.update(|cx| {
+                                send_attachment(
+                                    cx,
+                                    &auth_state,
+                                    attachments,
+                                    &content,
+                                    anonymous,
+                                    reply_to,
+                                )
+                            }),
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     McpCommand::ListEmojis {
@@ -178,6 +425,244 @@ impl McpRuntime {
                     }
                     McpCommand::LoadMoreMessages { older, reply } => {
                         let result = cx.update(|cx| load_more_messages(cx, older));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListLoadedMessages {
+                        limit,
+                        topic,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_loaded_messages(cx, limit, topic)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ReplyBegin { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::reply_begin(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToMessage { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::jump_to_message(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToPresent { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::jump_to_present);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetUserStatus { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::user_status_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetMemberList { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::member_list_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListBannedUsers {
+                        clan_id,
+                        channel_id,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::banned_users_task(cx, clan_id, channel_id)
+                        });
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::CloseModal { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::close_modal);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::member_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuOpen {
+                        user_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::member_menu_open(
+                                cx,
+                                mezon_store::UserId(user_id),
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::member_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::member_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::clan_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuOpen {
+                        clan_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::clan_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::clan_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::clan_menu_pick(cx, index, value));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListCategories { clan_id, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_categories(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateCategory {
+                        clan_id,
+                        name,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::create_category_task(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                name,
+                            )
+                        });
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::ChannelMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::channel_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuOpen {
+                        clan_id,
+                        channel_id,
+                        x,
+                        y,
+                        in_favorites,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                mezon_store::ChannelId(channel_id),
+                                x,
+                                y,
+                                in_favorites,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::channel_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuState { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::category_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuOpen {
+                        clan_id,
+                        category_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                category_id,
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::category_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateClan { name, logo, reply } => {
+                        let task = cx
+                            .update(|cx| mezon_ui::app::capture::create_clan_task(cx, name, logo));
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::OpenCreateClanModal { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::open_create_clan_modal);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SetUserStatus {
+                        status,
+                        minutes,
+                        until_turn_on,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::set_user_status(
+                                cx,
+                                &status,
+                                minutes,
+                                until_turn_on,
+                            )
+                        });
                         let _ = reply.send(result);
                     }
                 }
@@ -288,8 +773,11 @@ fn list_emojis(
 async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
     use mezon_ui::app::capture::{
         WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_wheel_tick, message_viewport_state,
+        prime_wheel_pointer,
     };
     let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    cx.update(prime_wheel_pointer)?;
+    cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
     let before = cx.update(|cx| message_viewport_state(cx));
     let mut delivered = 0u32;
     let mut consumed = 0u32;
@@ -314,6 +802,88 @@ async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Re
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
     }))
+}
+
+async fn topic_scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
+    use mezon_ui::app::capture::{
+        WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_topic_wheel_tick, prime_topic_wheel_pointer,
+        topic_viewport_state,
+    };
+    let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    cx.update(prime_topic_wheel_pointer)?;
+    cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+    let before = cx.update(|cx| topic_viewport_state(cx));
+    let mut delivered = 0u32;
+    let mut consumed = 0u32;
+    for tick in 0..ticks {
+        if cx.update(|cx| dispatch_topic_wheel_tick(cx, delta_y))? {
+            consumed += 1;
+        }
+        delivered += 1;
+        if tick + 1 < ticks {
+            cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+        }
+    }
+    let after = cx.update(|cx| topic_viewport_state(cx));
+    let (item_count, first_visible, at_bottom) = after.unwrap_or((0, 0, false));
+    Ok(json!({
+        "ok": true,
+        "ticks": delivered,
+        "consumed_ticks": consumed,
+        "moved": before != after,
+        "delta_y": delta_y,
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
+fn tour_state(cx: &mut App) -> anyhow::Result<Value> {
+    let Some(entity) = mezon_ui::tour::TourState::try_global(cx) else {
+        return Ok(json!({ "active": false }));
+    };
+    let status = entity.read(cx).status(cx);
+    Ok(match status {
+        None => json!({ "active": false }),
+        Some(status) => json!({
+            "active": true,
+            "resolving": status.resolving,
+            "hole": status.hole.map(|(x, y, w, h)| json!([x, y, w, h])),
+            "track": status.track,
+            "index": status.index,
+            "position": status.position,
+            "total": status.total,
+            "title_key": status.title_key,
+            "anchor": status.anchor,
+            "has_hole": status.has_hole,
+        }),
+    })
+}
+
+fn tour_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_start(track, cx)? {
+        Some(id) => Ok(json!({ "ok": true, "track": id })),
+        None => Ok(json!({
+            "ok": false,
+            "reason": "no track matched this route, it is already done, or a tour is already running",
+        })),
+    }
+}
+
+fn tour_advance(forward: bool, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_advance(forward, cx)? {
+        Some(advance) => Ok(json!({
+            "ok": true,
+            "moved": advance.moved,
+            "active": advance.still_active,
+        })),
+        None => Ok(json!({
+            "ok": false,
+            "moved": false,
+            "active": false,
+            "reason": "no tour is running",
+        })),
+    }
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {
@@ -348,6 +918,93 @@ fn load_more_messages(cx: &mut App, older: bool) -> anyhow::Result<Value> {
         "has_more_top": store.has_more_top(),
         "has_more_bottom": store.has_more_bottom(),
     }))
+}
+
+fn send_buzz(cx: &mut App, text: &str) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    if store.read(cx).is_anonymous_mode() {
+        anyhow::bail!("buzz is blocked in anonymous mode");
+    }
+    store.update(cx, |store, cx| {
+        store.send_buzz_message(text.to_string(), cx);
+    });
+    Ok(json!({ "ok": true, "text": text }))
+}
+
+fn outgoing_attachments(paths: &[String]) -> anyhow::Result<Vec<mezon_store::OutgoingAttachment>> {
+    paths
+        .iter()
+        .map(|path| {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_file() {
+                anyhow::bail!("file not found: {}", path.display());
+            }
+            let pending = mezon_ui::chat::mention_input::build_pending(path.clone())
+                .ok_or_else(|| anyhow::anyhow!("unreadable attachment: {}", path.display()))?;
+            Ok(mezon_store::OutgoingAttachment {
+                path: pending.path,
+                filename: pending.filename,
+                filetype: pending.filetype,
+                width: i32::try_from(pending.width).unwrap_or(0),
+                height: i32::try_from(pending.height).unwrap_or(0),
+                duration: pending.duration,
+                poster_jpeg: pending.poster_jpeg,
+            })
+        })
+        .collect()
+}
+
+fn send_attachment(
+    cx: &mut App,
+    auth_state: &gpui::Entity<AuthState>,
+    attachments: Vec<mezon_store::OutgoingAttachment>,
+    content: &str,
+    anonymous: bool,
+    reply_to: i64,
+) -> anyhow::Result<Value> {
+    let filenames: Vec<String> = attachments.iter().map(|att| att.filename.clone()).collect();
+    let (user_id, username) = match auth_state.read(cx) {
+        AuthState::Authenticated(session) => (session.user_id.clone(), session.username.clone()),
+        _ => anyhow::bail!("not signed in"),
+    };
+    let store = mezon_store::MessagesStore::global(cx);
+    let reply_draft = (reply_to != 0)
+        .then(|| {
+            store
+                .read(cx)
+                .reply_draft_for(mezon_store::MessageId(reply_to))
+        })
+        .flatten();
+    if reply_to != 0 && reply_draft.is_none() {
+        anyhow::bail!("message {reply_to} is not loaded in the active channel");
+    }
+    store.update(cx, |store, cx| {
+        if store.is_anonymous_mode() != anonymous {
+            store.toggle_anonymous_mode(cx);
+        }
+        if store.is_anonymous_mode() != anonymous {
+            anyhow::bail!("cannot set anonymous={anonymous} for the active channel");
+        }
+        store.send_message_with_payload(
+            content.to_string(),
+            user_id,
+            username,
+            mezon_store::OutgoingContent::default(),
+            attachments,
+            None,
+            reply_draft,
+            anonymous,
+            0,
+            cx,
+        );
+        Ok(json!({
+            "ok": true,
+            "attachments": filenames,
+            "content": content,
+            "anonymous": anonymous,
+            "reply_to": reply_to,
+        }))
+    })
 }
 
 fn build_context(cx: &App, auth_state: &gpui::Entity<AuthState>) -> Value {

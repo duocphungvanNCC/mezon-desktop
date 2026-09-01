@@ -7,10 +7,11 @@ use gpui::{
     http_client::HttpClient, prelude::*, px,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm, PcmStream};
-use mezon_store::PlatformStore;
 
+use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
+const AUDIO_OUTPUT_TOAST_KEY: &str = "audio-output-unavailable";
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 const AUDIO_FETCH_CHUNK: usize = 64 * 1024;
@@ -65,14 +66,11 @@ impl AudioPlayerView {
             download_url,
             download_name,
         } = activation;
-        let player = AudioPlayer::new()
-            .inspect_err(|err| tracing::warn!("audio output unavailable: {err}"))
-            .ok();
         let mut view = Self {
             url: url.clone(),
             download_url,
             download_name,
-            player,
+            player: None,
             state: LoadState::Loading,
             want_play: true,
             server_duration: duration,
@@ -81,8 +79,28 @@ impl AudioPlayerView {
             _load_task: None,
             tick_task: None,
         };
-        view.start_loading(url, cx);
+        if view.ensure_player(cx) {
+            view.start_loading(url, cx);
+        }
         view
+    }
+
+    fn ensure_player(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.player.is_some() {
+            return true;
+        }
+        match AudioPlayer::new() {
+            Ok(player) => {
+                self.player = Some(player);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("audio output unavailable: {err}");
+                self.state = LoadState::Failed;
+                cx.defer(report_audio_output_unavailable);
+                false
+            }
+        }
     }
 
     fn start_loading(&mut self, url: SharedString, cx: &mut Context<Self>) {
@@ -207,6 +225,19 @@ impl AudioPlayerView {
     }
 
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if !self.ensure_player(cx) {
+            cx.notify();
+            return;
+        }
+        if matches!(self.state, LoadState::Failed) {
+            self.state = LoadState::Loading;
+            self.want_play = true;
+            self.time_label = SharedString::from(time_label(0.0, self.server_duration));
+            self.last_label_seconds = (0, whole_seconds(self.server_duration));
+            self.start_loading(self.url.clone(), cx);
+            cx.notify();
+            return;
+        }
         match &self.player {
             Some(player) if self.is_ready() => {
                 if player.is_playing() {
@@ -217,12 +248,8 @@ impl AudioPlayerView {
                     self.restart_tick(cx);
                 }
             }
-            Some(_) => {
+            _ => {
                 self.want_play = !self.want_play;
-            }
-            None => {
-                open_audio_external(&self.url, cx);
-                return;
             }
         }
         cx.notify();
@@ -236,12 +263,17 @@ impl Render for AudioPlayerView {
             .as_ref()
             .map(|player| player.is_playing())
             .unwrap_or(false);
+        let play_icon = match self.state {
+            LoadState::Failed => IconName::TriangleAlert,
+            _ if playing => IconName::AudioPause,
+            _ => IconName::AudioPlay,
+        };
         let download_url = self.download_url.clone();
         let download_name = self.download_name.clone();
         audio_pill(
             "audio-play",
             "audio-download",
-            playing,
+            play_icon,
             self.time_label.clone(),
             cx.listener(|view, _, _window, cx| view.toggle_play(cx)),
             move |_, _, cx| {
@@ -258,16 +290,11 @@ impl Render for AudioPlayerView {
 pub(crate) fn audio_pill(
     play_id: impl Into<ElementId>,
     download_id: impl Into<ElementId>,
-    playing: bool,
+    play_icon: IconName,
     time_label: SharedString,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_download: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
-    let play_icon = if playing {
-        IconName::AudioPause
-    } else {
-        IconName::AudioPlay
-    };
     div()
         .flex()
         .w_full()
@@ -324,7 +351,11 @@ pub(crate) fn audio_pill(
         .into_any_element()
 }
 
-pub(crate) fn audio_sending_pill(duration: f64) -> gpui::AnyElement {
+/// The pill a voice message shows while its bytes are still on their way — for
+/// the sender until the upload finishes, for everyone else until `presign_finish`
+/// names the key. Spelling out "Uploading…" beats a bare spinner: the row is
+/// otherwise indistinguishable from an audio player that simply will not start.
+pub(crate) fn audio_sending_pill(duration: f64, locale: &str) -> gpui::AnyElement {
     div()
         .flex()
         .w_full()
@@ -356,8 +387,16 @@ pub(crate) fn audio_sending_pill(duration: f64) -> gpui::AnyElement {
                         .ml_2()
                         .text_size(px(14.))
                         .whitespace_nowrap()
-                        .child(audio_time_label(0.0, duration)),
-                ),
+                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                )
+                .when(duration > 0.0, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(14.))
+                            .whitespace_nowrap()
+                            .child(audio_time_label(0.0, duration)),
+                    )
+                }),
         )
         .into_any_element()
 }
@@ -441,10 +480,10 @@ async fn fetch_audio(
     Ok(body)
 }
 
-fn open_audio_external(url: &str, cx: &mut App) {
-    if let Some(store) = PlatformStore::try_global(cx) {
-        let _ = store.read(cx).open_url_external(url);
-    }
+pub(crate) fn report_audio_output_unavailable(cx: &mut App) {
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.error_once(AUDIO_OUTPUT_TOAST_KEY, "Audio output unavailable", cx)
+    });
 }
 
 fn whole_seconds(total: f64) -> u64 {

@@ -28,9 +28,9 @@ use mezon_store::{
 };
 use std::time::Duration;
 
+pub use attachments::build_pending;
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
-    validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
 };
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
@@ -460,6 +460,7 @@ pub struct MentionInput {
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
+    emoji_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
@@ -561,6 +562,8 @@ fn write_clipboard_image(image: &Image, base: i64, index: usize) -> Option<PathB
     Some(path)
 }
 
+const SUGGESTION_EMOJI_SOURCE_PX: u32 = 48;
+
 impl MentionInput {
     pub fn new(
         placeholder: impl Into<SharedString>,
@@ -571,6 +574,15 @@ impl MentionInput {
         let mut this = Self::build(placeholder, settings, false, window, cx);
         this.overflow_to_file = true;
         this
+    }
+
+    pub fn new_compact(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(placeholder, settings, true, window, cx)
     }
 
     pub fn new_edit(
@@ -619,6 +631,7 @@ impl MentionInput {
         );
         let store_subs = Self::subscribe_pool_sources(cx);
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
                 "composer-attachment-preview",
@@ -651,6 +664,7 @@ impl MentionInput {
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
             avatar_cache,
+            emoji_cache,
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
@@ -777,6 +791,20 @@ impl MentionInput {
         cx.notify();
     }
 
+    pub fn current_content(&self, cx: &App) -> (String, OutgoingContent, Vec<OutgoingAttachment>) {
+        let raw = self.input.read(cx).value().to_string();
+        let text = if self.committed.is_empty() {
+            raw.trim().to_string()
+        } else {
+            raw.trim_end().to_string()
+        };
+        (
+            text,
+            outgoing_content_from_committed(&raw, &self.committed),
+            outgoing_attachments(&self.pending_attachments),
+        )
+    }
+
     pub fn take_payload(
         &mut self,
         window: &mut Window,
@@ -787,6 +815,7 @@ impl MentionInput {
         Vec<OutgoingAttachment>,
         Option<OutgoingOgp>,
     )> {
+        let swallow = self.input.read(cx).pending_send_ime_token();
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -807,54 +836,19 @@ impl MentionInput {
             self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
-                input.set_value("", window, cx);
+                input.clear_after_send(swallow.clone(), window, cx);
             });
             return None;
         }
-        let mut content = OutgoingContent::default();
-        for token in &self.committed {
-            let s = byte_offset_to_utf16(&raw, token.start) as i32;
-            let e = byte_offset_to_utf16(&raw, token.end) as i32;
-            match &token.kind {
-                TokenKind::Mention { user_id, role_id } => content.mentions.push(OutgoingMention {
-                    user_id: user_id.clone(),
-                    role_id: role_id.clone(),
-                    display: token.display.clone(),
-                    s,
-                    e,
-                }),
-                TokenKind::Hashtag { channel_id } => content.hashtags.push(OutgoingHashtag {
-                    channel_id: channel_id.clone(),
-                    s,
-                    e,
-                }),
-                TokenKind::Emoji { emoji_id } => content.emojis.push(OutgoingEmoji {
-                    emoji_id: emoji_id.clone(),
-                    s,
-                    e,
-                }),
-            }
-        }
-        let attachments: Vec<OutgoingAttachment> = self
-            .pending_attachments
-            .drain(..)
-            .map(|p| OutgoingAttachment {
-                path: p.path,
-                filename: p.filename,
-                filetype: p.filetype,
-                width: i32::try_from(p.width).unwrap_or(0),
-                height: i32::try_from(p.height).unwrap_or(0),
-                duration: p.duration,
-                poster_jpeg: p.poster_jpeg,
-            })
-            .collect();
+        let content = outgoing_content_from_committed(&raw, &self.committed);
+        let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
         self.close_popup();
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
-            input.set_value("", window, cx);
+            input.clear_after_send(swallow, window, cx);
         });
         Some((text, content, attachments, ogp))
     }
@@ -1011,7 +1005,7 @@ impl MentionInput {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let pending = cx
@@ -1690,7 +1684,9 @@ impl MentionInput {
             cx.subscribe(
                 &DirectMessageStore::global(cx),
                 |this, _, event: &DirectEvent, cx| {
-                    let DirectEvent::Changed { channel_id } = event;
+                    let DirectEvent::Changed { channel_id } = event else {
+                        return;
+                    };
                     if channel_id.is_none() || *channel_id == mention_direct_id(cx) {
                         this.invalidate_pool(Sigil::At, cx);
                     }
@@ -1746,6 +1742,11 @@ impl MentionInput {
         if let Some(store) = EmojiStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, _: &EmojiEvent, cx| {
                 this.invalidate_pool(Sigil::Colon, cx)
+            }));
+        }
+        if let Some(store) = QuickMenuStore::try_global(cx) {
+            subs.push(cx.observe(&store, |this, _, cx| {
+                this.invalidate_pool(Sigil::Slash, cx);
             }));
         }
         subs
@@ -1808,7 +1809,7 @@ impl MentionInput {
         let query_lc = query.to_lowercase();
         self.session_commands
             .iter()
-            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .filter(|command| command.display_lc.contains(&query_lc))
             .map(|command| Suggestion::SlashCommand(command.clone()))
             .collect()
     }
@@ -1906,7 +1907,11 @@ impl MentionInput {
                 break;
             }
             if emoji.shortname.contains(&needle) {
-                let src = crate::util::imgproxy::emoji_url(cx, &emoji.emoji_id);
+                let src = crate::util::imgproxy::emoji_url_sized(
+                    cx,
+                    &emoji.emoji_id,
+                    SUGGESTION_EMOJI_SOURCE_PX,
+                );
                 out.push(Suggestion::Emoji(emoji.clone(), src.into()));
             }
         }
@@ -2129,9 +2134,90 @@ impl MentionInput {
         cx.set_global(ActiveComposer(entity.downgrade()));
     }
 
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<ActiveComposer>()
             .and_then(|composer| composer.0.upgrade())
+    }
+
+    pub(crate) fn probe_set_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+        });
+        self.on_change(cx);
+    }
+
+    pub(crate) fn probe_text(&self, cx: &App) -> SharedString {
+        self.input.read(cx).value_shared()
+    }
+
+    /// Names of the files staged on the composer, in the order they will be
+    /// sent. Reading a file off disk happens on a background task, so a drop
+    /// only shows up here once the attachment is actually staged — which is what
+    /// makes it the thing to poll before submitting.
+    pub(crate) fn probe_attachments(&self) -> Vec<String> {
+        self.pending_attachments
+            .iter()
+            .map(|att| att.filename.clone())
+            .collect()
+    }
+
+    pub(crate) fn probe_suggestions(&self) -> (bool, usize, Vec<String>) {
+        let labels = self
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.sort_keys().0.to_string())
+            .collect();
+        (self.popup_open(), self.selected, labels)
+    }
+
+    pub(crate) fn probe_accept(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.popup_open() || index >= self.suggestions.len() {
+            return false;
+        }
+        self.accept(index, window, cx);
+        true
+    }
+
+    pub(crate) fn probe_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_enter(window, cx);
+    }
+
+    pub(crate) fn probe_panel_send(
+        &mut self,
+        kind: &str,
+        url: String,
+        filename: String,
+        width: i32,
+        height: i32,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.close_popup();
+        match kind {
+            "sticker" => cx.emit(MentionInputEvent::SendSticker { url, filename }),
+            "gif" => cx.emit(MentionInputEvent::SendGif {
+                url,
+                width: width.max(0) as u32,
+                height: height.max(0) as u32,
+            }),
+            "sound" => cx.emit(MentionInputEvent::SendSound { url, filename }),
+            other => anyhow::bail!("unknown panel kind: {other}"),
+        }
+        cx.notify();
+        Ok(())
     }
 
     fn insert_emoji(
@@ -2297,7 +2383,13 @@ impl MentionInput {
                     let leading = if src.is_empty() {
                         None
                     } else {
-                        Some(img(src.clone()).size(px(22.)).into_any_element())
+                        Some(
+                            img(src.clone())
+                                .image_cache(&self.emoji_cache)
+                                .id("suggestion-emoji-frames")
+                                .size(px(22.))
+                                .into_any_element(),
+                        )
                     };
                     (
                         leading,
@@ -2500,12 +2592,15 @@ impl MentionInput {
     fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.popup_open();
         let popup = open.then(|| self.build_suggestion_popup(cx));
+        let previews =
+            (!self.pending_attachments.is_empty()).then(|| self.render_attachment_previews(cx));
         div()
             .relative()
             .w_full()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
+            .when_some(previews, |this, previews| this.child(previews))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
             .into_any_element()
@@ -2653,6 +2748,49 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
             shortname_lc: emoji.shortname.to_lowercase(),
         })
         .collect()
+}
+
+fn outgoing_attachments(pending: &[PendingAttachment]) -> Vec<OutgoingAttachment> {
+    pending
+        .iter()
+        .map(|pending| OutgoingAttachment {
+            path: pending.path.clone(),
+            filename: pending.filename.clone(),
+            filetype: pending.filetype.clone(),
+            width: i32::try_from(pending.width).unwrap_or(0),
+            height: i32::try_from(pending.height).unwrap_or(0),
+            duration: pending.duration,
+            poster_jpeg: pending.poster_jpeg.clone(),
+        })
+        .collect()
+}
+
+fn outgoing_content_from_committed(raw: &str, committed: &[CommittedToken]) -> OutgoingContent {
+    let mut content = OutgoingContent::default();
+    for token in committed {
+        let s = byte_offset_to_utf16(raw, token.start) as i32;
+        let e = byte_offset_to_utf16(raw, token.end) as i32;
+        match &token.kind {
+            TokenKind::Mention { user_id, role_id } => content.mentions.push(OutgoingMention {
+                user_id: user_id.clone(),
+                role_id: role_id.clone(),
+                display: token.display.clone(),
+                s,
+                e,
+            }),
+            TokenKind::Hashtag { channel_id } => content.hashtags.push(OutgoingHashtag {
+                channel_id: channel_id.clone(),
+                s,
+                e,
+            }),
+            TokenKind::Emoji { emoji_id } => content.emojis.push(OutgoingEmoji {
+                emoji_id: emoji_id.clone(),
+                s,
+                e,
+            }),
+        }
+    }
+    content
 }
 
 fn committed_from_compose_tokens(text: &str, tokens: Vec<ComposeToken>) -> Vec<CommittedToken> {
@@ -2831,6 +2969,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -2899,6 +3038,8 @@ impl Render for MentionInput {
             });
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()

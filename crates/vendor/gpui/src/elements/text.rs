@@ -1,8 +1,8 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -648,6 +648,7 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
 }
@@ -710,16 +711,18 @@ impl TextLayout {
                 // 2. wrap_width matches (or both are None)
                 // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
                 //    because the previous layout may have been computed without truncation)
+                // 4. the cached layout was not truncated
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
                     && truncate_width.is_none()
+                    && text_layout.truncate_width.is_none()
                 {
                     return size;
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                let (text, runs) = if truncate_width.is_some() {
+                let (text, runs) = if let Some(truncate_width) = truncate_width {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
                     {
@@ -731,10 +734,19 @@ impl TextLayout {
                             &runs,
                             truncate_from,
                         )
+                    } else if let Some(unclipped) = window
+                        .text_system()
+                        .shape_text(text.clone(), font_size, &runs, None, None)
+                        .log_err()
+                        && unclipped
+                            .iter()
+                            .all(|line| line.size(line_height).width <= truncate_width)
+                    {
+                        (text.clone(), Cow::Borrowed(&*runs))
                     } else {
                         line_wrapper.truncate_line(
                             text.clone(),
-                            truncate_width.unwrap_or(Pixels::MAX),
+                            truncate_width,
                             &truncation_affix,
                             &runs,
                             truncate_from,
@@ -761,6 +773,7 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
                     });
@@ -779,6 +792,7 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
                 });
@@ -1229,46 +1243,58 @@ impl Element for InteractiveText {
                         window.set_cursor_style(crate::CursorStyle::PointingHand, hitbox)
                     }
 
-                    let text_layout = text_layout.clone();
+                    // mezon vendor edit: register both listeners on every paint
+                    // behind one shared cell so a press resolves inside a single
+                    // frame. Upstream registers one per paint and refreshes in
+                    // between, which drops the click when no repaint lands or the
+                    // element id changed; re-apply on snapshot bump.
                     let mouse_down = interactive_state.mouse_down_index.clone();
-                    if let Some(mouse_down_index) = mouse_down.get() {
+                    window.on_mouse_event({
                         let hitbox = hitbox.clone();
-                        let clickable_ranges = self.clickable_ranges.clone();
-                        window.on_mouse_event(
-                            move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
-                                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
-                                    if let Some(Ok(mouse_up_index)) =
-                                        text_layout.try_index_for_position(event.position)
-                                    {
-                                        click_listener(
-                                            &clickable_ranges,
-                                            InteractiveTextClickEvent {
-                                                mouse_down_index,
-                                                mouse_up_index,
-                                            },
-                                            window,
-                                            cx,
-                                        )
-                                    }
-
-                                    mouse_down.take();
-                                    window.refresh();
-                                }
-                            },
-                        );
-                    } else {
-                        let hitbox = hitbox.clone();
-                        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
+                        let text_layout = text_layout.clone();
+                        let mouse_down = mouse_down.clone();
+                        move |event: &MouseDownEvent, phase, window, _| {
                             if phase == DispatchPhase::Bubble
+                                && event.button == MouseButton::Left
                                 && hitbox.is_hovered(window)
                                 && let Some(Ok(mouse_down_index)) =
                                     text_layout.try_index_for_position(event.position)
                             {
                                 mouse_down.set(Some(mouse_down_index));
-                                window.refresh();
                             }
-                        });
-                    }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let hitbox = hitbox.clone();
+                        let text_layout = text_layout.clone();
+                        let clickable_ranges = self.clickable_ranges.clone();
+                        move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
+                            if phase != DispatchPhase::Bubble
+                                || event.button != MouseButton::Left
+                            {
+                                return;
+                            }
+                            let Some(mouse_down_index) = mouse_down.take() else {
+                                return;
+                            };
+                            if !hitbox.is_hovered(window) {
+                                return;
+                            }
+                            if let Some(Ok(mouse_up_index)) =
+                                text_layout.try_index_for_position(event.position)
+                            {
+                                click_listener(
+                                    &clickable_ranges,
+                                    InteractiveTextClickEvent {
+                                        mouse_down_index,
+                                        mouse_up_index,
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            }
+                        }
+                    });
                 }
 
                 window.on_mouse_event({

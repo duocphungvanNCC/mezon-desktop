@@ -152,7 +152,7 @@ impl TopicsData {
         self.resort_topics();
     }
 
-    fn upsert_topic(&mut self, topic: TopicDiscussion) {
+    fn merge_topic(&mut self, topic: TopicDiscussion) {
         let topic_id = topic.id.clone();
         if let Some(idx) = self.topic_index.get(&topic_id).copied() {
             let existing = &mut self.topics[idx];
@@ -172,6 +172,21 @@ impl TopicsData {
             }
         } else {
             self.topics.push(topic);
+            if let Some(last) = self.topics.last() {
+                self.topic_index
+                    .insert(last.id.clone(), self.topics.len() - 1);
+            }
+        }
+    }
+
+    fn upsert_topic(&mut self, topic: TopicDiscussion) {
+        self.merge_topic(topic);
+        self.resort_topics();
+    }
+
+    fn upsert_topics(&mut self, topics: impl IntoIterator<Item = TopicDiscussion>) {
+        for topic in topics {
+            self.merge_topic(topic);
         }
         self.resort_topics();
     }
@@ -258,10 +273,15 @@ impl TopicsData {
     }
 }
 
+const MAX_TOPIC_FETCH_FAILURES: u32 = 3;
+
 pub struct TopicsStore {
     data: TopicsData,
     clan_id: Option<String>,
     loading: bool,
+    has_more: bool,
+    next_page: i32,
+    fetch_failures: u32,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
     panel_open: bool,
@@ -294,6 +314,9 @@ impl TopicsStore {
             data: TopicsData::default(),
             clan_id: None,
             loading: false,
+            has_more: true,
+            next_page: 1,
+            fetch_failures: 0,
             fetch_generation: 0,
             fetched_at: None,
             panel_open: false,
@@ -767,6 +790,19 @@ impl TopicsStore {
             message_code: 0,
         };
         let has_attachments = !attachments.is_empty();
+        // The reply row is built from the server's echo, which knows nothing about
+        // the file on this disk. Keep the paths so the sender sees the picture they
+        // just sent instead of fetching a proxied copy of it back — the same thing
+        // `MessageAttachment::optimistic_local` does for a channel send.
+        let local_sources: Vec<(String, Option<std::path::PathBuf>)> = attachments
+            .iter()
+            .map(|att| {
+                (
+                    att.filename.clone(),
+                    att.filetype.starts_with("image/").then(|| att.path.clone()),
+                )
+            })
+            .collect();
         let reply_ref =
             self.reply_target
                 .take()
@@ -830,6 +866,7 @@ impl TopicsStore {
             };
 
             let mut upload_ctx = None;
+            let mut uploaded_ctx = None;
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -858,13 +895,28 @@ impl TopicsStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = if anonymous {
-                    Vec::new()
-                } else {
-                    transport_mentions.clone()
-                };
+                let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
+                let deferred_presigned = if anonymous {
+                    if let Err(e) = api.upload_presigned_all(presigned).await {
+                        tracing::error!("submit_reply anonymous attachment upload failed: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
+                            this.compose.submitting = false;
+                            this.compose.creating = false;
+                            this.compose.error = Some(e.to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    None
+                } else {
+                    Some(presigned)
+                };
                 let sent = match api
                     .send_topic_presigned_message(
                         clan_id,
@@ -877,7 +929,7 @@ impl TopicsStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Vec::new(),
+                        deferred_presigned.is_some().then(Vec::new),
                         reply_ref.clone(),
                         send_flags,
                     )
@@ -899,15 +951,22 @@ impl TopicsStore {
                         return;
                     }
                 };
-                upload_ctx = Some((
-                    presigned,
-                    keys,
-                    update_mentions,
-                    update_hashtags,
-                    update_emojis,
-                    sent.message_id,
-                    sent.create_time.max(0) as u32,
-                ));
+                match deferred_presigned {
+                    Some(presigned) => {
+                        upload_ctx = Some((
+                            presigned,
+                            keys,
+                            update_mentions,
+                            update_hashtags,
+                            update_emojis,
+                            sent.message_id,
+                            sent.create_time.max(0) as u32,
+                        ));
+                    }
+                    None => {
+                        uploaded_ctx = Some((sent.message_id, keys));
+                    }
+                }
                 sent
             } else {
                 match api
@@ -954,10 +1013,25 @@ impl TopicsStore {
                     generation,
                     ack,
                     anonymous,
+                    local_sources,
                     cx,
                 );
             });
 
+            if let Some((real_message_id, keys)) = uploaded_ctx {
+                cx.update(|cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        for key in keys {
+                            store.apply_topic_attachment_outcome(
+                                topic_id,
+                                MessageId(real_message_id),
+                                AttachmentUploadOutcome::Uploaded(key),
+                                cx,
+                            );
+                        }
+                    });
+                });
+            }
             let Some((
                 presigned,
                 keys,
@@ -1037,6 +1111,7 @@ impl TopicsStore {
         generation: u64,
         ack: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) {
         if self.compose_generation != generation {
@@ -1048,7 +1123,14 @@ impl TopicsStore {
         let creator_id = viewer_user_id(cx);
         let append = MessagesStore::global(cx).update(cx, |store, cx| {
             store.set_active_topic(Some(topic_id), cx);
-            let append = store.append_topic_message(topic_id, ack, anonymous, cx);
+            let append = store.append_topic_message(
+                topic_id,
+                ack,
+                anonymous,
+                local_sources,
+                is_new_topic,
+                cx,
+            );
             if is_new_topic {
                 store.mark_message_as_topic(
                     ChannelId(parent_channel_id),
@@ -1191,6 +1273,9 @@ impl TopicsStore {
                     generation,
                     ack,
                     anonymous,
+                    // A url attachment (Tenor, a pasted link) has no file on this
+                    // disk to show.
+                    Vec::new(),
                     cx,
                 );
             });
@@ -1218,6 +1303,10 @@ impl TopicsStore {
         self.loading
     }
 
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
     fn is_fresh(&self, clan_id: &str) -> bool {
         self.clan_id.as_deref() == Some(clan_id)
             && self.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL)
@@ -1239,6 +1328,23 @@ impl TopicsStore {
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
         }
+        self.has_more = true;
+        self.next_page = 1;
+        self.fetch_failures = 0;
+        self.fetch_page(clan_id, 1, false, cx);
+    }
+
+    pub fn fetch_more(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        if self.loading || !self.has_more {
+            return;
+        }
+        if self.clan_id.as_deref() != Some(clan_id) {
+            return;
+        }
+        self.fetch_page(clan_id, self.next_page, true, cx);
+    }
+
+    fn fetch_page(&mut self, clan_id: &str, page: i32, append: bool, cx: &mut Context<Self>) {
         self.loading = true;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
@@ -1247,9 +1353,9 @@ impl TopicsStore {
         let api = self.api.clone();
         let clan_id = clan_id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = api.list_sd_topics(&clan_id, TOPICS_LIMIT).await;
+            let result = api.list_sd_topics(&clan_id, TOPICS_LIMIT, page).await;
             let _ = this.update(cx, |this, cx| {
-                this.apply_fetch_result(&clan_id, generation, result, cx);
+                this.apply_fetch_result(&clan_id, generation, page, append, result, cx);
             });
         })
         .detach();
@@ -1259,6 +1365,8 @@ impl TopicsStore {
         &mut self,
         clan_id: &str,
         generation: u64,
+        page: i32,
+        append: bool,
         result: Result<Vec<TopicDiscussion>, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
@@ -1268,7 +1376,14 @@ impl TopicsStore {
         self.loading = false;
         match result {
             Ok(topics) => {
-                self.data.set_topics(topics);
+                self.fetch_failures = 0;
+                self.has_more = topics.len() >= TOPICS_LIMIT as usize;
+                self.next_page = page.saturating_add(1);
+                if append {
+                    self.data.upsert_topics(topics);
+                } else {
+                    self.data.set_topics(topics);
+                }
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
                 cx.emit(TopicsEvent::Updated);
@@ -1276,6 +1391,10 @@ impl TopicsStore {
             }
             Err(e) => {
                 tracing::error!("list_sd_topics failed: {e}");
+                self.fetch_failures = self.fetch_failures.saturating_add(1);
+                if self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES {
+                    self.has_more = false;
+                }
                 cx.emit(TopicsEvent::Updated);
                 cx.notify();
             }
@@ -1658,6 +1777,32 @@ mod tests {
         ]);
 
         assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn upsert_topics_merges_a_page_then_resorts_once() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topics(vec![
+            topic(10, 1, "9", "a2", 150),
+            topic(20, 2, "8", "b", 300),
+            topic(30, 3, "8", "c", 200),
+        ]);
+
+        assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_eq!(data.topic_by_id("10").expect("topic 10").content, "a2");
+        assert_eq!(
+            data.topic_by_id("10").expect("topic 10").last_sender_id,
+            "9"
+        );
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            150
+        );
+        assert_sorted_by_timestamp_desc(&data);
         assert_index_matches_topics(&data);
     }
 

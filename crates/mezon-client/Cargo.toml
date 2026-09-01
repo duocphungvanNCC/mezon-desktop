@@ -31,6 +31,7 @@ flate2 = "1"
 bytes.workspace = true
 foyer.workspace = true
 parking_lot.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
@@ -42,3 +43,6 @@ core-foundation = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+
+[features]
+dev-session = []

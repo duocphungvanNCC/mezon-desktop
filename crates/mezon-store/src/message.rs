@@ -8,6 +8,7 @@ use mezon_client::transport::{
 };
 
 use crate::album_layout::AlbumLayout;
+use crate::config::AppConfig;
 use crate::ids::{ChannelId, MessageId, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
@@ -48,11 +49,14 @@ pub fn url_extension(url: &str) -> Option<String> {
 }
 
 pub fn is_image_type(filetype: &str, url: &str) -> bool {
-    let mime_image =
-        (filetype.starts_with("image") || filetype == STICKER_FILETYPE) && !is_svg_type(filetype);
+    let ext = url_extension(url);
+    if is_svg_type(filetype) || ext.as_deref() == Some("svg") {
+        return false;
+    }
+    let mime_image = filetype.starts_with("image") || filetype == STICKER_FILETYPE;
     mime_image
         || matches!(
-            url_extension(url).as_deref(),
+            ext.as_deref(),
             Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif")
         )
 }
@@ -90,8 +94,25 @@ impl MessageAttachment {
         Self::media_is_video(&self.filetype, &self.url)
     }
 
-    pub fn is_unsupported_media(&self) -> bool {
+    /// A Matroska video (`.webm`, and the `video/matroska` MIME a browser
+    /// recorder writes) rides on whatever demuxer the platform player has:
+    /// GStreamer reads it, AVFoundation (macOS) and Media Foundation (Windows)
+    /// do not. There the inline player can only mount, fail, and sit on a play
+    /// button that never does anything, so hand the file to the download box
+    /// instead. Audio `.webm` (voice messages) is decoded in-app by symphonia
+    /// and is deliberately left alone.
+    fn is_undecodable_matroska(&self, ext: Option<&str>) -> bool {
+        if cfg!(target_os = "linux") || self.filetype.contains("audio") {
+            return false;
+        }
         matches!(
+            self.filetype.as_str(),
+            "video/webm" | "video/matroska" | "video/x-matroska"
+        ) || ext == Some("webm")
+    }
+
+    pub fn is_unsupported_media(&self) -> bool {
+        if matches!(
             self.filetype.as_str(),
             "video/x-ms-wmv"
                 | "video/wmv"
@@ -105,6 +126,28 @@ impl MessageAttachment {
                 | "image/tiff"
                 | "image/bmp"
                 | "image/psd"
+        ) {
+            return true;
+        }
+        let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
+        if self.is_undecodable_matroska(ext.as_deref()) {
+            return true;
+        }
+        matches!(
+            ext.as_deref(),
+            Some(
+                "wmv"
+                    | "avi"
+                    | "flv"
+                    | "mkv"
+                    | "rmvb"
+                    | "wma"
+                    | "ra"
+                    | "tiff"
+                    | "tif"
+                    | "bmp"
+                    | "psd"
+            )
         )
     }
 }
@@ -308,6 +351,7 @@ pub enum MessageSpan {
     CodeBlock {
         language: Option<String>,
         text: SharedString,
+        fenced_source: SharedString,
     },
     Link {
         text: SharedString,
@@ -399,6 +443,7 @@ pub struct EmbedAuthor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedImage {
+    pub url: SharedString,
     pub url_proxied: SharedString,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -418,12 +463,75 @@ pub struct EmbedTextInput {
     pub multiline: bool,
     pub required: bool,
     pub disabled: bool,
+    pub numeric: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedDatePicker {
+    pub id: SharedString,
+    pub value: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadioOption {
+    pub label: SharedString,
+    pub value: SharedString,
+    pub description: SharedString,
+    pub name: SharedString,
+    pub style: Option<i32>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadio {
+    pub id: SharedString,
+    pub options: Vec<EmbedRadioOption>,
+    pub max_options: Option<i32>,
+}
+
+impl EmbedRadio {
+    pub fn allows_multiple(&self) -> bool {
+        match (self.options.first(), self.options.get(1)) {
+            (Some(first), Some(second)) => !first.name.is_empty() && first.name != second.name,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedAnimation {
+    pub id: SharedString,
+    pub url_image: SharedString,
+    pub url_position: SharedString,
+    pub pool: Vec<Vec<SharedString>>,
+    pub duration_seconds: f32,
+    pub repeat: Option<u32>,
+    pub vertical: bool,
+    pub is_result: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum EmbedInput {
     Text(EmbedTextInput),
     Select(MessageSelect),
+    DatePicker(EmbedDatePicker),
+    Radio(EmbedRadio),
+    Animation(EmbedAnimation),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbedGridItem {
+    pub start_col: u32,
+    pub start_row: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedGrid {
+    pub columns: u32,
+    pub rows: u32,
+    pub items: Vec<EmbedGridItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +540,8 @@ pub struct EmbedField {
     pub value: SharedString,
     pub inline: bool,
     pub input: Option<EmbedInput>,
+    pub shape: Option<EmbedGrid>,
+    pub buttons: Vec<MessageButton>,
 }
 
 #[derive(Debug, Clone)]
@@ -441,6 +551,7 @@ pub struct Embed {
     pub url: Option<SharedString>,
     pub author: Option<EmbedAuthor>,
     pub description_spans: Vec<MessageSpan>,
+    pub thumbnail_url: SharedString,
     pub thumbnail_proxied: SharedString,
     pub image: Option<EmbedImage>,
     pub footer: Option<EmbedFooter>,
@@ -909,7 +1020,16 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     collect(&content.hg, Kind::Hashtag, &mut toks);
     collect(&content.ej, Kind::Emoji, &mut toks);
     collect(&content.mk, Kind::Markdown, &mut toks);
-    collect(&content.lk, Kind::Link(LinkKind::Plain), &mut toks);
+    for t in &content.lk {
+        let s = t.s.unwrap_or(0);
+        let e = t.e.unwrap_or(0);
+        if e > s {
+            let text = slice(s, e);
+            let target = resolve_link_url(t.url.as_deref().unwrap_or(""), &text);
+            let kind = link_kind_from_marker(mezon_client::link_markdown_kind(&target));
+            toks.push((s, e, Kind::Link(kind), t.clone()));
+        }
+    }
     collect(&content.vk, Kind::Link(LinkKind::Plain), &mut toks);
     collect(&content.lky, Kind::Link(LinkKind::YouTube), &mut toks);
     toks.sort_by_key(|t| t.0);
@@ -977,6 +1097,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                         spans.push(MessageSpan::CodeBlock {
                             language,
                             text: text.into(),
+                            fenced_source: inner.clone().into(),
                         });
                     }
                     "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" => {
@@ -1027,6 +1148,16 @@ fn link_kind_from_marker(marker: &str) -> LinkKind {
         "lk_fb" => LinkKind::Facebook,
         "lk_tt" => LinkKind::TikTok,
         _ => LinkKind::Plain,
+    }
+}
+
+/// Inverse of [`link_kind_from_marker`] — `None` for a plain link, which carries no marker.
+pub(crate) fn link_marker_from_kind(kind: LinkKind) -> Option<&'static str> {
+    match kind {
+        LinkKind::YouTube => Some(mezon_client::YOUTUBE_LINK_MARKDOWN_KIND),
+        LinkKind::Facebook => Some(mezon_client::FACEBOOK_LINK_MARKDOWN_KIND),
+        LinkKind::TikTok => Some(mezon_client::TIKTOK_LINK_MARKDOWN_KIND),
+        LinkKind::Plain => None,
     }
 }
 
@@ -1188,9 +1319,9 @@ pub fn markdown_edit_source(content: &str, spans: &[MessageSpan]) -> Option<Stri
                 out.push_str(t);
                 out.push('`');
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock { fenced_source, .. } => {
                 out.push_str("```");
-                out.push_str(text);
+                out.push_str(fenced_source);
                 out.push_str("```");
             }
             MessageSpan::Link { text, .. } => out.push_str(text),
@@ -1224,17 +1355,45 @@ pub fn strip_code_fence(s: &str) -> (Option<String>, String) {
 
     if let Some((first, rest)) = body.split_once('\n') {
         let rest = rest.trim_end();
-        if !rest.is_empty()
-            && !first.is_empty()
-            && first.len() <= 32
-            && first.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#'
-            })
-        {
-            return (Some(first.to_string()), rest.to_string());
+        let candidate = first.trim();
+        if !rest.is_empty() && is_code_fence_language(candidate) {
+            return (Some(candidate.to_string()), rest.to_string());
         }
     }
     (None, body.to_string())
+}
+
+const CODE_FENCE_LANGUAGES: &[&str] = &[
+    "c",
+    "c++",
+    "c#",
+    "js",
+    "ts",
+    "py",
+    "java",
+    "javascript",
+    "typescript",
+    "python",
+    "go",
+    "rust",
+    "kotlin",
+    "sql",
+    "html",
+    "json",
+    "css",
+    "swift",
+    "yaml",
+    "php",
+    "jsx",
+    "bash",
+];
+
+fn is_code_fence_language(candidate: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let lowered = candidate.to_ascii_lowercase();
+    CODE_FENCE_LANGUAGES.contains(&lowered.as_str())
 }
 
 pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
@@ -1444,6 +1603,31 @@ pub fn message_sort_key(m: &Message) -> (u8, i64) {
 
 pub fn sort_messages(messages: &mut [Message]) {
     messages.sort_by_key(message_sort_key);
+}
+
+/// The 2x source size an emoji span is painted at: a message of only emoji
+/// renders them jumbo, everything else inline. Resolved once here, when the
+/// message is built, because the render path would otherwise rebuild the same
+/// imgproxy URL for every emoji of every visible message on every frame.
+const INLINE_EMOJI_SOURCE_PX: u32 = 48;
+const JUMBO_EMOJI_SOURCE_PX: u32 = 96;
+
+pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
+    let Some(cfg) = cfg else {
+        return;
+    };
+    let source_px = if spans_only_emoji(spans) {
+        JUMBO_EMOJI_SOURCE_PX
+    } else {
+        INLINE_EMOJI_SOURCE_PX
+    };
+    for span in spans.iter_mut() {
+        if let MessageSpan::Emoji { emoji_id, src, .. } = span
+            && !emoji_id.is_empty()
+        {
+            *src = cfg.emoji_src_sized(emoji_id, source_px).into();
+        }
+    }
 }
 
 impl Message {
@@ -1747,6 +1931,77 @@ mod tests {
         );
     }
 
+    fn edit_source_for_composer_text(raw: &str) -> (String, Option<String>) {
+        let sent = mezon_client::transport::build_send_content(raw, &[], &[], &[]);
+        let content: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("send content json");
+        let spans = parse_spans(&content);
+        let source = markdown_edit_source(&content.t, &spans);
+        (content.t.clone(), source)
+    }
+
+    #[test]
+    fn code_fence_keeps_a_first_line_that_is_not_a_known_language() {
+        for body in [
+            "\na\nb\nc\n",
+            "\nx\ny\n",
+            "\nfoo\nbar()\n",
+            "\nresult\nvalue\n",
+        ] {
+            let (language, text) = strip_code_fence(body);
+            assert_eq!(language, None, "body {body:?} must have no language");
+            assert_eq!(text, body.trim(), "body {body:?} must keep every line");
+        }
+    }
+
+    #[test]
+    fn code_fence_strips_only_a_whitelisted_language() {
+        assert_eq!(
+            strip_code_fence("rust\nlet x = 1;\n"),
+            (Some("rust".into()), "let x = 1;".into())
+        );
+        assert_eq!(
+            strip_code_fence("PYTHON\nprint(1)\n"),
+            (Some("PYTHON".into()), "print(1)".into())
+        );
+        assert_eq!(
+            strip_code_fence("rustacean\nlet x = 1;\n"),
+            (None, "rustacean\nlet x = 1;".into())
+        );
+    }
+
+    #[test]
+    fn code_fence_keeps_a_lone_language_word_as_body() {
+        assert_eq!(strip_code_fence("rust"), (None, "rust".into()));
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_bare_code_fence() {
+        let raw = "```let x = 1;```";
+        let (_, source) = edit_source_for_composer_text(raw);
+        assert_eq!(source.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_code_fence_with_a_language_tag() {
+        let raw = "```rust\nlet x = 1;\n```";
+        let (stored, source) = edit_source_for_composer_text(raw);
+        assert!(
+            source.is_some(),
+            "editing must restore the fence; stored text was {stored:?}"
+        );
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_multiline_code_fence() {
+        let raw = "before\n```\nlet x = 1;\nfn main() {}\n```\nafter";
+        let (stored, source) = edit_source_for_composer_text(raw);
+        assert!(
+            source.is_some(),
+            "editing must restore the fence; stored text was {stored:?}"
+        );
+    }
+
     #[test]
     fn edit_source_keeps_text_that_already_carries_markers() {
         let content = ApiMessageContent {
@@ -1780,6 +2035,93 @@ mod tests {
         assert_eq!(
             parse_spans(&content),
             vec![MessageSpan::Text("hello world".into())]
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_bare_link_token_by_platform() {
+        let url = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: url.into(),
+            lk: vec![token(0, url.len() as i64)],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: url.into(),
+                url: url.into(),
+                kind: LinkKind::YouTube,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_keeps_a_link_token_plain_when_markdown_tokens_decide_the_kind() {
+        let url = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..token(0, url.len() as i64)
+            }],
+            lk: vec![token(0, url.len() as i64)],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: url.into(),
+                url: url.into(),
+                kind: LinkKind::Plain,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_link_token_by_its_target_not_its_display_text() {
+        let text = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: text.into(),
+            lk: vec![ContentToken {
+                url: Some("https://evil.example/".into()),
+                ..token(0, text.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: text.into(),
+                url: "https://evil.example/".into(),
+                kind: LinkKind::Plain,
+            }],
+            "the card brand must follow the url the click opens, not the text it shows"
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_link_token_alongside_unrelated_markdown() {
+        let text = "hi https://youtu.be/abc";
+        let content = ApiMessageContent {
+            t: text.into(),
+            mk: vec![ContentToken {
+                kind: Some("b".into()),
+                ..token(0, 2)
+            }],
+            lk: vec![token(3, text.len() as i64)],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert!(
+            spans.iter().any(|span| matches!(
+                span,
+                MessageSpan::Link {
+                    kind: LinkKind::YouTube,
+                    ..
+                }
+            )),
+            "an unrelated bold run must not downgrade the link to plain: {spans:?}"
         );
     }
 
@@ -2172,6 +2514,7 @@ mod tests {
     fn svg_is_a_file_row_not_an_image() {
         assert!(!attachment("image/svg+xml", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("", "https://cdn.example/logo.svg").is_image());
+        assert!(!attachment("image", "https://cdn.example/logo.svg").is_image());
     }
 
     #[test]
@@ -2355,6 +2698,12 @@ mod tests {
         let bmp = attachment("image/bmp", "https://cdn.example/x.bmp");
         assert!(bmp.is_unsupported_media());
         assert!(bmp.is_image());
+
+        let uploaded_bmp = attachment("image", "https://cdn.example/1234.bmp");
+        assert!(uploaded_bmp.is_unsupported_media());
+
+        let uploaded_wmv = attachment("video", "https://cdn.example/1234.wmv");
+        assert!(uploaded_wmv.is_unsupported_media());
     }
 
     #[test]
@@ -2366,6 +2715,32 @@ mod tests {
         let png = attachment("image/png", "https://cdn.example/x.png");
         assert!(!png.is_unsupported_media());
         assert!(png.is_image());
+    }
+
+    #[test]
+    fn matroska_video_is_unsupported_where_the_platform_cannot_demux_it() {
+        // GStreamer reads Matroska; AVFoundation and Media Foundation do not.
+        let expected = !cfg!(target_os = "linux");
+
+        let webm = attachment("video/webm", "https://cdn.example/x.webm");
+        assert_eq!(webm.is_unsupported_media(), expected);
+
+        // A browser recorder writes `video/matroska`, and the web client uploads
+        // the bare "video" category instead of a MIME, so the extension has to
+        // carry the decision on its own.
+        let matroska = attachment("video/matroska", "https://cdn.example/1234.webm");
+        assert_eq!(matroska.is_unsupported_media(), expected);
+        let uploaded = attachment("video", "https://cdn.example/1234.webm");
+        assert_eq!(uploaded.is_unsupported_media(), expected);
+    }
+
+    #[test]
+    fn webm_voice_messages_stay_playable_audio() {
+        // Voice messages are WebM/Opus decoded in-app by symphonia, not by the
+        // platform video player, so the container gate must not swallow them.
+        let voice = attachment("audio/webm", "https://cdn.example/1234.webm");
+        assert!(!voice.is_unsupported_media());
+        assert!(voice.is_audio());
     }
 
     #[test]

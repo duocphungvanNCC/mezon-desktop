@@ -81,6 +81,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "get_account"
         | "get_current_context"
         | "get_scroll_state"
+        | "tour_state"
         | "close_panel"
         | "get_settings"
         | "get_voice_status"
@@ -92,7 +93,133 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "show_window"
         | "logout"
         | "refresh"
+        | "close_modal"
+        | "member_menu_state"
+        | "member_menu_close"
+        | "clan_menu_state"
+        | "clan_menu_close"
+        | "open_create_clan_modal"
         | "quit_app" => Arc::new(empty()),
+        "list_banned_users" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id."),
+                "channel_id": id("Channel snowflake id; 0 asks clan-wide."),
+            }),
+            &["clan_id"],
+        )),
+        "member_menu_open" => Arc::new(object(
+            json!({
+                "user_id": id("Member snowflake id from get_member_list."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["user_id"],
+        )),
+        "member_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from member_menu_open/member_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Ban row (seconds, 0 = until lifted).",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "clan_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["clan_id"],
+        )),
+        "clan_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from clan_menu_open/clan_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Notification Settings row.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "list_categories" => Arc::new(object(
+            json!({ "clan_id": id("Clan snowflake id from list_clans.") }),
+            &["clan_id"],
+        )),
+        "create_category" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "name": { "type": "string", "description": "Category name (letters, digits, space, - or _; must not start with a separator)." },
+            }),
+            &["clan_id", "name"],
+        )),
+        "tour_start" => Arc::new(object(
+            json!({
+                "track": { "type": "string", "description": "Track id. Omit to start the one matching the current route." },
+            }),
+            &[],
+        )),
+        "tour_advance" => Arc::new(object(
+            json!({
+                "forward": { "type": "boolean", "description": "true for the next step, false to go back. Default true." },
+            }),
+            &[],
+        )),
+        "mute_channel" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "mute_minutes": integer("Minutes to mute. Use -1 forever or 0 to unmute.", Some(0)),
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        "channel_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "channel_id": id("Channel snowflake id from list_channels."),
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+                "in_favorites": { "type": "boolean", "description": "Right-click the row inside the Favorites section instead of its own category (default false); the Favorites row drops Mark As Read." },
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        "channel_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from channel_menu_open/channel_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Mute and Notification rows.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "category_menu_open" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "category_id": { "type": "string", "description": "Category id from list_channels." },
+                "x": integer("Menu anchor x in window points (default 0).", Some(0)),
+                "y": integer("Menu anchor y in window points (default 0).", Some(0)),
+            }),
+            &["clan_id", "category_id"],
+        )),
+        "category_menu_pick" => Arc::new(object(
+            json!({
+                "index": integer("Item index from category_menu_open/category_menu_state.", None),
+                "value": integer(
+                    "Submenu option value; required for the Mute and Notification Settings rows.",
+                    None,
+                ),
+            }),
+            &["index"],
+        )),
+        "create_clan" => Arc::new(object(
+            json!({
+                "name": { "type": "string", "description": "Clan name (letters, digits, space, - or _; must not start with a separator)." },
+                "logo": { "type": "string", "description": "Optional logo URL; empty for none." },
+            }),
+            &["name"],
+        )),
         "list_channels" => Arc::new(object(
             json!({ "clan_id": id("Clan snowflake id to list channels for.") }),
             &["clan_id"],
@@ -115,6 +242,33 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "pin_id": id("Pin entry id from list_pinned_messages."),
             }),
             &["clan_id", "channel_id", "message_id", "pin_id"],
+        )),
+        #[cfg(debug_assertions)]
+        "set_channel_age_restricted" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id."),
+                "channel_id": id("Channel snowflake id."),
+                "on": { "type": "boolean", "description": "Enable the gate. Default true." },
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        #[cfg(debug_assertions)]
+        "set_local_dob" => Arc::new(object(
+            json!({
+                "seconds": { "type": "integer", "description": "Unix seconds of the birthday. 0 = never entered." },
+            }),
+            &["seconds"],
+        )),
+        #[cfg(debug_assertions)]
+        "inject_preview_message" => Arc::new(object(
+            json!({
+                "content": {
+                    "type": "object",
+                    "description": "Raw mezon message content payload, e.g. {\"t\": \"hi\", \"embed\": [...], \"components\": [...]}."
+                },
+                "sender_name": string("Display name for the injected sender. Default \"Embed Preview\"."),
+            }),
+            &["content"],
         )),
         "create_poll" => Arc::new(object(
             json!({
@@ -234,6 +388,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "open_pdf_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the pdf attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
         "scroll_wheel" => Arc::new(object(
             json!({
                 "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
@@ -335,6 +496,99 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "channel_id"],
         )),
+        "composer_type" => Arc::new(object(
+            json!({ "text": string("Full composer text to set.") }),
+            &["text"],
+        )),
+        "topic_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
+        "composer_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
+        "edit_begin" => Arc::new(object(
+            json!({ "message_id": id("Message id to edit.") }),
+            &["message_id"],
+        )),
+        "edit_type" => Arc::new(object(
+            json!({ "text": string("Full edit-box text to set.") }),
+            &["text"],
+        )),
+        "edit_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Suggestion index (default 0)."
+                }),
+            }),
+            &[],
+        )),
+        "composer_panel_send" => Arc::new(object(
+            json!({
+                "kind": string("sticker | gif | sound."),
+                "url": string("Media url."),
+                "filename": string("Filename for sticker/sound."),
+                "width": json!({"type": "integer", "description": "GIF width."}),
+                "height": json!({"type": "integer", "description": "GIF height."}),
+            }),
+            &["kind", "url"],
+        )),
+        "topic_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the topic composer."
+                }),
+            }),
+            &["paths"],
+        )),
+        "composer_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the composer."
+                }),
+            }),
+            &["paths"],
+        )),
+        "send_buzz" => Arc::new(object(
+            json!({ "text": string("Buzz text.") }),
+            &[],
+        )),
+        "send_attachment" => Arc::new(object(
+            json!({
+                "path": string("Local filesystem path to one file to send."),
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local filesystem paths for a multi-attachment (album) send."
+                }),
+                "content": string("Message text. Required when no path/paths is given."),
+                "anonymous": json!({
+                    "type": "boolean",
+                    "description": "Send as Anonymous in the active clan (default false)."
+                }),
+                "reply_to": id("Message id to reply to; must be loaded in the active channel."),
+            }),
+            &[],
+        )),
         "send_sticker" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id."),
@@ -359,6 +613,33 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "enabled": bool("When true, installs the mezon CLI shim into PATH."),
             }),
             &["enabled"],
+        )),
+        "list_loaded_messages" => Arc::new(object(
+            json!({
+                "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+                "topic": bool("Read the open topic panel's buffer instead of the channel's. Default false."),
+            }),
+            &[],
+        )),
+        "reply_begin" => Arc::new(object(
+            json!({
+                "message_id": id("Message to reply to; must be in the open channel's loaded history."),
+            }),
+            &["message_id"],
+        )),
+        "jump_to_message" => Arc::new(object(
+            json!({
+                "message_id": id("Message snowflake id to centre the window on."),
+            }),
+            &["message_id"],
+        )),
+        "set_user_status" => Arc::new(object(
+            json!({
+                "status": string("\"Online\", \"Idle\", \"Do Not Disturb\" or \"Invisible\"."),
+                "minutes": integer("How long the status lasts. 0 (default) means indefinitely.", Some(0)),
+                "until_turn_on": bool("Clear the status when the user turns it back on. Default false."),
+            }),
+            &["status"],
         )),
         _ => Arc::new(empty()),
     }

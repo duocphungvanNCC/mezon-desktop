@@ -99,6 +99,25 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "tour_state" => self.send_ui_result(|reply| McpCommand::TourState { reply }).await,
+            "tour_start" => {
+                self.require_write_mode("tour_start")?;
+                let track = arguments
+                    .get("track")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::TourStart { track, reply })
+                    .await
+            }
+            "tour_advance" => {
+                self.require_write_mode("tour_advance")?;
+                let forward = arguments
+                    .get("forward")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::TourAdvance { forward, reply })
+                    .await
+            }
             "scroll_wheel" => {
                 let delta_y = arguments
                     .get("delta_y")
@@ -146,9 +165,67 @@ impl McpBackend {
                 })
                 .await
             }
+            "open_pdf_viewer" => {
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                let attachment_index = arguments
+                    .get("attachment_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::OpenPdfViewer {
+                    message_id,
+                    attachment_index,
+                    reply,
+                })
+                .await
+            }
             "close_panel" => {
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
                     .await
+            }
+            "open_topic" => {
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::OpenTopic { message_id, reply })
+                    .await
+            }
+            "close_topic" => {
+                self.send_ui_result(|reply| McpCommand::CloseTopic { reply })
+                    .await
+            }
+            "topic_state" => {
+                self.send_ui_result(|reply| McpCommand::TopicState { reply })
+                    .await
+            }
+            "topic_type" => {
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("topic_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::TopicType { text, reply })
+                    .await
+            }
+            "topic_pick" => {
+                self.require_write_mode("topic_pick")?;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::TopicPick { index, reply })
+                    .await
+            }
+            "topic_submit" => {
+                self.send_ui_result(|reply| McpCommand::TopicSubmit { reply })
+                    .await
+            }
+            "topic_scroll_wheel" => {
+                let delta_y = arguments
+                    .get("delta_y")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(-120.0) as f32;
+                let ticks = arguments.get("ticks").and_then(Value::as_u64).unwrap_or(10) as u32;
+                self.send_ui_result(|reply| McpCommand::TopicScrollWheel {
+                    delta_y,
+                    ticks,
+                    reply,
+                })
+                .await
             }
             "list_emojis" => {
                 let clan_id = arguments
@@ -185,7 +262,114 @@ impl McpBackend {
                     .unwrap_or(true);
                 self.load_more_messages(older).await
             }
+            "list_loaded_messages" => {
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 500) as usize;
+                let topic = arguments
+                    .get("topic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages {
+                    limit,
+                    topic,
+                    reply,
+                })
+                .await
+            }
+            "reply_begin" => {
+                self.require_write_mode("reply_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::ReplyBegin { message_id, reply })
+                    .await
+            }
+            "jump_to_message" => {
+                self.require_write_mode("jump_to_message")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.jump_to_message(message_id).await
+            }
+            "jump_to_present" => {
+                self.require_write_mode("jump_to_present")?;
+                self.jump_to_present().await
+            }
+            "get_user_status" => self.get_user_status().await,
+            "get_member_list" => self.get_member_list().await,
+            "close_modal" => self.close_modal().await,
+            "list_banned_users" => self.list_banned_users(&arguments).await,
+            "member_menu_state" => self.member_menu_state().await,
+            "member_menu_open" => self.member_menu_open(&arguments).await,
+            "member_menu_close" => self.member_menu_close().await,
+            "member_menu_pick" => {
+                self.require_write_mode("member_menu_pick")?;
+                self.member_menu_pick(&arguments).await
+            }
+            "clan_menu_state" => self.clan_menu_state().await,
+            "list_categories" => self.list_categories(&arguments).await,
+            "create_category" => self.create_category(&arguments).await,
+            "mute_channel" => {
+                self.require_write_mode("mute_channel")?;
+                self.mute_channel(&arguments).await
+            }
+            "channel_menu_state" => self.channel_menu_state().await,
+            "channel_menu_open" => self.channel_menu_open(&arguments).await,
+            "channel_menu_close" => self.channel_menu_close().await,
+            "channel_menu_pick" => self.channel_menu_pick(&arguments).await,
+            "category_menu_state" => self.category_menu_state().await,
+            "category_menu_open" => self.category_menu_open(&arguments).await,
+            "category_menu_close" => self.category_menu_close().await,
+            "category_menu_pick" => self.category_menu_pick(&arguments).await,
+            "clan_menu_open" => self.clan_menu_open(&arguments).await,
+            "clan_menu_close" => self.clan_menu_close().await,
+            "clan_menu_pick" => {
+                self.require_write_mode("clan_menu_pick")?;
+                self.clan_menu_pick(&arguments).await
+            }
+            "open_create_clan_modal" => self.open_create_clan_modal().await,
+            "create_clan" => {
+                self.require_write_mode("create_clan")?;
+                self.create_clan(&arguments).await
+            }
+            "set_user_status" => {
+                self.require_write_mode("set_user_status")?;
+                self.set_user_status(&arguments).await
+            }
             "get_settings" => self.get_settings().await,
+            "join_voice" => {
+                self.require_write_mode("join_voice")?;
+                let clan_id = parse_i64_field(&arguments, "clan_id")?;
+                let channel_id = parse_i64_field(&arguments, "channel_id")?;
+                self.send_ui_result(|reply| McpCommand::JoinVoice {
+                    channel_id,
+                    clan_id,
+                    reply,
+                })
+                .await
+            }
+            "leave_voice" => {
+                self.require_write_mode("leave_voice")?;
+                self.send_ui_result(|reply| McpCommand::LeaveVoice { reply })
+                    .await
+            }
+            "get_recording_state" => {
+                self.send_ui_value(|reply| McpCommand::GetRecordingState { reply })
+                    .await
+            }
+            "start_recording" => {
+                self.require_write_mode("start_recording")?;
+                let path = arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::StartRecording { path, reply })
+                    .await
+            }
+            "stop_recording" => {
+                self.require_write_mode("stop_recording")?;
+                self.send_ui_result(|reply| McpCommand::StopRecording { reply })
+                    .await
+            }
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
             "get_sticker" => self.get_sticker(&arguments).await,
@@ -240,6 +424,49 @@ impl McpBackend {
                 self.require_write_mode("show_window")?;
                 self.send_ui_ok(|reply| McpCommand::ShowWindow { reply })
                     .await
+            }
+            #[cfg(debug_assertions)]
+            "set_channel_age_restricted" => {
+                self.require_write_mode("set_channel_age_restricted")?;
+                let clan_id = parse_i64_field(&arguments, "clan_id")?;
+                let channel_id = parse_i64_field(&arguments, "channel_id")?;
+                let on = arguments
+                    .get("on")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::SetChannelAgeRestricted {
+                    clan_id,
+                    channel_id,
+                    on,
+                    reply,
+                })
+                .await
+            }
+            #[cfg(debug_assertions)]
+            "set_local_dob" => {
+                self.require_write_mode("set_local_dob")?;
+                let seconds = u32::try_from(parse_i64_field(&arguments, "seconds")?)
+                    .map_err(|_| anyhow::anyhow!("seconds must fit in u32"))?;
+                self.send_ui_result(|reply| McpCommand::SetLocalDob { seconds, reply })
+                    .await
+            }
+            #[cfg(debug_assertions)]
+            "inject_preview_message" => {
+                self.require_write_mode("inject_preview_message")?;
+                let content = arguments
+                    .get("content")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("inject_preview_message requires content"))?;
+                let sender_name = arguments
+                    .get("sender_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::InjectPreviewMessage {
+                    content,
+                    sender_name,
+                    reply,
+                })
+                .await
             }
             "send_message" => {
                 self.require_write_mode("send_message")?;
@@ -303,6 +530,185 @@ impl McpBackend {
             "send_image" => {
                 self.require_write_mode("send_image")?;
                 self.send_image(&arguments).await
+            }
+            "composer_type" => {
+                self.require_write_mode("composer_type")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("composer_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::ComposerType { text, reply })
+                    .await
+            }
+            "composer_state" => {
+                self.send_ui_result(|reply| McpCommand::ComposerState { reply })
+                    .await
+            }
+            "composer_pick" => {
+                self.require_write_mode("composer_pick")?;
+                let index = arguments
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::ComposerPick { index, reply })
+                    .await
+            }
+            "composer_submit" => {
+                self.require_write_mode("composer_submit")?;
+                self.send_ui_result(|reply| McpCommand::ComposerSubmit { reply })
+                    .await
+            }
+            "edit_begin" => {
+                self.require_write_mode("edit_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::EditBegin { message_id, reply })
+                    .await
+            }
+            "edit_type" => {
+                self.require_write_mode("edit_type")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("edit_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::EditType { text, reply })
+                    .await
+            }
+            "edit_pick" => {
+                self.require_write_mode("edit_pick")?;
+                let index = arguments
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::EditPick { index, reply })
+                    .await
+            }
+            "edit_state" => {
+                self.send_ui_result(|reply| McpCommand::EditState { reply })
+                    .await
+            }
+            "edit_save" => {
+                self.require_write_mode("edit_save")?;
+                self.send_ui_result(|reply| McpCommand::EditSave { reply })
+                    .await
+            }
+            "composer_panel_send" => {
+                self.require_write_mode("composer_panel_send")?;
+                let kind = arguments
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("composer_panel_send requires string field kind")
+                    })?
+                    .to_string();
+                let url = arguments
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("composer_panel_send requires string field url"))?
+                    .to_string();
+                let filename = arguments
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let width = arguments.get("width").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let height = arguments.get("height").and_then(Value::as_i64).unwrap_or(0) as i32;
+                self.send_ui_result(|reply| McpCommand::ComposerPanelSend {
+                    kind,
+                    url,
+                    filename,
+                    width,
+                    height,
+                    reply,
+                })
+                .await
+            }
+            "topic_drop_paths" => {
+                self.require_write_mode("topic_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("topic_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::TopicDropPaths { paths, reply })
+                    .await
+            }
+            "composer_drop_paths" => {
+                self.require_write_mode("composer_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("composer_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::ComposerDropPaths { paths, reply })
+                    .await
+            }
+            "send_buzz" => {
+                self.require_write_mode("send_buzz")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::SendBuzz { text, reply })
+                    .await
+            }
+            "send_attachment" => {
+                self.require_write_mode("send_attachment")?;
+                let mut paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+                    paths.push(path.to_string());
+                }
+                let content = arguments
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if paths.is_empty() && content.is_empty() {
+                    anyhow::bail!("send_attachment requires path/paths or content");
+                }
+                let anonymous = arguments
+                    .get("anonymous")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reply_to = optional_i64_field(&arguments, "reply_to").unwrap_or(0);
+                self.send_ui_result(|reply| McpCommand::SendAttachment {
+                    paths,
+                    content,
+                    anonymous,
+                    reply_to,
+                    reply,
+                })
+                .await
             }
             "send_sticker" => {
                 self.require_write_mode("send_sticker")?;
@@ -449,6 +855,8 @@ impl McpBackend {
             id: i64,
             label: String,
             channel_type: u32,
+            category_id: i64,
+            category_name: String,
         }
         let items: Vec<ChannelSummary> = channels
             .into_iter()
@@ -456,6 +864,8 @@ impl McpBackend {
                 id: channel.channel_id,
                 label: channel.channel_label,
                 channel_type: channel.channel_type,
+                category_id: channel.category_id,
+                category_name: channel.category_name,
             })
             .collect();
         to_json(&items)
@@ -874,6 +1284,314 @@ impl McpBackend {
             .await
     }
 
+    async fn jump_to_message(&self, message_id: i64) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToMessage { message_id, reply })
+            .await
+    }
+
+    async fn jump_to_present(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToPresent { reply })
+            .await
+    }
+
+    async fn get_user_status(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetUserStatus { reply })
+            .await
+    }
+
+    async fn get_member_list(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetMemberList { reply })
+            .await
+    }
+
+    async fn list_banned_users(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("list_banned_users requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id").unwrap_or(0);
+        self.send_ui_result(|reply| McpCommand::ListBannedUsers {
+            clan_id,
+            channel_id,
+            reply,
+        })
+        .await
+    }
+
+    async fn close_modal(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CloseModal { reply })
+            .await
+    }
+
+    async fn member_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::MemberMenuState { reply })
+            .await
+    }
+
+    async fn member_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let user_id = optional_i64_field(arguments, "user_id")
+            .ok_or_else(|| anyhow::anyhow!("member_menu_open requires field user_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::MemberMenuOpen {
+            user_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn member_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::MemberMenuClose { reply })
+            .await
+    }
+
+    async fn member_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("member_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::MemberMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn clan_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ClanMenuState { reply })
+            .await
+    }
+
+    async fn clan_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("clan_menu_open requires field clan_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::ClanMenuOpen {
+            clan_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn clan_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ClanMenuClose { reply })
+            .await
+    }
+
+    async fn clan_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("clan_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::ClanMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn list_categories(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("list_categories requires field clan_id"))?;
+        self.send_ui_result(|reply| McpCommand::ListCategories { clan_id, reply })
+            .await
+    }
+
+    async fn create_category(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("create_category requires field clan_id"))?;
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("create_category requires string field name"))?;
+        self.send_ui_result(|reply| McpCommand::CreateCategory {
+            clan_id,
+            name,
+            reply,
+        })
+        .await
+    }
+
+    async fn mute_channel(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field channel_id"))?;
+        let mute_minutes = arguments
+            .get("mute_minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let mute_seconds = mute_seconds_from_minutes(mute_minutes)?;
+        self.api
+            .set_mute_channel(channel_id, mute_seconds, clan_id)
+            .await?;
+        to_json(&serde_json::json!({
+            "ok": true,
+            "channel_id": channel_id,
+            "mute_minutes": mute_minutes,
+        }))
+    }
+
+    async fn channel_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ChannelMenuState { reply })
+            .await
+    }
+
+    async fn channel_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_open requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id")
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_open requires field channel_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let in_favorites = arguments
+            .get("in_favorites")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::ChannelMenuOpen {
+            clan_id,
+            channel_id,
+            x,
+            y,
+            in_favorites,
+            reply,
+        })
+        .await
+    }
+
+    async fn channel_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::ChannelMenuClose { reply })
+            .await
+    }
+
+    async fn channel_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("channel_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::ChannelMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn category_menu_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CategoryMenuState { reply })
+            .await
+    }
+
+    async fn category_menu_open(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("category_menu_open requires field clan_id"))?;
+        let category_id = arguments
+            .get("category_id")
+            .and_then(|raw| {
+                raw.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| raw.as_i64().map(|id| id.to_string()))
+            })
+            .ok_or_else(|| anyhow::anyhow!("category_menu_open requires field category_id"))?;
+        let x = arguments.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let y = arguments.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.send_ui_result(|reply| McpCommand::CategoryMenuOpen {
+            clan_id,
+            category_id,
+            x,
+            y,
+            reply,
+        })
+        .await
+    }
+
+    async fn category_menu_close(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::CategoryMenuClose { reply })
+            .await
+    }
+
+    async fn category_menu_pick(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let index = arguments
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("category_menu_pick requires integer field index"))?
+            as usize;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        self.send_ui_result(|reply| McpCommand::CategoryMenuPick {
+            index,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn create_clan(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("create_clan requires string field name"))?;
+        let logo = arguments
+            .get("logo")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        self.send_ui_result(|reply| McpCommand::CreateClan { name, logo, reply })
+            .await
+    }
+
+    async fn open_create_clan_modal(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::OpenCreateClanModal { reply })
+            .await
+    }
+
+    async fn set_user_status(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let status = arguments
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("set_user_status requires string field status"))?
+            .to_string();
+        let minutes = arguments
+            .get("minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as i32;
+        let until_turn_on = arguments
+            .get("until_turn_on")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::SetUserStatus {
+            status,
+            minutes,
+            until_turn_on,
+            reply,
+        })
+        .await
+    }
+
     async fn navigate(&self, path: &str) -> anyhow::Result<Value> {
         validate_navigate_path(path)?;
         let Some(ui_tx) = &self.ui_tx else {
@@ -1188,7 +1906,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                Some(Vec::new()),
                 Default::default(),
             )
             .await?;
@@ -1430,12 +2148,28 @@ fn parse_search_content(raw: &str) -> String {
 struct MessageDetail {
     id: i64,
     content: String,
+    /// The content JSON as the server stored it. This is where `presign_finish`
+    /// lives, and comparing its keys against the attachment urls below is the
+    /// only way to see why a receiver still treats an attachment as pending.
+    content_raw: String,
     sender_id: i64,
     sender_name: String,
     create_time: i64,
     has_attachments: bool,
+    attachments: Vec<AttachmentSummary>,
     embeds: Vec<EmbedSummary>,
     components: Vec<ComponentRowSummary>,
+}
+
+#[derive(Serialize)]
+struct AttachmentSummary {
+    filename: String,
+    filetype: String,
+    size: i32,
+    url: String,
+    thumbnail: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Serialize)]
@@ -1496,10 +2230,24 @@ fn message_detail(message: &ApiMessage) -> MessageDetail {
     MessageDetail {
         id: message.message_id,
         content: message.content.clone(),
+        content_raw: message.content_raw.clone(),
         sender_id: message.sender_id,
         sender_name: message.sender_name.clone(),
         create_time: message.create_time,
         has_attachments: !message.attachments.is_empty(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|a| AttachmentSummary {
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                size: a.size,
+                url: a.url.clone(),
+                thumbnail: a.thumbnail.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect(),
         embeds: message
             .content_tokens
             .embed
@@ -1658,6 +2406,18 @@ fn optional_i64_field(arguments: &Value, field: &str) -> Option<i64> {
         raw.as_i64()
             .or_else(|| raw.as_str().and_then(|s| s.parse::<i64>().ok()))
     })
+}
+
+fn mute_seconds_from_minutes(minutes: i64) -> anyhow::Result<i32> {
+    match minutes {
+        -1 => Ok(-1),
+        0 => Ok(0),
+        1.. => minutes
+            .checked_mul(60)
+            .and_then(|seconds| i32::try_from(seconds).ok())
+            .ok_or_else(|| anyhow::anyhow!("mute_minutes is too large")),
+        _ => anyhow::bail!("mute_minutes must be -1, 0, or positive"),
+    }
 }
 
 fn validate_navigate_path(path: &str) -> anyhow::Result<()> {
@@ -1841,5 +2601,14 @@ mod tests {
                 .expect("spans")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mute_minutes_are_converted_to_wire_seconds() {
+        assert_eq!(mute_seconds_from_minutes(-1).unwrap(), -1);
+        assert_eq!(mute_seconds_from_minutes(0).unwrap(), 0);
+        assert_eq!(mute_seconds_from_minutes(15).unwrap(), 900);
+        assert!(mute_seconds_from_minutes(-2).is_err());
+        assert!(mute_seconds_from_minutes(i64::MAX).is_err());
     }
 }

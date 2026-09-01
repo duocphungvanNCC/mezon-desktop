@@ -1,20 +1,24 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Entity, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage,
-    Window, canvas, deferred, div, img, point, prelude::*, px, relative,
+    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred,
+    div, img, point, prelude::*, px, relative, rems,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
-    DeviceMenuKind, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL, PermissionStore,
-    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore,
+    DeviceMenuKind, DisplayedFlower, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
+    PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
+    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
+    flower_menu_blocked,
 };
 
 use crate::ChatLayout;
+use crate::Shell;
+use crate::chat::flower_celebration::FlowerCelebrationElement;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
@@ -1175,6 +1179,7 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
                 .justify_center()
                 .child(
                     img(r.emoji_src.clone())
+                        .id(("voice-reaction-frames", seq))
                         .size(px(40.))
                         .object_fit(ObjectFit::Contain)
                         .with_animation(
@@ -1208,7 +1213,10 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
         .into_any_element()
 }
 
-fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
+fn reactions_overlay(
+    store: &VoiceStore,
+    emoji_cache: Entity<crate::image_cache::LruImageCache>,
+) -> Option<AnyElement> {
     let reactions = store.displayed_reactions();
     if reactions.is_empty() {
         return None;
@@ -1218,7 +1226,41 @@ fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
             .absolute()
             .inset_0()
             .overflow_hidden()
+            .image_cache(emoji_cache)
             .children(reactions.iter().map(reaction_float))
+            .into_any_element(),
+    )
+}
+
+fn flower_burst(flower: &DisplayedFlower, caption: Option<SharedString>) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .size_full()
+        .child(FlowerCelebrationElement::new(
+            &flower.key,
+            flower.started_at,
+            caption,
+        ))
+        .into_any_element()
+}
+
+fn flowers_overlay(store: &VoiceStore) -> Option<AnyElement> {
+    let flowers = store.displayed_flowers();
+    if flowers.is_empty() {
+        return None;
+    }
+    let caption = store.flower_caption().cloned();
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .children(
+                flowers
+                    .iter()
+                    .map(|flower| flower_burst(flower, caption.clone())),
+            )
             .into_any_element(),
     )
 }
@@ -1357,7 +1399,10 @@ fn render_in_call(
         ),
     });
 
+    let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
+    let reactions = reactions_overlay(voice.read(cx), emoji_cache);
     let theme = cx.theme();
+    let flowers = flowers_overlay(voice.read(cx));
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
             SharedString::from(mezon_i18n::t(locale, "channelVoice.connecting").to_string()),
@@ -1432,12 +1477,20 @@ fn render_in_call(
                 .find(|p| p.identity == identity)?;
             let (name, _) =
                 resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+            let can_moderate = !participant.is_local
+                && PermissionStore::try_global(cx).is_some_and(|store| {
+                    store
+                        .read(cx)
+                        .check_permission(channel.clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+                });
             let menu = build_participant_menu(
                 voice,
                 identity.to_string(),
                 name,
-                participant.is_local,
+                can_moderate,
                 participant.muted,
+                participant.is_local,
+                flower_menu_disabled(cx),
                 locale,
             );
             Some(context_menu_at(position, menu).into_any_element())
@@ -1478,7 +1531,8 @@ fn render_in_call(
             ))
         })
         .children(connection_toast)
-        .children(reactions_overlay(voice.read(cx)))
+        .children(reactions)
+        .children(flowers)
         .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
         .children(mic_modal)
         .children(participant_menu)
@@ -2406,12 +2460,22 @@ fn participant_menu_trigger(
     }
 }
 
+fn flower_menu_disabled(cx: &App) -> bool {
+    WalletStore::try_global(cx).is_some_and(|wallet| {
+        let wallet = wallet.read(cx);
+        wallet.is_available() && flower_menu_blocked(wallet.pending_give_flower(), wallet.balance())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_participant_menu(
     voice: &Entity<VoiceStore>,
     identity: String,
     name: String,
-    is_local: bool,
+    can_moderate: bool,
     muted: bool,
+    is_local: bool,
+    flower_disabled: bool,
     locale: &str,
 ) -> ContextMenu {
     let dismiss = {
@@ -2423,7 +2487,7 @@ fn build_participant_menu(
 
     let mut menu = ContextMenu::new().on_dismiss(dismiss);
 
-    if !is_local {
+    if can_moderate {
         if !muted {
             let voice = voice.clone();
             let identity = identity.clone();
@@ -2449,6 +2513,34 @@ fn build_participant_menu(
                 },
             )
             .separator();
+    }
+
+    if !is_local {
+        let voice = voice.clone();
+        let identity = identity.clone();
+        let label = mezon_i18n::t(locale, "contextMenu.giveFlower");
+        let locale = locale.to_string();
+        menu = menu
+            .item_icon(label, IconName::Flower, move |window, cx| {
+                let identity = identity.clone();
+                let locale = locale.clone();
+                let wallet_available = WalletStore::try_global(cx)
+                    .map(|wallet| wallet.read(cx).is_available())
+                    .unwrap_or(false);
+                if !wallet_available {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.show_wallet_not_available(
+                            mezon_i18n::t(&locale, "message.wallet.notAvailable"),
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                voice.update(cx, |store, cx| store.give_flower(identity, cx));
+            })
+            .disabled(flower_disabled);
     }
 
     menu.item_icon(
@@ -2735,6 +2827,13 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
 }
 
 #[allow(clippy::too_many_arguments)]
+/// gg sans gives each digit its own advance — `1` measures 392 units against
+/// `0`'s 594 — so a ticking timer re-measured the pill around it on every
+/// second. Tabular figures pin all ten to 600, which holds the whole string at
+/// one width no matter what the clock reads.
+static TABULAR_FIGURES: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
+
 fn control_bar(
     theme: &Theme,
     locale: &str,
@@ -2747,6 +2846,8 @@ fn control_bar(
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
     let screen_enabled = store.screen_share_enabled();
+    let recording = store.recording_state();
+    let can_record = store.can_record();
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -2869,6 +2970,71 @@ fn control_bar(
             }
         })
     };
+
+    let interactive_app_button = {
+        let button = InteractiveAppTrigger::new(
+            neutral_bg.into(),
+            neutral_hover,
+            theme.text_muted.into(),
+            mezon_i18n::t(locale, "channelVoice.openInteractiveApp"),
+        );
+        let voice = voice.clone();
+        let locale = locale.to_string();
+        PopoverMenu::new("voice-interactive-app-popover")
+            .anchor(Anchor::BottomLeft)
+            .attach(Anchor::TopLeft)
+            .offset(point(px(0.), -px(4.)))
+            .menu(move |window, cx| {
+                Some(cx.new(|cx| {
+                    InteractiveAppPopoverPanel::new(voice.clone(), locale.clone(), window, cx)
+                }))
+            })
+            .trigger(button)
+    };
+
+    let record_button = can_record.then(|| {
+        let voice = voice.clone();
+        let active = matches!(recording, RecordingState::Recording);
+        let busy = matches!(
+            recording,
+            RecordingState::Starting | RecordingState::Stopping
+        );
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if active {
+            (
+                gpui::rgb(LEAVE_RED).into(),
+                gpui::rgb(LEAVE_RED_HOVER).into(),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_muted.into())
+        };
+        circle_button(
+            "voice-record-btn",
+            bg,
+            hover,
+            if active {
+                IconName::VoiceRecordStopIcon
+            } else {
+                IconName::VoiceRecordIcon
+            },
+            color,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if active {
+                "channelVoice.stopRecording"
+            } else {
+                "channelVoice.startRecording"
+            },
+        )))
+        .on_click(move |_, window, cx| {
+            if busy {
+                return;
+            }
+            let window_id = crate::chat::record_window::record_window_id(window);
+            voice.update(cx, |store, cx| store.toggle_recording(window_id, cx));
+        })
+    });
 
     let leave_button = {
         let voice = voice.clone();
@@ -3046,6 +3212,57 @@ fn control_bar(
         })
     };
 
+    let record_badge = matches!(recording, RecordingState::Recording).then(|| {
+        let elapsed = store.recording_elapsed().as_secs();
+        let stalled = store.recording_stalled();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded(px(999.))
+            .bg(gpui::rgba(0xc4362b26))
+            .border_1()
+            .border_color(gpui::rgb(LEAVE_RED))
+            .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(LEAVE_RED)))
+            .child(
+                div()
+                    .font_features(TABULAR_FIGURES.clone())
+                    // Linux shapes text through cosmic-text, which ignores font
+                    // features, so keep a floor above the widest the string can
+                    // measure (4.64rem) to hold the pill still there too. In
+                    // rems, because the window's rem size follows the zoom
+                    // level and the old px floor sat below the text either way.
+                    .min_w(rems(4.75))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(gpui::rgb(LEAVE_RED))
+                    .child(format!(
+                        "REC {:02}:{:02}:{:02}",
+                        elapsed / 3600,
+                        (elapsed % 3600) / 60,
+                        elapsed % 60
+                    )),
+            )
+            .when(stalled, |el| {
+                el.child(
+                    div()
+                        .id("voice-record-stalled")
+                        .child(
+                            Icon::new(IconName::VoiceScreenShareStopIcon)
+                                .size(px(12.))
+                                .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                        )
+                        .tooltip(Tooltip::text(mezon_i18n::t(
+                            locale,
+                            "channelVoice.recordingVideoStalled",
+                        ))),
+                )
+            })
+    });
+
     let left = div()
         .flex()
         .flex_row()
@@ -3053,7 +3270,10 @@ fn control_bar(
         .items_center()
         .gap_3()
         .child(emoji_button)
-        .child(sound_button);
+        .child(sound_button)
+        .child(interactive_app_button)
+        .children(record_button)
+        .children(record_badge);
 
     let center = div()
         .flex()
@@ -3069,6 +3289,8 @@ fn control_bar(
         .child(leave_button);
 
     div()
+        .relative()
+        .children(crate::tour::probe(crate::tour::TourAnchor::VoiceControls))
         .flex()
         .flex_row()
         .items_center()
@@ -3102,6 +3324,150 @@ fn circle_button(
         .cursor_pointer()
         .hover(move |s| s.bg(bg_hover))
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color.into()))
+}
+
+#[derive(IntoElement)]
+struct InteractiveAppTrigger {
+    open: bool,
+    bg: Hsla,
+    bg_hover: Hsla,
+    icon_color: Hsla,
+    label: SharedString,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl InteractiveAppTrigger {
+    fn new(bg: Hsla, bg_hover: Hsla, icon_color: Hsla, label: impl Into<SharedString>) -> Self {
+        Self {
+            open: false,
+            bg,
+            bg_hover,
+            icon_color,
+            label: label.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for InteractiveAppTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for InteractiveAppTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for InteractiveAppTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = circle_button(
+            "voice-interactive-app-btn",
+            if self.open { self.bg_hover } else { self.bg },
+            self.bg_hover,
+            IconName::Joystick,
+            self.icon_color,
+        )
+        .tooltip(Tooltip::text(self.label));
+        if let Some(on_click) = self.on_click {
+            button = button.on_click(on_click);
+        }
+        button
+    }
+}
+
+struct InteractiveAppPopoverPanel {
+    voice: Entity<VoiceStore>,
+    locale: String,
+    focus_handle: FocusHandle,
+}
+
+impl InteractiveAppPopoverPanel {
+    fn new(
+        voice: Entity<VoiceStore>,
+        locale: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
+            .detach();
+        Self {
+            voice,
+            locale,
+            focus_handle,
+        }
+    }
+}
+
+impl Focusable for InteractiveAppPopoverPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for InteractiveAppPopoverPanel {}
+
+impl Render for InteractiveAppPopoverPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = &cx.theme().tokens;
+        let mut menu = div()
+            .key_context("menu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _, cx| cx.emit(DismissEvent)))
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(240.))
+            .p(px(6.))
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .shadow_lg();
+        for (key, app) in [
+            (
+                "channelVoice.interactiveApp.quiz",
+                VoiceInteractiveApp::Quiz,
+            ),
+            (
+                "channelVoice.interactiveApp.blackboard",
+                VoiceInteractiveApp::Blackboard,
+            ),
+            (
+                "channelVoice.interactiveApp.interactive",
+                VoiceInteractiveApp::Interactive,
+            ),
+        ] {
+            let voice = self.voice.clone();
+            menu = menu.child(
+                div()
+                    .id(key)
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(4.))
+                    .text_sm()
+                    .text_color(tokens.text_theme_message)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(tokens.bg_item_hover))
+                    .child(mezon_i18n::t(&self.locale, key).to_string())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
+                        cx.emit(DismissEvent);
+                    })),
+            );
+        }
+        menu
+    }
 }
 
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {
@@ -3330,6 +3696,10 @@ fn device_list_panel(
     let voice = voice.clone();
     let hover_bg = theme.bg_hover;
     let text_color = theme.text_primary;
+    let active_present = entries
+        .iter()
+        .any(|(id, _)| id.as_deref() == active_id.as_deref());
+    let effective_active = if active_present { active_id } else { None };
     div()
         .id(SharedString::from(format!(
             "voice-device-list-{}",
@@ -3348,7 +3718,7 @@ fn device_list_panel(
         .border_color(theme.border)
         .shadow_lg()
         .children(entries.into_iter().map(move |(id, name)| {
-            let selected = id.as_deref() == active_id.as_deref();
+            let selected = id.as_deref() == effective_active.as_deref();
             let slug = id.as_deref().unwrap_or("default").to_string();
             let radio = device_radio(theme, selected);
             let voice = voice.clone();
@@ -3421,31 +3791,38 @@ fn device_entries(
     locale: &str,
     cx: &App,
 ) -> Vec<(Option<String>, String)> {
-    let mut entries = vec![(
-        None,
-        mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string(),
-    )];
+    let system_default = || mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string();
     match kind {
         DeviceKind::AudioInput | DeviceKind::AudioOutput => {
+            let mut entries = Vec::new();
             if let Some(audio) = AudioStore::try_global(cx) {
                 let audio = audio.read(cx);
-                let devices = if matches!(kind, DeviceKind::AudioInput) {
-                    &audio.input_devices
+                let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
+                    (&audio.input_devices, &audio.default_input_name)
                 } else {
-                    &audio.output_devices
+                    (&audio.output_devices, &audio.default_output_name)
                 };
+                let default_label = match default_name {
+                    Some(name) => format!("Default - {name}"),
+                    None => system_default(),
+                };
+                entries.push((None, default_label));
                 for device in devices {
                     entries.push((Some(device.id.clone()), device.name.clone()));
                 }
+            } else {
+                entries.push((None, system_default()));
             }
+            entries
         }
         DeviceKind::VideoInput => {
+            let mut entries = vec![(None, system_default())];
             for device in store.camera_devices() {
                 entries.push((Some(device.id.clone()), device.name.clone()));
             }
+            entries
         }
     }
-    entries
 }
 
 fn device_kind_label(kind: DeviceKind, locale: &str) -> String {

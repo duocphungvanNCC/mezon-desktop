@@ -1,6 +1,8 @@
+use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
+use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
@@ -8,6 +10,7 @@ use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
 };
+use crate::invite::{AddFriendPage, InvitePage};
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
@@ -26,12 +29,70 @@ pub struct RootView {
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
     channel_setting_screen: Entity<ChannelSettingScreen>,
+    invite_page: Entity<InvitePage>,
+    add_friend_page: Entity<AddFriendPage>,
+    shell: Entity<Shell>,
     applied_theme: String,
     cached_locale: String,
     image_cache: Entity<LruImageCache>,
     connecting_since: Option<Instant>,
     network_online: bool,
+    call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
+    _recording_toasts: Option<gpui::Subscription>,
+    tour_autostart: Option<Task<()>>,
+    tour_autostart_for: Option<&'static str>,
+    tour_autostart_last: Option<&'static str>,
+    tour_autostart_attempts: u8,
+    tour_autostart_armed: bool,
+}
+
+fn surface_recording_toast(
+    root: &mut RootView,
+    _voice: gpui::Entity<mezon_store::VoiceStore>,
+    event: &mezon_store::VoiceStoreEvent,
+    cx: &mut Context<RootView>,
+) {
+    let locale = root.cached_locale.clone();
+    let toast = match event {
+        mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Info,
+                    mezon_i18n::t(&locale, "channelVoice.recordingVideoUnavailable").to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
+    };
+    let (kind, message) = match toast {
+        mezon_store::RecordingToast::Saved(path) => {
+            // Hand the finished file straight to the system player — the desktop can do what the
+            // web app cannot. `Saved` already means playable: the recorder only reports it after
+            // `container::is_playable`, so there is nothing left to check here.
+            cx.open_with_system(&path);
+            (
+                crate::components::primitives::ToastKind::Success,
+                format!(
+                    "{} {}",
+                    mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ),
+            )
+        }
+        mezon_store::RecordingToast::Failed(error) => (
+            crate::components::primitives::ToastKind::Error,
+            format!(
+                "{}: {error}",
+                mezon_i18n::t(&locale, "channelVoice.recordingFailed")
+            ),
+        ),
+    };
+    crate::app::shell::Shell::global(cx).update(cx, |shell, cx| shell.toast(kind, message, cx));
 }
 
 fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
@@ -52,8 +113,10 @@ impl RootView {
     ) -> Self {
         // App shell: owns the cross-cutting overlay layers (toasts + modal). Init before child
         // views so any of them can surface a toast/modal via `Shell::global`.
-        let shell = crate::app::shell::Shell::init(cx);
-        cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+        let shell = Shell::init(cx);
+
+        let recording_toasts = mezon_store::VoiceStore::try_global(cx)
+            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {
@@ -82,7 +145,15 @@ impl RootView {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
+            this.schedule_tour_autostart(cx);
             cx.notify();
+        })
+        .detach();
+
+        cx.observe(&ClanList::global(cx), |this, _clans, cx| {
+            if crate::tour::eligibility_undecided(cx) {
+                this.schedule_tour_autostart(cx);
+            }
         })
         .detach();
 
@@ -96,8 +167,20 @@ impl RootView {
                 this.connecting_since = None;
                 this._splash_delay = None;
             }
+            if matches!(*auth_state.read(cx), AuthState::Authenticated(_)) {
+                this.tour_autostart_armed = true;
+                this.schedule_tour_autostart(cx);
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                this.tour_autostart_armed = false;
+                this.tour_autostart = None;
+                this.tour_autostart_for = None;
+                this.tour_autostart_last = None;
+                this.tour_autostart_attempts = 0;
+                crate::tour::shutdown(cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 crate::image_viewer::close_image_viewer(cx);
+                crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
                 crate::image_cache::clear_all_image_caches(cx);
                 mezon_canvas::reset_canvas_image_caches(cx);
@@ -115,7 +198,7 @@ impl RootView {
             if this.network_online != online {
                 this.network_online = online;
                 let locale = this.cached_locale.clone();
-                crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                Shell::global(cx).update(cx, |shell, cx| {
                     if online {
                         shell.dismiss(NETWORK_OFFLINE_TOAST_KEY, cx);
                     } else {
@@ -188,6 +271,16 @@ impl RootView {
             move |cx| ChannelSettingScreen::new(settings.clone(), cx)
         });
 
+        let invite_page = cx.new({
+            let settings = settings.clone();
+            move |cx| InvitePage::new(settings.clone(), cx)
+        });
+
+        let add_friend_page = cx.new({
+            let settings = settings.clone();
+            move |cx| AddFriendPage::new(settings.clone(), cx)
+        });
+
         let applied_theme = settings.read(cx).theme.clone();
         let cached_locale = settings.read(cx).language.clone();
         crate::image_cache::start_idle_trim(cx);
@@ -207,21 +300,66 @@ impl RootView {
         } else {
             (None, None)
         };
+        let call_overlay = cx.new(CallOverlay::new);
         Self {
+            call_overlay,
             title_bar,
             auth_state,
             login_view,
             chat_layout,
             settings_screen,
+            invite_page,
+            add_friend_page,
             clan_setting_screen,
             channel_setting_screen,
+            shell,
             applied_theme,
             cached_locale,
             image_cache,
             connecting_since,
             network_online,
             _splash_delay: splash_delay,
+            _recording_toasts: recording_toasts,
+            tour_autostart: None,
+            tour_autostart_for: None,
+            tour_autostart_last: None,
+            tour_autostart_attempts: 0,
+            tour_autostart_armed: false,
         }
+    }
+
+    fn schedule_tour_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.tour_autostart_armed {
+            return;
+        }
+        let Some(id) = crate::tour::pending_core_track(cx) else {
+            return;
+        };
+        if self.tour_autostart_for == Some(id) {
+            return;
+        }
+        if self.tour_autostart_last == Some(id) {
+            if self.tour_autostart_attempts >= TOUR_AUTOSTART_MAX_ATTEMPTS {
+                return;
+            }
+        } else {
+            self.tour_autostart_attempts = 0;
+        }
+        self.tour_autostart_attempts += 1;
+        self.tour_autostart_last = Some(id);
+        self.tour_autostart_for = Some(id);
+        self.tour_autostart = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
+            let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
+            if !started {
+                this.update(cx, |this, _| {
+                    if this.tour_autostart_for == Some(id) {
+                        this.tour_autostart_for = None;
+                    }
+                })
+                .ok();
+            }
+        }));
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
@@ -333,26 +471,22 @@ impl Render for RootView {
                         uncached_fill(self.channel_setting_screen.clone())
                     }
                     Route::NotFound { .. } => render_not_found(theme, locale),
-                    Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
-                    Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
-                    _ => uncached_fill(self.chat_layout.clone()),
+                    Route::AddFriend { .. } => uncached_fill(self.add_friend_page.clone()),
+                    Route::Invite { .. } => uncached_fill(self.invite_page.clone()),
+                    _ => cached_fill(self.chat_layout.clone()),
                 }
             }
         };
-
-        let overlay = crate::app::shell::Shell::global(cx)
-            .read(cx)
-            .render_overlay();
 
         div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.bg_primary)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()
+            .bg(theme.surfaces.secondary.ramp())
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
@@ -373,7 +507,8 @@ impl Render for RootView {
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
             })
-            .child(overlay)
+            .child(self.shell.clone())
+            .child(self.call_overlay.clone())
     }
 }
 
@@ -425,6 +560,8 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
+const TOUR_AUTOSTART_MAX_ATTEMPTS: u8 = 3;
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;
@@ -434,6 +571,11 @@ const SPLASH_LOGO_WIDTH: f32 = 280.;
 const SPLASH_LOGO_HEIGHT: f32 = 50.;
 const SPLASH_LOGO_VIEWPORT_FRACTION: f32 = 0.72;
 const SPLASH_DOT_BASE_SIZE: f32 = 6.;
+const SPLASH_DOT_SCALE_MIN: f32 = 0.8;
+const SPLASH_DOT_SCALE_RANGE: f32 = 0.4;
+const SPLASH_DOT_CELL_SIZE: f32 =
+    SPLASH_DOT_BASE_SIZE * (SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE);
+const SPLASH_DOT_PITCH: f32 = 12.;
 const SPLASH_DOT_CYCLE_MS: u64 = 1400;
 const SPLASH_DOT_STAGGER_MS: u64 = 200;
 const SPLASH_PROGRESS_MS: u64 = 30_000;
@@ -465,27 +607,43 @@ fn splash_dot_intensity(delta: f32, offset: f32) -> f32 {
 /// tick on the root view for as long as the machine stays offline. Nobody is watching a background
 /// window, so the pulse is dropped there.
 fn render_splash_dots(animate: bool) -> gpui::AnyElement {
-    let mut row = div().flex().flex_row().gap(px(6.)).mt(px(4.));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPLASH_DOT_PITCH - SPLASH_DOT_CELL_SIZE))
+        .mt(px(4.))
+        .h(px(SPLASH_DOT_CELL_SIZE));
     for index in 0..3u64 {
         let offset = (index * SPLASH_DOT_STAGGER_MS) as f32 / SPLASH_DOT_CYCLE_MS as f32;
         let dot = div()
             .rounded_full()
             .bg(gpui::rgb(SPLASH_ACCENT))
             .size(px(SPLASH_DOT_BASE_SIZE));
-        row = row.child(if animate {
+        let dot = if animate {
             dot.with_animation(
                 gpui::ElementId::Integer(index),
                 Animation::new(Duration::from_millis(SPLASH_DOT_CYCLE_MS)).repeat(),
                 move |el, delta| {
                     let intensity = splash_dot_intensity(delta, offset);
+                    let scale = SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE * intensity;
                     el.opacity(0.2 + 0.8 * intensity)
-                        .size(px(SPLASH_DOT_BASE_SIZE * (0.8 + 0.4 * intensity)))
+                        .size(px(SPLASH_DOT_BASE_SIZE * scale))
                 },
             )
             .into_any_element()
         } else {
             dot.opacity(0.6).into_any_element()
-        });
+        };
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .size(px(SPLASH_DOT_CELL_SIZE))
+                .child(dot),
+        );
     }
     row.into_any_element()
 }
@@ -580,30 +738,6 @@ fn render_connecting(locale: &str, attempt: u32, online: bool, animate: bool) ->
                         .child(label),
                 )
                 .with_animation(body_id, body_anim, |el, delta| el.opacity(delta)),
-        )
-        .into_any_element()
-}
-
-fn render_placeholder(theme: &Theme, label: &str) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.text_primary)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.text_secondary)
-                .child("Coming soon"),
         )
         .into_any_element()
 }

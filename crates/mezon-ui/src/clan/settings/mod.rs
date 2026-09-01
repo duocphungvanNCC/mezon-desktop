@@ -8,6 +8,8 @@ mod community_setting_page;
 mod emoji_setting_page;
 mod emoji_sticker_picker;
 mod integration_setting_page;
+mod onboarding_modal;
+mod onboarding_setting_page;
 mod overview_setting_page;
 mod role_color_picker;
 mod role_display_tab;
@@ -26,7 +28,10 @@ pub use category_sort_page::CategorySortPage;
 pub use clan_setting_screen::{ClanSettingScreen, ClanSettingsPage};
 pub use community_setting_page::{CommunitySettingPage, render_community_save_bar};
 pub use emoji_setting_page::EmojiSettingPage;
-pub use integration_setting_page::IntegrationSettingPage;
+pub use integration_setting_page::{
+    IntegrationSettingPage, random_webhook_avatar, random_webhook_name, upload_webhook_avatar,
+};
+pub use onboarding_setting_page::OnboardingSettingPage;
 pub use overview_setting_page::OverviewSettingPage;
 pub use role_setting_page::{RoleSettingPage, render_role_save_bar};
 pub use sound_setting_page::SoundSettingPage;

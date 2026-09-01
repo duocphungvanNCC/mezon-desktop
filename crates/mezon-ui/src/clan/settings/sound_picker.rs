@@ -384,9 +384,8 @@ impl SoundPicker {
             prompt: Some(prompt),
         });
         self._submit_task = Some(cx.spawn(async move |this, cx| {
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => return,
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                return;
             };
             let Some(path) = paths.into_iter().next() else {
                 return;
@@ -495,7 +494,7 @@ impl SoundPicker {
                 }
                 Err(e) => {
                     tracing::error!("sound save failed: {e}");
-                    let message = sound_error_message(&locale, &e);
+                    let message = sound_error_message(&locale, &e.to_string());
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();

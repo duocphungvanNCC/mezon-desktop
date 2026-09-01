@@ -4,6 +4,18 @@ use std::sync::Arc;
 
 const LEGACY_MEDIA_ORIGINS: [&str; 2] = ["https://cdn.mezon.ai", "http://cdn.mezon.ai"];
 
+const READ_CDN_ORIGINS: [&str; 9] = [
+    "https://cdn.mezon.ai",
+    "http://cdn.mezon.ai",
+    "https://cdn.mezon.vn",
+    "http://cdn.mezon.vn",
+    "https://cdn.komu.ai",
+    "http://cdn.komu.ai",
+    "https://cdn.komu.vn",
+    "http://cdn.komu.vn",
+    "https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev",
+];
+
 #[allow(dead_code)]
 mod baked_env {
     include!(concat!(env!("OUT_DIR"), "/baked_env.rs"));
@@ -27,6 +39,9 @@ pub struct AppConfig {
     pub stream_ws_url: String,
     pub meet_ws_url: String,
     pub notification_ws_url: String,
+    pub blackboard_url: String,
+    pub quiz_url: String,
+    pub interactive_url: String,
 
     // ── OAuth2 ────────────────────────────────────────────────────────────────
     pub oauth2_authorize_url: String,
@@ -109,6 +124,9 @@ impl AppConfig {
             stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
+            blackboard_url: "https://blackboard.mezon.ai".into(),
+            quiz_url: "https://quiz.mezon.ai".into(),
+            interactive_url: "https://interactive.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
             oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
@@ -183,6 +201,15 @@ impl AppConfig {
             notification_ws_url: opt_str(
                 baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
+            ),
+            blackboard_url: opt_str(
+                baked_env::NX_CHAT_APP_BLACKBOARD_URL,
+                &defaults.blackboard_url,
+            ),
+            quiz_url: opt_str(baked_env::NX_CHAT_APP_QUIZ_URL, &defaults.quiz_url),
+            interactive_url: opt_str(
+                baked_env::NX_CHAT_APP_INTERACTIVE_URL,
+                &defaults.interactive_url,
             ),
 
             oauth2_authorize_url: opt_str(
@@ -331,6 +358,11 @@ impl AppConfig {
         &self.api_gw_host
     }
 
+    pub fn client_base_url(&self) -> String {
+        let scheme = if self.api_secure { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.api_gw_host, self.api_gw_port)
+    }
+
     /// REST client bootstrap port — mirrors `getMezonConfig()` in the web app.
     pub fn client_port(&self) -> u16 {
         self.api_gw_port
@@ -353,13 +385,11 @@ impl AppConfig {
     }
 
     pub fn media_origins(&self) -> Vec<&str> {
-        let mut origins = Vec::with_capacity(4);
-        for origin in [
-            self.base_img_url.trim_end_matches('/'),
-            self.profile_img_url.trim_end_matches('/'),
-            LEGACY_MEDIA_ORIGINS[0],
-            LEGACY_MEDIA_ORIGINS[1],
-        ] {
+        let mut origins = Vec::with_capacity(READ_CDN_ORIGINS.len() + 2);
+        for origin in std::iter::once(self.base_img_url.trim_end_matches('/'))
+            .chain(std::iter::once(self.profile_img_url.trim_end_matches('/')))
+            .chain(READ_CDN_ORIGINS.iter().copied())
+        {
             if !origin.is_empty() && !origins.contains(&origin) {
                 origins.push(origin);
             }
@@ -368,8 +398,16 @@ impl AppConfig {
     }
 
     pub fn is_own_media_origin(&self, url: &str) -> bool {
-        self.media_origins()
-            .into_iter()
+        let base = self.base_img_url.trim_end_matches('/');
+        if !base.is_empty() && url_has_origin(url, base) {
+            return true;
+        }
+        let profile = self.profile_img_url.trim_end_matches('/');
+        if !profile.is_empty() && url_has_origin(url, profile) {
+            return true;
+        }
+        READ_CDN_ORIGINS
+            .iter()
             .any(|origin| url_has_origin(url, origin))
     }
 
@@ -869,7 +907,24 @@ mod tests {
         assert!(origins.contains(&cfg.profile_img_url.as_str()));
         assert!(origins.contains(&"https://cdn.mezon.ai"));
         assert!(origins.contains(&"http://cdn.mezon.ai"));
+        assert!(origins.contains(&"https://cdn.mezon.vn"));
+        assert!(origins.contains(&"https://cdn.komu.ai"));
+        assert!(origins.contains(&"https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev"));
         assert!(!origins.contains(&cfg.upload_img_url.as_str()));
+    }
+
+    #[test]
+    fn web_canvas_cdns_are_own_media_and_imgproxied() {
+        let cfg = AppConfig::dev_defaults();
+        let r2 = "https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev/clan/photo.png";
+        let mezon_vn = "https://cdn.mezon.vn/clan/photo.png";
+        assert!(cfg.is_own_media_origin(r2));
+        assert!(cfg.is_own_media_origin(mezon_vn));
+        let r2_out = cfg.imgproxy_url(r2, 100, 100, "fit");
+        assert!(r2_out.starts_with(&cfg.imgproxy_base_url), "{r2_out}");
+        assert!(r2_out.contains(r2));
+        let vn_out = cfg.imgproxy_url(mezon_vn, 100, 100, "fit");
+        assert!(vn_out.starts_with(&cfg.imgproxy_base_url), "{vn_out}");
     }
 
     #[test]

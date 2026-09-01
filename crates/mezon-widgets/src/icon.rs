@@ -1,6 +1,6 @@
 use gpui::{Svg, prelude::*, px, svg};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     AddCircle,
     AddIcon,
@@ -49,8 +49,11 @@ pub enum IconName {
     Chevron,
     ChevronDown,
     ChevronDownIcon,
+    ChevronDownThin,
     ChevronRight,
     CirclePlusFill,
+    ClanGuideHouse,
+    ClanGuideSeal,
     ClockIcon,
     Close,
     CloseButton,
@@ -84,6 +87,7 @@ pub enum IconName {
     FileThumbRar,
     FileThumbXls,
     FiltersIcon,
+    Flower,
     Forum,
     FullScreen,
     GamingConsoleIcon,
@@ -259,6 +263,7 @@ pub enum IconName {
     TypingIndicator,
     TopRight,
     Transaction,
+    TransferOwner,
     TrashIcon,
     TrendingGifs,
     TriangleAlert,
@@ -287,6 +292,8 @@ pub enum IconName {
     VoiceMicIcon,
     VoicePopOutIcon,
     VoiceRaiseHandIcon,
+    VoiceRecordIcon,
+    VoiceRecordStopIcon,
     VoiceScreenShareIcon,
     VoiceScreenShareStopIcon,
     VoiceSoundControlIcon,
@@ -311,6 +318,10 @@ pub enum IconName {
     EndPollNowIcon,
     MarkUnreadIcon,
     AddToInboxIcon,
+    QuickActionEdit,
+    QuickActionEmpty,
+    QuickActionInfo,
+    QuickActionTrash,
     QuickMenusIcon,
 }
 
@@ -364,8 +375,11 @@ impl IconName {
             Self::Chevron => "icons/chevron.svg",
             Self::ChevronDown => "icons/chevron_down.svg",
             Self::ChevronDownIcon => "icons/chevron-down-icon.svg",
+            Self::ChevronDownThin => "icons/chevron-down-thin.svg",
             Self::ChevronRight => "icons/chevron_right.svg",
             Self::CirclePlusFill => "icons/circle-plus-fill.svg",
+            Self::ClanGuideHouse => "icons/clan-guide-house.svg",
+            Self::ClanGuideSeal => "icons/clan-guide-seal.svg",
             Self::ClockIcon => "icons/clock-icon.svg",
             Self::Close => "icons/close.svg",
             Self::CloseButton => "icons/close-button.svg",
@@ -399,6 +413,7 @@ impl IconName {
             Self::FileThumbRar => "icons/file-thumb-rar.svg",
             Self::FileThumbXls => "icons/file-thumb-xls.svg",
             Self::FiltersIcon => "icons/filters-icon.svg",
+            Self::Flower => "icons/flower.svg",
             Self::Forum => "icons/forum.svg",
             Self::FullScreen => "icons/full-screen.svg",
             Self::GamingConsoleIcon => "icons/gaming-console-icon.svg",
@@ -574,6 +589,7 @@ impl IconName {
             Self::TypingIndicator => "icons/typing-indicator.svg",
             Self::TopRight => "icons/top-right.svg",
             Self::Transaction => "icons/transaction.svg",
+            Self::TransferOwner => "icons/transfer-owner.svg",
             Self::TrashIcon => "icons/trash-icon.svg",
             Self::TrendingGifs => "icons/trending-gifs.svg",
             Self::TriangleAlert => "icons/triangle-alert.svg",
@@ -602,6 +618,8 @@ impl IconName {
             Self::VoiceMicIcon => "icons/voice-mic-icon.svg",
             Self::VoicePopOutIcon => "icons/voice-pop-out-icon.svg",
             Self::VoiceRaiseHandIcon => "icons/voice-raise-hand-icon.svg",
+            Self::VoiceRecordIcon => "icons/voice-record-icon.svg",
+            Self::VoiceRecordStopIcon => "icons/voice-record-stop-icon.svg",
             Self::VoiceScreenShareIcon => "icons/voice-screen-share-icon.svg",
             Self::VoiceScreenShareStopIcon => "icons/voice-screen-share-stop-icon.svg",
             Self::VoiceSoundControlIcon => "icons/voice-sound-control-icon.svg",
@@ -626,6 +644,10 @@ impl IconName {
             Self::EndPollNowIcon => "icons/end-poll-now.svg",
             Self::MarkUnreadIcon => "icons/mark-unread.svg",
             Self::AddToInboxIcon => "icons/add-to-inbox.svg",
+            Self::QuickActionEdit => "icons/quick-action-edit.svg",
+            Self::QuickActionEmpty => "icons/quick-action-empty.svg",
+            Self::QuickActionInfo => "icons/quick-action-info.svg",
+            Self::QuickActionTrash => "icons/quick-action-trash.svg",
             Self::QuickMenusIcon => "icons/quick-menus.svg",
         }
     }

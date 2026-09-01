@@ -7,15 +7,20 @@ use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::RealtimeEvent;
 use mezon_client::is_channel_limit_api_error;
+use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
+use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId};
-use crate::messages::MessagesStore;
+use crate::ids::{ChannelId, ClanId, UserId};
+use crate::messages::{
+    MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, mentioned_thread_candidates, plan_thread_membership, upload_attachments_now,
+};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
@@ -41,11 +46,29 @@ pub struct ThreadSummary {
     pub active: i32,
     pub creator_id: String,
     pub last_message_content: String,
+    pub last_message_preview: String,
     pub last_message_sender_id: String,
     pub last_message_sender_name: String,
     pub last_message_sender_avatar: String,
     pub last_sent_timestamp: i64,
     pub member_count: i32,
+}
+
+pub fn thread_preview_display(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut prev_space = false;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +82,7 @@ pub enum ThreadsEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCreateFailReason {
     ChannelLimitExceeded,
+    Api(u32),
     Other,
 }
 
@@ -204,8 +228,10 @@ impl ThreadsStore {
             return;
         }
         let Some(list_id) = self.list_channel_id.clone() else {
-            if let RealtimeEvent::ChannelArchive(ev) = event {
-                self.apply_channel_archive(ev, cx);
+            match event {
+                RealtimeEvent::ChannelArchive(ev) => self.apply_channel_archive(ev, cx),
+                RealtimeEvent::ChannelDeleted(ev) => self.apply_channel_deleted(ev, cx),
+                _ => {}
             }
             return;
         };
@@ -219,12 +245,10 @@ impl ThreadsStore {
                 self.apply_thread_updated(ev, cx);
             }
             RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
-            RealtimeEvent::ChannelDeleted(ev) => {
-                self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
-            }
             RealtimeEvent::ChannelArchive(ev) => {
                 self.apply_channel_archive(ev, cx);
             }
+            RealtimeEvent::ChannelDeleted(ev) => self.apply_channel_deleted(ev, cx),
             _ => {}
         }
     }
@@ -267,6 +291,7 @@ impl ThreadsStore {
             active: THREAD_STATUS_JOINED,
             creator_id: desc.creator_id.to_string(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -356,6 +381,26 @@ impl ThreadsStore {
         self.set_thread_active(channel_id, THREAD_STATUS_ARCHIVED, cx);
     }
 
+    pub fn remove_thread_locally(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.apply_thread_deleted(channel_id, cx);
+    }
+
+    pub fn remove_threads_of_parent(&mut self, parent_id: &str, cx: &mut Context<Self>) {
+        self.apply_parent_channel_deleted(parent_id, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_threads_for_test(
+        &mut self,
+        list_channel_id: &str,
+        threads: Vec<ThreadSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_channel_id = Some(list_channel_id.to_string());
+        self.threads = threads;
+        cx.notify();
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
         self.threads
             .iter()
@@ -401,6 +446,40 @@ impl ThreadsStore {
             self.mark_thread_archived(&channel_id, cx);
         } else {
             self.mark_thread_active(&channel_id, cx);
+        }
+    }
+
+    fn apply_channel_deleted(
+        &mut self,
+        ev: &realtime::ChannelDeletedEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let channel_id = ev.channel_id.to_string();
+        if ev.parent_id != 0 {
+            self.apply_thread_deleted(&channel_id, cx);
+            return;
+        }
+        self.apply_parent_channel_deleted(&channel_id, cx);
+    }
+
+    fn apply_parent_channel_deleted(&mut self, parent_id: &str, cx: &mut Context<Self>) {
+        let before = self.threads.len();
+        self.threads.retain(|t| t.parent_id != parent_id);
+        let mut changed = self.threads.len() != before;
+        if let Some(results) = self.search_results.as_mut() {
+            let results_before = results.len();
+            results.retain(|t| t.parent_id != parent_id);
+            changed |= results.len() != results_before;
+        }
+        if self.list_channel_id.as_deref() == Some(parent_id) {
+            self.list_channel_id = None;
+            self.loaded_channel = None;
+            self.search_results = None;
+            self.search_query.clear();
+            changed = true;
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -910,23 +989,29 @@ impl ThreadsStore {
         cx.notify();
     }
 
-    pub fn submit_create(&mut self, name: String, message: String, cx: &mut Context<Self>) {
+    pub fn submit_create(
+        &mut self,
+        name: String,
+        message: String,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        cx: &mut Context<Self>,
+    ) {
         if self._create_task.is_some() || self.submitting || !self.can_create_thread(cx) {
             return;
         }
         let name = name.trim().to_string();
-        let message = message.trim().to_string();
-
         if name.is_empty() {
             self.name_error = Some("thread_name_too_short".into());
             cx.notify();
             return;
         }
-        if message.is_empty() {
+        if message.trim().is_empty() && attachments.is_empty() {
             self.name_error = Some("initial_message_required".into());
             cx.notify();
             return;
         }
+        let message = message.trim_end().to_string();
 
         let Some(parent_id) = self.list_channel_id.clone() else {
             return;
@@ -934,8 +1019,46 @@ impl ThreadsStore {
         let Some(clan_id) = self.clan_id.clone() else {
             return;
         };
+        let Ok(clan_id_parsed) = clan_id.parse::<ClanId>() else {
+            return;
+        };
+        if clan_id_parsed.is_zero() {
+            return;
+        }
+        let Ok(parent_channel_id) = parent_id.parse::<ChannelId>() else {
+            return;
+        };
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
+        let clan_id_i64 = clan_id_parsed.get();
+        let parent_channel = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id_parsed, parent_channel_id)
+            .map(|channel| (channel.channel_type.as_raw() as i32, channel.private));
+        let parent_channel_type = parent_channel.map(|(channel_type, _)| channel_type);
+        let parent_is_public = parent_channel.is_some_and(|(_, private)| !private);
+        let cached_parent_members = ChannelMembersStore::try_global(cx).and_then(|members| {
+            let members = members.read(cx);
+            members
+                .has_channel(parent_channel_id)
+                .then(|| members.member_ids(parent_channel_id))
+        });
+        let transport_mentions = content_tokens
+            .mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect::<Vec<_>>();
+        let mentioned = mentioned_thread_candidates(&transport_mentions, clan_id_parsed, cx);
+        let transport_hashtags = content_tokens
+            .hashtags
+            .into_iter()
+            .map(OutgoingHashtag::into_transport)
+            .collect::<Vec<_>>();
+        let transport_emojis = content_tokens
+            .emojis
+            .into_iter()
+            .map(OutgoingEmoji::into_transport)
+            .collect::<Vec<_>>();
 
         self.name_error = None;
         self.creating = true;
@@ -973,11 +1096,11 @@ impl ThreadsStore {
 
             let create_result = api
                 .create_channel(
-                    clan_id.parse::<i64>().unwrap_or(0),
+                    clan_id_i64,
                     &name,
                     CHANNEL_TYPE_THREAD,
                     category_id.as_deref().and_then(|s| s.parse().ok()),
-                    parent_id.parse::<i64>().ok(),
+                    Some(parent_channel_id.get()),
                     channel_private,
                 )
                 .await;
@@ -1001,21 +1124,106 @@ impl ThreadsStore {
 
             let thread_id = thread.channel_id;
             let thread_id_str = thread_id.to_string();
-            let clan_id_i64 = clan_id.parse::<i64>().unwrap_or(0);
+
             if let Err(e) = api
-                .send_channel_message(
+                .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
+                .await
+            {
+                tracing::warn!("join_chat after thread create failed: {e}");
+            }
+
+            let parent_members = match cached_parent_members {
+                Some(ids) => ids,
+                None if !parent_is_public => match parent_channel_type {
+                    Some(channel_type) => {
+                        match api
+                            .list_channel_users(clan_id_i64, parent_channel_id.get(), channel_type)
+                            .await
+                        {
+                            Ok(users) => {
+                                let ids: Vec<UserId> =
+                                    users.iter().map(|user| UserId(user.user_id)).collect();
+                                let _ = this.update(cx, |_this, cx| {
+                                    if let Some(members) = ChannelMembersStore::try_global(cx) {
+                                        members.update(cx, |members, cx| {
+                                            members.apply_members_loaded(
+                                                parent_channel_id,
+                                                &users,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                });
+                                ids
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "list parent members for thread create failed: {e}"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    }
+                    None => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            let invite_ids =
+                plan_thread_membership(None, &[], &parent_members, parent_is_public, &mentioned);
+
+            let mut invite_failed = false;
+            if !invite_ids.is_empty() {
+                let user_ids: Vec<String> = invite_ids
+                    .iter()
+                    .map(|user_id| user_id.to_string())
+                    .collect();
+                if let Err(e) = api.add_channel_users(thread_id, user_ids).await {
+                    tracing::error!("add mentioned users to new thread failed: {e}");
+                    invite_failed = true;
+                }
+            }
+            let starter_mentions = if channel_private != 0 && invite_failed {
+                Vec::new()
+            } else {
+                transport_mentions
+            };
+
+            let send_result = if attachments.is_empty() {
+                api.send_channel_message(
                     clan_id_i64,
                     thread_id,
                     &message,
                     false,
                     STREAM_MODE_THREAD,
-                    vec![],
-                    vec![],
-                    vec![],
+                    starter_mentions,
+                    transport_hashtags,
+                    transport_emojis,
                     None,
                 )
                 .await
-            {
+            } else {
+                match upload_attachments_now(&api, attachments).await {
+                    Ok(uploaded) => {
+                        api.send_presigned_message(
+                            clan_id_i64,
+                            thread_id,
+                            &message,
+                            false,
+                            STREAM_MODE_THREAD,
+                            uploaded,
+                            None,
+                            starter_mentions,
+                            transport_hashtags,
+                            transport_emojis,
+                            None,
+                            Default::default(),
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            if let Err(e) = send_result {
                 tracing::error!("send starter message to thread failed: {e}");
                 if let Err(e) = this.update(cx, |this, cx| {
                     this.finish_create_request();
@@ -1029,20 +1237,12 @@ impl ThreadsStore {
                 return;
             }
 
-            if let Err(e) = api
-                .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
-                .await
-            {
-                tracing::warn!("join_chat after thread create failed: {e}");
-            }
-
             if let Err(e) = this.update(cx, |this, cx| {
                 this.creating = false;
                 this.finish_create_request();
                 this.loaded_channel = None;
-                let clan_id_for_refresh = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
                 ChannelList::global(cx).update(cx, |list, cx| {
-                    list.refresh_clan(clan_id_for_refresh, cx);
+                    list.refresh_clan(clan_id_parsed, cx);
                 });
                 cx.emit(ThreadsEvent::ThreadCreated {
                     channel_id: thread_id_str,
@@ -1059,9 +1259,11 @@ impl ThreadsStore {
 
 fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
     if is_channel_limit_api_error(err) {
-        ThreadCreateFailReason::ChannelLimitExceeded
-    } else {
-        ThreadCreateFailReason::Other
+        return ThreadCreateFailReason::ChannelLimitExceeded;
+    }
+    match api_status_from_error(err) {
+        Some(status) => ThreadCreateFailReason::Api(status.code),
+        None => ThreadCreateFailReason::Other,
     }
 }
 
@@ -1154,7 +1356,8 @@ fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
         channel_private: t.channel_private,
         active: t.active,
         creator_id: t.creator_id,
-        last_message_content: t.last_message_content,
+        last_message_content: t.last_message_content.clone(),
+        last_message_preview: thread_preview_display(&t.last_message_content),
         last_message_sender_id: t.last_message_sender_id,
         last_message_sender_name: t.last_message_sender_name,
         last_message_sender_avatar: t.last_message_sender_avatar,
@@ -1173,6 +1376,7 @@ fn thread_from_created_event(ev: &realtime::ChannelCreatedEvent) -> ThreadSummar
         active: ev.status,
         creator_id: ev.creator_id.to_string(),
         last_message_content: String::new(),
+        last_message_preview: String::new(),
         last_message_sender_id: ev.creator_id.to_string(),
         last_message_sender_name: String::new(),
         last_message_sender_avatar: String::new(),
@@ -1193,7 +1397,8 @@ fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessa
     thread.last_sent_timestamp = i64::from(msg.create_time_seconds);
     if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
         let api_msg = MezonTransport::message_from_proto(msg);
-        thread.last_message_content = api_msg.content;
+        thread.last_message_content = api_msg.content.clone();
+        thread.last_message_preview = thread_preview_display(&api_msg.content);
         thread.last_message_sender_id = api_msg.sender_id.to_string();
         thread.last_message_sender_name = api_msg.sender_name;
         thread.last_message_sender_avatar = api_msg.avatar;
@@ -1297,6 +1502,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1388,6 +1594,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1406,6 +1613,7 @@ mod tests {
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
                     last_message_content: String::new(),
+                    last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
                     last_message_sender_name: String::new(),
                     last_message_sender_avatar: String::new(),
@@ -1421,6 +1629,7 @@ mod tests {
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
                     last_message_content: String::new(),
+                    last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
                     last_message_sender_name: String::new(),
                     last_message_sender_avatar: String::new(),
@@ -1444,6 +1653,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: "old".into(),
+            last_message_preview: "old".into(),
             last_message_sender_id: "9".into(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1461,6 +1671,7 @@ mod tests {
         patch_thread_from_message(&mut thread, &msg);
         assert_eq!(thread.last_sent_timestamp, 99);
         assert_eq!(thread.last_message_content, "hello");
+        assert_eq!(thread.last_message_preview, "hello");
         assert_eq!(thread.last_message_sender_id, "42");
     }
 
@@ -1475,6 +1686,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: "keep".into(),
+            last_message_preview: "keep".into(),
             last_message_sender_id: "9".into(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1505,6 +1717,7 @@ mod tests {
                 active: THREAD_STATUS_JOINED,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1520,6 +1733,7 @@ mod tests {
                 active: THREAD_STATUS_ARCHIVED,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1535,6 +1749,7 @@ mod tests {
                 active: THREAD_STATUS_ACTIVE_PUBLIC,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1560,6 +1775,11 @@ mod tests {
             ThreadCreateFailReason::ChannelLimitExceeded
         );
         let err: anyhow::Error = ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            thread_create_fail_reason(&err),
+            ThreadCreateFailReason::Api(13)
+        );
+        let err = anyhow::anyhow!("socket closed");
         assert_eq!(
             thread_create_fail_reason(&err),
             ThreadCreateFailReason::Other
@@ -1594,5 +1814,128 @@ mod tests {
                 assert!(!store.is_creating());
             });
         });
+    }
+
+    #[gpui::test]
+    fn channel_deleted_removes_thread_and_parent_children(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = ThreadsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.threads = vec![
+                    ThreadSummary {
+                        channel_id: "9".into(),
+                        channel_label: "t1".into(),
+                        clan_id: "1".into(),
+                        parent_id: "1".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_preview: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                    ThreadSummary {
+                        channel_id: "10".into(),
+                        channel_label: "t2".into(),
+                        clan_id: "1".into(),
+                        parent_id: "1".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_preview: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                    ThreadSummary {
+                        channel_id: "20".into(),
+                        channel_label: "other".into(),
+                        clan_id: "1".into(),
+                        parent_id: "2".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_preview: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                ];
+                store.on_realtime_event(
+                    &RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                        clan_id: 1,
+                        channel_id: 9,
+                        parent_id: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(store.threads.len(), 2);
+                assert!(!store.threads.iter().any(|t| t.channel_id == "9"));
+
+                store.list_channel_id = Some("1".into());
+                store.loaded_channel = Some("1".into());
+                store.on_realtime_event(
+                    &RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                        clan_id: 1,
+                        channel_id: 1,
+                        parent_id: 0,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(store.threads.len(), 1);
+                assert_eq!(store.threads[0].channel_id, "20");
+                assert!(store.list_channel_id.is_none());
+                assert!(store.loaded_channel.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn thread_preview_display_collapses_decoded_newlines() {
+        assert_eq!(thread_preview_display("123\n123\n111"), "123 123 111");
+    }
+
+    #[test]
+    fn thread_preview_display_preserves_literal_backslash_n() {
+        assert_eq!(
+            thread_preview_display(r"\n123\n123\n111\n"),
+            r"\n123\n123\n111\n"
+        );
+    }
+
+    #[test]
+    fn thread_preview_display_preserves_windows_paths() {
+        assert_eq!(thread_preview_display(r"C:\temp\file"), r"C:\temp\file");
+    }
+
+    #[test]
+    fn thread_preview_display_does_not_parse_json_objects() {
+        assert_eq!(
+            thread_preview_display(r#"{"foo":"bar"}"#),
+            r#"{"foo":"bar"}"#
+        );
+        assert_eq!(
+            thread_preview_display(r#"{"t":"other"}"#),
+            r#"{"t":"other"}"#
+        );
     }
 }

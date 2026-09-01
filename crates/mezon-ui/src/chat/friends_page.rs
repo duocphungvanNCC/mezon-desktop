@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Point, SharedString, StatefulInteractiveElement, Styled, Subscription, UniformListScrollHandle,
-    Window, div, img, prelude::*, px, relative, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
-    ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, Friend, FriendEvent,
-    FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity, UserId,
+    ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, DmAvatarPresence, Friend,
+    FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity,
+    UserId, current_user_presence,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::app::window_controls::APP_HEADER_HEIGHT;
+use crate::chat::call_actions::{CallTarget, call_user};
 use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, ToastKind, context_menu_at,
@@ -71,6 +73,7 @@ struct FriendRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    presence: DmAvatarPresence,
     user_status: SharedString,
     state: FriendState,
 }
@@ -173,6 +176,7 @@ impl FriendsPage {
                         cx,
                     );
                 }
+                FriendEvent::FollowerChecked { .. } => {}
             }),
         );
         subs.push(cx.subscribe(
@@ -318,10 +322,16 @@ impl FriendsPage {
         let store = PresenceStore::global(cx);
         let presence = store.read(cx);
         let mut changed = false;
+        let own_presence = current_user_presence(cx);
         for row in &mut self.rows {
             let online = presence.is_online(row.id);
             if row.online != online {
                 row.online = online;
+                changed = true;
+            }
+            let badge = presence.member_presence(row.id, own_presence);
+            if row.presence != badge {
+                row.presence = badge;
                 changed = true;
             }
             let status = presence.user_status(row.id).unwrap_or("");
@@ -371,6 +381,7 @@ impl FriendsPage {
             filtered.sort_by_cached_key(|f| f.label().to_lowercase());
         }
 
+        let own_presence = current_user_presence(cx);
         self.rows = filtered
             .into_iter()
             .map(|f| FriendRow {
@@ -381,6 +392,7 @@ impl FriendsPage {
                 avatar_src: SharedString::from(imgproxy::avatar_url(cx, &f.avatar_url)),
                 avatar_raw: SharedString::from(f.avatar_url.clone()),
                 online: presence.is_online(f.id),
+                presence: presence.member_presence(f.id, own_presence),
                 user_status: SharedString::from(
                     presence.user_status(f.id).unwrap_or("").to_string(),
                 ),
@@ -584,11 +596,7 @@ fn build_activity_rows(
             group.len()
         ))));
         for (a, f) in group {
-            let description = if a.activity_description.is_empty() {
-                a.activity_name.clone()
-            } else {
-                a.activity_description.clone()
-            };
+            let description = activity_row_subtitle(a, locale);
             rows.push(ActivityRow::Item {
                 label: SharedString::from(f.label().to_string()),
                 description: SharedString::from(description),
@@ -598,6 +606,24 @@ fn build_activity_rows(
         }
     }
     rows
+}
+
+fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
+    if !activity.activity_description.is_empty() {
+        return activity.activity_description.clone();
+    }
+    let kind_key = match activity.activity_type {
+        ACTIVITY_TYPE_WORK => "friendsPage.activity.codingStatus",
+        ACTIVITY_TYPE_LIVE => "friendsPage.activity.musicStatus",
+        ACTIVITY_TYPE_PLAY => "friendsPage.activity.gamingStatus",
+        _ => return activity.activity_name.clone(),
+    };
+    let kind_label = mezon_i18n::t(locale, kind_key);
+    if activity.activity_name.is_empty() {
+        kind_label.to_string()
+    } else {
+        format!("{kind_label} · {}", activity.activity_name)
+    }
 }
 
 fn is_valid_username(value: &str) -> bool {
@@ -620,7 +646,18 @@ fn open_remove_friend_modal(
     });
 }
 
-fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
+fn friend_call_target(user_id: UserId, cx: &App) -> Option<CallTarget> {
+    let friend = FriendStore::try_global(cx)?;
+    let friend = friend.read(cx).friend(user_id)?;
+    Some(CallTarget {
+        user: user_id,
+        label: friend.label().into(),
+        avatar: friend.avatar_url.clone().into(),
+        username: friend.username.clone().into(),
+    })
+}
+
+pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return;
     };
@@ -656,12 +693,14 @@ impl Render for FriendsPage {
         let locale = self.settings.read(cx).language.clone();
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsPage))
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .size_full()
-            .bg(theme.tokens.bg_secondary)
+            .bg(theme.surfaces.secondary.ramp())
             .child(self.render_header(&theme, &locale, cx))
             .child(
                 div()
@@ -746,6 +785,8 @@ impl FriendsPage {
 
         let add_button = div()
             .id("friend-add")
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::AddFriendButton))
             .px_2()
             .py(px(6.))
             .rounded_lg()
@@ -812,7 +853,7 @@ impl FriendsPage {
             .flex_1()
             .min_w_0()
             .flex_col()
-            .bg(theme.tokens.bg_secondary);
+            .bg(theme.surfaces.secondary.ramp());
 
         if self.add_friend_open {
             main.child(self.render_add_friend(theme, locale, cx))
@@ -833,7 +874,7 @@ impl FriendsPage {
             .rounded_lg()
             .border_1()
             .border_color(theme.tokens.border_primary)
-            .bg(theme.tokens.bg_primary)
+            .bg(theme.surfaces.primary)
             .flex()
             .items_center()
             .px_3();
@@ -915,13 +956,17 @@ impl FriendsPage {
                             .justify_center()
                             .text_center()
                             .mb(px(120.))
-                            .child(mezon_i18n::t(locale, key).to_string()),
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .child(mezon_i18n::t(locale, key).to_string()),
+                            ),
                     ),
             );
         }
 
         let entity = cx.entity();
-        let theme = theme.clone();
+        let theme = cx.theme().clone();
         let count = self.rows.len();
         let avatar_cache = self.avatar_cache.clone();
         let locale = SharedString::from(locale.to_string());
@@ -948,8 +993,8 @@ impl FriendsPage {
         let entity = cx.entity();
         let avatar_cache = self.avatar_cache.clone();
         let count = self.activity_rows.len();
-        let bg = theme.tokens.bg_active_friend_list;
-        let row_theme = theme.clone();
+        let bg = theme.surfaces.active_friend_list.ramp();
+        let row_theme = cx.theme().clone();
         let list = uniform_list("friends-activity-list", count, move |range, _window, cx| {
             let rows = &entity.read(cx).activity_rows;
             range
@@ -988,12 +1033,16 @@ impl FriendsPage {
                 }
             }
         };
-        let coming_soon = {
+        let call_friend = |video: bool| {
             let settings = self.settings.clone();
             move |_window: &mut Window, cx: &mut App| {
-                let msg =
-                    mezon_i18n::t(&settings.read(cx).language, "common.comingSoon").to_string();
-                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+                let locale = settings.read(cx).language.clone();
+                let Some(target) = friend_call_target(user_id, cx) else {
+                    return;
+                };
+                let error =
+                    SharedString::from(mezon_i18n::t(&locale, "shareContact.card.callError"));
+                call_user(target, video, error, cx);
             }
         };
 
@@ -1016,11 +1065,11 @@ impl FriendsPage {
             .on_dismiss(dismiss)
             .item(
                 t("friendsPage.friendMenu.startVideoCall"),
-                coming_soon.clone(),
+                call_friend(true),
             )
             .item(
                 t("friendsPage.friendMenu.startVoiceCall"),
-                coming_soon.clone(),
+                call_friend(false),
             )
             .item(t("contextMenu.member.shareContact"), {
                 let panel = panel.clone();
@@ -1187,17 +1236,28 @@ fn render_friend_row(
         avatar = avatar.src(row.avatar_raw.clone());
     }
 
-    let dot_fill = if row.online {
-        theme.status_online
-    } else {
-        theme.text_muted
-    };
-    let avatar_slot = div()
-        .relative()
-        .flex_shrink_0()
-        .size(px(AVATAR_SIZE))
-        .child(avatar)
-        .child(
+    let presence_badge: Option<AnyElement> = match row.presence {
+        DmAvatarPresence::None => None,
+        DmAvatarPresence::Idle => Some(
+            div()
+                .absolute()
+                .bottom(px(-1.))
+                .right(px(-1.))
+                .size(px(10.))
+                .child(
+                    Icon::new(IconName::DarkModeIcon)
+                        .size(px(10.))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2,
+                        )))
+                        .text_color(
+                            crate::util::user_status::presence_badge_color(DmAvatarPresence::Idle)
+                                .unwrap_or(theme.status_idle),
+                        ),
+                )
+                .into_any_element(),
+        ),
+        DmAvatarPresence::Online | DmAvatarPresence::Dnd => Some(
             div()
                 .absolute()
                 .bottom(px(-1.))
@@ -1206,8 +1266,17 @@ fn render_friend_row(
                 .rounded_full()
                 .border_2()
                 .border_color(theme.tokens.bg_secondary)
-                .bg(dot_fill),
-        );
+                .bg(crate::util::user_status::presence_badge_color(row.presence)
+                    .unwrap_or(theme.status_online))
+                .into_any_element(),
+        ),
+    };
+    let avatar_slot = div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(AVATAR_SIZE))
+        .child(avatar)
+        .children(presence_badge);
 
     let group_name = row.group_name.clone();
     let mut name_line = div()
@@ -1472,7 +1541,7 @@ fn render_row_actions(
                     .text_color(theme.tokens.text_secondary)
                     .cursor_pointer()
                     .occlude()
-                    .hover(|s| s.bg(theme.tokens.bg_primary))
+                    .hover(|s| s.bg(theme.surfaces.primary))
                     .on_click(move |_, _window, cx| {
                         FriendStore::global(cx).update(cx, |s, cx| s.unblock_friend(id, cx));
                     })

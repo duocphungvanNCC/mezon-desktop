@@ -64,7 +64,9 @@ impl SendTokenModal {
         if let Some(wallet) = WalletStore::try_global(cx)
             && !wallet.read(cx).is_available()
         {
-            wallet.update(cx, |wallet, cx| wallet.enable_wallet_for_current_user(cx));
+            wallet.update(cx, |wallet, cx| {
+                wallet.enable_wallet_for_current_user(false, cx)
+            });
         }
         let candidates = Self::build_candidates(cx);
         let view = cx.new(|cx| {
@@ -110,8 +112,10 @@ impl SendTokenModal {
                         return;
                     }
                     this.error = None;
-                    let raw = input.read(cx).value();
-                    let needs_reformat = format_amount_input(raw, &this.locale) != raw;
+                    let state = input.read(cx);
+                    let needs_reformat =
+                        amount_reformat_target(state.value(), state.is_composing(), &this.locale)
+                            .is_some();
                     if needs_reformat && !this.amount_reformat_queued {
                         this.amount_reformat_queued = true;
                         let input = input.clone();
@@ -120,9 +124,10 @@ impl SendTokenModal {
                         window.defer(cx, move |window, cx| {
                             view.update(cx, |this, _| this.amount_reformat_queued = false);
                             input.update(cx, |input, cx| {
-                                let current = input.value().to_string();
-                                let formatted = format_amount_input(&current, &locale);
-                                if formatted != current {
+                                let composing = input.is_composing();
+                                let target =
+                                    amount_reformat_target(input.value(), composing, &locale);
+                                if let Some(formatted) = target {
                                     input.set_value(formatted, window, cx);
                                 }
                             });
@@ -285,8 +290,19 @@ impl SendTokenModal {
         self.can_send_with(amount, self.exceeds_balance_for(amount, cx))
     }
 
-    fn send(&mut self, cx: &mut Context<Self>) {
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_send(cx) {
+            return;
+        }
+        let wallet_available = WalletStore::try_global(cx)
+            .map(|wallet| wallet.read(cx).is_available())
+            .unwrap_or(false);
+        if !wallet_available {
+            let message = mezon_i18n::t(&self.locale, "message.wallet.notAvailable").to_string();
+            let locale = self.locale.clone();
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.show_wallet_not_available(message, &locale, window, cx)
+            });
             return;
         }
         let Some((recipient, recipient_username)) = self.selected.clone() else {
@@ -600,8 +616,8 @@ impl Render for SendTokenModal {
                         "userProfile.statusProfile.sendTokenModal.buttons.sendTokens",
                     ))
                     .disabled(!can_send)
-                    .on_click(move |_: &ClickEvent, _window, cx| {
-                        entity.update(cx, |this, cx| this.send(cx));
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        entity.update(cx, |this, cx| this.send(window, cx));
                     }),
             );
 
@@ -663,6 +679,14 @@ fn group_separator(locale: &str) -> char {
     if locale.starts_with("vi") { '.' } else { ',' }
 }
 
+fn amount_reformat_target(raw: &str, composing: bool, locale: &str) -> Option<String> {
+    if composing {
+        return None;
+    }
+    let formatted = format_amount_input(raw, locale);
+    (formatted != raw).then_some(formatted)
+}
+
 fn format_amount_input(raw: &str, locale: &str) -> String {
     if raw.is_empty() {
         return String::new();
@@ -701,8 +725,8 @@ fn section(theme: &crate::theme::Theme, label: impl Into<SharedString>) -> gpui:
 #[cfg(test)]
 mod tests {
     use super::{
-        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, digit_count,
-        format_amount_input, format_thousands, parse_whole_token_amount,
+        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, amount_reformat_target,
+        digit_count, format_amount_input, format_thousands, parse_whole_token_amount,
     };
 
     #[test]
@@ -776,6 +800,17 @@ mod tests {
         assert_eq!(format_amount_input("1000", "vi"), "1.000");
         assert_eq!(format_amount_input("12345678", "vi"), "12.345.678");
         assert_eq!(format_amount_input("999", "en"), "999");
+    }
+
+    #[test]
+    fn an_ime_composition_is_never_reformatted_under_the_engine() {
+        assert_eq!(
+            amount_reformat_target("10000", false, "en"),
+            Some("10,000".to_string())
+        );
+        assert_eq!(amount_reformat_target("10000", true, "en"), None);
+        assert_eq!(amount_reformat_target("10.000", true, "vi"), None);
+        assert_eq!(amount_reformat_target("10,000", false, "en"), None);
     }
 
     #[test]

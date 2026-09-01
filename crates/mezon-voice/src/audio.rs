@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -51,6 +51,66 @@ fn flush_capture(
     }
 }
 
+struct CaptureConverter {
+    channels: usize,
+    step: f64,
+    position: f64,
+    history: [i16; CAPTURE_HISTORY],
+    mono: Vec<i16>,
+}
+
+impl CaptureConverter {
+    fn new(device: AudioFormat) -> Self {
+        Self {
+            channels: device.channels.max(1) as usize,
+            step: device.sample_rate.max(1) as f64 / CAPTURE_SAMPLE_RATE as f64,
+            position: 1.0,
+            history: [0; CAPTURE_HISTORY],
+            mono: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, interleaved: &[i16], out: &mut Vec<i16>) {
+        self.mono.clear();
+        self.mono.extend_from_slice(&self.history);
+        for frame in interleaved.chunks_exact(self.channels) {
+            let sum: i32 = frame.iter().map(|sample| *sample as i32).sum();
+            self.mono.push((sum / self.channels as i32) as i16);
+        }
+        let fresh = self.mono.len() - CAPTURE_HISTORY;
+        if fresh == 0 {
+            return;
+        }
+        let limit = (fresh + 1) as f64;
+        while self.position < limit {
+            out.push(self.resolve(self.position));
+            self.position += self.step;
+        }
+        self.position -= fresh as f64;
+        self.history.copy_from_slice(&self.mono[fresh..]);
+    }
+
+    fn resolve(&self, position: f64) -> i16 {
+        let index = position as usize;
+        if self.step > 1.0 {
+            let last = self.mono.len() - 1;
+            let stop = ((position + self.step) as usize).clamp(index, last);
+            let window = &self.mono[index..=stop];
+            let sum: i32 = window.iter().map(|sample| *sample as i32).sum();
+            return (sum / window.len() as i32) as i16;
+        }
+        let t = position - index as f64;
+        let p0 = self.mono[index - 1] as f64;
+        let p1 = self.mono[index] as f64;
+        let p2 = self.mono[index + 1] as f64;
+        let p3 = self.mono[index + 2] as f64;
+        let a = 1.5 * (p1 - p2) + 0.5 * (p3 - p0);
+        let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+        let c = 0.5 * (p2 - p0);
+        (((a * t + b) * t + c) * t + p1).round() as i16
+    }
+}
+
 fn update_out_latency(info: &cpal::OutputCallbackInfo, out_latency_ms: &AtomicU32) {
     let ts = info.timestamp();
     if let Some(d) = ts.playback.duration_since(&ts.callback) {
@@ -66,6 +126,101 @@ fn capture_delay_ms(info: &cpal::InputCallbackInfo, out_latency_ms: &AtomicU32) 
         .map(|d| d.as_millis().min(500) as u32)
         .unwrap_or(0);
     (out_latency_ms.load(Ordering::Relaxed) + in_latency).min(500) as i32
+}
+
+#[derive(Clone)]
+struct CallbackHeartbeat {
+    epoch: Instant,
+    last_callback_ms: Arc<AtomicU64>,
+}
+
+impl CallbackHeartbeat {
+    fn new() -> Self {
+        let heartbeat = Self {
+            epoch: Instant::now(),
+            last_callback_ms: Arc::new(AtomicU64::new(0)),
+        };
+        heartbeat.mark();
+        heartbeat
+    }
+
+    fn mark(&self) {
+        self.last_callback_ms
+            .store(self.now_ms(), Ordering::Relaxed);
+    }
+
+    fn tick(&self) -> u64 {
+        self.last_callback_ms.load(Ordering::Relaxed)
+    }
+
+    fn age(&self) -> Duration {
+        Duration::from_millis(self.now_ms().saturating_sub(self.tick()))
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+}
+
+enum StallAction {
+    Recover(u32),
+    Exhausted,
+}
+
+struct StallRecovery {
+    observed_tick: u64,
+    attempts: u32,
+    last_attempt: Option<Instant>,
+    exhausted_reported: bool,
+}
+
+impl StallRecovery {
+    fn new(heartbeat: &CallbackHeartbeat) -> Self {
+        Self {
+            observed_tick: heartbeat.tick(),
+            attempts: 0,
+            last_attempt: None,
+            exhausted_reported: false,
+        }
+    }
+
+    fn reset(&mut self, heartbeat: &CallbackHeartbeat) {
+        heartbeat.mark();
+        self.observed_tick = heartbeat.tick();
+        self.attempts = 0;
+        self.last_attempt = None;
+        self.exhausted_reported = false;
+    }
+
+    fn poll(&mut self, heartbeat: &CallbackHeartbeat) -> Option<StallAction> {
+        let tick = heartbeat.tick();
+        if tick != self.observed_tick {
+            self.observed_tick = tick;
+            self.attempts = 0;
+            self.last_attempt = None;
+            self.exhausted_reported = false;
+            return None;
+        }
+        if heartbeat.age() < AUDIO_CALLBACK_STALL_TIMEOUT {
+            return None;
+        }
+        if self.attempts >= MAX_AUDIO_STALL_RECOVERIES {
+            if !self.exhausted_reported {
+                self.exhausted_reported = true;
+                return Some(StallAction::Exhausted);
+            }
+            return None;
+        }
+        if self
+            .last_attempt
+            .is_some_and(|at| at.elapsed() < AUDIO_STALL_RETRY_INTERVAL)
+        {
+            return None;
+        }
+        self.attempts += 1;
+        self.last_attempt = Some(Instant::now());
+        Some(StallAction::Recover(self.attempts))
+    }
 }
 
 fn flush_reverse(
@@ -207,10 +362,39 @@ pub struct AudioFormat {
 #[derive(Default)]
 pub struct PlaybackMixer {
     tracks: Mutex<HashMap<u64, VecDeque<i16>>>,
+    record: crate::record::RecordTaps,
+    record_rate: AtomicU32,
+    record_channels: AtomicU32,
 }
 
 impl PlaybackMixer {
     const MAX_BUFFERED: usize = 48_000;
+
+    pub fn new(record: crate::record::RecordTaps) -> Self {
+        Self {
+            record,
+            ..Default::default()
+        }
+    }
+
+    pub fn record_taps(&self) -> crate::record::RecordTaps {
+        self.record.clone()
+    }
+
+    fn set_output_format(&self, rate: u32, channels: u32) {
+        self.record_rate.store(rate, Ordering::Relaxed);
+        self.record_channels.store(channels, Ordering::Relaxed);
+    }
+
+    fn tee_to_recorder(&self, mixed: &[i16]) {
+        let rate = self.record_rate.load(Ordering::Relaxed);
+        let channels = self.record_channels.load(Ordering::Relaxed);
+        if rate == 0 || channels == 0 {
+            return;
+        }
+        self.record
+            .push(mezon_record::AudioSource::Remote, mixed, rate, channels);
+    }
 
     pub fn push(&self, key: u64, samples: &[i16]) {
         let mut tracks = self.tracks.lock();
@@ -239,6 +423,8 @@ impl PlaybackMixer {
                     (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }
+        drop(tracks);
+        self.tee_to_recorder(out);
     }
 }
 
@@ -251,6 +437,12 @@ enum AudioCmd {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceResetKind {
+    Input,
+    Output,
+}
+
 pub struct AudioIo {
     ctrl_tx: flume::Sender<AudioCmd>,
     audio_stopped_rx: flume::Receiver<()>,
@@ -259,6 +451,7 @@ pub struct AudioIo {
     pub mic_rx: flume::Receiver<Vec<i16>>,
     pub input_format_rx: flume::Receiver<AudioFormat>,
     pub output_format_rx: flume::Receiver<AudioFormat>,
+    pub device_reset_rx: flume::Receiver<DeviceResetKind>,
     pub mixer: Arc<PlaybackMixer>,
     ns_enabled: Arc<AtomicBool>,
     ns_level: Arc<AtomicU32>,
@@ -286,8 +479,9 @@ impl AudioIo {
     pub fn start(
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        record_taps: crate::record::RecordTaps,
     ) -> Result<Self> {
-        let mixer = Arc::new(PlaybackMixer::default());
+        let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
         let (capture_tx, capture_rx) = flume::bounded::<CaptureChunk>(128);
         let (reverse_tx, reverse_rx) = flume::bounded::<ReverseChunk>(128);
@@ -295,6 +489,7 @@ impl AudioIo {
         let (out_fmt_tx, out_fmt_rx) = flume::bounded::<Result<AudioFormat, String>>(1);
         let (in_fmt_tx, in_fmt_rx) = flume::unbounded::<AudioFormat>();
         let (out_change_tx, out_change_rx) = flume::unbounded::<AudioFormat>();
+        let (device_reset_tx, device_reset_rx) = flume::unbounded::<DeviceResetKind>();
         let (audio_stopped_tx, audio_stopped_rx) = flume::bounded::<()>(1);
         let (apm_stopped_tx, apm_stopped_rx) = flume::bounded::<()>(1);
         let ns_enabled = Arc::new(AtomicBool::new(false));
@@ -318,23 +513,32 @@ impl AudioIo {
                 let out_latency_ms = Arc::new(AtomicU32::new(0));
                 let rebuild_pending = Arc::new(AtomicBool::new(false));
                 let in_rebuild_pending = Arc::new(AtomicBool::new(false));
+                let output_heartbeat = CallbackHeartbeat::new();
+                let input_heartbeat = CallbackHeartbeat::new();
                 let mut current_input_id = input_device_id;
                 let mut current_output_id = output_device_id;
                 let mut out_alive = Arc::new(AtomicBool::new(true));
                 let mut in_alive = Arc::new(AtomicBool::new(false));
-                let prepared = prepare_output(
+                let prepared = open_output_for_startup(
                     current_output_id.as_deref(),
-                    mixer_for_thread.clone(),
-                    reverse_tx.clone(),
-                    out_latency_ms.clone(),
-                    OutputErrorHook {
+                    &mixer_for_thread,
+                    &reverse_tx,
+                    &out_latency_ms,
+                    &output_heartbeat,
+                    &OutputErrorHook {
                         ctrl_tx: rebuild_tx.clone(),
                         rebuild_pending: rebuild_pending.clone(),
                         stream_alive: out_alive.clone(),
                     },
                 );
                 let (mut out_stream, mut out_fmt) = match prepared {
-                    Ok(pair) => pair,
+                    Ok((stream, fmt, opened_id)) => {
+                        if current_output_id.is_some() && opened_id.is_none() {
+                            let _ = device_reset_tx.send(DeviceResetKind::Output);
+                        }
+                        current_output_id = opened_id;
+                        (stream, fmt)
+                    }
                     Err(e) => {
                         let _ = out_fmt_tx.send(Err(e.to_string()));
                         return;
@@ -349,12 +553,84 @@ impl AudioIo {
                 let mut input_healthy = true;
                 let mut last_rebuild: Option<Instant> = None;
                 let mut last_in_rebuild: Option<Instant> = None;
+                let mut output_absent_streak: u32 = 0;
+                let mut input_absent_streak: u32 = 0;
                 let mut current_in_fmt: Option<AudioFormat> = None;
-                while let Ok(cmd) = ctrl_rx.recv() {
+                let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
+                let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
+                let mut active_default_output_id = if current_output_id.is_none() {
+                    default_output_id(&host)
+                } else {
+                    None
+                };
+                loop {
+                    let cmd = match ctrl_rx.recv_timeout(AUDIO_HEALTH_CHECK_INTERVAL) {
+                        Ok(cmd) => cmd,
+                        Err(flume::RecvTimeoutError::Timeout) => {
+                            match output_stall_recovery.poll(&output_heartbeat) {
+                                Some(StallAction::Recover(attempt)) => {
+                                    tracing::warn!(
+                                        attempt,
+                                        max_attempts = MAX_AUDIO_STALL_RECOVERIES,
+                                        "voice output callback stalled; requesting stream recovery"
+                                    );
+                                    if !rebuild_pending.swap(true, Ordering::Relaxed) {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildOutput);
+                                    }
+                                }
+                                Some(StallAction::Exhausted) => tracing::warn!(
+                                    "voice output callback recovery limit reached; waiting for callback or device change"
+                                ),
+                                None => {}
+                            }
+                            if input_active {
+                                match input_stall_recovery.poll(&input_heartbeat) {
+                                    Some(StallAction::Recover(attempt)) => {
+                                        tracing::warn!(
+                                            attempt,
+                                            max_attempts = MAX_AUDIO_STALL_RECOVERIES,
+                                            "voice mic callback stalled; requesting stream recovery"
+                                        );
+                                        if !in_rebuild_pending.swap(true, Ordering::Relaxed) {
+                                            let _ = rebuild_tx.send(AudioCmd::RebuildInput);
+                                        }
+                                    }
+                                    Some(StallAction::Exhausted) => tracing::warn!(
+                                        "voice mic callback recovery limit reached; waiting for callback or device change"
+                                    ),
+                                    None => {}
+                                }
+                            } else {
+                                input_stall_recovery.reset(&input_heartbeat);
+                            }
+                            if output_healthy
+                                && current_output_id.is_none()
+                                && !rebuild_pending.load(Ordering::Relaxed)
+                            {
+                                let now_default = default_output_id(&host);
+                                if now_default.is_some()
+                                    && now_default != active_default_output_id
+                                {
+                                    tracing::info!(
+                                        from = ?active_default_output_id,
+                                        to = ?now_default,
+                                        "system default output device changed; following"
+                                    );
+                                    active_default_output_id = now_default;
+                                    if !rebuild_pending.swap(true, Ordering::Relaxed) {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildOutput);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        Err(flume::RecvTimeoutError::Disconnected) => break,
+                    };
                     match cmd {
                         AudioCmd::SetInputActive(active) => {
                             input_active = active;
                             in_alive.store(active, Ordering::Relaxed);
+                            input_stall_recovery.reset(&input_heartbeat);
                             if !active {
                                 if let Some(stream) = &in_stream
                                     && let Err(e) = stream.pause()
@@ -372,6 +648,7 @@ impl AudioIo {
                                     current_input_id.as_deref(),
                                     capture_tx.clone(),
                                     out_latency_ms.clone(),
+                                    input_heartbeat.clone(),
                                     InputErrorHook {
                                         ctrl_tx: rebuild_tx.clone(),
                                         rebuild_pending: in_rebuild_pending.clone(),
@@ -383,13 +660,18 @@ impl AudioIo {
                                         in_alive = new_alive;
                                         input_healthy = true;
                                         in_rebuild_pending.store(false, Ordering::Relaxed);
+                                        if input_format_changed(current_in_fmt, in_fmt) {
+                                            let _ = in_fmt_tx.send(in_fmt);
+                                        }
                                         current_in_fmt = Some(in_fmt);
-                                        let _ = in_fmt_tx.send(in_fmt);
                                         in_stream = Some(stream);
                                     }
                                     Err(e) => {
                                         input_healthy = false;
-                                        tracing::warn!("voice mic stream build failed: {e}")
+                                        tracing::warn!("voice mic stream build failed: {e}");
+                                        if !in_rebuild_pending.swap(true, Ordering::Relaxed) {
+                                            let _ = rebuild_tx.send(AudioCmd::RebuildInput);
+                                        }
                                     }
                                 }
                             }
@@ -407,6 +689,8 @@ impl AudioIo {
                                 continue;
                             }
                             current_input_id = device_id;
+                            input_absent_streak = 0;
+                            input_stall_recovery.reset(&input_heartbeat);
                             if !capture_started {
                                 continue;
                             }
@@ -417,6 +701,7 @@ impl AudioIo {
                                 current_input_id.as_deref(),
                                 capture_tx.clone(),
                                 out_latency_ms.clone(),
+                                input_heartbeat.clone(),
                                 InputErrorHook {
                                     ctrl_tx: rebuild_tx.clone(),
                                     rebuild_pending: in_rebuild_pending.clone(),
@@ -437,8 +722,10 @@ impl AudioIo {
                                     in_stream = Some(stream);
                                     input_healthy = true;
                                     in_rebuild_pending.store(false, Ordering::Relaxed);
+                                    if input_format_changed(current_in_fmt, in_fmt) {
+                                        let _ = in_fmt_tx.send(in_fmt);
+                                    }
                                     current_in_fmt = Some(in_fmt);
-                                    let _ = in_fmt_tx.send(in_fmt);
                                 }
                                 Err(e) => {
                                     input_healthy = false;
@@ -454,12 +741,15 @@ impl AudioIo {
                                 continue;
                             }
                             current_output_id = device_id;
+                            output_absent_streak = 0;
+                            output_stall_recovery.reset(&output_heartbeat);
                             let new_alive = Arc::new(AtomicBool::new(true));
                             match prepare_output(
                                 current_output_id.as_deref(),
                                 mixer_for_thread.clone(),
                                 reverse_tx.clone(),
                                 out_latency_ms.clone(),
+                                output_heartbeat.clone(),
                                 OutputErrorHook {
                                     ctrl_tx: rebuild_tx.clone(),
                                     rebuild_pending: rebuild_pending.clone(),
@@ -475,6 +765,11 @@ impl AudioIo {
                                     ));
                                     output_healthy = true;
                                     rebuild_pending.store(false, Ordering::Relaxed);
+                                    active_default_output_id = if current_output_id.is_none() {
+                                        default_output_id(&host)
+                                    } else {
+                                        None
+                                    };
                                     let changed = new_fmt.sample_rate != out_fmt.sample_rate
                                         || new_fmt.channels != out_fmt.channels;
                                     out_fmt = new_fmt;
@@ -505,18 +800,31 @@ impl AudioIo {
                             last_in_rebuild = Some(Instant::now());
                             request_macos_microphone_permission();
                             let new_alive = Arc::new(AtomicBool::new(true));
-                            match build_input(
+                            let rebuild = rebuild_input_stream(
                                 &host,
                                 current_input_id.as_deref(),
-                                capture_tx.clone(),
-                                out_latency_ms.clone(),
-                                InputErrorHook {
+                                input_absent_streak,
+                                &capture_tx,
+                                &out_latency_ms,
+                                &input_heartbeat,
+                                &InputErrorHook {
                                     ctrl_tx: rebuild_tx.clone(),
                                     rebuild_pending: in_rebuild_pending.clone(),
                                     stream_alive: new_alive.clone(),
                                 },
-                            ) {
-                                Ok((stream, in_fmt)) => {
+                            );
+                            in_rebuild_pending.store(false, Ordering::Relaxed);
+                            match rebuild {
+                                InputRebuild::Installed {
+                                    stream,
+                                    fmt,
+                                    active_id,
+                                } => {
+                                    if current_input_id.is_some() && active_id.is_none() {
+                                        let _ = device_reset_tx.send(DeviceResetKind::Input);
+                                    }
+                                    input_absent_streak = 0;
+                                    current_input_id = active_id;
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
                                     if let Some(old) = in_stream.take() {
@@ -528,28 +836,26 @@ impl AudioIo {
                                     in_stream = Some(stream);
                                     input_healthy = true;
                                     tracing::info!(
-                                        "voice mic stream recovered after stream error: {}Hz/{}ch",
-                                        in_fmt.sample_rate,
-                                        in_fmt.channels,
+                                        "voice mic stream recovered: {}Hz/{}ch",
+                                        fmt.sample_rate,
+                                        fmt.channels,
                                     );
-                                    let changed = match current_in_fmt {
-                                        Some(f) => {
-                                            f.sample_rate != in_fmt.sample_rate
-                                                || f.channels != in_fmt.channels
-                                        }
-                                        None => true,
-                                    };
-                                    current_in_fmt = Some(in_fmt);
-                                    if changed {
-                                        let _ = in_fmt_tx.send(in_fmt);
+                                    if input_format_changed(current_in_fmt, fmt) {
+                                        let _ = in_fmt_tx.send(fmt);
+                                    }
+                                    current_in_fmt = Some(fmt);
+                                }
+                                InputRebuild::KeepRetrying { absent_streak } => {
+                                    input_absent_streak = absent_streak;
+                                    input_healthy = false;
+                                    if absent_streak > 0
+                                        && absent_streak < INPUT_DISCONNECT_CONFIRM
+                                        && !in_rebuild_pending.swap(true, Ordering::Relaxed)
+                                    {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildInput);
                                     }
                                 }
-                                Err(e) => {
-                                    input_healthy = false;
-                                    tracing::warn!("voice mic stream recovery failed: {e}");
-                                }
                             }
-                            in_rebuild_pending.store(false, Ordering::Relaxed);
                         }
                         AudioCmd::RebuildOutput => {
                             if !rebuild_pending.load(Ordering::Relaxed) {
@@ -563,43 +869,66 @@ impl AudioIo {
                             }
                             last_rebuild = Some(Instant::now());
                             let new_alive = Arc::new(AtomicBool::new(true));
-                            match prepare_output(
+                            let rebuild = rebuild_output_stream(
                                 current_output_id.as_deref(),
-                                mixer_for_thread.clone(),
-                                reverse_tx.clone(),
-                                out_latency_ms.clone(),
-                                OutputErrorHook {
+                                output_absent_streak,
+                                &mixer_for_thread,
+                                &reverse_tx,
+                                &out_latency_ms,
+                                &output_heartbeat,
+                                &OutputErrorHook {
                                     ctrl_tx: rebuild_tx.clone(),
                                     rebuild_pending: rebuild_pending.clone(),
                                     stream_alive: new_alive.clone(),
                                 },
-                            ) {
-                                Ok((new_stream, new_fmt)) => {
+                            );
+                            rebuild_pending.store(false, Ordering::Relaxed);
+                            match rebuild {
+                                OutputRebuild::Installed {
+                                    stream,
+                                    fmt,
+                                    active_id,
+                                } => {
+                                    if current_output_id.is_some() && active_id.is_none() {
+                                        let _ = device_reset_tx.send(DeviceResetKind::Output);
+                                    }
+                                    output_absent_streak = 0;
+                                    current_output_id = active_id;
                                     out_alive.store(false, Ordering::Relaxed);
                                     out_alive = new_alive;
                                     drop_stream_detached(std::mem::replace(
                                         &mut out_stream,
-                                        new_stream,
+                                        stream,
                                     ));
                                     output_healthy = true;
+                                    active_default_output_id = if current_output_id.is_none() {
+                                        default_output_id(&host)
+                                    } else {
+                                        None
+                                    };
                                     tracing::info!(
-                                        "voice output stream recovered after stream error: {}Hz/{}ch",
-                                        new_fmt.sample_rate,
-                                        new_fmt.channels,
+                                        "voice output stream recovered: {}Hz/{}ch",
+                                        fmt.sample_rate,
+                                        fmt.channels,
                                     );
-                                    let changed = new_fmt.sample_rate != out_fmt.sample_rate
-                                        || new_fmt.channels != out_fmt.channels;
-                                    out_fmt = new_fmt;
+                                    let changed = fmt.sample_rate != out_fmt.sample_rate
+                                        || fmt.channels != out_fmt.channels;
+                                    out_fmt = fmt;
                                     if changed {
-                                        let _ = out_change_tx.send(new_fmt);
+                                        let _ = out_change_tx.send(fmt);
                                     }
                                 }
-                                Err(e) => {
+                                OutputRebuild::KeepRetrying { absent_streak } => {
+                                    output_absent_streak = absent_streak;
                                     output_healthy = false;
-                                    tracing::warn!("voice output stream recovery failed: {e}");
+                                    if absent_streak > 0
+                                        && absent_streak < OUTPUT_DISCONNECT_CONFIRM
+                                        && !rebuild_pending.swap(true, Ordering::Relaxed)
+                                    {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildOutput);
+                                    }
                                 }
                             }
-                            rebuild_pending.store(false, Ordering::Relaxed);
                         }
                         AudioCmd::Shutdown => {
                             in_alive.store(false, Ordering::Relaxed);
@@ -635,6 +964,7 @@ impl AudioIo {
             mic_rx,
             input_format_rx: in_fmt_rx,
             output_format_rx: out_change_rx,
+            device_reset_rx,
             mixer,
             ns_enabled,
             ns_level,
@@ -702,8 +1032,19 @@ fn input_err_fn(hook: InputErrorHook) -> impl FnMut(cpal::StreamError) + Send + 
 
 const STREAM_REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const AUDIO_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const AUDIO_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+const AUDIO_STALL_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_AUDIO_STALL_RECOVERIES: u32 = 3;
+const INITIAL_OUTPUT_OPEN_ATTEMPTS: u32 = 3;
+const INITIAL_OUTPUT_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+const OUTPUT_DISCONNECT_CONFIRM: u32 = 2;
+const INPUT_DISCONNECT_CONFIRM: u32 = 2;
 const AUDIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REVERSE_DRAIN_PER_CAPTURE: usize = 8;
+const CAPTURE_SAMPLE_RATE: u32 = 48_000;
+const CAPTURE_HISTORY: usize = 3;
+const CAPTURE_CHANNELS: u32 = 1;
 
 #[derive(Clone)]
 struct OutputErrorHook {
@@ -811,26 +1152,146 @@ fn prepare_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let host = cpal::default_host();
+    let device = select_output(&host, output_device_id)?;
+    open_output(
+        &device,
+        mixer,
+        reverse_tx,
+        out_latency_ms,
+        heartbeat,
+        err_hook,
+    )
+}
+
+fn open_output_for_startup(
+    output_device_id: Option<&str>,
+    mixer: &Arc<PlaybackMixer>,
+    reverse_tx: &flume::Sender<ReverseChunk>,
+    out_latency_ms: &Arc<AtomicU32>,
+    heartbeat: &CallbackHeartbeat,
+    err_hook: &OutputErrorHook,
+) -> Result<(cpal::Stream, AudioFormat, Option<String>)> {
     if let Some(id) = output_device_id {
-        let opened = select_output(&host, Some(id)).and_then(|device| {
-            open_output(
-                &device,
+        for attempt in 1..=INITIAL_OUTPUT_OPEN_ATTEMPTS {
+            match prepare_output(
+                Some(id),
                 mixer.clone(),
                 reverse_tx.clone(),
                 out_latency_ms.clone(),
+                heartbeat.clone(),
                 err_hook.clone(),
-            )
-        });
-        match opened {
-            Ok(ready) => return Ok(ready),
-            Err(e) => tracing::warn!("voice output device unusable, falling back to default: {e}"),
+            ) {
+                Ok((stream, fmt)) => return Ok((stream, fmt, Some(id.to_string()))),
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        "preferred voice output device unavailable at startup: {e}"
+                    );
+                    if attempt < INITIAL_OUTPUT_OPEN_ATTEMPTS {
+                        std::thread::sleep(INITIAL_OUTPUT_RETRY_INTERVAL);
+                    }
+                }
+            }
+        }
+        tracing::warn!(
+            "preferred voice output device still unavailable; starting on system default"
+        );
+    }
+    let (stream, fmt) = prepare_output(
+        None,
+        mixer.clone(),
+        reverse_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    )?;
+    Ok((stream, fmt, None))
+}
+
+enum OutputRebuild {
+    Installed {
+        stream: cpal::Stream,
+        fmt: AudioFormat,
+        active_id: Option<String>,
+    },
+    KeepRetrying {
+        absent_streak: u32,
+    },
+}
+
+fn output_device_absent(id: &str) -> bool {
+    let host = cpal::default_host();
+    match host.output_devices() {
+        Ok(mut devices) => {
+            !devices.any(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+        }
+        Err(_) => false,
+    }
+}
+
+fn rebuild_output_stream(
+    desired_id: Option<&str>,
+    absent_streak: u32,
+    mixer: &Arc<PlaybackMixer>,
+    reverse_tx: &flume::Sender<ReverseChunk>,
+    out_latency_ms: &Arc<AtomicU32>,
+    heartbeat: &CallbackHeartbeat,
+    err_hook: &OutputErrorHook,
+) -> OutputRebuild {
+    match prepare_output(
+        desired_id,
+        mixer.clone(),
+        reverse_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            return OutputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: desired_id.map(str::to_string),
+            };
+        }
+        Err(e) => tracing::warn!("voice output recovery open failed: {e}"),
+    }
+    let Some(id) = desired_id else {
+        return OutputRebuild::KeepRetrying { absent_streak: 0 };
+    };
+    if !output_device_absent(id) {
+        return OutputRebuild::KeepRetrying { absent_streak: 0 };
+    }
+    let absent_streak = absent_streak + 1;
+    if absent_streak < OUTPUT_DISCONNECT_CONFIRM {
+        return OutputRebuild::KeepRetrying { absent_streak };
+    }
+    match prepare_output(
+        None,
+        mixer.clone(),
+        reverse_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            tracing::warn!(
+                "preferred voice output device disconnected; switched to system default"
+            );
+            OutputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: None,
+            }
+        }
+        Err(e) => {
+            tracing::warn!("voice output fallback to system default failed: {e}");
+            OutputRebuild::KeepRetrying { absent_streak }
         }
     }
-    let device = select_output(&host, None)?;
-    open_output(&device, mixer, reverse_tx, out_latency_ms, err_hook)
 }
 
 fn open_output(
@@ -838,9 +1299,18 @@ fn open_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_output_config()?;
+    let device_id = device
+        .id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let device_name = device
+        .description()
+        .map(|description| description.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let out_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
@@ -851,9 +1321,17 @@ fn open_output(
         mixer,
         reverse_tx,
         out_latency_ms,
+        heartbeat,
         err_hook,
     )?;
     stream.play()?;
+    tracing::info!(
+        device_id,
+        device_name,
+        sample_rate = out_fmt.sample_rate,
+        channels = out_fmt.channels,
+        "voice output stream opened",
+    );
     Ok((stream, out_fmt))
 }
 
@@ -877,24 +1355,46 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
+fn default_output_id(host: &cpal::Host) -> Option<String> {
+    host.default_output_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
 fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
-    if let Some(id) = id
-        && let Ok(mut devices) = host.output_devices()
-        && let Some(device) = devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
-    {
-        return Ok(device);
+    if let Some(id) = id {
+        if let Ok(mut devices) = host.output_devices()
+            && let Some(device) =
+                devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
+        {
+            return Ok(device);
+        }
+        return Err(anyhow!("audio output device is unavailable: {id}"));
     }
     host.default_output_device()
         .ok_or_else(|| anyhow!("no audio output device available"))
 }
 
-fn low_latency_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+fn capture_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
     match supported.buffer_size() {
         cpal::SupportedBufferSize::Range { min, max } => {
-            cpal::BufferSize::Fixed((supported.sample_rate() / 100).clamp(*min, *max))
+            cpal::BufferSize::Fixed((supported.sample_rate() / 25).clamp(*min, *max))
         }
         cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
     }
+}
+
+fn playback_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+    match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed((supported.sample_rate() / 25).clamp(*min, *max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
+fn input_format_changed(current: Option<AudioFormat>, next: AudioFormat) -> bool {
+    current.is_none_or(|fmt| fmt.sample_rate != next.sample_rate || fmt.channels != next.channels)
 }
 
 fn build_input(
@@ -902,30 +1402,131 @@ fn build_input(
     id: Option<&str>,
     capture_tx: flume::Sender<CaptureChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
     err_hook: InputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
-    if let Some(id) = id {
-        let opened = select_input(host, Some(id)).and_then(|device| {
-            open_input(
-                &device,
-                capture_tx.clone(),
-                out_latency_ms.clone(),
-                err_hook.clone(),
-            )
-        });
-        match opened {
-            Ok(ready) => return Ok(ready),
-            Err(e) => tracing::warn!("voice input device unusable, falling back to default: {e}"),
+    let device = select_input(host, id)?;
+    open_input(&device, capture_tx, out_latency_ms, heartbeat, err_hook)
+}
+
+enum InputRebuild {
+    Installed {
+        stream: cpal::Stream,
+        fmt: AudioFormat,
+        active_id: Option<String>,
+    },
+    KeepRetrying {
+        absent_streak: u32,
+    },
+}
+
+fn input_device_absent(host: &cpal::Host, id: &str) -> bool {
+    match host.input_devices() {
+        Ok(mut devices) => {
+            !devices.any(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+        }
+        Err(_) => false,
+    }
+}
+
+fn rebuild_input_stream(
+    host: &cpal::Host,
+    desired_id: Option<&str>,
+    absent_streak: u32,
+    capture_tx: &flume::Sender<CaptureChunk>,
+    out_latency_ms: &Arc<AtomicU32>,
+    heartbeat: &CallbackHeartbeat,
+    err_hook: &InputErrorHook,
+) -> InputRebuild {
+    match build_input(
+        host,
+        desired_id,
+        capture_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            return InputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: desired_id.map(str::to_string),
+            };
+        }
+        Err(e) => tracing::warn!("voice mic recovery open failed: {e}"),
+    }
+    let Some(id) = desired_id else {
+        return InputRebuild::KeepRetrying { absent_streak: 0 };
+    };
+    if !input_device_absent(host, id) {
+        return InputRebuild::KeepRetrying { absent_streak: 0 };
+    }
+    let absent_streak = absent_streak + 1;
+    if absent_streak < INPUT_DISCONNECT_CONFIRM {
+        return InputRebuild::KeepRetrying { absent_streak };
+    }
+    match build_input(
+        host,
+        None,
+        capture_tx.clone(),
+        out_latency_ms.clone(),
+        heartbeat.clone(),
+        err_hook.clone(),
+    ) {
+        Ok((stream, fmt)) => {
+            tracing::warn!("preferred voice mic device disconnected; switched to system default");
+            InputRebuild::Installed {
+                stream,
+                fmt,
+                active_id: None,
+            }
+        }
+        Err(e) => {
+            tracing::warn!("voice mic fallback to system default failed: {e}");
+            InputRebuild::KeepRetrying { absent_streak }
         }
     }
-    let device = select_input(host, None)?;
-    open_input(&device, capture_tx, out_latency_ms, err_hook)
+}
+
+fn build_capture_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    device_fmt: AudioFormat,
+    capture_tx: flume::Sender<CaptureChunk>,
+    out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
+    err_hook: InputErrorHook,
+    to_i16: fn(T) -> i16,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::SizedSample + 'static,
+{
+    let frame = (CAPTURE_SAMPLE_RATE as usize / 100) * CAPTURE_CHANNELS as usize;
+    let rate = CAPTURE_SAMPLE_RATE as i32;
+    let channels = CAPTURE_CHANNELS as i32;
+    let mut converter = CaptureConverter::new(device_fmt);
+    let mut scratch: Vec<i16> = Vec::new();
+    let mut acc: Vec<i16> = Vec::new();
+    device.build_input_stream(
+        config,
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
+            heartbeat.mark();
+            let delay = capture_delay_ms(info, &out_latency_ms);
+            scratch.clear();
+            scratch.extend(data.iter().copied().map(to_i16));
+            converter.push(&scratch, &mut acc);
+            flush_capture(&mut acc, frame, rate, channels, delay, &capture_tx);
+        },
+        input_err_fn(err_hook),
+        None,
+    )
 }
 
 fn open_input(
     device: &cpal::Device,
     capture_tx: flume::Sender<CaptureChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
     err_hook: InputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_input_config()?;
@@ -937,69 +1538,60 @@ fn open_input(
         .description()
         .map(|description| description.to_string())
         .unwrap_or_else(|_| "unknown".to_string());
-    let in_fmt = AudioFormat {
+    let device_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
     };
+    let capture_fmt = AudioFormat {
+        sample_rate: CAPTURE_SAMPLE_RATE,
+        channels: CAPTURE_CHANNELS,
+    };
     let mut config: cpal::StreamConfig = supported.config();
-    config.buffer_size = low_latency_buffer(&supported);
-    let rate = in_fmt.sample_rate as i32;
-    let channels = in_fmt.channels.max(1) as i32;
-    let frame = (in_fmt.sample_rate as usize / 100) * in_fmt.channels.max(1) as usize;
+    config.buffer_size = capture_buffer(&supported);
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => {
-            let tx = capture_tx;
-            let mut acc: Vec<i16> = Vec::new();
-            device.build_input_stream(
-                &config,
-                move |data: &[f32], info: &cpal::InputCallbackInfo| {
-                    let delay = capture_delay_ms(info, &out_latency_ms);
-                    acc.extend(data.iter().copied().map(f32_to_i16));
-                    flush_capture(&mut acc, frame, rate, channels, delay, &tx);
-                },
-                input_err_fn(err_hook),
-                None,
-            )?
-        }
-        cpal::SampleFormat::I16 => {
-            let tx = capture_tx;
-            let mut acc: Vec<i16> = Vec::new();
-            device.build_input_stream(
-                &config,
-                move |data: &[i16], info: &cpal::InputCallbackInfo| {
-                    let delay = capture_delay_ms(info, &out_latency_ms);
-                    acc.extend_from_slice(data);
-                    flush_capture(&mut acc, frame, rate, channels, delay, &tx);
-                },
-                input_err_fn(err_hook),
-                None,
-            )?
-        }
-        cpal::SampleFormat::U16 => {
-            let tx = capture_tx;
-            let mut acc: Vec<i16> = Vec::new();
-            device.build_input_stream(
-                &config,
-                move |data: &[u16], info: &cpal::InputCallbackInfo| {
-                    let delay = capture_delay_ms(info, &out_latency_ms);
-                    acc.extend(data.iter().map(|&u| (u as i32 - 32768) as i16));
-                    flush_capture(&mut acc, frame, rate, channels, delay, &tx);
-                },
-                input_err_fn(err_hook),
-                None,
-            )?
-        }
+        cpal::SampleFormat::F32 => build_capture_stream::<f32>(
+            device,
+            &config,
+            device_fmt,
+            capture_tx,
+            out_latency_ms,
+            heartbeat,
+            err_hook,
+            f32_to_i16,
+        )?,
+        cpal::SampleFormat::I16 => build_capture_stream::<i16>(
+            device,
+            &config,
+            device_fmt,
+            capture_tx,
+            out_latency_ms,
+            heartbeat,
+            err_hook,
+            |sample| sample,
+        )?,
+        cpal::SampleFormat::U16 => build_capture_stream::<u16>(
+            device,
+            &config,
+            device_fmt,
+            capture_tx,
+            out_latency_ms,
+            heartbeat,
+            err_hook,
+            |sample| (sample as i32 - 32768) as i16,
+        )?,
         other => bail!("unsupported input sample format: {other:?}"),
     };
     tracing::info!(
         device_id,
         device_name,
-        sample_rate = in_fmt.sample_rate,
-        channels = in_fmt.channels,
+        device_sample_rate = device_fmt.sample_rate,
+        device_channels = device_fmt.channels,
         sample_format = ?supported.sample_format(),
+        sample_rate = capture_fmt.sample_rate,
+        channels = capture_fmt.channels,
         "voice mic stream opened",
     );
-    Ok((stream, in_fmt))
+    Ok((stream, capture_fmt))
 }
 
 fn build_output(
@@ -1008,13 +1600,15 @@ fn build_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
 ) -> Result<cpal::Stream> {
     let mut config: cpal::StreamConfig = supported.config();
-    config.buffer_size = low_latency_buffer(supported);
+    config.buffer_size = playback_buffer(supported);
     let rate = supported.sample_rate() as i32;
     let channels = supported.channels().max(1) as i32;
     let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;
+    mixer.set_output_format(rate as u32, channels as u32);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
             let mut tmp: Vec<i16> = Vec::new();
@@ -1023,6 +1617,7 @@ fn build_output(
             device.build_output_stream(
                 &config,
                 move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    heartbeat.mark();
                     update_out_latency(info, &out_latency_ms);
                     tmp.clear();
                     tmp.resize(out.len(), 0);
@@ -1043,6 +1638,7 @@ fn build_output(
             device.build_output_stream(
                 &config,
                 move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    heartbeat.mark();
                     update_out_latency(info, &out_latency_ms);
                     mixer.mix_into(out);
                     rev.extend_from_slice(out);
@@ -1059,6 +1655,7 @@ fn build_output(
             device.build_output_stream(
                 &config,
                 move |out: &mut [u16], info: &cpal::OutputCallbackInfo| {
+                    heartbeat.mark();
                     update_out_latency(info, &out_latency_ms);
                     tmp.clear();
                     tmp.resize(out.len(), 0);
@@ -1076,37 +1673,4 @@ fn build_output(
         other => bail!("unsupported output sample format: {other:?}"),
     };
     Ok(stream)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mixer_sums_tracks_and_clamps() {
-        let mixer = PlaybackMixer::default();
-        mixer.push(1, &[10_000, -10_000]);
-        mixer.push(2, &[30_000, -30_000]);
-        let mut out = [0i16; 2];
-        mixer.mix_into(&mut out);
-        assert_eq!(out[0], i16::MAX);
-        assert_eq!(out[1], i16::MIN);
-    }
-
-    #[test]
-    fn mixer_outputs_silence_when_empty() {
-        let mixer = PlaybackMixer::default();
-        let mut out = [123i16; 4];
-        mixer.mix_into(&mut out);
-        assert_eq!(out, [0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn mixer_drops_oldest_when_overflowing() {
-        let mixer = PlaybackMixer::default();
-        let big = vec![7i16; PlaybackMixer::MAX_BUFFERED + 100];
-        mixer.push(1, &big);
-        let len = mixer.tracks.lock().get(&1).unwrap().len();
-        assert_eq!(len, PlaybackMixer::MAX_BUFFERED);
-    }
 }

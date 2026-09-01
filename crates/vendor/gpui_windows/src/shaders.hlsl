@@ -9,8 +9,27 @@ cbuffer GlobalParams: register(b0) {
     uint3 global_pad;
 };
 
+cbuffer BatchParams: register(b1) {
+    uint batch_start_index;
+    uint3 batch_pad;
+};
+
 Texture2D<float4> t_sprite: register(t0);
 SamplerState s_sprite: register(s0);
+
+struct GradientRamp {
+    float colors[32];
+    float positions[8];
+    uint count;
+    uint3 ramp_pad;
+};
+StructuredBuffer<GradientRamp> gradient_ramps: register(t2);
+
+float4 gradient_ramp_color(GradientRamp ramp, uint stop) {
+    uint base = stop * 4u;
+    return float4(ramp.colors[base], ramp.colors[base + 1u],
+                  ramp.colors[base + 2u], ramp.colors[base + 3u]);
+}
 
 struct SubpixelSpriteFragmentOutput {
     float4 foreground : SV_Target0;
@@ -59,7 +78,7 @@ struct Background {
     Hsla solid;
     float gradient_angle_or_pattern_height;
     LinearColorStop colors[2];
-    uint pad;
+    uint ramp;
 };
 
 struct GradientColor {
@@ -335,6 +354,29 @@ float2x2 rotate2d(float angle) {
     return float2x2(c, -s, s, c);
 }
 
+float gradient_t(Background background, float2 position, Bounds bounds) {
+    // -90 degrees to match the CSS gradient angle.
+    float gradient_angle = background.gradient_angle_or_pattern_height;
+    float radians = (fmod(gradient_angle, 360.0) - 90.0) * (M_PI_F / 180.0);
+    float2 direction = float2(cos(radians), sin(radians));
+
+    // Expand the short side to be the same as the long side
+    if (bounds.size.x > bounds.size.y) {
+        direction.y *= bounds.size.y / bounds.size.x;
+    } else {
+        direction.x *=  bounds.size.x / bounds.size.y;
+    }
+
+    float2 half_size = bounds.size * 0.5;
+    float2 center = bounds.origin + half_size;
+    float2 center_to_point = position - center;
+    float t = dot(center_to_point, direction) / length(direction);
+    if (abs(direction.x) > abs(direction.y)) {
+        return (t + half_size.x) / bounds.size.x;
+    }
+    return (t + half_size.y) / bounds.size.y;
+}
+
 float4 gradient_color(Background background,
                       float2 position,
                       Bounds bounds,
@@ -346,29 +388,7 @@ float4 gradient_color(Background background,
             color = solid_color;
             break;
         case 1: {
-            // -90 degrees to match the CSS gradient angle.
-            float gradient_angle = background.gradient_angle_or_pattern_height;
-            float radians = (fmod(gradient_angle, 360.0) - 90.0) * (M_PI_F / 180.0);
-            float2 direction = float2(cos(radians), sin(radians));
-
-            // Expand the short side to be the same as the long side
-            if (bounds.size.x > bounds.size.y) {
-                direction.y *= bounds.size.y / bounds.size.x;
-            } else {
-                direction.x *=  bounds.size.x / bounds.size.y;
-            }
-
-            // Get the t value for the linear gradient with the color stop percentages.
-            float2 half_size = bounds.size * 0.5;
-            float2 center = bounds.origin + half_size;
-            float2 center_to_point = position - center;
-            float t = dot(center_to_point, direction) / length(direction);
-            // Check the direct to determine the use x or y
-            if (abs(direction.x) > abs(direction.y)) {
-                t = (t + half_size.x) / bounds.size.x;
-            } else {
-                t = (t + half_size.y) / bounds.size.y;
-            }
+            float t = gradient_t(background, position, bounds);
 
             // Adjust t based on the stop percentages
             t = (t - background.colors[0].percentage)
@@ -429,6 +449,55 @@ float4 gradient_color(Background background,
 
             color = solid_color;
             color.a *= saturate(should_be_colored);
+            break;
+        }
+        case 4: {
+            // Multi-stop linear gradient. The stops live in the shared ramp
+            // buffer so the whole ramp still paints as a single quad.
+            uint ramp_index = background.ramp & 0x7FFFFFFFu;
+            bool anchored = (background.ramp & 0x80000000u) != 0u;
+            GradientRamp ramp = gradient_ramps[ramp_index];
+            // A viewport-anchored ramp spans the whole window, so each panel shows
+            // its own slice of one continuous gradient (background-attachment: fixed).
+            Bounds ramp_bounds = bounds;
+            if (anchored) {
+                ramp_bounds.origin = float2(0.0, 0.0);
+                ramp_bounds.size = global_viewport_size;
+            }
+            float t = gradient_t(background, position, ramp_bounds);
+
+            // Select the segment containing t, clamping to the first/last stop.
+            float4 from_color = gradient_ramp_color(ramp, 0u);
+            float4 to_color = from_color;
+            float segment_t = 0.0;
+            for (uint i = 0u; i + 1u < ramp.count; ++i) {
+                float stop_from = ramp.positions[i];
+                if (i == 0u || t >= stop_from) {
+                    from_color = gradient_ramp_color(ramp, i);
+                    to_color = gradient_ramp_color(ramp, i + 1u);
+                    segment_t = saturate((t - stop_from)
+                        / max(ramp.positions[i + 1u] - stop_from, 1e-6));
+                }
+            }
+
+            if (background.color_space == 1) {
+                color = oklab_to_srgb(lerp(srgb_to_oklab(from_color),
+                                           srgb_to_oklab(to_color), segment_t));
+            } else {
+                color = lerp(from_color, to_color, segment_t);
+            }
+            color.a *= background.solid.a;
+
+            // Dither to reduce banding in gradients (especially dark/alpha).
+            {
+                float2 seed = position * 0.6180339887; // golden ratio spread
+                float r1 = frac(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+                float r2 = frac(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+                float tri = r1 + r2 - 1.0; // triangular PDF, range [-1, +1]
+                color.rgb += tri * 2.0 / 255.0;
+                color.a   += tri * 3.0 / 255.0;
+            }
+
             break;
         }
     }
@@ -525,8 +594,9 @@ struct QuadFragmentInput {
 
 StructuredBuffer<Quad> quads: register(t1);
 
-QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint quad_id: SV_InstanceID) {
+QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint quad_id = batch_start_index + instance_id;
     Quad quad = quads[quad_id];
     float4 device_position = to_device_position(unit_vertex, quad.bounds);
 
@@ -875,8 +945,9 @@ struct ShadowFragmentInput {
 
 StructuredBuffer<Shadow> shadows: register(t1);
 
-ShadowVertexOutput shadow_vertex(uint vertex_id: SV_VertexID, uint shadow_id: SV_InstanceID) {
+ShadowVertexOutput shadow_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint shadow_id = batch_start_index + instance_id;
     Shadow shadow = shadows[shadow_id];
 
     Bounds bounds;
@@ -1080,8 +1151,9 @@ struct UnderlineFragmentInput {
 
 StructuredBuffer<Underline> underlines: register(t1);
 
-UnderlineVertexOutput underline_vertex(uint vertex_id: SV_VertexID, uint underline_id: SV_InstanceID) {
+UnderlineVertexOutput underline_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint underline_id = batch_start_index + instance_id;
     Underline underline = underlines[underline_id];
     float4 device_position = to_device_position(unit_vertex, underline.bounds);
     float4 clip_distance = distance_from_clip_rect(unit_vertex, underline.bounds,
@@ -1155,8 +1227,9 @@ struct MonochromeSpriteFragmentInput {
 
 StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
 
-MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexID, uint sprite_id: SV_InstanceID) {
+MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint sprite_id = batch_start_index + instance_id;
     MonochromeSprite sprite = mono_sprites[sprite_id];
     float4 device_position =
         to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
@@ -1178,8 +1251,8 @@ float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Targe
     return float4(input.color.rgb, input.color.a * alpha_corrected);
 }
 
-MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint sprite_id: SV_InstanceID) {
-    return monochrome_sprite_vertex(vertex_id, sprite_id);
+MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    return monochrome_sprite_vertex(vertex_id, instance_id);
 }
 
 SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentInput input) {
@@ -1227,8 +1300,9 @@ struct PolychromeSpriteFragmentInput {
 
 StructuredBuffer<PolychromeSprite> poly_sprites: register(t1);
 
-PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexID, uint sprite_id: SV_InstanceID) {
+PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint sprite_id = batch_start_index + instance_id;
     PolychromeSprite sprite = poly_sprites[sprite_id];
     float4 device_position = to_device_position(unit_vertex, sprite.bounds);
     float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
@@ -1249,7 +1323,7 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     float distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     float4 color = sample;
-    if ((sprite.grayscale & 0xFFu) != 0u) {
+    if (sprite.grayscale != 0u) {
         float3 grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = float4(grayscale, sample.a);
     }

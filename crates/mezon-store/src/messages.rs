@@ -11,9 +11,10 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
-    ApiActionRow, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper, ApiMessage,
-    ApiMessageComponent, ApiMessageContent, ApiMessageInput, ApiSelectComponent, LOCATION_CODE,
-    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
+    ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
+    ApiRadioOption, ApiSelectComponent, LOCATION_CODE, MESSAGE_BUZZ_CODE,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
     emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
@@ -21,23 +22,25 @@ use mezon_client::transport::{
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
-    UrlAttachment, inbox_notification_from_marked_message_local,
+    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
+    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::Settings;
-use crate::account::AccountStore;
+use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
-use crate::direct::{DirectKind, DirectMessageStore};
+use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
+use crate::group_members::GroupMembersStore;
 use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
-    CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedInput,
+    CallLog, CallLogType, Embed, EmbedAnimation, EmbedAuthor, EmbedDatePicker, EmbedField,
+    EmbedFooter, EmbedGrid, EmbedGridItem, EmbedImage, EmbedInput, EmbedRadio, EmbedRadioOption,
     EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
     MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
     MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
@@ -55,6 +58,7 @@ use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
+const TOPIC_FULL_PAGE_LEN: usize = MESSAGE_PAGE_LIMIT as usize - 1;
 const MAX_COUNTED_TOPIC_REPLIES: usize = 2048;
 const DIRECTION_BEFORE: i32 = 3;
 const DIRECTION_AFTER: i32 = 1;
@@ -67,6 +71,7 @@ use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
+const MAX_PENDING_BELOW: usize = 500;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 const TYPING_THROTTLE: Duration = Duration::from_millis(1000);
@@ -106,6 +111,9 @@ pub struct TopicAppend {
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
+    /// A live message landed below the loaded window while the reader was away
+    /// from the tail. No row exists for it, but the scroll-down button counts it.
+    UnreadBelowChanged,
     /// A send failed with no row to mark (the channel's first page had not landed,
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
@@ -170,7 +178,7 @@ pub enum MessagesEvent {
 
 /// The message currently being replied to (composer state), mirroring React's
 /// reply reference draft in `references.slice`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyDraft {
     pub message_ref_id: MessageId,
     pub sender_id: UserId,
@@ -556,11 +564,16 @@ pub struct MessagesStore {
     last_read_message_by_channel: HashMap<ChannelId, MessageId>,
     /// User scrolled away from the bottom (React `isViewingOlderMessagesByChannelId`).
     viewing_older_by_channel: HashMap<ChannelId, bool>,
+    /// Live messages for the open channel that arrived while its tail was not
+    /// visible, so they never entered the buffer. They still count as unread
+    /// under the scroll-down button until the reader gets back to the bottom.
+    pending_below_by_channel: HashMap<ChannelId, Vec<MessageId>>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
     /// Topic bucket currently shown in the discussion side panel, if any. Lets
     /// realtime replies to a non-active topic bucket still notify the panel.
     active_topic_id: Option<ChannelId>,
+    active_topic_parent: Option<ChannelId>,
     pending_jump: Option<(ChannelId, MessageId)>,
     is_public: bool,
     is_dm: bool,
@@ -572,11 +585,15 @@ pub struct MessagesStore {
     /// so we don't blast through the whole history (cf. React `handleOnChange`).
     last_load_more: Option<Instant>,
     consecutive_loads: u32,
+    topic_loading: bool,
+    topic_loading_more: bool,
+    retained_topic: Option<ChannelId>,
+    topic_last_load_more: Option<Instant>,
+    topic_consecutive_loads: u32,
     fetch_generation: u64,
     latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
-    /// Active reply target for the composer, if any.
-    reply_target: Option<ReplyDraft>,
+    reply_targets: KeyedCache<ChannelId, ReplyDraft>,
     /// Message currently being edited inline in its row (self-only; one at a time).
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
@@ -601,6 +618,12 @@ pub struct MessagesStore {
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
     presign_expiry_task: Option<Task<()>>,
+    /// Per-attachment-url backoff for the CDN existence probe. Keyed by url
+    /// because that is what uniquely identifies an object across the message
+    /// copies the caches may hold.
+    presign_probe: HashMap<String, PresignProbe>,
+    presign_probe_task: Option<Task<()>>,
+    presign_probe_running: bool,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
@@ -933,9 +956,11 @@ impl MessagesStore {
         self.last_message_by_channel.clear();
         self.last_read_message_by_channel.clear();
         self.viewing_older_by_channel.clear();
+        self.pending_below_by_channel.clear();
         self.active_channel_id = None;
         self.active_clan_id = None;
         self.active_topic_id = None;
+        self.active_topic_parent = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -943,10 +968,15 @@ impl MessagesStore {
         self.loading_more = false;
         self.last_load_more = None;
         self.consecutive_loads = 0;
+        self.topic_loading = false;
+        self.topic_loading_more = false;
+        self.retained_topic = None;
+        self.topic_last_load_more = None;
+        self.topic_consecutive_loads = 0;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
-        self.reply_target = None;
+        self.reply_targets.clear();
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
@@ -966,6 +996,14 @@ impl MessagesStore {
         self.last_typing_sent = None;
         self.buzz_player = None;
         self.buzz_sound_loading = false;
+        // A probe round outlives the session it was started for: dropping the task
+        // stops it from spending requests on the previous account's CDN objects,
+        // and clearing the flag is what lets the next session arm a probe at all
+        // (the scheduler treats a set flag as "a round is already in flight").
+        self.presign_probe.clear();
+        self.presign_probe_task = None;
+        self.presign_probe_running = false;
+        self.presign_expiry_task = None;
         cx.notify();
     }
 
@@ -988,9 +1026,11 @@ impl MessagesStore {
             last_message_by_channel: HashMap::new(),
             last_read_message_by_channel: HashMap::new(),
             viewing_older_by_channel: HashMap::new(),
+            pending_below_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
             active_topic_id: None,
+            active_topic_parent: None,
             pending_jump: None,
             is_public: true,
             is_dm: false,
@@ -999,10 +1039,15 @@ impl MessagesStore {
             loading_more: false,
             last_load_more: None,
             consecutive_loads: 0,
+            topic_loading: false,
+            topic_loading_more: false,
+            retained_topic: None,
+            topic_last_load_more: None,
+            topic_consecutive_loads: 0,
             fetch_generation: 0,
             latest_fetch: HashMap::new(),
             reset_generation: 0,
-            reply_target: None,
+            reply_targets: KeyedCache::new(Some(crate::compose::MAX_DRAFT_CHANNELS)),
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
@@ -1021,6 +1066,9 @@ impl MessagesStore {
             embed_form: HashMap::new(),
             forward_task: None,
             presign_expiry_task: None,
+            presign_probe: HashMap::new(),
+            presign_probe_task: None,
+            presign_probe_running: false,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
@@ -1144,6 +1192,33 @@ impl MessagesStore {
         ))
     }
 
+    /// Push an optimistic row, unless the tail is detached — appending onto a
+    /// jump-to-message AROUND window would seal the history gap.
+    fn append_optimistic(&mut self, channel_id: ChannelId, optimistic: Message) -> Option<usize> {
+        if self.tail_detached(channel_id) {
+            return None;
+        }
+        self.cache.get_mut(&channel_id).map(|channel| {
+            let old_len = channel.messages.len();
+            channel.messages.push_grouped(optimistic);
+            old_len
+        })
+    }
+
+    /// A send from a detached window has no row to show where the user is
+    /// looking, so follow it back to the live tail instead of leaving the send
+    /// invisible. This must run on the ack, not on the send: the newest page
+    /// only contains the message once the server has stored it, and the ack is
+    /// also what moves the recorded tail onto the id we need to land on. A burst
+    /// of sends supersedes itself through `fetch_generation`, so the last ack
+    /// wins and the buffer converges on a tail that owns every sent row.
+    fn follow_send_to_present(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if self.active_channel_id != Some(channel_id) || !self.tail_detached(channel_id) {
+            return;
+        }
+        self.jump_to_present(cx);
+    }
+
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.
@@ -1205,6 +1280,49 @@ impl MessagesStore {
         }
     }
 
+    fn note_pending_below(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        own: bool,
+    ) -> bool {
+        if own || message_id.is_optimistic() || self.active_channel_id != Some(storage_id) {
+            return false;
+        }
+        let pending = self.pending_below_by_channel.entry(storage_id).or_default();
+        if pending.contains(&message_id) {
+            return false;
+        }
+        if pending.len() >= MAX_PENDING_BELOW {
+            pending.remove(0);
+        }
+        pending.push(message_id);
+        true
+    }
+
+    /// Unread messages that sit below the loaded buffer: they arrived while the
+    /// reader was away from the tail, so the scroll-down button has to count
+    /// them even though no row exists for them yet.
+    pub fn pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
+        let Some(channel_id) = self.active_channel_id else {
+            return 0;
+        };
+        let Some(pending) = self.pending_below_by_channel.get(&channel_id) else {
+            return 0;
+        };
+        let Some(channel) = self.cache.get(&channel_id) else {
+            return pending.len() as u32;
+        };
+        pending
+            .iter()
+            .filter(|id| {
+                let counted_by_the_viewport = counted_from.is_some_and(|seen| **id > seen)
+                    && channel.messages.contains_id(**id);
+                !counted_by_the_viewport
+            })
+            .count() as u32
+    }
+
     fn is_viewing_older(&self, storage_id: ChannelId) -> bool {
         self.viewing_older_by_channel
             .get(&storage_id)
@@ -1256,6 +1374,7 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        self.pending_below_by_channel.remove(&channel_id);
         if !should_write_last_seen(
             self.known_last_seen_id(channel_id, cx),
             self.last_message_by_channel.get(&channel_id).copied(),
@@ -1521,6 +1640,10 @@ impl MessagesStore {
         let Some(channel_id) = self.active_channel_id else {
             return false;
         };
+        self.tail_detached(channel_id)
+    }
+
+    fn tail_detached(&self, channel_id: ChannelId) -> bool {
         let Some(channel) = self.cache.get(&channel_id) else {
             return false;
         };
@@ -2023,12 +2146,17 @@ impl MessagesStore {
 
     /// Current composer reply target (React reply reference draft).
     pub fn reply_target(&self) -> Option<&ReplyDraft> {
-        self.reply_target.as_ref()
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.get(&channel_id))
     }
 
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
-        self.reply_target = Some(draft);
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.reply_targets
+            .insert(channel_id, draft, Some(&channel_id));
         cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
@@ -2059,10 +2187,15 @@ impl MessagesStore {
 
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
-        if self.reply_target.take().is_some() {
+        if self.take_reply_target().is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
+    }
+
+    fn take_reply_target(&mut self) -> Option<ReplyDraft> {
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.remove(&channel_id))
     }
 
     /// Message currently being edited inline in its row, if any.
@@ -2459,6 +2592,7 @@ impl MessagesStore {
                     uid,
                     uname,
                     payload.anonymous,
+                    payload.reply,
                     cx,
                 );
                 return;
@@ -2992,13 +3126,21 @@ impl MessagesStore {
                 size: i32::try_from(att.size).unwrap_or(0),
             })
             .collect();
-        let attachment_link = attachments
-            .first()
+        let first_attachment = attachments.first();
+        let attachment_link = first_attachment
             .map(|att| att.url.clone())
             .unwrap_or_default();
-        let attachment_type = attachments
-            .first()
+        let attachment_type = first_attachment
             .map(|att| att.filetype.clone())
+            .unwrap_or_default();
+        let attachment_filename = first_attachment
+            .map(|att| att.filename.clone())
+            .unwrap_or_default();
+        let attachment_size = first_attachment
+            .map(|att| att.size.max(0) as u64)
+            .unwrap_or(0);
+        let attachment_thumbnail = first_attachment
+            .map(|att| att.thumbnail.clone())
             .unwrap_or_default();
         let has_more_attachment = attachments.len() > 1;
         let avatar = msg.avatar_url.to_string();
@@ -3028,6 +3170,9 @@ impl MessagesStore {
             create_time_seconds,
             attachment_link,
             attachment_type,
+            attachment_filename,
+            attachment_size,
+            attachment_thumbnail,
             has_more_attachment,
             mention_spans,
             channel_type,
@@ -3101,16 +3246,51 @@ impl MessagesStore {
             return;
         }
         if let Some(prev) = self.active_topic_id
-            && next != Some(prev)
+            && let Some(stale) = self.retained_topic.replace(prev)
+            && stale != prev
         {
-            self.cache.remove(&prev);
-            self.last_message_by_channel.remove(&prev);
-            self.pending_self_adds
-                .retain(|(channel_id, _, _), _| *channel_id != prev);
+            self.drop_topic_bucket(stale);
+        }
+        if let Some(next_id) = next
+            && self.retained_topic == Some(next_id)
+        {
+            self.retained_topic = None;
         }
         self.active_topic_id = next;
+        self.active_topic_parent = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
+    }
+
+    fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
+        self.cache.remove(&topic_id);
+        self.last_message_by_channel.remove(&topic_id);
+        self.pending_self_adds
+            .retain(|(channel_id, _, _), _| *channel_id != topic_id);
+    }
+
+    pub fn is_topic_loading(&self) -> bool {
+        self.topic_loading
+    }
+
+    pub fn topic_has_more_top(&self) -> bool {
+        self.active_topic_id
+            .and_then(|topic_id| self.cache.get(&topic_id))
+            .map(|c| c.has_more)
+            .unwrap_or(false)
+    }
+
+    pub fn topic_has_more_bottom(&self) -> bool {
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        has_more_bottom_for(
+            self.last_message_by_channel.get(&topic_key).copied(),
+            &channel.messages,
+        )
     }
 
     /// Load a discussion topic's replies into their own bucket (keyed by topic id).
@@ -3123,26 +3303,46 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let topic_key = ChannelId(topic_id);
+        self.active_topic_parent = Some(ChannelId(parent_channel_id));
+        self.topic_loading = true;
+        cx.notify();
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
-                .list_topic_messages(clan_id, parent_channel_id, topic_id, 0, MESSAGE_PAGE_LIMIT)
+                .list_topic_messages(
+                    clan_id,
+                    parent_channel_id,
+                    topic_id,
+                    0,
+                    0,
+                    MESSAGE_PAGE_LIMIT,
+                )
                 .await;
             let msgs = match result {
                 Ok(page) => page.messages,
                 Err(e) => {
                     tracing::error!("fetch_topic_messages failed for topic {topic_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading = false;
+                        cx.notify();
+                    });
                     return;
                 }
             };
+            let fetched = msgs.len();
             let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
             let _ = this.update(cx, |this, cx| {
+                this.topic_loading = false;
                 if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
                     return;
                 }
                 this.set_channel(topic_key, parsed);
+                if let Some(channel) = this.cache.get_mut(&topic_key) {
+                    channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
+                }
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 cx.notify();
             });
@@ -3150,11 +3350,267 @@ impl MessagesStore {
         .detach();
     }
 
+    pub fn is_topic_loading_more(&self) -> bool {
+        self.topic_loading_more
+    }
+
+    pub fn load_more_topic(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.topic_loading_more {
+            return false;
+        }
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent else {
+            return false;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        if !channel.has_more {
+            return false;
+        }
+        let Some(oldest_id) = channel
+            .messages
+            .first()
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
+        else {
+            return false;
+        };
+
+        let now = Instant::now();
+        let rapid = self
+            .topic_last_load_more
+            .map(|t| now.duration_since(t) < Duration::from_millis(300))
+            .unwrap_or(false);
+        self.topic_consecutive_loads = if rapid {
+            (self.topic_consecutive_loads + 1).min(3)
+        } else {
+            0
+        };
+        self.topic_last_load_more = Some(now);
+        let backoff = Duration::from_millis(u64::from(self.topic_consecutive_loads) * 333);
+
+        self.topic_loading_more = true;
+        cx.notify();
+        tracing::debug!(
+            topic_id = topic_key.get(),
+            before_message_id = oldest_id.get(),
+            backoff_ms = backoff.as_millis() as u64,
+            "load_more_topic: fetching older page"
+        );
+
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            if !backoff.is_zero() {
+                cx.background_executor().timer(backoff).await;
+            }
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_key.get(),
+                    oldest_id.get(),
+                    DIRECTION_BEFORE,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("load_more_topic failed for topic {}: {e}", topic_key.get());
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let batch_len = msgs.len();
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading_more = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let prepended = match this.cache.get_mut(&topic_key) {
+                    Some(channel) => {
+                        let store_oldest = channel.messages.first().map(|m| m.id);
+                        let batch_oldest = parsed.iter().map(|m| m.id).min();
+                        let reached_top = topic_reached_top(store_oldest, batch_oldest, batch_len);
+                        let older: Vec<Message> = parsed
+                            .into_iter()
+                            .filter(|m| !channel.messages.contains_id(m.id))
+                            .collect();
+                        let prepended = older.len();
+                        if prepended > 0 {
+                            channel.messages.prepend_older(older);
+                        }
+                        channel.has_more = !reached_top && prepended > 0;
+                        prepended
+                    }
+                    None => 0,
+                };
+                tracing::debug!(
+                    topic_id = topic_key.get(),
+                    fetched = batch_len,
+                    prepended,
+                    "load_more_topic: page applied"
+                );
+                if prepended > 0 {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: topic_key.get(),
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    pub fn load_more_topic_bottom(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.topic_loading_more {
+            return false;
+        }
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent else {
+            return false;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        let expected_tail = self.last_message_by_channel.get(&topic_key).copied();
+        if !has_more_bottom_for(expected_tail, &channel.messages) {
+            return false;
+        }
+        let Some(newest_id) = channel
+            .messages
+            .last()
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
+        else {
+            return false;
+        };
+
+        self.topic_loading_more = true;
+        cx.notify();
+        tracing::debug!(
+            topic_id = topic_key.get(),
+            after_message_id = newest_id.get(),
+            "load_more_topic_bottom: fetching newer page"
+        );
+
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_key.get(),
+                    newest_id.get(),
+                    DIRECTION_AFTER,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!(
+                        "load_more_topic_bottom failed for topic {}: {e}",
+                        topic_key.get()
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let batch_len = msgs.len();
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading_more = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let appended = match this.cache.get_mut(&topic_key) {
+                    Some(channel) => {
+                        let newer: Vec<Message> = parsed
+                            .into_iter()
+                            .filter(|m| !channel.messages.contains_id(m.id))
+                            .collect();
+                        let appended = newer.len();
+                        if appended > 0 {
+                            let dropped = channel.messages.append_newer(newer);
+                            if dropped > 0 {
+                                channel.has_more = true;
+                            }
+                        }
+                        appended
+                    }
+                    None => 0,
+                };
+                if appended == 0
+                    && let Some(tail) = reconciled_tail_after_empty_page(
+                        this.last_message_by_channel.get(&topic_key).copied(),
+                        expected_tail,
+                        newest_id,
+                    )
+                {
+                    this.last_message_by_channel.insert(topic_key, tail);
+                }
+                tracing::debug!(
+                    topic_id = topic_key.get(),
+                    fetched = batch_len,
+                    appended,
+                    "load_more_topic_bottom: page applied"
+                );
+                if appended > 0 {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: topic_key.get(),
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    /// `local_sources` is the sender's own copy of each attachment, in the order
+    /// they were sent — empty for a reply arriving from anyone else. A topic reply
+    /// has no optimistic row: it is built from the server's echo, which carries no
+    /// path, so without this the sender would fetch a proxied copy of the file
+    /// still sitting on their disk.
     pub fn append_topic_message(
         &mut self,
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
+        is_new_topic: bool,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3164,6 +3620,7 @@ impl MessagesStore {
         let masked = anonymous && anonymize_sender(&mut msg, cfg);
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
+        apply_local_sources(&mut msg.attachments, &local_sources);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
             msg.create_time
@@ -3173,6 +3630,26 @@ impl MessagesStore {
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
+                    // The socket delivered this reply before its own ack came back —
+                    // with a batch of attachments it usually does. Dropping the paths
+                    // here is what sent the sender to the proxy for files it is
+                    // holding: the row that survives is the socket's, and that one
+                    // never had them.
+                    let mut changed = false;
+                    if let Some(existing) = channel.messages.get_mut_by_id(msg.id) {
+                        changed = apply_local_sources(&mut existing.attachments, &local_sources);
+                    }
+                    if changed {
+                        // The topic list renders from a clone it only refreshes on
+                        // an event, so a silent change here is a store that is
+                        // right behind a view that is not. Measured, the row still
+                        // comes out right — it is uploading at this point, so
+                        // nothing is fetched, and the presign patch that follows
+                        // refreshes the view in time. This is here so that stays
+                        // true when the order those two arrive in changes.
+                        cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                        cx.notify();
+                    }
                     return TopicAppend::default();
                 }
                 channel.messages.push_grouped(msg);
@@ -3180,6 +3657,10 @@ impl MessagesStore {
         } else {
             self.set_channel(topic_key, vec![msg]);
         }
+        if is_new_topic && let Some(channel) = self.cache.get_mut(&topic_key) {
+            channel.has_more = false;
+        }
+        self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
             && mark_topic_reply_counted(
                 &mut self.counted_topic_replies,
@@ -3307,10 +3788,6 @@ impl MessagesStore {
     /// channel happened to arrive.
     fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
-        let base_img = config
-            .as_ref()
-            .map(|c| c.base_img_url.clone())
-            .unwrap_or_default();
         let now = now_unix_seconds();
         let mut changed = false;
         for channel in self.cache.values_mut() {
@@ -3318,17 +3795,20 @@ impl MessagesStore {
                 if !message.attachments.iter().any(|a| a.presign_pending) {
                     continue;
                 }
-                let Some(keys) = presign::parse_presign_finish_keys(&message.content) else {
+                // `presign_pending` is the gate's own verdict, already applied by
+                // whoever built or updated this row. Re-deriving it here from
+                // `message.content` was the bug: that field holds the display text,
+                // never the content JSON, so the parse returned None for every row
+                // and the sweep skipped all of them — leaving an attachment whose
+                // upload died pending forever, and the CDN probe polling it every
+                // 30s for as long as the channel stayed open.
+                if message.create_time <= 0
+                    || now - message.create_time < presign::PRESIGN_PENDING_MAX_AGE_SEC
+                {
                     continue;
-                };
+                }
                 let before = message.attachments.len();
-                apply_presign_gate_at(
-                    &mut message.attachments,
-                    &keys,
-                    &base_img,
-                    message.create_time,
-                    now,
-                );
+                message.attachments.retain(|a| !a.presign_pending);
                 if message.attachments.len() != before {
                     // The album layout and the viewer list are built from the
                     // attachments, so dropping one leaves them describing tiles
@@ -3345,6 +3825,168 @@ impl MessagesStore {
             cx.notify();
         }
         self.schedule_presign_expiry(cx);
+        self.schedule_presign_probe(cx);
+    }
+
+    /// Buckets a probe may look at: whatever the user is actually looking at.
+    /// Probing the whole cache would turn every scrollback message into CDN
+    /// traffic, and an attachment nobody can see does not need healing.
+    fn probe_buckets(&self) -> Vec<ChannelId> {
+        [self.active_channel_id, self.active_topic_id]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Refresh the probe table from what is currently pending, then report how
+    /// long until the next attachment is due. `None` means nothing to probe.
+    fn refresh_presign_probes(&mut self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let mut pending: HashSet<String> = HashSet::new();
+        for bucket in self.probe_buckets() {
+            let Some(channel) = self.cache.get(&bucket) else {
+                continue;
+            };
+            for message in channel.messages.items.iter() {
+                for att in message.attachments.iter() {
+                    // `uploading` means this client is still PUTting the bytes; it
+                    // knows the answer already and asking the CDN would only add
+                    // traffic to every message we send ourselves. `upload_failed`
+                    // means the bytes never left, so the object will never appear
+                    // and probing for it just burns requests until the expiry.
+                    if att.presign_pending
+                        && !att.uploading
+                        && !att.upload_failed
+                        && !att.url.is_empty()
+                    {
+                        pending.insert(att.url.clone());
+                    }
+                }
+            }
+        }
+        self.presign_probe.retain(|url, _| pending.contains(url));
+        for url in pending {
+            self.presign_probe.entry(url).or_insert(PresignProbe {
+                attempts: 0,
+                next_at: now + presign_probe_delay(0),
+            });
+        }
+        self.presign_probe
+            .values()
+            .map(|probe| probe.next_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Urls whose turn it is, with their backoff already advanced so a slow
+    /// probe cannot be started twice.
+    ///
+    /// Capped: the round fires its requests together, so a channel that somehow
+    /// has many stuck attachments would otherwise open a connection per
+    /// attachment at once. Whatever is left over stays due and the next round —
+    /// scheduled the moment this one lands — picks it up.
+    fn take_due_probe_urls(&mut self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        for (url, probe) in self.presign_probe.iter_mut() {
+            if due.len() >= PRESIGN_PROBE_BATCH {
+                break;
+            }
+            if probe.next_at <= now {
+                probe.attempts = probe.attempts.saturating_add(1);
+                probe.next_at = now + presign_probe_delay(probe.attempts);
+                due.push(url.clone());
+            }
+        }
+        due
+    }
+
+    /// The object answered, so the attachment can render even though the
+    /// presign_finish patch never reached us.
+    fn settle_presign_probes(&mut self, found: &[String], cx: &mut Context<Self>) {
+        if found.is_empty() {
+            return;
+        }
+        let mut touched: Vec<MessageId> = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                let mut hit = false;
+                for att in message.attachments.iter_mut() {
+                    if att.presign_pending && found.iter().any(|url| url == &att.url) {
+                        att.presign_pending = false;
+                        hit = true;
+                    }
+                }
+                if hit {
+                    touched.push(message.id);
+                }
+            }
+        }
+        for url in found {
+            self.presign_probe.remove(url);
+        }
+        if !touched.is_empty() {
+            tracing::info!(
+                count = found.len(),
+                "presign probe cleared pending attachments"
+            );
+            // The message list repaints on MessagesEvent, not on a bare notify: an
+            // Updated event per row is what re-measures and re-renders it, so the
+            // placeholder gives way to the image without waiting for some unrelated
+            // change to force a frame.
+            for message_id in touched {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    /// Ask the CDN whether the objects exist yet, for attachments still waiting
+    /// on a presign_finish that may never arrive. Runs only while something is
+    /// pending in the open channel or topic.
+    fn schedule_presign_probe(&mut self, cx: &mut Context<Self>) {
+        if self.presign_probe_running {
+            // A probe is in flight; it re-schedules itself when it lands. Restarting
+            // here would cancel it, and the busy callers below fire on every message.
+            return;
+        }
+        let Some(delay) = self.refresh_presign_probes() else {
+            self.presign_probe_task = None;
+            return;
+        };
+        self.presign_probe_running = true;
+        self.presign_probe_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let due = this
+                .update(cx, |this, _| this.take_due_probe_urls())
+                .unwrap_or_default();
+            // Together, not one after another: a HEAD that goes unanswered burns the
+            // full probe timeout, and a serial round would stack one timeout per
+            // attachment before the next round — and before a channel the user has
+            // since switched to — gets a turn.
+            let probes = due.into_iter().enumerate().map(|(index, url)| {
+                let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
+                async move {
+                    let exists = mezon_client::transport_runtime::object_exists(
+                        &presign_probe_url(&url, nonce),
+                    )
+                    .await;
+                    tracing::debug!(url = %url, exists, "presign probe");
+                    exists.then_some(url)
+                }
+            });
+            let found: Vec<String> = futures::future::join_all(probes)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
+            let _ = this.update(cx, |this, cx| {
+                this.presign_probe_running = false;
+                this.settle_presign_probes(&found, cx);
+                this.schedule_presign_probe(cx);
+            });
+        }));
     }
 
     fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
@@ -3564,6 +4206,14 @@ impl MessagesStore {
         let Some(message) = self.cached_message(message_id) else {
             return HashSet::new();
         };
+        let embed_radios = message
+            .embeds
+            .iter()
+            .flat_map(|embed| embed.fields.iter())
+            .filter_map(|field| match field.input.as_ref() {
+                Some(EmbedInput::Radio(radio)) if radio.allows_multiple() => Some(radio.id.clone()),
+                _ => None,
+            });
         let embed_selects = message
             .embeds
             .iter()
@@ -3584,7 +4234,39 @@ impl MessagesStore {
             .chain(row_selects)
             .filter(|select| select.allows_multiple())
             .filter_map(|select| select.id.clone())
+            .chain(embed_radios)
             .collect()
+    }
+
+    pub fn choose_embed_radio(
+        &mut self,
+        message_id: MessageId,
+        radio_id: SharedString,
+        multiple: bool,
+        max_options: Option<i32>,
+        value: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .message_select_selection(message_id, &radio_id)
+            .to_vec();
+        let values = if multiple {
+            if current.contains(&value) {
+                current.into_iter().filter(|item| *item != value).collect()
+            } else {
+                let max = max_options.filter(|max| *max > 0);
+                if max.is_some_and(|max| current.len() >= max as usize) {
+                    return;
+                }
+                let mut values = current;
+                values.push(value);
+                values
+            }
+        } else {
+            vec![value]
+        };
+        self.set_message_select_selection(message_id, radio_id, values, cx);
+        self.notify_message_row(message_id, cx);
     }
 
     fn embed_form_payload(
@@ -3596,6 +4278,47 @@ impl MessagesStore {
             self.select_ui.get(&message_id),
             self.embed_form.get(&message_id),
         )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn inject_preview_message(
+        &mut self,
+        content: serde_json::Value,
+        sender_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<i64> {
+        let Some(channel_id) = self.active_channel_id else {
+            anyhow::bail!("no active channel");
+        };
+        let content_tokens: mezon_client::transport::ApiMessageContent =
+            serde_json::from_value(content.clone())?;
+        let attachments: Vec<mezon_client::transport::ApiAttachment> = content
+            .get("attachments")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let message_id = synthesize_ws_message_id(self, channel_id, channel_id, 0);
+        let api = ApiMessage {
+            message_id,
+            content: content_tokens.t.clone(),
+            content_tokens,
+            content_raw: content.to_string(),
+            code: 0,
+            sender_id: 0,
+            sender_name: sender_name.unwrap_or_else(|| "Embed Preview".to_string()),
+            avatar: String::new(),
+            create_time: unix_now_seconds(),
+            update_time: 0,
+            hide_editted: true,
+            attachments,
+            references: Vec::new(),
+            reactions: Vec::new(),
+            entity_mentions: Vec::new(),
+        };
+        let cfg = AppConfig::try_global(cx);
+        let viewer_id = viewer_user_id(cx);
+        let message = message_from_api(api, cfg, viewer_id);
+        self.apply_incoming_message(channel_id, message, cx);
+        Ok(message_id)
     }
 
     pub fn click_message_button(
@@ -3674,7 +4397,7 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let reply = self.reply_target.take();
+        let reply = self.take_reply_target();
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
@@ -3807,7 +4530,7 @@ impl MessagesStore {
         let has_attachments = !attachments.is_empty();
         let reply = match reply_override {
             Some(draft) => Some(draft),
-            None => self.reply_target.take(),
+            None => self.take_reply_target(),
         };
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
@@ -3909,7 +4632,9 @@ impl MessagesStore {
                 mk,
                 ..Default::default()
             };
-            optimistic = optimistic.with_spans(parse_spans(&tokens));
+            let mut optimistic_spans = parse_spans(&tokens);
+            crate::message::fill_emoji_sources(&mut optimistic_spans, AppConfig::try_global(cx));
+            optimistic = optimistic.with_spans(optimistic_spans);
             if ogp.is_some() {
                 optimistic =
                     optimistic.with_ogp(build_ogp_preview(&tokens, AppConfig::try_global(cx)));
@@ -3961,11 +4686,7 @@ impl MessagesStore {
         } else if message_code == LOCATION_CODE {
             optimistic.code = MessageCode::Location;
         }
-        let appended = self.cache.get_mut(&channel_id).map(|channel| {
-            let old_len = channel.messages.len();
-            channel.messages.push_grouped(optimistic);
-            old_len
-        });
+        let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
@@ -4029,11 +4750,32 @@ impl MessagesStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = if anonymous {
-                    Vec::new()
-                } else {
-                    transport_mentions.clone()
-                };
+                if anonymous {
+                    send_anonymous_attachment_message(
+                        &api,
+                        &this,
+                        AnonymousAttachmentSend {
+                            clan_id,
+                            channel_id,
+                            temp_id,
+                            content: &content,
+                            is_public,
+                            mode,
+                            presigned,
+                            msg_attachments,
+                            keys,
+                            reply_ref,
+                            mentions: transport_mentions,
+                            hashtags: transport_hashtags,
+                            emojis: transport_emojis,
+                            flags: send_flags,
+                        },
+                        cx,
+                    )
+                    .await;
+                    return;
+                }
+                let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
                 let sent = match api
@@ -4048,7 +4790,7 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Vec::new(),
+                        Some(Vec::new()),
                         send_flags,
                     )
                     .await
@@ -4065,11 +4807,8 @@ impl MessagesStore {
                 let real_message_id = sent.message_id;
                 let create_time_seconds = sent.create_time.max(0) as u32;
                 let _ = this.update(cx, |this, cx| {
-                    let mut confirmed =
+                    let confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-                    if anonymous {
-                        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-                    }
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
                 let (on_complete, mut completions) =
@@ -4180,6 +4919,31 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
+            cx,
+        );
+    }
+
+    pub fn send_sticker_reply(
+        &mut self,
+        url: String,
+        filename: String,
+        sender_id: String,
+        sender_name: String,
+        reply_to: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.reply_draft_for(reply_to);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE.to_string(),
+            0,
+            0,
+            sender_id,
+            sender_name,
+            self.is_anonymous_mode(),
+            reply,
             cx,
         );
     }
@@ -4202,6 +4966,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4223,6 +4988,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4237,6 +5003,7 @@ impl MessagesStore {
         sender_id: String,
         sender_name: String,
         anonymous: bool,
+        reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4250,6 +5017,17 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
+        let reply = match reply_override {
+            Some(draft) => Some(draft),
+            None => self.take_reply_target(),
+        };
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
         self.clear_last_read_message(channel_id);
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
@@ -4274,7 +5052,7 @@ impl MessagesStore {
                 content_tokens: OutgoingContent::default(),
                 attachments: Vec::new(),
                 ogp: None,
-                reply: None,
+                reply: reply.clone(),
                 anonymous,
                 message_code: 0,
                 url_attachment: Some(UrlAttachment {
@@ -4303,29 +5081,70 @@ impl MessagesStore {
 
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let (reply_reference, reply_ref) = match &reply {
+            Some(draft) => {
+                let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                    draft.sender_id,
+                    (
+                        "",
+                        &draft.sender_name,
+                        &draft.sender_name,
+                        &draft.sender_avatar,
+                    ),
+                    reply_clan_id,
+                    cx,
+                );
+                (
+                    Some(MessageReference {
+                        message_ref_id: draft.message_ref_id,
+                        sender_id: draft.sender_id,
+                        sender_name: name_for_prioritize(&clan_nick, &display_name, &username),
+                        sender_clan_nick: clan_nick.clone(),
+                        sender_display_name: display_name.clone(),
+                        sender_username: username.clone(),
+                        sender_avatar: avatar.clone(),
+                        content_preview: crate::message::reply_preview_line(&draft.content_preview)
+                            .into(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        has_embed: draft.has_embed,
+                        is_poll: draft.is_poll,
+                    }),
+                    Some(OutgoingReply {
+                        message_ref_id: draft.message_ref_id.get(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        message_sender_id: draft.sender_id.get(),
+                        message_sender_username: username,
+                        message_sender_avatar: avatar,
+                        message_sender_clan_nick: clan_nick,
+                        message_sender_display_name: display_name,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
         let mut optimistic =
             Message::new(temp_id, String::new(), sender_id, display_name, create_time)
                 .with_sort_id(sort_id)
                 .with_avatar(avatar_url)
                 .with_avatar_proxied(avatar_proxied)
                 .with_attachments(vec![optimistic_attachment]);
+        if let Some(reference) = reply_reference {
+            optimistic = optimistic.with_references(vec![reference]);
+        }
         if anonymous {
             let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
-        let appended = self.cache.get_mut(&channel_id).map(|channel| {
-            let old_len = channel.messages.len();
-            channel.messages.push_grouped(optimistic);
-            old_len
-        });
+        let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
-
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
-                .send_message_with_attachment_urls(
+                .send_message_with_attachment_urls_reply(
                     clan_id.get(),
                     channel_id.get(),
                     is_public,
@@ -4337,6 +5156,7 @@ impl MessagesStore {
                         width,
                         height,
                     }],
+                    reply_ref,
                     OutgoingMessageFlags {
                         anonymous_message: anonymous,
                         message_code: 0,
@@ -4403,13 +5223,14 @@ impl MessagesStore {
         self.pending_self_adds.clear();
         self.prune_message_ui_state();
         let Some(channel_id) = channel_id else {
+            let had_reply_target = self.reply_target().is_some();
             self.flush_pending_last_seen(cx);
             self.active_channel_id = None;
             self.active_clan_id = None;
             self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
-            if self.reply_target.take().is_some() {
+            if had_reply_target {
                 cx.emit(MessagesEvent::ReplyTargetChanged);
             }
             self.sync_anonymous_mode(cx);
@@ -4528,6 +5349,7 @@ impl MessagesStore {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
+        let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
         if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
             self.pending_jump = None;
@@ -4538,9 +5360,11 @@ impl MessagesStore {
         self.is_dm = is_dm;
         self.mode = mode;
         self.viewing_older_by_channel.insert(channel_id, false);
+        self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
-        if self.reply_target.take().is_some() {
+        self.reply_targets.touch(&channel_id);
+        if self.reply_target() != previous_reply_target.as_ref() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -4576,6 +5400,16 @@ impl MessagesStore {
         self.spawn_initial_fetch(clan_id, channel_id, generation, cx);
     }
 
+    /// Subscribe the socket to one channel — but never before the clan itself is joined.
+    ///
+    /// A `channel_join` for a **public** channel resolves to the clan-wide stream, not a
+    /// per-channel one, so the gateway ends up with the clan stream already tracked. Its
+    /// `clan_join` handler answers an already-tracked clan from the tracker and skips the
+    /// fan-out entirely, which silently leaves every **private** channel and thread in that
+    /// clan unsubscribed for the rest of the session — public rows keep updating, so it
+    /// reads as "some channels stopped going unread". Awaiting the clan join first is what
+    /// keeps the fan-out reachable. React gets this ordering for free: its clan route loader
+    /// dispatches `joinClan` before the channel loader dispatches `joinChannel`.
     fn spawn_join(
         &self,
         clan_id: ClanId,
@@ -4585,7 +5419,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
+        let clan_joined = (!clan_id.is_zero()).then(|| {
+            ChannelList::global(cx)
+                .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+        });
         cx.spawn(async move |_this, _cx| {
+            if let Some(clan_joined) = clan_joined {
+                clan_joined.await;
+            }
             if let Err(e) = api
                 .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
                 .await
@@ -4653,6 +5494,7 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                self.schedule_presign_probe(cx);
                 if is_current && self.messages().is_empty() {
                     self.mark_empty_channel_seen(channel_id, cx);
                 }
@@ -4749,7 +5591,11 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
+                let own = viewer_id.is_some_and(|uid| uid.get() == m.sender_id);
                 if self.is_viewing_older(storage_id) {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -4760,6 +5606,9 @@ impl MessagesStore {
                     )
                 });
                 if !tail_loaded {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -4860,6 +5709,7 @@ impl MessagesStore {
         self.set_last_message(storage_id, last_id);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
@@ -4913,6 +5763,7 @@ impl MessagesStore {
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
@@ -4934,12 +5785,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self
-            .reply_target
-            .as_ref()
+            .reply_targets
+            .get(&storage_id)
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
-            self.reply_target = None;
-            cx.emit(MessagesEvent::ReplyTargetChanged);
+            self.reply_targets.remove(&storage_id);
+            if self.active_channel_id == Some(storage_id) {
+                cx.emit(MessagesEvent::ReplyTargetChanged);
+            }
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -5254,16 +6107,16 @@ impl MessagesStore {
         } else {
             state.selected = vec![index];
         }
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
     }
 
     pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let state = self.poll_ui.entry(message_id).or_default();
         state.show_results = !state.show_results;
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
     }
 
-    fn notify_poll_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    fn notify_message_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         cx.emit(MessagesEvent::Updated {
             message_id: Some(message_id),
         });
@@ -5307,7 +6160,7 @@ impl MessagesStore {
             return;
         };
         self.poll_ui.entry(message_id).or_default().voting = true;
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
         let api = self.api.clone();
         let cid = channel_id.get();
         let mid = message_id.get();
@@ -5329,7 +6182,7 @@ impl MessagesStore {
                     }
                     Err(e) => tracing::error!("vote_poll failed: {e}"),
                 }
-                store.notify_poll_row(message_id, cx);
+                store.notify_message_row(message_id, cx);
             });
         })
         .detach();
@@ -5383,11 +6236,15 @@ impl MessagesStore {
     ) -> Task<anyhow::Result<PollDetail>> {
         let api = self.api.clone();
         let cid = self.active_channel_id.map_or(0, |c| c.get());
-        let clan_id = self.active_clan_id.unwrap_or(ClanId(0));
+        let is_dm = self.is_dm;
+        let clan_id = (!is_dm).then_some(self.active_clan_id).flatten();
+        let dm_channel_id = is_dm.then_some(self.active_channel_id).flatten();
         let mid = message_id.get();
         cx.spawn(async move |this, cx| {
             let resp = api.get_poll(poll_id, mid, cid).await?;
-            let detail = this.update(cx, |_store, cx| map_poll_detail(&resp, clan_id, cx))?;
+            let detail = this.update(cx, |_store, cx| {
+                map_poll_detail(&resp, clan_id, dm_channel_id, cx)
+            })?;
             Ok(detail)
         })
     }
@@ -5513,10 +6370,11 @@ async fn ensure_archived_thread_reactivated(
     }
 }
 
-fn plan_thread_membership(
+pub(crate) fn plan_thread_membership(
     self_id: Option<UserId>,
     thread_members: &[UserId],
     parent_members: &[UserId],
+    parent_is_public: bool,
     mentioned: &[UserId],
 ) -> Vec<UserId> {
     let mut plan = Vec::new();
@@ -5528,7 +6386,7 @@ fn plan_thread_membership(
     for user_id in mentioned {
         if Some(*user_id) == self_id
             || thread_members.contains(user_id)
-            || !parent_members.contains(user_id)
+            || (!parent_is_public && !parent_members.contains(user_id))
             || plan.contains(user_id)
         {
             continue;
@@ -5544,7 +6402,7 @@ fn needs_parent_lookup(thread_members: &[UserId], candidates: &[UserId]) -> bool
         .any(|user_id| !thread_members.contains(user_id))
 }
 
-fn mentioned_thread_candidates(
+pub(crate) fn mentioned_thread_candidates(
     mentions: &[TransportMention],
     clan_id: ClanId,
     cx: &App,
@@ -5576,6 +6434,7 @@ struct ThreadSendContext {
     parent_id: ChannelId,
     channel_type: Option<i32>,
     parent_channel_type: Option<i32>,
+    parent_is_public: bool,
     self_id: Option<UserId>,
     /// `None` when the store holds no roster for the channel. Distinguishing that
     /// from an empty roster matters: an unloaded thread would otherwise read as
@@ -5599,12 +6458,16 @@ fn thread_send_context(
     let parent_channel_type = channels
         .channel(clan_id, parent_id)
         .map(|channel| channel.channel_type.as_raw() as i32);
+    let parent_is_public = channels
+        .channel(clan_id, parent_id)
+        .is_some_and(|channel| !channel.private);
     let members = ChannelMembersStore::try_global(cx)?;
     let members = members.read(cx);
     Some(ThreadSendContext {
         parent_id,
         channel_type,
         parent_channel_type,
+        parent_is_public,
         self_id: viewer_user_id(cx),
         thread_members: members
             .has_channel(channel_id)
@@ -5694,25 +6557,27 @@ async fn resolve_thread_membership_plan(
     let mut candidates = ctx.mentioned;
     candidates.extend_from_slice(extra_candidates);
     // Parent membership only gates the candidates; a self-join never consults it.
-    let parent_members = if needs_parent_lookup(&thread_members, &candidates) {
-        resolve_channel_members(
-            api,
-            this,
-            clan_id,
-            ctx.parent_id,
-            ctx.parent_channel_type,
-            ctx.parent_members,
-            cx,
-        )
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let parent_members =
+        if !ctx.parent_is_public && needs_parent_lookup(&thread_members, &candidates) {
+            resolve_channel_members(
+                api,
+                this,
+                clan_id,
+                ctx.parent_id,
+                ctx.parent_channel_type,
+                ctx.parent_members,
+                cx,
+            )
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     plan_thread_membership(
         if join_self { ctx.self_id } else { None },
         &thread_members,
         &parent_members,
+        ctx.parent_is_public,
         &candidates,
     )
 }
@@ -5790,26 +6655,30 @@ impl MessagesStore {
     ) {
         self.pending_send_payloads.remove(&temp_id);
         let confirmed_id = confirmed.id;
+        let tail_detached = self.tail_detached(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             self.set_last_message(channel_id, confirmed_id);
             return;
         };
         let old_len = channel.messages.len();
-        let pushed = if let Some(idx) = channel.messages.position(temp_id) {
-            let temp = channel
-                .messages
-                .get_by_id(temp_id)
-                .expect("temp row must exist at position")
-                .clone();
-            let confirmed = merge_sparse_sender(&temp, confirmed);
-            channel.messages.replace_at_and_regroup(idx, confirmed);
-            false
-        } else if !channel.messages.contains_id(confirmed.id) {
-            channel.messages.push_sorted(confirmed);
-            true
-        } else {
-            false
-        };
+        let (pushed, dropped_by_detached_tail) =
+            if let Some(idx) = channel.messages.position(temp_id) {
+                let temp = channel
+                    .messages
+                    .get_by_id(temp_id)
+                    .expect("temp row must exist at position")
+                    .clone();
+                let confirmed = merge_sparse_sender(&temp, confirmed);
+                channel.messages.replace_at_and_regroup(idx, confirmed);
+                (false, false)
+            } else if tail_detached {
+                (false, true)
+            } else if !channel.messages.contains_id(confirmed.id) {
+                channel.messages.push_sorted(confirmed);
+                (true, false)
+            } else {
+                (false, false)
+            };
         self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
             return;
@@ -5821,6 +6690,9 @@ impl MessagesStore {
                 message_id: Some(confirmed_id),
             });
             cx.notify();
+        }
+        if dropped_by_detached_tail {
+            self.follow_send_to_present(channel_id, cx);
         }
     }
 
@@ -5892,6 +6764,9 @@ impl MessagesStore {
             });
             cx.notify();
         }
+        // Our own upload just finished, so the row is now pending on nothing but the
+        // presign_finish patch — which is exactly what can go missing.
+        self.schedule_presign_probe(cx);
     }
 
     pub fn apply_topic_attachment_outcome(
@@ -5908,6 +6783,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
+        self.schedule_presign_probe(cx);
     }
 
     fn resync(&mut self, cx: &mut Context<Self>) {
@@ -6045,6 +6921,43 @@ fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
         .and_then(|content| content.tp)
         .and_then(|tp| tp.parse::<i64>().ok())
         .is_some_and(|id| id != 0)
+}
+
+/// Point a row's attachments at the sender's own copies. Matched by filename,
+/// because the echo is the server's list and nothing promises it comes back in
+/// the order it was sent — an index would then aim a row at the wrong picture.
+/// The same name twice in one message keeps its order within that name.
+///
+/// The count check stays as the outer guard: a different length means this echo
+/// is not the send those files belong to at all.
+/// Returns whether any attachment actually gained a path — the caller has to
+/// know, because a row that changed under a view holding its own clone is only
+/// redrawn if the store says so.
+fn apply_local_sources(
+    attachments: &mut [MessageAttachment],
+    local_sources: &[(String, Option<std::path::PathBuf>)],
+) -> bool {
+    if local_sources.len() != attachments.len() {
+        return false;
+    }
+    let mut by_name: HashMap<&str, std::collections::VecDeque<&Option<std::path::PathBuf>>> =
+        HashMap::new();
+    for (name, path) in local_sources {
+        by_name.entry(name.as_str()).or_default().push_back(path);
+    }
+    let mut changed = false;
+    for att in attachments.iter_mut() {
+        if att.local_source.is_some() {
+            continue;
+        }
+        if let Some(queue) = by_name.get_mut(att.filename.as_str())
+            && let Some(path) = queue.pop_front()
+        {
+            changed |= path.is_some();
+            att.local_source = path.clone();
+        }
+    }
+    changed
 }
 
 fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
@@ -6277,6 +7190,33 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
         .is_some_and(|m| m.code != MessageCode::Indicator)
 }
 
+fn is_older_message_id(candidate: Option<MessageId>, reference: Option<MessageId>) -> bool {
+    match (candidate, reference) {
+        (Some(candidate), Some(reference)) => candidate < reference,
+        _ => false,
+    }
+}
+
+fn message_id_sequence_gap(newer: Option<MessageId>, older: Option<MessageId>) -> i64 {
+    match (newer, older) {
+        (Some(newer), Some(older)) => snowflake_seq(newer) - snowflake_seq(older),
+        _ => 0,
+    }
+}
+
+fn topic_reached_top(
+    store_oldest: Option<MessageId>,
+    batch_oldest: Option<MessageId>,
+    batch_len: usize,
+) -> bool {
+    if !is_older_message_id(batch_oldest, store_oldest) {
+        return true;
+    }
+    let scanned_to_window_edge =
+        message_id_sequence_gap(store_oldest, batch_oldest) >= TOPIC_FULL_PAGE_LEN as i64;
+    batch_len < TOPIC_FULL_PAGE_LEN && !scanned_to_window_edge
+}
+
 pub(crate) fn prepare_messages(
     msgs: Vec<ApiMessage>,
     cfg: Option<&AppConfig>,
@@ -6491,7 +7431,95 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
     }
 }
 
-async fn upload_attachments_now(
+struct AnonymousAttachmentSend<'a> {
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    temp_id: MessageId,
+    content: &'a str,
+    is_public: bool,
+    mode: i32,
+    presigned: Vec<PresignedAttachment>,
+    msg_attachments: Vec<mezon_proto::api::MessageAttachment>,
+    keys: Vec<String>,
+    reply_ref: Option<OutgoingReply>,
+    mentions: Vec<TransportMention>,
+    hashtags: Vec<TransportHashtag>,
+    emojis: Vec<TransportEmoji>,
+    flags: OutgoingMessageFlags,
+}
+
+async fn send_anonymous_attachment_message(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    send: AnonymousAttachmentSend<'_>,
+    cx: &mut AsyncApp,
+) {
+    let AnonymousAttachmentSend {
+        clan_id,
+        channel_id,
+        temp_id,
+        content,
+        is_public,
+        mode,
+        presigned,
+        msg_attachments,
+        keys,
+        reply_ref,
+        mentions,
+        hashtags,
+        emojis,
+        flags,
+    } = send;
+    if let Err(e) = api.upload_presigned_all(presigned).await {
+        tracing::error!("anonymous attachment upload failed: {e}");
+        let _ = this.update(cx, |this, cx| {
+            this.mark_temp_failed(channel_id, temp_id, cx);
+        });
+        return;
+    }
+    let sent = match api
+        .send_presigned_message(
+            clan_id.get(),
+            channel_id.get(),
+            content,
+            is_public,
+            mode,
+            msg_attachments,
+            reply_ref,
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            flags,
+        )
+        .await
+    {
+        Ok(sent) => sent,
+        Err(e) => {
+            tracing::error!("anonymous send_presigned_message failed: {e}");
+            let _ = this.update(cx, |this, cx| {
+                this.mark_temp_failed(channel_id, temp_id, cx);
+            });
+            return;
+        }
+    };
+    let real_message_id = sent.message_id;
+    let _ = this.update(cx, |this, cx| {
+        let mut confirmed = message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+        for key in keys {
+            this.mark_channel_attachment_outcome(
+                channel_id,
+                MessageId(real_message_id),
+                AttachmentUploadOutcome::Uploaded(key),
+                cx,
+            );
+        }
+    });
+}
+
+pub(crate) async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
 ) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {
@@ -6571,11 +7599,43 @@ fn apply_presign_gate(
 /// sweep would not touch it. It must agree with `sweep_expired_presign`: a
 /// message the sweep skips but this counts would be rescheduled at zero delay
 /// forever.
+/// Backoff between CDN existence probes for one attachment. The first wait is
+/// long enough that the normal path — the presign_finish update arriving a
+/// second or two after the message — costs no requests at all.
+const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
+
+/// How many objects one probe round asks about at once.
+const PRESIGN_PROBE_BATCH: usize = 6;
+
+/// One attachment's probe schedule.
+#[derive(Debug, Clone, Copy)]
+struct PresignProbe {
+    attempts: u32,
+    next_at: std::time::Instant,
+}
+
+fn presign_probe_delay(attempts: u32) -> std::time::Duration {
+    let last = PRESIGN_PROBE_BACKOFF_SECS.len() - 1;
+    let idx = (attempts as usize).min(last);
+    std::time::Duration::from_secs(PRESIGN_PROBE_BACKOFF_SECS[idx])
+}
+
+/// The probe URL carries a nonce so that a not-found answer is cached under a
+/// key nothing renders from. Without it an early probe could pin a 404 onto the
+/// very URL the message is about to use.
+fn presign_probe_url(url: &str, nonce: u64) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}probe={nonce:x}")
+}
+
+/// When this row's pending attachments stop being worth waiting for. Reads the
+/// gate's verdict off the attachments rather than re-parsing the content: the
+/// row's `content` is display text, so a parse here answers None for every
+/// message and the timer is never armed at all.
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
     if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
         return None;
     }
-    presign::parse_presign_finish_keys(&message.content)?;
     Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
 }
 
@@ -6745,15 +7805,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     let mut spans = parse_spans(&m.content_tokens);
-    if let Some(cfg) = cfg {
-        for span in &mut spans {
-            if let MessageSpan::Emoji { emoji_id, src, .. } = span
-                && !emoji_id.is_empty()
-            {
-                *src = cfg.emoji_src(emoji_id).into();
-            }
-        }
-    }
+    crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
         .iter()
@@ -6849,12 +7901,17 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
 
 fn map_poll_detail(
     resp: &mezon_proto::api::GetPollResponse,
-    clan_id: ClanId,
+    clan_id: Option<ClanId>,
+    dm_channel_id: Option<ChannelId>,
     cx: &App,
 ) -> PollDetail {
-    let members_entity = ClanMembersStore::global(cx);
-    let members = members_entity.read(cx);
     let cfg = AppConfig::try_global(cx);
+    let clan = clan_id.map(|clan_id| (clan_id, ClanMembersStore::global(cx).read(cx)));
+    let group =
+        dm_channel_id.map(|channel_id| (channel_id, GroupMembersStore::global(cx).read(cx)));
+    let dm_channel = dm_channel_id
+        .and_then(|channel_id| DirectMessageStore::global(cx).read(cx).find(channel_id));
+    let account = AccountStore::try_global(cx).and_then(|store| store.read(cx).account.as_ref());
     let answer_count = resp.answers.len().max(resp.answer_counts.len());
     let mut voters_by_answer: Vec<Vec<PollVoter>> = vec![Vec::new(); answer_count];
     for detail in &resp.voter_details {
@@ -6863,34 +7920,85 @@ fn map_poll_detail(
             continue;
         };
         for &uid in &detail.user_ids {
-            let user_id = UserId(uid);
-            let voter = match members.member(clan_id, user_id) {
-                Some(member) => {
-                    let avatar = member.avatar();
-                    let avatar_proxied = cfg
-                        .map(|c| c.avatar_proxy(avatar))
-                        .unwrap_or_else(|| avatar.to_string());
-                    PollVoter {
-                        user_id,
-                        display_name: member.name().to_string().into(),
-                        username: member.user.username.clone().into(),
-                        avatar_proxied: avatar_proxied.into(),
-                    }
-                }
-                None => PollVoter {
-                    user_id,
-                    display_name: uid.to_string().into(),
-                    username: SharedString::default(),
-                    avatar_proxied: SharedString::default(),
-                },
-            };
-            slot.push(voter);
+            slot.push(resolve_poll_voter(
+                UserId(uid),
+                clan,
+                group,
+                dm_channel,
+                account,
+                cfg,
+            ));
         }
     }
     PollDetail {
         total_votes: resp.total_votes,
         answer_counts: resp.answer_counts.clone(),
         voters_by_answer,
+    }
+}
+
+fn resolve_poll_voter(
+    user_id: UserId,
+    clan: Option<(ClanId, &ClanMembersStore)>,
+    group: Option<(ChannelId, &GroupMembersStore)>,
+    dm_channel: Option<&DirectChannel>,
+    account: Option<&UserAccount>,
+    cfg: Option<&AppConfig>,
+) -> PollVoter {
+    let proxy = |avatar: &str| {
+        cfg.map(|c| c.avatar_proxy(avatar))
+            .unwrap_or_else(|| avatar.to_string())
+    };
+    if let Some((clan_id, members)) = clan
+        && let Some(member) = members.member(clan_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some((channel_id, members)) = group
+        && let Some(member) = members.member(channel_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some(dm) = dm_channel
+        && dm.peer_user_id == Some(user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: dm.label.clone().into(),
+            username: dm.peer_username.clone().into(),
+            avatar_proxied: proxy(&dm.avatar).into(),
+        };
+    }
+    if let Some(account) = account
+        && account.user_id == user_id.get()
+    {
+        let display_name = if account.display_name.is_empty() {
+            &account.username
+        } else {
+            &account.display_name
+        };
+        return PollVoter {
+            user_id,
+            display_name: display_name.clone().into(),
+            username: account.username.clone().into(),
+            avatar_proxied: proxy(account.avatar_url.as_deref().unwrap_or_default()).into(),
+        };
+    }
+    PollVoter {
+        user_id,
+        display_name: user_id.get().to_string().into(),
+        username: SharedString::default(),
+        avatar_proxied: SharedString::default(),
     }
 }
 
@@ -7037,7 +8145,7 @@ fn first_content_link_url(content: &ApiMessageContent) -> Option<String> {
     }
     detect_markdown(&content.t)
         .into_iter()
-        .find(|tok| tok.kind == "lk")
+        .find(|tok| mezon_client::is_link_markdown_kind(&tok.kind))
         .map(|tok| utf16_slice(&content.t, i64::from(tok.s), i64::from(tok.e)))
         .filter(|url| !url.is_empty())
 }
@@ -7057,9 +8165,25 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         return Vec::new();
     }
     let markdowns = detect_markdown(text);
+    // Embed bodies stay inline. React only runs its social-link classifier over message content,
+    // so a YouTube URL in a description is a link there, not the block-level card the classified
+    // kinds would render inside the embed's column.
+    let mk = markdown_content_tokens(&markdowns)
+        .into_iter()
+        .map(|mut tok| {
+            if tok
+                .kind
+                .as_deref()
+                .is_some_and(mezon_client::is_link_markdown_kind)
+            {
+                tok.kind = Some(mezon_client::LINK_MARKDOWN_KIND.to_string());
+            }
+            tok
+        })
+        .collect();
     parse_spans(&ApiMessageContent {
         t: text.to_string(),
-        mk: markdown_content_tokens(&markdowns),
+        mk,
         ..Default::default()
     })
 }
@@ -7151,17 +8275,22 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
                 .into(),
             url: a.url.clone().map(Into::into),
         });
-    let thumbnail_proxied = embed
+    let thumbnail = embed
         .thumbnail
         .as_ref()
         .filter(|t| !t.url.is_empty())
-        .map(|t| proxy_image(&t.url, 64, 64, cfg))
-        .unwrap_or_default()
-        .into();
+        .map(|t| t.url.clone())
+        .unwrap_or_default();
+    let thumbnail_proxied = if thumbnail.is_empty() {
+        SharedString::default()
+    } else {
+        proxy_image(&thumbnail, 64, 64, cfg).into()
+    };
     let image = embed.image.as_ref().filter(|i| !i.url.is_empty()).map(|i| {
         let width = i.width.map(|v| v.max(0) as u32);
         let height = i.height.map(|v| v.max(0) as u32);
         EmbedImage {
+            url: i.url.clone().into(),
             url_proxied: proxy_image(&i.url, width.unwrap_or(400), height.unwrap_or(300), cfg)
                 .into(),
             width,
@@ -7189,6 +8318,8 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
             value: field.value.clone().into(),
             inline: field.inline,
             input: parse_embed_input(field.inputs.as_ref()),
+            shape: parse_embed_shape(field.shape.as_ref()),
+            buttons: parse_embed_field_buttons(field.button.as_ref()),
         })
         .collect::<Vec<_>>()
         .into();
@@ -7200,6 +8331,7 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
         url: embed.url.clone().map(Into::into),
         author,
         description_spans: text_to_spans(embed.description.as_deref().unwrap_or_default()),
+        thumbnail_url: thumbnail.into(),
         thumbnail_proxied,
         image,
         footer,
@@ -7263,8 +8395,66 @@ fn describe_form(form: &serde_json::Map<String, serde_json::Value>) -> String {
         .join(", ")
 }
 
+const EMBED_COMPONENT_TYPE_BUTTON: i32 = 1;
 const EMBED_COMPONENT_TYPE_SELECT: i32 = 2;
 const EMBED_COMPONENT_TYPE_INPUT: i32 = 3;
+const EMBED_COMPONENT_TYPE_DATEPICKER: i32 = 4;
+const EMBED_COMPONENT_TYPE_RADIO: i32 = 5;
+const EMBED_COMPONENT_TYPE_ANIMATION: i32 = 6;
+const EMBED_COMPONENT_TYPE_GRID: i32 = 7;
+const EMBED_ANIMATION_DEFAULT_DURATION: f32 = 2.0;
+const EMBED_GRID_MAX_ITEMS: u32 = 2048;
+
+fn parse_embed_field_buttons(value: Option<&serde_json::Value>) -> Vec<MessageButton> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let component: ApiMessageComponent = serde_json::from_value(item.clone()).ok()?;
+            if component.component_type != EMBED_COMPONENT_TYPE_BUTTON {
+                return None;
+            }
+            match build_component(&component) {
+                MessageComponent::Button(button) => Some(button),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn parse_embed_shape(value: Option<&serde_json::Value>) -> Option<EmbedGrid> {
+    let wrapper: ApiEmbedShapeWrapper = serde_json::from_value(value?.clone()).ok()?;
+    if wrapper
+        .component_type
+        .is_some_and(|kind| kind != EMBED_COMPONENT_TYPE_GRID)
+    {
+        return None;
+    }
+    let columns = wrapper.columns.unwrap_or(0).max(0) as u32;
+    let rows = wrapper.rows.unwrap_or(0).max(0) as u32;
+    if columns == 0 || rows == 0 {
+        return None;
+    }
+    let cells = columns.saturating_mul(rows).min(EMBED_GRID_MAX_ITEMS) as usize;
+    Some(EmbedGrid {
+        columns,
+        rows,
+        items: wrapper
+            .component
+            .items
+            .iter()
+            .take(cells)
+            .map(|item| EmbedGridItem {
+                start_col: item.start_col.unwrap_or(1).max(1) as u32,
+                start_row: item.start_row.unwrap_or(1).max(1) as u32,
+                width: item.width.unwrap_or(1).max(1) as u32,
+                height: item.height.unwrap_or(1).max(1) as u32,
+            })
+            .collect(),
+    })
+}
 
 fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
     let value = value?;
@@ -7281,6 +8471,77 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                 multiline: component.textarea,
                 required: component.required,
                 disabled: component.disabled,
+                numeric: component
+                    .input_type
+                    .as_deref()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("number")),
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_DATEPICKER) => {
+            let value = wrapper
+                .component
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some(EmbedInput::DatePicker(EmbedDatePicker {
+                id: id.into(),
+                value: value.into(),
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_RADIO) => {
+            let options: Vec<ApiRadioOption> =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            if options.is_empty() {
+                return None;
+            }
+            let mut radio = EmbedRadio {
+                id: id.into(),
+                options: options
+                    .into_iter()
+                    .map(|option| EmbedRadioOption {
+                        label: option.label.into(),
+                        value: option.value.into(),
+                        description: option.description.unwrap_or_default().into(),
+                        name: option.name.unwrap_or_default().into(),
+                        style: option.style,
+                        disabled: option.disabled,
+                    })
+                    .collect(),
+                max_options: wrapper.max_options.filter(|max| *max > 0),
+            };
+            if radio.max_options.is_none() && radio.allows_multiple() {
+                radio.max_options = Some(i32::try_from(radio.options.len()).unwrap_or(i32::MAX));
+            }
+            Some(EmbedInput::Radio(radio))
+        }
+        Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
+            let component: ApiAnimationComponent =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            let pool: Vec<Vec<SharedString>> = component
+                .pool
+                .into_iter()
+                .map(|frames| frames.into_iter().map(SharedString::from).collect())
+                .filter(|frames: &Vec<SharedString>| !frames.is_empty())
+                .collect();
+            if pool.is_empty() {
+                return None;
+            }
+            Some(EmbedInput::Animation(EmbedAnimation {
+                id: id.into(),
+                url_image: component.url_image.unwrap_or_default().into(),
+                url_position: component.url_position.unwrap_or_default().into(),
+                pool,
+                duration_seconds: component
+                    .duration
+                    .filter(|value| *value > 0.)
+                    .unwrap_or(EMBED_ANIMATION_DEFAULT_DURATION),
+                repeat: component
+                    .repeat
+                    .filter(|value| *value > 0)
+                    .map(|v| v as u32),
+                vertical: component.vertical,
+                is_result: component.is_result.is_some_and(|value| value != 0),
             }))
         }
         Some(EMBED_COMPONENT_TYPE_SELECT) => {
@@ -7420,7 +8681,7 @@ fn poll_label_segments(label: &str, cfg: Option<&AppConfig>) -> Vec<PollLabelSeg
     segments
 }
 
-fn build_poll_data(
+pub(crate) fn build_poll_data(
     content: &ApiMessageContent,
     text: &str,
     cfg: Option<&AppConfig>,
@@ -7713,10 +8974,118 @@ mod tests {
     use crate::ids::UserId;
     use crate::message::MessageSpan;
 
+    fn attachment(filename: &str) -> MessageAttachment {
+        MessageAttachment {
+            filename: filename.into(),
+            ..Default::default()
+        }
+    }
+
+    fn source(filename: &str, path: &str) -> (String, Option<std::path::PathBuf>) {
+        (filename.into(), Some(std::path::PathBuf::from(path)))
+    }
+
+    #[test]
+    fn local_sources_follow_the_filename_not_the_position() {
+        // The echo is the server's ordering of the batch, and nothing promises it
+        // matches the order they were handed to the upload.
+        let mut attachments = vec![
+            attachment("c.png"),
+            attachment("a.png"),
+            attachment("b.png"),
+        ];
+        let changed = apply_local_sources(
+            &mut attachments,
+            &[
+                source("a.png", "/disk/a.png"),
+                source("b.png", "/disk/b.png"),
+                source("c.png", "/disk/c.png"),
+            ],
+        );
+
+        assert!(changed);
+        let got: Vec<_> = attachments
+            .iter()
+            .map(|a| {
+                a.local_source
+                    .as_ref()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(got, vec!["/disk/c.png", "/disk/a.png", "/disk/b.png"]);
+    }
+
+    #[test]
+    fn repeated_filenames_keep_their_order_within_the_name() {
+        // Two files of the same name are indistinguishable, so the only sane rule
+        // is first-come inside that name.
+        let mut attachments = vec![attachment("shot.png"), attachment("shot.png")];
+        apply_local_sources(
+            &mut attachments,
+            &[
+                source("shot.png", "/disk/one/shot.png"),
+                source("shot.png", "/disk/two/shot.png"),
+            ],
+        );
+
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/one/shot.png")
+        );
+        assert_eq!(
+            attachments[1].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/two/shot.png")
+        );
+    }
+
+    #[test]
+    fn a_short_echo_applies_nothing_and_reports_no_change() {
+        let mut attachments = vec![attachment("a.png"), attachment("b.png")];
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/a.png")]);
+
+        assert!(
+            !changed,
+            "a count mismatch means the batch cannot be trusted"
+        );
+        assert!(attachments.iter().all(|a| a.local_source.is_none()));
+    }
+
+    #[test]
+    fn applying_paths_that_are_already_there_reports_no_change() {
+        // The caller redraws on `true`; saying so when nothing moved would repaint
+        // the topic list on every echo.
+        let mut attachments = vec![attachment("a.png")];
+        attachments[0].local_source = Some(std::path::PathBuf::from("/disk/a.png"));
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/other.png")]);
+
+        assert!(!changed);
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/a.png"),
+            "a path already on the row wins over a late one"
+        );
+    }
+
+    #[test]
+    fn a_url_attachment_with_no_file_behind_it_is_not_a_change() {
+        let mut attachments = vec![attachment("tenor.gif")];
+        let changed = apply_local_sources(&mut attachments, &[("tenor.gif".into(), None)]);
+
+        assert!(!changed);
+        assert!(attachments[0].local_source.is_none());
+    }
+
     #[test]
     fn thread_send_joins_sender_when_not_a_member() {
-        let plan =
-            plan_thread_membership(Some(UserId(1)), &[UserId(2)], &[UserId(1), UserId(2)], &[]);
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
@@ -7727,6 +9096,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[],
         );
 
@@ -7739,6 +9109,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2), UserId(3)],
+            false,
             &[UserId(2), UserId(3)],
         );
 
@@ -7751,6 +9122,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2), UserId(9)],
         );
 
@@ -7763,6 +9135,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2)],
         );
 
@@ -7775,6 +9148,7 @@ mod tests {
             Some(UserId(1)),
             &[],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(1), UserId(2), UserId(2)],
         );
 
@@ -7783,7 +9157,7 @@ mod tests {
 
     #[test]
     fn thread_send_without_a_known_viewer_only_adds_mentions() {
-        let plan = plan_thread_membership(None, &[], &[UserId(2)], &[UserId(2)]);
+        let plan = plan_thread_membership(None, &[], &[UserId(2)], false, &[UserId(2)]);
 
         assert_eq!(plan, vec![UserId(2)]);
     }
@@ -7799,16 +9173,28 @@ mod tests {
     }
 
     #[test]
+    fn public_parent_does_not_require_an_explicit_channel_roster() {
+        let plan = plan_thread_membership(Some(UserId(1)), &[UserId(1)], &[], true, &[UserId(2)]);
+
+        assert_eq!(plan, vec![UserId(2)]);
+    }
+
+    #[test]
     fn thread_reaction_joins_a_parent_member() {
-        let plan =
-            plan_thread_membership(None, &[UserId(2)], &[UserId(1), UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(
+            None,
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[UserId(1)],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
 
     #[test]
     fn thread_reaction_does_not_join_a_non_parent_member() {
-        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], false, &[UserId(1)]);
 
         assert!(plan.is_empty());
     }
@@ -7826,6 +9212,101 @@ mod tests {
         assert_eq!(first_non_empty("live", "baked"), "live");
         assert_eq!(first_non_empty("", "baked"), "baked");
         assert_eq!(first_non_empty("", ""), "");
+    }
+
+    #[gpui::test]
+    fn a_topic_pages_older_replies_from_its_own_bucket(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+
+                assert!(
+                    !store.load_more_topic(cx),
+                    "no topic open means nothing to page"
+                );
+
+                store.set_active_topic(Some(topic.get()), cx);
+                store.fetch_topic_messages(clan.get(), parent.get(), topic.get(), cx);
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "reply", "6", "Eve", 300)],
+                );
+
+                assert!(store.topic_has_more_top());
+                assert!(
+                    store.load_more_topic(cx),
+                    "an open topic with older history must page"
+                );
+                assert!(
+                    !store.load_more_topic(cx),
+                    "a second page must not start while one is in flight"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_topic_pages_newer_replies_once_its_tail_was_trimmed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.fetch_topic_messages(clan.get(), parent.get(), topic.get(), cx);
+                store.set_channel(
+                    topic,
+                    vec![
+                        Message::new(MessageId(5), "older", "6", "Eve", 300),
+                        Message::new(MessageId(9), "newest", "6", "Eve", 400),
+                    ],
+                );
+
+                assert!(
+                    !store.topic_has_more_bottom(),
+                    "the loaded tail is the real tail"
+                );
+                assert!(!store.load_more_topic_bottom(cx));
+
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "older", "6", "Eve", 300)],
+                );
+
+                assert!(
+                    store.topic_has_more_bottom(),
+                    "the known tail is no longer in the buffer"
+                );
+                assert!(
+                    store.load_more_topic_bottom(cx),
+                    "a trimmed tail must page newer replies back in"
+                );
+            });
+        });
     }
 
     #[gpui::test]
@@ -7886,6 +9367,65 @@ mod tests {
             &[("reset", 1), ("reset", 0), ("reset", 2), ("reset", 1)],
             "returning to the dm must re-emit its real row count, not zero"
         );
+    }
+
+    #[gpui::test]
+    fn reply_targets_are_restored_per_conversation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            let clan_channel = ChannelId(22);
+            let dm_message = MessageId(1);
+            let clan_message = MessageId(2);
+
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(dm_message, "dm", "5", "Bob", 100)]);
+                store.set_channel(
+                    clan_channel,
+                    vec![Message::new(clan_message, "clan", "6", "Eve", 200)],
+                );
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.set_reply_to(dm_message, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.close(cx);
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert!(store.reply_target().is_none());
+                store.set_reply_to(clan_message, cx);
+
+                store.close(cx);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(clan_message)
+                );
+                store.clear_reply(cx);
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+            });
+        });
     }
 
     fn api_page(ids: &[i64]) -> mezon_client::transport::ListChannelMessagesResult {
@@ -8051,6 +9591,10 @@ mod tests {
                             creator_id: UserId(0),
                             active: crate::channel::CHANNEL_ACTIVE_JOINED,
                             avatar_url: String::new(),
+                            topic: String::new(),
+                            age_restricted: 0,
+                            e2ee: 0,
+                            app_id: 0,
                         }],
                     }],
                 );
@@ -8434,6 +9978,219 @@ mod tests {
         assert_eq!(form["today"], serde_json::json!("shipped"));
     }
 
+    #[gpui::test]
+    fn a_single_choice_radio_replaces_and_a_multi_choice_one_toggles(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let message_id = MessageId(7);
+            let single = EmbedRadio {
+                id: "vote".into(),
+                options: vec![radio_option("y", "vote"), radio_option("n", "vote")],
+                max_options: None,
+            };
+            let multi = EmbedRadio {
+                id: "picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(1),
+            };
+            let bounded_multi = EmbedRadio {
+                id: "implicit-picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(2),
+            };
+
+            store.update(cx, |store, cx| {
+                pick(store, &single, "y", cx);
+                pick(store, &single, "n", cx);
+                assert_eq!(store.message_select_selection(message_id, "vote"), ["n"]);
+
+                pick(store, &multi, "a", cx);
+                pick(store, &multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "picks"),
+                    ["a"],
+                    "max_options caps a multi-choice radio"
+                );
+
+                pick(store, &multi, "a", cx);
+                assert!(
+                    store
+                        .message_select_selection(message_id, "picks")
+                        .is_empty(),
+                    "picking the same option again clears it"
+                );
+
+                pick(store, &bounded_multi, "a", cx);
+                pick(store, &bounded_multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "implicit-picks"),
+                    ["a", "b"],
+                    "an inferred multi-choice radio accepts each available option"
+                );
+            });
+        });
+    }
+
+    fn pick(
+        store: &mut MessagesStore,
+        radio: &EmbedRadio,
+        value: &str,
+        cx: &mut Context<MessagesStore>,
+    ) {
+        store.choose_embed_radio(
+            MessageId(7),
+            radio.id.clone(),
+            radio.allows_multiple(),
+            radio.max_options,
+            value.into(),
+            cx,
+        );
+    }
+
+    fn radio_option(value: &str, name: &str) -> EmbedRadioOption {
+        EmbedRadioOption {
+            label: value.to_string().into(),
+            value: value.to_string().into(),
+            description: SharedString::default(),
+            name: name.to_string().into(),
+            style: None,
+            disabled: false,
+        }
+    }
+
+    #[gpui::test]
+    fn a_submitted_embed_form_carries_every_input_kind_in_react_shape(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let channel = ChannelId(10);
+            let message_id = MessageId(42);
+            let content = serde_json::json!({
+                "t": "",
+                "embed": [{
+                    "title": "Daily",
+                    "fields": [
+                        { "name": "Project", "value": "", "inputs": {
+                            "type": 3, "id": "project",
+                            "component": { "defaultValue": "Alpha" } } },
+                        { "name": "Task", "value": "", "inputs": {
+                            "type": 2, "id": "task",
+                            "component": { "options": [{ "label": "Coding", "value": "coding" }] } } },
+                        { "name": "Tags", "value": "", "inputs": {
+                            "type": 2, "id": "tags", "max_options": 3,
+                            "component": { "min_options": 1, "max_options": 3, "options": [
+                                { "label": "A", "value": "a" }, { "label": "B", "value": "b" }] } } },
+                        { "name": "Ship", "value": "", "inputs": {
+                            "type": 5, "id": "vote", "component": [
+                                { "label": "Yes", "value": "y", "name": "vote" },
+                                { "label": "No", "value": "n", "name": "vote" }] } },
+                        { "name": "Stack", "value": "", "inputs": {
+                            "type": 5, "id": "picks", "max_options": 2, "component": [
+                                { "label": "Rust", "value": "rust", "name": "rust" },
+                                { "label": "GPUI", "value": "gpui", "name": "gpui" }] } }
+                    ]
+                }]
+            });
+            let api_content: mezon_client::transport::ApiMessageContent =
+                serde_json::from_value(content).expect("content parses");
+            let embeds = build_embeds(&api_content, None);
+            let mut message = Message::new(message_id, "", "7", "KOMU", 100);
+            message.embeds = embeds;
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, channel, true, false, 1, 2, cx);
+                store.set_channel(channel, vec![message]);
+
+                store.set_embed_form_value(message_id, "project".into(), "Alpha".into());
+                store.set_message_select_selection(
+                    message_id,
+                    "task".into(),
+                    vec!["coding".into()],
+                    cx,
+                );
+                store.set_message_select_selection(
+                    message_id,
+                    "tags".into(),
+                    vec!["a".into(), "b".into()],
+                    cx,
+                );
+                store.choose_embed_radio(message_id, "vote".into(), false, Some(1), "y".into(), cx);
+                store.choose_embed_radio(
+                    message_id,
+                    "picks".into(),
+                    true,
+                    Some(2),
+                    "rust".into(),
+                    cx,
+                );
+                store.choose_embed_radio(
+                    message_id,
+                    "picks".into(),
+                    true,
+                    Some(2),
+                    "gpui".into(),
+                    cx,
+                );
+
+                let form = serde_json::Value::Object(store.embed_form_payload(message_id));
+                assert_eq!(
+                    form,
+                    serde_json::json!({
+                        "project": "Alpha",
+                        "task": "coding",
+                        "tags": ["a", "b"],
+                        "vote": "y",
+                        "picks": ["rust", "gpui"]
+                    }),
+                    "single-choice select/radio submit as strings, multi-choice as arrays"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_grid_never_renders_more_cells_than_the_board_has() {
+        let shape = serde_json::json!({
+            "type": 7,
+            "id": "board",
+            "columns": 2,
+            "rows": 2,
+            "component": {
+                "items": (0..50)
+                    .map(|index| serde_json::json!({ "start_col": 1, "start_row": 1, "width": index % 3 + 1 }))
+                    .collect::<Vec<_>>()
+            }
+        });
+        let grid = parse_embed_shape(Some(&shape)).expect("grid");
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.rows, 2);
+        assert_eq!(
+            grid.items.len(),
+            4,
+            "a 2x2 board keeps four cells however many the payload lists"
+        );
+    }
+
     #[test]
     fn embed_form_of_an_untouched_message_is_an_empty_object() {
         let form = build_embed_form_payload(&HashSet::new(), None, None);
@@ -8522,11 +10279,179 @@ mod tests {
 
     #[test]
     fn parse_embed_input_ignores_unsupported_and_incomplete() {
-        let datepicker = serde_json::json!({ "type": 4, "id": "date", "component": {} });
-        assert!(parse_embed_input(Some(&datepicker)).is_none());
+        let unknown = serde_json::json!({ "type": 9, "id": "what", "component": {} });
+        assert!(parse_embed_input(Some(&unknown)).is_none());
         let missing_id = serde_json::json!({ "type": 3, "component": {} });
         assert!(parse_embed_input(Some(&missing_id)).is_none());
         assert!(parse_embed_input(None).is_none());
+    }
+
+    #[test]
+    fn a_numeric_default_value_still_fills_the_input() {
+        let value = serde_json::json!({
+            "type": 3,
+            "id": "working-time",
+            "component": {
+                "placeholder": "Working time",
+                "defaultValue": 8,
+                "type": "number",
+                "required": 1
+            }
+        });
+        let EmbedInput::Text(input) = parse_embed_input(Some(&value)).expect("input should parse")
+        else {
+            panic!("expected a text input");
+        };
+        assert_eq!(input.default_value.as_ref(), "8");
+        assert_eq!(input.placeholder.as_ref(), "Working time");
+        assert!(input.numeric);
+        assert!(
+            input.required,
+            "a JSON-typed field must not take the rest of the component with it"
+        );
+    }
+
+    #[test]
+    fn one_malformed_field_does_not_drop_the_rest_of_the_embed() {
+        let api: ApiEmbed = serde_json::from_value(serde_json::json!({
+            "title": 2026,
+            "description": 7,
+            "fields": [
+                { "name": "Good", "value": "one" },
+                { "name": "Numeric", "value": 42 },
+                { "name": "Broken", "value": { "nested": true } },
+                { "name": "Also good", "value": "two" }
+            ]
+        }))
+        .expect("embed should parse");
+        let embed = build_embed(&api, None);
+        assert_eq!(embed.title.as_ref(), "2026");
+        let names: Vec<&str> = embed.fields.iter().map(|f| f.name.as_ref()).collect();
+        assert_eq!(names, ["Good", "Numeric", "Broken", "Also good"]);
+        assert_eq!(embed.fields[1].value.as_ref(), "42");
+        assert_eq!(embed.fields[2].value.as_ref(), "");
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_date_picker() {
+        let value = serde_json::json!({
+            "type": 4,
+            "id": "day",
+            "component": { "value": "2026-08-24" }
+        });
+        let EmbedInput::DatePicker(picker) =
+            parse_embed_input(Some(&value)).expect("datepicker should parse")
+        else {
+            panic!("expected a datepicker");
+        };
+        assert_eq!(picker.id.as_ref(), "day");
+        assert_eq!(picker.value.as_ref(), "2026-08-24");
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_radio_and_derives_multiplicity() {
+        let single = serde_json::json!({
+            "type": 5,
+            "id": "vote",
+            "max_options": 2,
+            "component": [
+                { "label": "Yes", "value": "y", "name": "vote" },
+                { "label": "No", "value": "n", "name": "vote", "style": 4 }
+            ]
+        });
+        let EmbedInput::Radio(radio) =
+            parse_embed_input(Some(&single)).expect("radio should parse")
+        else {
+            panic!("expected a radio");
+        };
+        assert_eq!(radio.options.len(), 2);
+        assert_eq!(radio.max_options, Some(2));
+        assert_eq!(radio.options[1].style, Some(4));
+        assert!(!radio.allows_multiple());
+
+        let multi = serde_json::json!({
+            "type": 5,
+            "id": "picks",
+            "component": [
+                { "label": "A", "value": "a", "name": "a" },
+                { "label": "B", "value": "b", "name": "b" }
+            ]
+        });
+        let EmbedInput::Radio(radio) = parse_embed_input(Some(&multi)).expect("radio should parse")
+        else {
+            panic!("expected a radio");
+        };
+        assert!(radio.allows_multiple());
+        assert_eq!(radio.max_options, Some(2));
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_animation() {
+        let value = serde_json::json!({
+            "type": 6,
+            "id": "dice",
+            "component": {
+                "url_image": "https://cdn/sheet.png",
+                "url_position": "https://cdn/sheet.json",
+                "pool": [["a", "b"], ["c"]],
+                "duration": "3",
+                "repeat": 2,
+                "isResult": 1
+            }
+        });
+        let EmbedInput::Animation(animation) =
+            parse_embed_input(Some(&value)).expect("animation should parse")
+        else {
+            panic!("expected an animation");
+        };
+        assert_eq!(animation.pool.len(), 2);
+        assert_eq!(animation.duration_seconds, 3.0);
+        assert_eq!(animation.repeat, Some(2));
+        assert!(animation.is_result);
+    }
+
+    #[test]
+    fn parse_embed_input_drops_animation_without_frames() {
+        let value = serde_json::json!({
+            "type": 6,
+            "id": "dice",
+            "component": { "url_image": "https://cdn/sheet.png", "pool": [] }
+        });
+        assert!(parse_embed_input(Some(&value)).is_none());
+    }
+
+    #[test]
+    fn build_embed_maps_field_buttons_and_shape() {
+        let field = mezon_client::transport::ApiEmbedField {
+            name: "Board".into(),
+            button: Some(serde_json::json!([
+                { "type": 1, "id": "play", "component": { "label": "Play", "icon": "PLAY" } },
+                { "type": 2, "id": "not-a-button", "component": {} }
+            ])),
+            shape: Some(serde_json::json!({
+                "type": 7,
+                "id": "board",
+                "columns": 4,
+                "rows": 2,
+                "component": { "items": [{ "start_col": 2, "start_row": 1, "width": 2 }] }
+            })),
+            ..Default::default()
+        };
+        let api = ApiEmbed {
+            fields: vec![field],
+            ..Default::default()
+        };
+        let embed = build_embed(&api, None);
+        let field = &embed.fields[0];
+        assert_eq!(field.buttons.len(), 1);
+        assert_eq!(field.buttons[0].label.as_ref(), "Play");
+        assert_eq!(field.buttons[0].id.as_deref(), Some("play"));
+        let shape = field.shape.as_ref().expect("shape should parse");
+        assert_eq!((shape.columns, shape.rows), (4, 2));
+        assert_eq!(shape.items.len(), 1);
+        assert_eq!(shape.items[0].start_col, 2);
+        assert_eq!(shape.items[0].width, 2);
+        assert_eq!(shape.items[0].height, 1);
     }
 
     #[test]
@@ -8561,6 +10486,33 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, MessageSpan::CodeBlock { .. })),
             "embed description should parse a ``` fence into a CodeBlock span"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_keeps_social_links_inline() {
+        let spans = text_to_spans("watch https://youtu.be/abc");
+        assert!(
+            spans.iter().any(|s| matches!(
+                s,
+                MessageSpan::Link {
+                    kind: crate::message::LinkKind::Plain,
+                    ..
+                }
+            )),
+            "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn first_content_link_url_falls_back_to_a_detected_social_link() {
+        let content = ApiMessageContent {
+            t: "https://www.tiktok.com/@user/video/123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            first_content_link_url(&content).as_deref(),
+            Some("https://www.tiktok.com/@user/video/123")
         );
     }
 
@@ -10062,6 +12014,238 @@ mod tests {
         assert!(!has_more_bottom_for(parent_tail, &parent_buffer));
     }
 
+    #[gpui::test]
+    fn sending_from_a_jump_window_keeps_the_history_gap_loadable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+            let temp_id = MessageId::next_optimistic();
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.set_channel(
+                    channel,
+                    vec![
+                        Message::new(MessageId(10), "pinned", "5", "Bob", 100),
+                        Message::new(MessageId(11), "next", "5", "Bob", 110),
+                    ],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                assert!(
+                    store.tail_detached(channel),
+                    "an AROUND jump window stops short of the channel tail"
+                );
+
+                assert!(
+                    store
+                        .append_optimistic(channel, Message::new(temp_id, "re", "42", "Me", 900))
+                        .is_none(),
+                    "the optimistic reply must not land next to history it does not adjoin"
+                );
+                assert_eq!(store.messages_in_channel(channel).len(), 2);
+
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(501), "re", "42", "Me", 900),
+                    cx,
+                );
+            });
+
+            store.update(cx, |store, _cx| {
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    2,
+                    "the confirmed reply must not be appended onto the jump window either"
+                );
+                assert!(
+                    store.tail_detached(channel),
+                    "the messages between the jump window and the reply stay loadable"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_live_message_below_the_viewport_counts_toward_the_scroll_down_badge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+
+                store.handle_event(
+                    &RealtimeEvent::ChannelMessage(mezon_proto::api::ChannelMessage {
+                        clan_id: 3,
+                        channel_id: 7,
+                        message_id: 501,
+                        sender_id: 42,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "a live message must not be sewn onto a window detached from the tail"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "but it is unread, so the scroll-down button has to count it"
+                );
+
+                store.note_pending_below(channel, MessageId(502), true);
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "the reader's own message is not unread"
+                );
+
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(501), "hi", "42", "Bob", 900)],
+                );
+                assert_eq!(
+                    store.pending_below_count(Some(MessageId(500))),
+                    0,
+                    "once the row is loaded and the viewport counts it, it is not counted twice"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "while the viewport counts nothing the badge keeps carrying it"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sending_from_a_jump_window_follows_the_send_back_to_the_present(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(3));
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+                assert!(store.tail_detached(channel));
+
+                let temp_id = MessageId::next_optimistic();
+                let generation = store.fetch_generation;
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(501), "re", "42", "Me", 900),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "the ack must not seal the gap by landing on the detached window"
+                );
+                assert!(
+                    !store.is_viewing_older(channel),
+                    "the ack must not leave the viewport parked on the detached window"
+                );
+                assert!(
+                    store.loading && store.fetch_generation != generation,
+                    "the ack refetches the live tail so the sent row becomes reachable"
+                );
+                assert_eq!(
+                    store.last_message_by_channel.get(&channel).copied(),
+                    Some(MessageId(501)),
+                    "the refetch has to chase the id the send just created"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sending_at_the_channel_tail_still_shows_the_optimistic_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+            let temp_id = MessageId::next_optimistic();
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "hi", "5", "Bob", 100)],
+                );
+                assert!(!store.tail_detached(channel));
+
+                assert_eq!(
+                    store.append_optimistic(channel, Message::new(temp_id, "re", "42", "Me", 900)),
+                    Some(1)
+                );
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(11), "re", "42", "Me", 900),
+                    cx,
+                );
+
+                let rows = store.messages_in_channel(channel);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[1].id, MessageId(11));
+                assert!(!store.tail_detached(channel));
+            });
+        });
+    }
+
     #[test]
     fn temp_match_position_skips_failed_temp() {
         let mut failed = Message::new(MessageId::next_optimistic(), "hello", "42", "Me", 1);
@@ -10142,6 +12326,40 @@ mod tests {
         let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
         assert_eq!(storage_channel_id(&plain), ChannelId(10));
         assert_eq!(parent_channel_id(&plain), ChannelId(10));
+    }
+
+    fn snowflake_at(millis: i64) -> Option<MessageId> {
+        Some(MessageId(millis << SNOWFLAKE_TIME_SHIFT))
+    }
+
+    #[test]
+    fn topic_top_is_reached_when_the_page_holds_nothing_older() {
+        assert!(topic_reached_top(snowflake_at(1000), None, 0));
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(1000), 1));
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(1200), 5));
+    }
+
+    #[test]
+    fn topic_top_is_reached_when_a_short_page_stayed_inside_the_window() {
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(990), 10));
+    }
+
+    #[test]
+    fn topic_keeps_paging_when_a_short_page_spans_a_full_window() {
+        assert!(!topic_reached_top(
+            snowflake_at(1000),
+            snowflake_at(900),
+            10
+        ));
+    }
+
+    #[test]
+    fn topic_keeps_paging_on_a_full_page() {
+        assert!(!topic_reached_top(
+            snowflake_at(1000),
+            snowflake_at(999),
+            TOPIC_FULL_PAGE_LEN
+        ));
     }
 
     #[test]
@@ -10439,17 +12657,91 @@ mod tests {
         pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         pending.attachments[0].presign_pending = true;
 
-        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
         assert_eq!(
             presign_expiry_deadline(&pending),
             Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
-            "a pending message the sweep can act on arms the timer"
+            "a pending attachment arms the timer"
         );
 
-        // The sweep skips a message whose content no longer carries the field, so
-        // counting it here would re-arm the timer at zero delay forever.
-        pending.content = r#"{"t":"hi"}"#.to_string();
+        // What the sweep does when it fires: everything still pending goes. With
+        // nothing left pending there is no deadline, so the timer is not re-armed
+        // at zero delay — which is what would spin.
+        pending.attachments.retain(|a| !a.presign_pending);
         assert_eq!(presign_expiry_deadline(&pending), None);
+
+        // An optimistic row has no server timestamp yet; waiting on it would mean
+        // a deadline in 1970.
+        let mut no_time = pending.clone();
+        no_time.create_time = 0;
+        no_time.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        no_time.attachments[0].presign_pending = true;
+        assert_eq!(presign_expiry_deadline(&no_time), None);
+    }
+
+    #[test]
+    fn expiry_deadline_does_not_depend_on_the_row_carrying_content_json() {
+        // The row's `content` is display text — the content JSON with
+        // `presign_finish` never reaches it. Deriving the deadline from a parse of
+        // that field armed no timer at all, so a dead upload stayed pending
+        // forever and the probe polled it every 30s until the channel closed.
+        let mut msg = Message::new(MessageId(1), "just some text", "", "", 1000);
+        msg.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/uploads/photo.png".into(),
+            presign_pending: true,
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending attachment arms the timer whatever the text says"
+        );
+
+        msg.attachments[0].presign_pending = false;
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            None,
+            "nothing pending, nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn presign_probe_backoff_stretches_then_holds_at_thirty_seconds() {
+        let secs = |attempts| presign_probe_delay(attempts).as_secs();
+        // The first wait outlasts a healthy presign_finish, so the normal path
+        // never spends a request.
+        assert_eq!(secs(0), 8);
+        assert_eq!(secs(1), 15);
+        assert_eq!(secs(2), 30);
+        assert_eq!(secs(3), 30);
+        // A genuinely slow upload must not turn into a request storm: the delay
+        // stops growing but never shrinks back down.
+        assert_eq!(secs(4), 30);
+        assert_eq!(secs(50), 30);
+        assert_eq!(secs(u32::MAX), 30);
+    }
+
+    #[test]
+    fn presign_probe_batch_is_bounded_so_one_round_cannot_flood_the_cdn() {
+        // The round fires its requests together, so the cap is what keeps a channel
+        // full of stuck attachments from opening a connection per attachment.
+        const { assert!(PRESIGN_PROBE_BATCH > 0) };
+        const { assert!(PRESIGN_PROBE_BATCH <= 8) };
+    }
+
+    #[test]
+    fn presign_probe_url_never_reuses_the_clean_url() {
+        // A 404 must be cached under a key nothing renders from, otherwise an
+        // early probe poisons the URL the message is about to use.
+        let probed = presign_probe_url("https://cdn.mezon.ai/a/b.png", 0xdead);
+        assert_eq!(probed, "https://cdn.mezon.ai/a/b.png?probe=dead");
+        assert!(probed.starts_with("https://cdn.mezon.ai/a/b.png?"));
+
+        // An url that already carries a query keeps it.
+        assert_eq!(
+            presign_probe_url("https://cdn.mezon.ai/a/b.png?v=2", 1),
+            "https://cdn.mezon.ai/a/b.png?v=2&probe=1"
+        );
     }
 
     #[test]
@@ -10560,6 +12852,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_topic_reply_marks_top_without_disabling_existing_topic_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let new_topic_id = 77;
+            let existing_topic_id = 88;
+            store.update(cx, |store, cx| {
+                store.set_active_topic(Some(new_topic_id), cx);
+                store.append_topic_message(
+                    new_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+
+                assert!(!store.topic_has_more_top());
+
+                store.set_active_topic(Some(existing_topic_id), cx);
+                store.append_topic_message(
+                    existing_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    false,
+                    cx,
+                );
+
+                assert!(store.topic_has_more_top());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn resend_keeps_a_failed_row_it_cannot_replay(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = test_store(cx);
@@ -10608,6 +12936,52 @@ mod tests {
                 assert_eq!(
                     payload.url_attachment.as_ref().map(|a| a.url.as_str()),
                     Some("https://cdn.example/sticker.webp")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_url_attachment_reply_keeps_its_reference(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(7);
+                let target = MessageId(42);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(target, "hello", "6", "Eve", 100)],
+                );
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+                store.set_reply_to(target, cx);
+
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".to_string(),
+                    "sticker.webp".to_string(),
+                    "5".to_string(),
+                    "Bob".to_string(),
+                    cx,
+                );
+
+                assert!(store.reply_target().is_none());
+                let payload = store
+                    .pending_send_payloads
+                    .values()
+                    .next()
+                    .expect("sticker reply records a payload to retry with");
+                assert_eq!(
+                    payload.reply.as_ref().map(|reply| reply.message_ref_id),
+                    Some(target)
+                );
+                assert_eq!(
+                    store
+                        .cache
+                        .get(&channel)
+                        .and_then(|messages| messages.messages.last())
+                        .and_then(|message| message.references.first())
+                        .map(|reference| reference.message_ref_id),
+                    Some(target)
                 );
             });
         });

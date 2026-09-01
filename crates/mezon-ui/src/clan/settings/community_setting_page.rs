@@ -501,15 +501,12 @@ impl CommunitySettingPage {
                 });
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => {
-                    let _ = this.update(cx, |this, cx| {
-                        this._banner_upload_task = None;
-                        cx.notify();
-                    });
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    this._banner_upload_task = None;
+                    cx.notify();
+                });
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(path) => path,
@@ -666,7 +663,7 @@ impl CommunitySettingPage {
                 .w_full()
                 .p_6()
                 .rounded_lg()
-                .bg(theme.tokens.bg_secondary)
+                .bg(theme.surfaces.secondary)
                 .border_1()
                 .border_color(theme.border)
                 .child(
@@ -805,7 +802,7 @@ impl CommunitySettingPage {
                         .w_full()
                         .h_full()
                         .rounded(radius)
-                        .object_fit(gpui::ObjectFit::Fill),
+                        .object_fit(gpui::ObjectFit::Cover),
                 )
             })
             .when(!has_banner, |el| {
@@ -1139,7 +1136,7 @@ impl CommunitySettingPage {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(theme.border)
-                                .bg(theme.tokens.bg_secondary)
+                                .bg(theme.surfaces.secondary)
                                 .child(
                                     h_flex()
                                         .items_center()

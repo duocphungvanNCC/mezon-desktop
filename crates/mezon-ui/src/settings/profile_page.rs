@@ -7,7 +7,9 @@ use gpui::{
     Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
     Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
+use mezon_store::{
+    AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
+};
 
 use super::clan_profile_section::ClanProfileSection;
 use super::edit_avatar::EditAvatar;
@@ -74,6 +76,7 @@ pub struct ProfilePage {
     fetch_error: bool,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
+    clan_tab_id: Option<mezon_store::ClanId>,
     avatar_local_preview: Option<std::path::PathBuf>,
     dm_icon_menu_position: Option<Point<Pixels>>,
     avatar_image_cache: Entity<LruImageCache>,
@@ -186,6 +189,25 @@ impl ProfilePage {
                         shell.error(format!("Failed to upload direct message icon: {}", msg), cx)
                     });
                 }
+                AccountEvent::AccountDeleted => {
+                    let locale = this.settings.read(cx).language.clone();
+                    let message =
+                        mezon_i18n::t(&locale, "accountSetting.toast.deleteAccount.success");
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.close_modal(cx);
+                        shell.success(message, cx);
+                    });
+                    LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));
+                }
+                AccountEvent::AccountDeleteFailed => {
+                    let locale = this.settings.read(cx).language.clone();
+                    let message =
+                        mezon_i18n::t(&locale, "accountSetting.toast.deleteAccount.error");
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.close_modal(cx);
+                        shell.error(message, cx);
+                    });
+                }
                 _ => {}
             },
         )
@@ -203,6 +225,7 @@ impl ProfilePage {
             settings,
             clan_list,
             active_tab: ProfileTab::User,
+            clan_tab_id: None,
             profile,
             display_name_input: None,
             about_me_input: None,
@@ -231,11 +254,13 @@ impl ProfilePage {
 
     pub fn show_user_profile(&mut self, cx: &mut Context<Self>) {
         self.active_tab = ProfileTab::User;
+        self.clan_tab_id = None;
         cx.notify();
     }
 
     pub fn show_clan_profile(&mut self, clan_id: mezon_store::ClanId, cx: &mut Context<Self>) {
         self.active_tab = ProfileTab::Clan;
+        self.clan_tab_id = Some(clan_id);
         let display_name = self
             .profile
             .as_ref()
@@ -514,7 +539,11 @@ impl Render for ProfilePage {
                 .into_any_element();
         }
 
-        let active_clan_id = self.clan_list.read(cx).active_clan().map(|clan| clan.id);
+        let clan_list = self.clan_list.read(cx);
+        let active_clan_id = self
+            .clan_tab_id
+            .filter(|id| clan_list.clan_by_id(*id).is_some())
+            .or_else(|| clan_list.active_clan().map(|clan| clan.id));
         if active_clan_id.is_none() && self.active_tab == ProfileTab::Clan {
             self.active_tab = ProfileTab::User;
         }
@@ -601,13 +630,17 @@ impl Render for ProfilePage {
                                         )
                                     },
                                 );
-                            let active_clan_id =
-                                this.clan_list.read(cx).active_clan().map(|c| c.id);
+                            let clan_list = this.clan_list.read(cx);
+                            let active_clan_id = this
+                                .clan_tab_id
+                                .filter(|id| clan_list.clan_by_id(*id).is_some())
+                                .or_else(|| clan_list.active_clan().map(|c| c.id));
                             let Some(active_clan_id) = active_clan_id else {
                                 this.active_tab = ProfileTab::User;
                                 cx.notify();
                                 return;
                             };
+                            this.clan_tab_id = Some(active_clan_id);
                             let section = this.ensure_clan_section(cx);
                             section.update(cx, |s, cx| {
                                 s.set_user_profile(
@@ -684,14 +717,11 @@ impl Render for ProfilePage {
                                 GpuiButton::new("delete-account-btn")
                                     .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
                                     .danger()
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         let locale = this.settings.read(cx).language.clone();
-                                        let message = mezon_i18n::t(
-                                            &locale,
-                                            "setting.profile.deleteComingSoon",
-                                        );
-                                        Shell::global(cx)
-                                            .update(cx, |shell, cx| shell.info(message, cx));
+                                        Shell::global(cx).update(cx, |shell, cx| {
+                                            shell.confirm_delete_account(&locale, window, cx)
+                                        });
                                     })),
                             ),
                         )
@@ -903,9 +933,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
@@ -1090,9 +1121,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
@@ -1287,7 +1319,7 @@ impl ProfilePage {
                                         .top(px(28.))
                                         .size(px(14.))
                                         .rounded_full()
-                                        .bg(theme.tokens.bg_secondary)
+                                        .bg(theme.surfaces.secondary)
                                         .border_1()
                                         .border_color(theme.bg_secondary),
                                 )
@@ -1317,11 +1349,4 @@ impl ProfilePage {
     }
 }
 
-pub(super) fn profile_status(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    match status.to_ascii_lowercase().as_str() {
-        "idle" => (IconName::DarkModeIcon, theme.status_idle),
-        "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
-        "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
-        _ => (IconName::OnlineStatus, theme.status_online),
-    }
-}
+pub(super) use crate::util::user_status::status_icon_and_color as profile_status;

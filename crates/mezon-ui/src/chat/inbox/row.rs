@@ -2,21 +2,27 @@ use std::ops::Range;
 
 use chrono::{Local, TimeZone};
 use gpui::{
-    App, Entity, FontWeight, HighlightStyle, Hsla, SharedString, StyledText, UnderlineStyle, div,
-    img, prelude::*, px, rgb,
+    App, ClickEvent, Entity, FontWeight, HighlightStyle, Hsla, ObjectFit, SharedString, StyledText,
+    UnderlineStyle, Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectMessageStore, InboxCategory, InboxMentionSpan, InboxNotification, MessageSpan,
-    ProfileContext, RolesStore, TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore,
-    attachment_link_is_image, inbox_spans_from_raw, message_content_is_attachment,
-    resolve_user_profile,
+    AppConfig, AttachmentSeedInput, Channel, ChannelAttachment, ChannelId, ChannelList,
+    ChannelType, ClanId, ClanList, ClanMembersStore, DirectMessageStore, InboxCategory,
+    InboxMentionSpan, InboxNotification, MessageId, MessageSpan, ProfileContext, RolesStore,
+    Settings, TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore,
+    attachment_link_is_image, attachment_link_is_video, format_file_size, inbox_spans_from_raw,
+    message_content_is_attachment, resolve_user_profile,
 };
 
-use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
+use crate::chat::file_type_icon::file_type_icon_for;
+use crate::chat::message::code_block_copy_overlay;
+use crate::chat::message::parts::FILE_NAME_COLOR;
+use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
+use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
 use crate::router::Route;
 use crate::theme::Theme;
+use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
@@ -63,7 +69,11 @@ pub(crate) struct NotificationRowView {
     sender_name_color: Hsla,
     attachment_link: String,
     attachment_type: String,
+    attachment_filename: String,
+    attachment_size: u64,
+    attachment_thumbnail: String,
     has_more_attachment: bool,
+    media: Option<InboxMediaOpen>,
     pub(crate) can_jump: bool,
 }
 
@@ -429,6 +439,15 @@ pub(crate) fn build_notification_row_view(
     let attachment_type = message_preview
         .map(|m| m.attachment_type.clone())
         .unwrap_or_default();
+    let attachment_filename = message_preview
+        .map(|m| m.attachment_filename.clone())
+        .unwrap_or_default();
+    let attachment_size = message_preview
+        .map(|m| m.attachment_size)
+        .unwrap_or_default();
+    let attachment_thumbnail = message_preview
+        .map(|m| m.attachment_thumbnail.clone())
+        .unwrap_or_default();
     let has_more_attachment = message_preview.is_some_and(|m| m.has_more_attachment);
 
     let mention_breadcrumb = if notification.category == InboxCategory::Mentions {
@@ -468,6 +487,14 @@ pub(crate) fn build_notification_row_view(
 
     let can_jump = notification.effective_message_id().is_some()
         && notification_jump_route(notification, cx).is_some();
+    let media = (!attachment_link.is_empty()).then(|| {
+        inbox_media_open(
+            notification,
+            &attachment_link,
+            &attachment_filename,
+            &attachment_type,
+        )
+    });
 
     NotificationRowView {
         sender_name,
@@ -486,7 +513,11 @@ pub(crate) fn build_notification_row_view(
         sender_name_color,
         attachment_link,
         attachment_type,
+        attachment_filename,
+        attachment_size,
+        attachment_thumbnail,
         has_more_attachment,
+        media,
         can_jump,
     }
 }
@@ -1129,6 +1160,7 @@ fn render_inbox_message_spans(
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
+    notification_id: &str,
 ) -> gpui::AnyElement {
     if body_spans.is_empty() {
         return div().into_any_element();
@@ -1143,6 +1175,7 @@ fn render_inbox_message_spans(
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     let mut inline_batch: Vec<MessageSpan> = Vec::new();
     let mut offset = 0usize;
+    let mut code_key = 0usize;
 
     for span in body_spans {
         if matches!(span, MessageSpan::CodeBlock { .. }) {
@@ -1156,13 +1189,23 @@ fn render_inbox_message_spans(
                 children.push(element);
             }
             if let MessageSpan::CodeBlock {
-                text: code_text, ..
+                text: code_text,
+                fenced_source,
+                ..
             } = span
             {
                 if let Some(rel) = text[offset..].find(code_text.as_ref()) {
                     offset += rel + code_text.len();
                 }
-                children.push(render_inbox_code_block(theme, code_text));
+                let copy_id =
+                    SharedString::from(format!("inbox-code-copy-{notification_id}-{code_key}"));
+                code_key += 1;
+                children.push(render_inbox_code_block(
+                    theme,
+                    code_text,
+                    copy_id,
+                    fenced_source.clone(),
+                ));
             }
             continue;
         }
@@ -1193,6 +1236,7 @@ fn render_message_content(
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
+    notification_id: &str,
 ) -> impl IntoElement {
     let text_str = text.to_string();
     if text_str.is_empty() {
@@ -1209,6 +1253,7 @@ fn render_message_content(
             body_link_ranges,
             body_inline_span_ranges,
             body_spans,
+            notification_id,
         );
     }
     let highlights = inbox_content_highlights(
@@ -1221,7 +1266,12 @@ fn render_message_content(
     render_inbox_styled_body(theme, &text_str, highlights)
 }
 
-fn render_inbox_code_block(theme: &Theme, text: &SharedString) -> gpui::AnyElement {
+fn render_inbox_code_block(
+    theme: &Theme,
+    text: &SharedString,
+    copy_id: SharedString,
+    copy_source: SharedString,
+) -> gpui::AnyElement {
     div()
         .w_full()
         .min_w_0()
@@ -1234,57 +1284,356 @@ fn render_inbox_code_block(theme: &Theme, text: &SharedString) -> gpui::AnyEleme
         .text_size(px(14.))
         .text_color(theme.tokens.text_theme_message)
         .child(text.clone())
+        .child(code_block_copy_overlay(copy_id, copy_source, theme))
+        .into_any_element()
+}
+
+#[derive(Clone)]
+struct InboxMediaOpen {
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    uploader_id: UserId,
+    create_time_seconds: u32,
+    url: String,
+    filename: String,
+    filetype: String,
+}
+
+fn inbox_media_open(
+    notification: &InboxNotification,
+    url: &str,
+    filename: &str,
+    filetype: &str,
+) -> InboxMediaOpen {
+    let clan_id = notification
+        .effective_clan_id()
+        .and_then(|id| id.parse().ok())
+        .filter(|id: &ClanId| !id.is_zero())
+        .unwrap_or(ClanId(0));
+    let channel_id = notification
+        .effective_channel_id()
+        .and_then(|id| id.parse().ok())
+        .filter(|id: &ChannelId| !id.is_zero())
+        .unwrap_or(ChannelId(0));
+    let message_id = notification
+        .effective_message_id()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(MessageId(0));
+    let uploader_id = notification
+        .message
+        .as_ref()
+        .map(|m| m.sender_id.as_str())
+        .filter(|id| !id.is_empty() && *id != "0")
+        .unwrap_or(notification.sender_id.as_str())
+        .parse()
+        .unwrap_or(UserId(0));
+    InboxMediaOpen {
+        clan_id,
+        channel_id,
+        message_id,
+        uploader_id,
+        create_time_seconds: notification.message_timestamp(),
+        url: url.to_string(),
+        filename: filename.to_string(),
+        filetype: filetype.to_string(),
+    }
+}
+
+fn open_inbox_media_viewer(media: InboxMediaOpen, window: &Window, cx: &mut App) {
+    if media.url.is_empty() {
+        return;
+    }
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let seed = ChannelAttachment::seed_from_message(
+        &AttachmentSeedInput {
+            url: media.url.clone(),
+            filename: media.filename,
+            filetype: media.filetype,
+            width: 0,
+            height: 0,
+            presign_pending: false,
+        },
+        media.message_id,
+        media.uploader_id,
+        media.create_time_seconds,
+        media.channel_id,
+        media.clan_id,
+        AppConfig::try_global(cx),
+    );
+    let url = SharedString::from(seed.url.clone());
+    let anchor = media.create_time_seconds.saturating_add(86_400);
+    open_image_viewer(
+        OpenViewerRequest {
+            clan_id: media.clan_id,
+            channel_id: media.channel_id,
+            channel_label: resolve_channel_label(
+                media.clan_id,
+                media.channel_id,
+                SharedString::default(),
+                cx,
+            ),
+            settings,
+            attachments: vec![seed],
+            selected_index: 0,
+            selected_url: Some(url),
+            anchor_before: (media.create_time_seconds > 0).then_some(anchor),
+        },
+        window,
+        cx,
+    );
+}
+
+fn render_inbox_image(
+    link: &str,
+    image_cache: Entity<LruImageCache>,
+    media: Option<InboxMediaOpen>,
+) -> gpui::AnyElement {
+    div()
+        .id(SharedString::from(format!("inbox-image-{link}")))
+        .max_w(px(150.))
+        .max_h(px(150.))
+        .overflow_hidden()
+        .rounded(px(8.))
+        .cursor_pointer()
+        .child(
+            img(link)
+                .image_cache(&image_cache)
+                .w_full()
+                .h_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .on_click(move |_: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            if let Some(media) = media.clone() {
+                open_inbox_media_viewer(media, window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+fn render_inbox_video(
+    theme: &Theme,
+    link: &str,
+    thumbnail: &str,
+    image_cache: Entity<LruImageCache>,
+    media: Option<InboxMediaOpen>,
+) -> gpui::AnyElement {
+    let poster = if thumbnail.is_empty() {
+        None
+    } else {
+        Some(SharedString::from(thumbnail.to_string()))
+    };
+    div()
+        .id(SharedString::from(format!("inbox-video-{link}")))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(150.))
+        .h(px(150.))
+        .overflow_hidden()
+        .rounded(px(8.))
+        .bg(theme.bg_tertiary)
+        .cursor_pointer()
+        .when_some(poster, |el, poster| {
+            el.child(
+                img(poster)
+                    .image_cache(&image_cache)
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        })
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::Rgba {
+                    r: 0.,
+                    g: 0.,
+                    b: 0.,
+                    a: 0.3,
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(40.))
+                        .h(px(40.))
+                        .rounded_full()
+                        .bg(gpui::Rgba {
+                            r: 0.,
+                            g: 0.,
+                            b: 0.,
+                            a: 0.5,
+                        })
+                        .child(
+                            Icon::new(IconName::PlayButton)
+                                .size(px(18.))
+                                .text_color(gpui::white()),
+                        ),
+                ),
+        )
+        .on_click(move |_: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            if let Some(media) = media.clone() {
+                open_inbox_media_viewer(media, window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+fn render_inbox_file_card(
+    theme: &Theme,
+    link: &str,
+    filetype: &str,
+    filename: &str,
+    size: u64,
+) -> gpui::AnyElement {
+    let display_name = if filename.is_empty() {
+        SharedString::from("Attachment")
+    } else {
+        SharedString::from(filename.to_string())
+    };
+    let size_line = SharedString::from(format!("size: {}", format_file_size(size)));
+    let icon = file_type_icon_for(filetype, filename);
+    let download_url = SharedString::from(link.to_string());
+    let download_name = display_name.clone();
+    let body_url = download_url.clone();
+    let body_name = download_name.clone();
+    let group_name = SharedString::from(format!("inbox-file-{link}"));
+    let body_id = SharedString::from(format!("inbox-file-body-{link}"));
+    div()
+        .id(group_name.clone())
+        .group(group_name.clone())
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .mt(px(10.))
+        .p_3()
+        .rounded_lg()
+        .bg(theme.tokens.bg_item_theme_hover)
+        .border_1()
+        .border_color(theme.tokens.border_primary)
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .w(px(32.))
+                .h(px(40.))
+                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+        )
+        .child(
+            div()
+                .id(body_id)
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click({
+                    let body_url = body_url.clone();
+                    let body_name = body_name.clone();
+                    move |_: &ClickEvent, _, cx| {
+                        save_with_progress_toast(body_url.clone(), body_name.clone(), cx);
+                    }
+                })
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(16.))
+                        .text_color(gpui::rgb(FILE_NAME_COLOR))
+                        .hover(|s| s.underline())
+                        .child(display_name),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(size_line),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .right(px(12.))
+                .flex()
+                .items_center()
+                .opacity(0.)
+                .group_hover(group_name, |s| s.opacity(1.))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("inbox-file-dl-{link}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded_md()
+                        .bg(theme.tokens.bg_theme_contexify)
+                        .border_1()
+                        .border_color(theme.tokens.border_primary)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.8))
+                        .on_click(move |_: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            save_with_progress_toast(
+                                download_url.clone(),
+                                download_name.clone(),
+                                cx,
+                            );
+                        })
+                        .child(
+                            Icon::new(IconName::Download)
+                                .size(px(14.))
+                                .text_color(theme.tokens.text_theme_primary),
+                        ),
+                ),
+        )
         .into_any_element()
 }
 
 fn render_attachment_preview(
     theme: &Theme,
     locale: &SharedString,
-    link: &str,
-    filetype: &str,
-    has_more: bool,
+    view: &NotificationRowView,
     image_cache: Entity<LruImageCache>,
 ) -> impl IntoElement {
     let more_files = mezon_i18n::t(locale, "channelTopbar.moreFiles");
+    let link = view.attachment_link.as_str();
+    let filetype = view.attachment_type.as_str();
+    let media = view.media.clone();
+    let preview = if attachment_link_is_image(link, filetype) {
+        render_inbox_image(link, image_cache, media)
+    } else if attachment_link_is_video(link, filetype) {
+        render_inbox_video(theme, link, &view.attachment_thumbnail, image_cache, media)
+    } else {
+        render_inbox_file_card(
+            theme,
+            link,
+            filetype,
+            &view.attachment_filename,
+            view.attachment_size,
+        )
+    };
     v_flex()
         .gap_1()
-        .child(if attachment_link_is_image(link, filetype) {
-            div()
-                .max_w(px(150.))
-                .max_h(px(150.))
-                .overflow_hidden()
-                .rounded(px(8.))
-                .child(
-                    img(link)
-                        .image_cache(&image_cache)
-                        .w_full()
-                        .h_full()
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(150.))
-                .h(px(80.))
-                .rounded(px(8.))
-                .bg(theme.bg_tertiary)
-                .border_1()
-                .border_color(theme.border)
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(
-                    filetype
-                        .split('/')
-                        .next_back()
-                        .unwrap_or("file")
-                        .to_string(),
-                ))
-                .into_any_element()
-        })
-        .when(has_more, |col| {
+        .w_full()
+        .min_w_0()
+        .child(preview)
+        .when(view.has_more_attachment, |col| {
             col.child(
                 div()
                     .text_xs()
@@ -1436,34 +1785,33 @@ pub fn render_notification_body(
                                     &view.time_label,
                                     view.sender_name_color,
                                 ))
-                                .when(view.body_is_attachment, |c| {
-                                    c.child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.text_muted)
-                                            .child(attachment_label),
-                                    )
-                                })
                                 .when(
-                                    !view.body_is_attachment && !view.body_text.is_empty(),
+                                    view.body_is_attachment && view.attachment_link.is_empty(),
                                     |c| {
-                                        c.child(render_message_content(
-                                            theme,
-                                            &view.body_text,
-                                            &view.mention_spans,
-                                            &view.body_link_ranges,
-                                            &view.body_inline_span_ranges,
-                                            &view.body_spans,
-                                        ))
+                                        c.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.text_muted)
+                                                .child(attachment_label),
+                                        )
                                     },
                                 )
+                                .when(!view.body_text.is_empty(), |c| {
+                                    c.child(render_message_content(
+                                        theme,
+                                        &view.body_text,
+                                        &view.mention_spans,
+                                        &view.body_link_ranges,
+                                        &view.body_inline_span_ranges,
+                                        &view.body_spans,
+                                        &notification.id,
+                                    ))
+                                })
                                 .when(!view.attachment_link.is_empty(), |c| {
                                     c.child(render_attachment_preview(
                                         theme,
                                         locale,
-                                        &view.attachment_link,
-                                        &view.attachment_type,
-                                        view.has_more_attachment,
+                                        view,
                                         image_cache.clone(),
                                     ))
                                 }),

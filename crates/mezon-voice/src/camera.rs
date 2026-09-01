@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use livekit::track::LocalVideoTrack;
@@ -22,6 +22,7 @@ const TARGET_HEIGHT: u32 = 480;
 const TARGET_FPS: u32 = 30;
 const MAX_CAMERA_WIDTH: u32 = 1280;
 const MAX_CAMERA_HEIGHT: u32 = 720;
+const CAMERA_ENUM_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct CameraDeviceInfo {
@@ -29,7 +30,33 @@ pub struct CameraDeviceInfo {
     pub name: String,
 }
 
-pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
+type CameraEnumReply = flume::Sender<Vec<CameraDeviceInfo>>;
+
+fn camera_enum_worker() -> Option<&'static flume::Sender<CameraEnumReply>> {
+    static WORKER: OnceLock<Option<flume::Sender<CameraEnumReply>>> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (tx, rx) = flume::unbounded::<CameraEnumReply>();
+            let spawned = std::thread::Builder::new()
+                .name("mezon-camera-enum".into())
+                .spawn(move || {
+                    init_camera_com();
+                    while let Ok(reply) = rx.recv() {
+                        let _ = reply.send(query_cameras());
+                    }
+                });
+            match spawned {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    tracing::warn!("camera enumeration thread unavailable: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn query_cameras() -> Vec<CameraDeviceInfo> {
     let backend = native_api_backend().unwrap_or(ApiBackend::AVFoundation);
     match query(backend) {
         Ok(devices) => devices
@@ -45,6 +72,39 @@ pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
         }
     }
 }
+
+pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
+    let Some(worker) = camera_enum_worker() else {
+        return Vec::new();
+    };
+    let (reply_tx, reply_rx) = flume::bounded::<Vec<CameraDeviceInfo>>(1);
+    if worker.send(reply_tx).is_err() {
+        tracing::warn!("camera enumeration worker stopped");
+        return Vec::new();
+    }
+    match reply_rx.recv_timeout(CAMERA_ENUM_TIMEOUT) {
+        Ok(devices) => devices,
+        Err(e) => {
+            tracing::warn!("camera enumeration did not answer: {e}");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn init_camera_com() {
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+    };
+
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    if result.is_err() {
+        tracing::warn!("camera thread COM initialization failed: {result}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn init_camera_com() {}
 
 pub struct CameraController {
     stop: Arc<AtomicBool>,
@@ -84,14 +144,15 @@ pub fn start_camera(
         .name("mezon-camera".into())
         .spawn(move || {
             let _guard = crate::runtime::handle().enter();
+            init_camera_com();
 
             if !request_macos_permission() {
                 let _ = track_tx.send(Err("camera permission denied".into()));
                 return;
             }
 
-            let mut current_device = device_id;
-            let mut camera = match open_camera(current_device.as_deref()) {
+            let current_device = device_id;
+            let camera = match open_camera(current_device.as_deref()) {
                 Ok(camera) => camera,
                 Err(e) => {
                     let _ = track_tx.send(Err(e));
@@ -117,81 +178,156 @@ pub fn start_camera(
                 return;
             }
 
-            let key = local_camera_key(&identity);
-            let started = Instant::now();
-            tracing::info!("camera capture started: {source_width}x{source_height}");
-
-            let mut preview = Vec::new();
-            let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
-            let mut last_capture: Option<Instant> = None;
-
-            'outer: loop {
-                let switch_to = 'capture: loop {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                    if let Ok(device) = switch_rx.try_recv() {
-                        let mut latest = device;
-                        while let Ok(next) = switch_rx.try_recv() {
-                            latest = next;
-                        }
-                        if latest != current_device {
-                            break 'capture latest;
-                        }
-                    }
-                    let buffer = match camera.frame() {
-                        Ok(buffer) => buffer,
-                        Err(e) => {
-                            tracing::warn!("camera frame error: {e}");
-                            continue;
-                        }
-                    };
-                    if let Some(last) = last_capture
-                        && last.elapsed() < frame_interval
-                    {
-                        continue;
-                    }
-                    last_capture = Some(Instant::now());
-                    push_camera_frame(
-                        &buffer,
-                        &source,
-                        &frame_store,
-                        key,
-                        started.elapsed().as_micros() as i64,
-                        &mut preview,
-                    );
-                };
-
-                drop(camera);
-                camera = match open_camera(switch_to.as_deref()) {
-                    Ok(camera) => {
-                        current_device = switch_to;
-                        let res = camera.resolution();
-                        tracing::info!("camera switched: {}x{}", res.width(), res.height());
-                        camera
-                    }
-                    Err(e) => {
-                        tracing::warn!("camera switch failed: {e}; reverting to previous device");
-                        match open_camera(current_device.as_deref()) {
-                            Ok(camera) => camera,
-                            Err(e) => {
-                                tracing::error!("camera revert failed: {e}");
-                                break 'outer;
-                            }
-                        }
-                    }
-                };
-                last_capture = None;
-            }
-
-            frame_store.remove(key);
-            tracing::info!("camera capture stopped");
+            capture_loop(
+                camera,
+                source,
+                &frame_store,
+                &identity,
+                current_device,
+                &thread_stop,
+                &switch_rx,
+            );
         });
     if let Err(e) = spawned {
         tracing::error!("failed to spawn camera capture thread: {e}");
     }
 
     (CameraController { stop, switch_tx }, track_rx)
+}
+
+pub fn start_camera_into(
+    identity: String,
+    frame_store: Arc<VideoFrameStore>,
+    device_id: Option<String>,
+    source: NativeVideoSource,
+    err_tx: flume::Sender<String>,
+) -> CameraController {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
+
+    let thread_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("mezon-camera".into())
+        .spawn(move || {
+            let _guard = crate::runtime::handle().enter();
+            init_camera_com();
+
+            if !request_macos_permission() {
+                tracing::warn!("camera permission denied");
+                let _ = err_tx.send("camera permission denied".into());
+                return;
+            }
+
+            let current_device = device_id;
+            let camera = match open_camera(current_device.as_deref()) {
+                Ok(camera) => camera,
+                Err(e) => {
+                    tracing::warn!("camera start failed: {e}");
+                    let _ = err_tx.send(e);
+                    return;
+                }
+            };
+
+            capture_loop(
+                camera,
+                source,
+                &frame_store,
+                &identity,
+                current_device,
+                &thread_stop,
+                &switch_rx,
+            );
+        });
+    if let Err(e) = spawned {
+        tracing::error!("failed to spawn camera capture thread: {e}");
+    }
+
+    CameraController { stop, switch_tx }
+}
+
+fn capture_loop(
+    mut camera: Camera,
+    source: NativeVideoSource,
+    frame_store: &Arc<VideoFrameStore>,
+    identity: &str,
+    mut current_device: Option<String>,
+    thread_stop: &AtomicBool,
+    switch_rx: &flume::Receiver<Option<String>>,
+) {
+    let key = local_camera_key(identity);
+    let started = Instant::now();
+    let resolution = camera.resolution();
+    tracing::info!(
+        "camera capture started: {}x{}",
+        resolution.width(),
+        resolution.height()
+    );
+
+    let mut preview = Vec::new();
+    let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
+    let mut last_capture: Option<Instant> = None;
+
+    'outer: loop {
+        let switch_to = 'capture: loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                break 'outer;
+            }
+            if let Ok(device) = switch_rx.try_recv() {
+                let mut latest = device;
+                while let Ok(next) = switch_rx.try_recv() {
+                    latest = next;
+                }
+                if latest != current_device {
+                    break 'capture latest;
+                }
+            }
+            let buffer = match camera.frame() {
+                Ok(buffer) => buffer,
+                Err(e) => {
+                    tracing::warn!("camera frame error: {e}");
+                    continue;
+                }
+            };
+            if let Some(last) = last_capture
+                && last.elapsed() < frame_interval
+            {
+                continue;
+            }
+            last_capture = Some(Instant::now());
+            push_camera_frame(
+                &buffer,
+                &source,
+                frame_store,
+                key,
+                started.elapsed().as_micros() as i64,
+                &mut preview,
+            );
+        };
+
+        drop(camera);
+        camera = match open_camera(switch_to.as_deref()) {
+            Ok(camera) => {
+                current_device = switch_to;
+                let res = camera.resolution();
+                tracing::info!("camera switched: {}x{}", res.width(), res.height());
+                camera
+            }
+            Err(e) => {
+                tracing::warn!("camera switch failed: {e}; reverting to previous device");
+                match open_camera(current_device.as_deref()) {
+                    Ok(camera) => camera,
+                    Err(e) => {
+                        tracing::error!("camera revert failed: {e}");
+                        break 'outer;
+                    }
+                }
+            }
+        };
+        last_capture = None;
+    }
+
+    frame_store.remove(key);
+    tracing::info!("camera capture stopped");
 }
 
 fn push_camera_frame(
@@ -447,6 +583,32 @@ fn request_macos_permission() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn request_macos_permission() -> bool {
     true
+}
+
+#[cfg(target_os = "macos")]
+fn camera_authorization_status() -> i64 {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::Class;
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let Some(cls) = Class::get("AVCaptureDevice") else {
+            return 3;
+        };
+        let media_type: id = NSString::alloc(nil).init_str("vide");
+        msg_send![cls, authorizationStatusForMediaType: media_type]
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn camera_denied() -> bool {
+    matches!(camera_authorization_status(), 1 | 2)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn camera_denied() -> bool {
+    false
 }
 
 #[cfg(test)]

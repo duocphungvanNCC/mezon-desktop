@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
+const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -43,9 +44,14 @@ pub struct ApiStatusError {
 
 impl ApiStatusError {
     pub const OUT_OF_RANGE: u32 = 11;
+    pub const INVALID_ARGUMENT: u32 = 3;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
+    }
+
+    pub fn is_invalid_argument(self) -> bool {
+        self.code == Self::INVALID_ARGUMENT
     }
 
     pub fn is_create_channel_limit_exceeded(self) -> bool {
@@ -69,6 +75,8 @@ pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
 
+const API_CODE_ALREADY_EXISTS: u32 = 6;
+
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
 }
@@ -76,6 +84,87 @@ fn api_status_error(code: u32) -> anyhow::Error {
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEvent {
+    #[prost(int64, tag = "1")]
+    clan_id: i64,
+    #[prost(int64, tag = "2")]
+    voice_channel_id: i64,
+    #[prost(int64, tag = "3")]
+    user_id: i64,
+    #[prost(int32, tag = "4")]
+    event_type: i32,
+    #[prost(string, tag = "5")]
+    params: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEnvelope {
+    #[prost(int32, tag = "1")]
+    cid: i32,
+    #[prost(message, optional, tag = "100")]
+    voice_interactive_event: Option<LegacyVoiceInteractiveEvent>,
+}
+
+fn is_supported_voice_interactive_event_type(event_type: i32) -> bool {
+    matches!(event_type, 1 | 2 | 10 | 11 | 12)
+}
+
+fn is_valid_voice_interactive_event(event: &realtime::VoiceInteractiveEvent) -> bool {
+    event.clan_id != 0
+        && event.voice_channel_id != 0
+        && is_supported_voice_interactive_event_type(event.event_type)
+}
+
+fn decode_realtime_envelope(payload: &[u8]) -> Result<realtime::Envelope, prost::DecodeError> {
+    match realtime::Envelope::decode(payload) {
+        Ok(envelope) => Ok(envelope),
+        Err(modern_error) => {
+            let Ok(legacy_envelope) = LegacyVoiceInteractiveEnvelope::decode(payload) else {
+                return Err(modern_error);
+            };
+            let Some(legacy) = legacy_envelope.voice_interactive_event else {
+                return Err(modern_error);
+            };
+            if !is_supported_voice_interactive_event_type(legacy.event_type) {
+                return Err(modern_error);
+            }
+            Ok(realtime::Envelope {
+                cid: legacy_envelope.cid,
+                message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                    realtime::VoiceInteractiveEvent {
+                        clan_id: legacy.clan_id,
+                        voice_channel_id: legacy.voice_channel_id,
+                        sender_id: legacy.user_id,
+                        receiver_id: 0,
+                        event_type: legacy.event_type,
+                        params: legacy.params,
+                    },
+                )),
+            })
+        }
+    }
+}
+
+fn decode_voice_interactive_response(
+    response: &[u8],
+) -> Result<Option<realtime::VoiceInteractiveEvent>> {
+    if response.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(envelope) = realtime::Envelope::decode(response)
+        && let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+    {
+        return Ok(is_valid_voice_interactive_event(&event).then_some(event));
+    }
+    if let Ok(event) = realtime::VoiceInteractiveEvent::decode(response)
+        && is_valid_voice_interactive_event(&event)
+    {
+        return Ok(Some(event));
+    }
+    Ok(None)
 }
 
 /// Represents real-time events pushed from the server.
@@ -106,16 +195,20 @@ pub enum RealtimeEvent {
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
+    VoiceInteractive(realtime::VoiceInteractiveEvent),
+    ScreenShare(realtime::ScreenShareEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
     AddClanUser(realtime::AddClanUserEvent),
     ClanEventCreated(api::CreateEventRequest),
     UserClanRemoved(realtime::UserClanRemoved),
+    BanUser(realtime::BannedUserEvent),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
     UserProfileUpdated(realtime::UserProfileUpdatedEvent),
     ClanDeleted(realtime::ClanDeletedEvent),
+    TransferOwnership(realtime::TransferOwnershipEvent),
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
     RemoveFriend(realtime::RemoveFriend),
@@ -130,6 +223,9 @@ pub enum RealtimeEvent {
     TopicInMessageEvent(realtime::TopicInMessageEvent),
     TokenSent(api::TokenSentEvent),
     GiveCoffee(api::GiveCoffeeEvent),
+    WebrtcSignaling(realtime::WebrtcSignalingFwd),
+    IncomingCallPush(realtime::IncomingCallPush),
+    Webhook(api::Webhook),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -161,13 +257,17 @@ impl RealtimeEvent {
             Self::VoiceJoined(_) => "VoiceJoined",
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
+            Self::VoiceInteractive(_) => "VoiceInteractive",
+            Self::ScreenShare(_) => "ScreenShare",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
             Self::AddClanUser(_) => "AddClanUser",
             Self::ClanEventCreated(_) => "ClanEventCreated",
             Self::UserClanRemoved(_) => "UserClanRemoved",
+            Self::BanUser(_) => "BanUser",
             Self::ClanUpdated(_) => "ClanUpdated",
+            Self::TransferOwnership(_) => "TransferOwnership",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
             Self::UserProfileUpdated(_) => "UserProfileUpdated",
             Self::ClanDeleted(_) => "ClanDeleted",
@@ -183,6 +283,9 @@ impl RealtimeEvent {
             Self::TopicInMessageEvent(_) => "TopicInMessageEvent",
             Self::TokenSent(_) => "TokenSent",
             Self::GiveCoffee(_) => "GiveCoffee",
+            Self::WebrtcSignaling(_) => "WebrtcSignaling",
+            Self::IncomingCallPush(_) => "IncomingCallPush",
+            Self::Webhook(_) => "Webhook",
             Self::Unhandled(_) => "Unhandled",
         }
     }
@@ -218,6 +321,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
+            realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
+            realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -226,7 +331,11 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::ClanEventCreated(m) => Ok(Self::ClanEventCreated(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
+            realtime::envelope::Message::BanUserEvent(m) => Ok(Self::BanUser(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
+            realtime::envelope::Message::TransferOwnershipEvent(m) => {
+                Ok(Self::TransferOwnership(m))
+            }
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
             }
@@ -246,6 +355,9 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::TopicInMessageEvent(m) => Ok(Self::TopicInMessageEvent(m)),
             realtime::envelope::Message::TokenSentEvent(m) => Ok(Self::TokenSent(m)),
             realtime::envelope::Message::GiveCoffeeEvent(m) => Ok(Self::GiveCoffee(m)),
+            realtime::envelope::Message::WebrtcSignalingFwd(m) => Ok(Self::WebrtcSignaling(m)),
+            realtime::envelope::Message::IncomingCallPush(m) => Ok(Self::IncomingCallPush(m)),
+            realtime::envelope::Message::WebhookEvent(m) => Ok(Self::Webhook(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -256,7 +368,7 @@ fn dispatch_realtime_push(
     payload: &[u8],
     on_event: &(dyn Fn(RealtimeEvent) + Send + Sync),
 ) {
-    match realtime::Envelope::decode(payload) {
+    match decode_realtime_envelope(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
@@ -378,6 +490,13 @@ fn jwt_expiry(token: &str) -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RenewedTokens {
+    pub token: String,
+    pub refresh_token: String,
+    pub id_token: String,
+}
+
 impl HttpFallbackSession {
     fn token_expired(&self) -> bool {
         self.token_lifetime().1
@@ -409,7 +528,7 @@ pub struct MezonTransport {
     fallback_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Token pairs minted by the fallback, published so the store can persist them — otherwise the
     /// connection loop re-arms the fallback with the stale token it still holds.
-    renewed_tokens: watch::Sender<Option<(String, String)>>,
+    renewed_tokens: watch::Sender<Option<RenewedTokens>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -455,14 +574,18 @@ impl MezonTransport {
 
     /// Renew the fallback token through the same single-flight path a send would use, so the
     /// connection store and a concurrent send can never spend the same refresh token twice.
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<RenewedTokens> {
         let current = self
             .http_fallback
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
-        let renewed = self.refresh_fallback_token(&current).await?;
-        Ok((renewed.token.clone(), renewed.refresh_token.clone()))
+        let (renewed, id_token) = self.refresh_fallback_token(&current).await?;
+        Ok(RenewedTokens {
+            token: renewed.token.clone(),
+            refresh_token: renewed.refresh_token.clone(),
+            id_token,
+        })
     }
 
     /// Generate a unique correlation ID.
@@ -679,6 +802,8 @@ pub struct ApiAccount {
     pub status: String,
     #[serde(default)]
     pub user_status: String,
+    #[serde(default)]
+    pub dob_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -690,6 +815,44 @@ pub struct ApiSession {
     /// leaves the client reconnecting with a credential the server has already retired.
     pub session_id: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkPhoneError {
+    AlreadyLinked,
+    Api(u32),
+    Transport(String),
+}
+
+impl std::fmt::Display for LinkPhoneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyLinked => write!(f, "phone number already linked"),
+            Self::Api(code) => write!(f, "API error: code={code}"),
+            Self::Transport(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for LinkPhoneError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationPasswordError {
+    IncorrectCurrentPassword,
+    Api { code: u32, message: String },
+    Transport(String),
+}
+
+impl std::fmt::Display for RegistrationPasswordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncorrectCurrentPassword => write!(f, "incorrect current password"),
+            Self::Api { code, message } => write!(f, "API error: code={code}, response={message}"),
+            Self::Transport(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RegistrationPasswordError {}
 
 /// A friend relationship: the friend's account plus the relationship state and
 /// which side initiated it. `state` matches the proto `Friend.State` enum:
@@ -727,10 +890,29 @@ pub struct ApiChannelDesc {
     pub clan_name: String,
     #[serde(default)]
     pub channel_avatar: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub age_restricted: i32,
+    #[serde(default)]
+    pub e2ee: i32,
+    #[serde(default)]
+    pub app_id: i64,
 }
 
 fn default_channel_active() -> i32 {
     1
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateChannelDescParams {
+    pub channel_label: Option<String>,
+    pub category_id: i64,
+    pub topic: String,
+    pub age_restricted: i32,
+    pub e2ee: i32,
+    pub app_id: i64,
+    pub channel_avatar: Option<String>,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -767,6 +949,7 @@ pub struct ApiCategoryDesc {
 pub struct ApiVoiceChannelUser {
     pub channel_id: i64,
     pub user_ids: Vec<i64>,
+    pub share_screen_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -848,7 +1031,7 @@ impl ApiChannelAttachment {
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1269,7 +1452,7 @@ pub struct ApiEntityMention {
 }
 
 pub fn parse_message_mentions(bytes: &[u8]) -> Vec<ApiEntityMention> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1339,6 +1522,10 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
 /// decode as protobuf group tags, which is exactly the garbled
 /// "unexpected end group tag" / "buffer underflow" warnings seen in the field.
 /// Sniff and parse those as JSON before attempting a protobuf decode.
+fn blob_is_json_null(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| text.trim() == "null")
+}
+
 fn message_field_json(bytes: &[u8]) -> Option<serde_json::Value> {
     let text = std::str::from_utf8(bytes).ok()?;
     let trimmed = text.trim();
@@ -1377,12 +1564,6 @@ fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> 
                 return None;
             }
             let message_sender_id = json_field_i64(item, "message_sender_id");
-            if message_sender_id == 0 {
-                tracing::warn!(
-                    "dropping reference {message_ref_id}: message_sender_id is missing or malformed"
-                );
-                return None;
-            }
             let avatar = match item.get("message_sender_avatar") {
                 Some(serde_json::Value::String(raw)) => raw.clone(),
                 _ => json_field_string(item, "mesages_sender_avatar"),
@@ -1431,15 +1612,48 @@ fn parse_reactions_json_value(value: &serde_json::Value) -> Vec<ApiMessageReacti
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
         return parse_references_json_value(&value);
     }
-    match api::MessageRefList::decode(bytes) {
-        Ok(list) => list
-            .refs
+    if let Some(refs) = decode_message_ref_list(bytes) {
+        return refs;
+    }
+    if let Some(inner) = base64_blob(bytes) {
+        if let Some(value) = message_field_json(&inner) {
+            return parse_references_json_value(&value);
+        }
+        if let Some(refs) = decode_message_ref_list(&inner) {
+            return refs;
+        }
+    }
+    let salvaged = salvage_message_refs(bytes);
+    if !salvaged.is_empty() {
+        tracing::warn!(
+            "salvaged {} message reference(s) from a malformed blob ({} bytes)",
+            salvaged.len(),
+            bytes.len()
+        );
+        return salvaged;
+    }
+    tracing::warn!(
+        "failed to decode message references ({} bytes, leading bytes {}, utf8 {}, json {:?})",
+        bytes.len(),
+        blob_prefix(bytes),
+        std::str::from_utf8(bytes).is_ok(),
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .err()
+            .map(|e| e.to_string())
+    );
+    Vec::new()
+}
+
+fn decode_message_ref_list(bytes: &[u8]) -> Option<Vec<ApiMessageRef>> {
+    let list = api::MessageRefList::decode(bytes).ok()?;
+    Some(
+        list.refs
             .into_iter()
             .map(|r| ApiMessageRef {
                 message_ref_id: r.message_ref_id,
@@ -1452,14 +1666,86 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
                 message_sender_display_name: r.message_sender_display_name,
             })
             .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "failed to decode message references ({} bytes): {e}",
-                bytes.len()
-            );
-            Vec::new()
+    )
+}
+
+fn base64_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+    {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
+        .ok()
+}
+
+fn salvage_scalar(text: &str, key: &str) -> Option<String> {
+    let start = text.find(key)? + key.len();
+    let rest = text[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(rest.len());
+        if end == 0 {
+            None
+        } else {
+            Some(rest[..end].to_string())
         }
     }
+}
+
+fn salvage_message_refs(bytes: &[u8]) -> Vec<ApiMessageRef> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut refs = Vec::new();
+    for chunk in text.split("\"message_ref_id\"").skip(1) {
+        let chunk = format!("\"message_ref_id\"{chunk}");
+        let Some(id) = salvage_scalar(&chunk, "\"message_ref_id\"") else {
+            continue;
+        };
+        let Ok(message_ref_id) = id.parse::<i64>() else {
+            continue;
+        };
+        if message_ref_id == 0 {
+            continue;
+        }
+        refs.push(ApiMessageRef {
+            message_ref_id,
+            content: String::new(),
+            has_attachment: false,
+            message_sender_id: salvage_scalar(&chunk, "\"message_sender_id\"")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or_default(),
+            message_sender_username: salvage_scalar(&chunk, "\"message_sender_username\"")
+                .unwrap_or_default(),
+            message_sender_avatar: salvage_scalar(&chunk, "\"message_sender_avatar\"")
+                .or_else(|| salvage_scalar(&chunk, "\"mesages_sender_avatar\""))
+                .unwrap_or_default(),
+            message_sender_clan_nick: salvage_scalar(&chunk, "\"message_sender_clan_nick\"")
+                .unwrap_or_default(),
+            message_sender_display_name: salvage_scalar(&chunk, "\"message_sender_display_name\"")
+                .unwrap_or_default(),
+        });
+    }
+    refs
+}
+
+fn blob_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
@@ -1531,7 +1817,7 @@ fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) ->
 }
 
 fn parse_message_reactions(bytes: &[u8]) -> Vec<ApiMessageReaction> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1653,6 +1939,53 @@ mod opt_i32_flex {
             Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<i32>().ok()),
             _ => Ok(None),
         }
+    }
+}
+
+mod opt_f32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_f64().map(|v| v as f32)),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<f32>().ok()),
+            _ => Ok(None),
+        }
+    }
+}
+
+mod sprite_pool {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut flat = Vec::new();
+        let mut pools = Vec::new();
+        for item in items {
+            match item {
+                serde_json::Value::Array(frames) => pools.push(
+                    frames
+                        .iter()
+                        .filter_map(super::flex_string)
+                        .collect::<Vec<_>>(),
+                ),
+                other => flat.extend(super::flex_string(&other)),
+            }
+        }
+        if !flat.is_empty() {
+            pools.push(flat);
+        }
+        Ok(pools)
     }
 }
 
@@ -1785,23 +2118,23 @@ mod poll_answers {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedAuthor {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedThumbnail {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedImage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub width: Option<i32>,
@@ -1811,17 +2144,17 @@ pub struct ApiEmbedImage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedFooter {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedField {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub value: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub inline: bool,
@@ -1835,16 +2168,104 @@ pub struct ApiEmbedField {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiMessageInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub placeholder: Option<String>,
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
+    pub input_type: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub required: bool,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub textarea: bool,
-    #[serde(default, rename = "defaultValue")]
+    #[serde(
+        default,
+        rename = "defaultValue",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
     pub default_value: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiRadioOption {
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub label: String,
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub value: String,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub style: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiAnimationComponent {
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+    #[serde(default, deserialize_with = "sprite_pool::deserialize")]
+    pub pool: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "opt_f32_flex::deserialize")]
+    pub duration: Option<f32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub repeat: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub vertical: bool,
+    #[serde(
+        default,
+        rename = "isResult",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub is_result: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridItem {
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub width: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub height: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_col: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_row: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridComponent {
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    pub items: Vec<ApiGridItem>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiEmbedShapeWrapper {
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub component_type: Option<i32>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub component: ApiGridComponent,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub columns: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub rows: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1855,7 +2276,7 @@ pub struct ApiEmbedInputWrapper {
         deserialize_with = "opt_i32_flex::deserialize"
     )]
     pub component_type: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub id: Option<String>,
     #[serde(default)]
     pub component: serde_json::Value,
@@ -1867,21 +2288,21 @@ pub struct ApiEmbedInputWrapper {
 pub struct ApiEmbed {
     #[serde(default, deserialize_with = "embed_color::deserialize")]
     pub color: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
     #[serde(default)]
     pub author: Option<ApiEmbedAuthor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub description: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<ApiEmbedThumbnail>,
-    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    #[serde(default, deserialize_with = "embed_fields_lenient::deserialize")]
     pub fields: Vec<ApiEmbedField>,
     #[serde(default)]
     pub image: Option<ApiEmbedImage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub timestamp: Option<String>,
     #[serde(default)]
     pub footer: Option<ApiEmbedFooter>,
@@ -1901,15 +2322,15 @@ pub struct ApiSelectOption {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiButtonComponent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub label: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disable: bool,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub style: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon: Option<String>,
 }
 
@@ -1986,6 +2407,26 @@ mod opt_string_flex {
             .as_ref()
             .and_then(super::flex_string)
             .filter(|text| !text.is_empty()))
+    }
+}
+
+mod embed_fields_lenient {
+    use super::ApiEmbedField;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiEmbedField>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect())
     }
 }
 
@@ -2542,6 +2983,55 @@ struct MarkdownMatch {
     marker: usize,
 }
 
+pub const LINK_MARKDOWN_KIND: &str = "lk";
+pub const YOUTUBE_LINK_MARKDOWN_KIND: &str = "lk_yt";
+pub const FACEBOOK_LINK_MARKDOWN_KIND: &str = "lk_fb";
+pub const TIKTOK_LINK_MARKDOWN_KIND: &str = "lk_tt";
+
+static YOUTUBE_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:youtube\.com/(?:watch\?v=|embed/|v/|e/|shorts/)|youtu\.be/)")
+        .expect("static youtube link pattern")
+});
+// `\w`/`\d` are Unicode classes here but ASCII-only in JS, so the classes are spelled out to keep
+// this in step with mezon-react's getLinkType — a link this crate tags but the web client's own
+// regex rejects renders as a broken embed there.
+static FACEBOOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:facebook\.com/(?:reel/|watch\?v=|[0-9A-Za-z_.]+/videos/(?:[0-9A-Za-z_.]+/)?))[0-9A-Za-z_-]+",
+    )
+    .expect("static facebook link pattern")
+});
+static TIKTOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:tiktok\.com/@[^/]+/video/[0-9]+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
+    )
+    .expect("static tiktok link pattern")
+});
+
+pub fn link_markdown_kind(url: &str) -> &'static str {
+    if YOUTUBE_LINK.is_match(url) {
+        YOUTUBE_LINK_MARKDOWN_KIND
+    } else if FACEBOOK_LINK.is_match(url) {
+        FACEBOOK_LINK_MARKDOWN_KIND
+    } else if TIKTOK_LINK.is_match(url) {
+        TIKTOK_LINK_MARKDOWN_KIND
+    } else {
+        LINK_MARKDOWN_KIND
+    }
+}
+
+/// Every kind [`link_markdown_kind`] can return. Consumers that filter detected markdown down to
+/// links must use this instead of comparing against `"lk"`, or they silently drop social links.
+pub fn is_link_markdown_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        LINK_MARKDOWN_KIND
+            | YOUTUBE_LINK_MARKDOWN_KIND
+            | FACEBOOK_LINK_MARKDOWN_KIND
+            | TIKTOK_LINK_MARKDOWN_KIND
+    )
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -2583,8 +3073,9 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
                 j += 1;
             }
             if j > i + scheme {
+                let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
-                    kind: "lk",
+                    kind: link_markdown_kind(&url),
                     start: i,
                     end: j,
                     marker: 0,
@@ -3258,7 +3749,7 @@ impl MezonTransport {
         self.adapter.credential_rejected()
     }
 
-    pub fn renewed_tokens(&self) -> watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(&self) -> watch::Receiver<Option<RenewedTokens>> {
         self.renewed_tokens.subscribe()
     }
 
@@ -3267,13 +3758,13 @@ impl MezonTransport {
     async fn refresh_fallback_token(
         &self,
         stale: &HttpFallbackSession,
-    ) -> Result<Arc<HttpFallbackSession>> {
+    ) -> Result<(Arc<HttpFallbackSession>, String)> {
         let _guard = self.fallback_refresh_lock.lock().await;
         let current = self.http_fallback.read().clone();
         if let Some(current) = current
             && !current.token_expired()
         {
-            return Ok(current);
+            return Ok((current, String::new()));
         }
 
         let body = api::SessionRefreshRequest {
@@ -3347,14 +3838,18 @@ impl MezonTransport {
             server_key: stale.server_key.clone(),
         });
         *self.http_fallback.write() = Some(renewed.clone());
-        self.renewed_tokens
-            .send_replace(Some((session.token, session.refresh_token)));
+        self.renewed_tokens.send_replace(Some(RenewedTokens {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            id_token: session.id_token.clone(),
+        }));
         tracing::info!(
             target: "socket",
-            "api_http_token_renewed: jwt_valid_for={}s",
-            renewed.token_lifetime().0
+            "api_http_token_renewed: jwt_valid_for={}s id_token_renewed={}",
+            renewed.token_lifetime().0,
+            !session.id_token.is_empty()
         );
-        Ok(renewed)
+        Ok((renewed, session.id_token))
     }
 
     async fn send_api_request_over_http(&self, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
@@ -3372,6 +3867,7 @@ impl MezonTransport {
             self.refresh_fallback_token(&fallback)
                 .await
                 .context("could not renew the token for the HTTP fallback")?
+                .0
         } else {
             fallback
         };
@@ -3489,6 +3985,7 @@ impl MezonTransport {
             logo,
             status: user.status,
             user_status: user.user_status,
+            dob_seconds: user.dob_seconds,
         }
     }
 
@@ -3552,6 +4049,10 @@ impl MezonTransport {
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
             channel_avatar: channel.channel_avatar,
+            topic: channel.topic,
+            age_restricted: channel.age_restricted,
+            e2ee: channel.e2ee,
+            app_id: channel.app_id,
         }
     }
 
@@ -4007,7 +4508,7 @@ impl MezonTransport {
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
             clan_id,
-            limit: 500,
+            limit: CHANNEL_DESC_FETCH_LIMIT,
             state: 1,
             channel_type: 1,
             ..Default::default()
@@ -4159,7 +4660,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4189,13 +4692,15 @@ impl MezonTransport {
     }
 
     /// List messages belonging to a discussion topic. Mirrors mezon-js
-    /// `listChannelMessages(clanId, channelId, undefined, direction, limit, topicId)`:
-    /// the parent `channel_id` is passed with `message_id = 0` and the `topic_id` set.
+    /// `listChannelMessages(clanId, channelId, messageId, direction, limit, topicId)`:
+    /// the parent `channel_id` is passed with the `topic_id` set, and `message_id`
+    /// is the paging cursor (`0` for the newest page).
     pub async fn list_topic_messages(
         &self,
         clan_id: i64,
         channel_id: i64,
         topic_id: i64,
+        message_id: i64,
         direction: i32,
         limit: u32,
     ) -> Result<ListChannelMessagesResult> {
@@ -4205,14 +4710,16 @@ impl MezonTransport {
         let body = api::ListChannelMessagesRequest {
             clan_id,
             channel_id,
-            message_id: 0,
+            message_id,
             direction,
             limit: limit as i32,
             topic_id,
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4276,6 +4783,111 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_voice_reaction error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn forward_webrtc_signaling(
+        &self,
+        receiver_id: i64,
+        data_type: i32,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=WebrtcSignalingFwd cid={} data_type={data_type}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::WebrtcSignalingFwd(
+                realtime::WebrtcSignalingFwd {
+                    receiver_id,
+                    data_type,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("forward_webrtc_signaling error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn write_voice_interactive_event(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<Option<realtime::VoiceInteractiveEvent>> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=VoiceInteractiveEvent cid={} channel_id={voice_channel_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                realtime::VoiceInteractiveEvent {
+                    clan_id,
+                    voice_channel_id,
+                    sender_id,
+                    receiver_id,
+                    event_type,
+                    params,
+                },
+            )),
+        };
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            clan_id,
+            voice_channel_id,
+            event_type,
+            "sending VoiceInteractiveEvent"
+        );
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            code,
+            "received VoiceInteractiveEvent CID response"
+        );
+        if code != 0 {
+            anyhow::bail!("write_voice_interactive_event error: code={code}");
+        }
+        decode_voice_interactive_response(&response)
+    }
+
+    pub async fn make_call_push(
+        &self,
+        receiver_id: i64,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=IncomingCallPush cid={} channel_id={channel_id}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::IncomingCallPush(
+                realtime::IncomingCallPush {
+                    receiver_id,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("make_call_push error: code={code}");
         }
         Ok(())
     }
@@ -5041,6 +5653,11 @@ impl MezonTransport {
                     .iter()
                     .filter_map(|s| s.parse::<i64>().ok())
                     .collect(),
+                share_screen_ids: u
+                    .share_screen_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
             })
             .collect())
     }
@@ -5655,12 +6272,17 @@ impl MezonTransport {
     }
 
     /// List Sd Topics.
-    pub async fn list_sd_topic(&self, clan_id: i64, limit: i32) -> Result<api::SdTopicList> {
+    pub async fn list_sd_topic(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<api::SdTopicList> {
         let cid = self.generate_cid();
         let body = api::ListSdTopicRequest {
             clan_id,
             limit,
-            page: 1,
+            page: page.max(1),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListSdTopic", body).await?;
@@ -6399,13 +7021,13 @@ impl MezonTransport {
         Ok(Self::channel_desc_from_proto(channel))
     }
 
-    /// Delete a channel.
-    pub async fn delete_channel(&self, _channel_id: i64) -> Result<()> {
+    /// Delete a channel or thread.
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::DeleteChannelDescRequest {
-            channel_id: _channel_id,
-            ..Default::default()
+            clan_id,
+            channel_id,
         }
         .encode_to_vec();
 
@@ -6459,16 +7081,19 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelDescRequest {
             clan_id,
             channel_id,
-            channel_label,
-            channel_avatar,
-            ..Default::default()
+            channel_label: params.channel_label,
+            category_id: params.category_id,
+            app_id: params.app_id,
+            topic: params.topic,
+            age_restricted: params.age_restricted,
+            e2ee: params.e2ee,
+            channel_avatar: params.channel_avatar,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -6543,7 +7168,7 @@ impl MezonTransport {
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddChannelUsers", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -6563,7 +7188,7 @@ impl MezonTransport {
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7683,16 +8308,10 @@ impl MezonTransport {
     /// Create activity.
     pub async fn create_activiy(
         &self,
-        activity_name: &str,
-        activity_type: i32,
+        request: api::CreateActivityRequest,
     ) -> Result<api::UserActivity> {
         let cid = self.generate_cid();
-        let body = api::CreateActivityRequest {
-            activity_name: activity_name.to_string(),
-            activity_type,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateActiviy", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -7858,14 +8477,9 @@ impl MezonTransport {
     }
 
     /// Delete event.
-    pub async fn delete_event(&self, event_id: i64, clan_id: i64) -> Result<()> {
+    pub async fn delete_event(&self, request: api::DeleteEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::DeleteEventRequest {
-            event_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -7874,15 +8488,9 @@ impl MezonTransport {
     }
 
     /// Update event.
-    pub async fn update_event(&self, event_id: i64, clan_id: i64, title: &str) -> Result<()> {
+    pub async fn update_event(&self, request: api::UpdateEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateEventRequest {
-            event_id,
-            clan_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8414,13 +9022,13 @@ impl MezonTransport {
     }
 
     /// Create onboarding.
-    pub async fn create_onboarding(&self, clan_id: i64) -> Result<api::ListOnboardingResponse> {
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<api::OnboardingContent>,
+    ) -> Result<api::ListOnboardingResponse> {
         let cid = self.generate_cid();
-        let body = api::CreateOnboardingRequest {
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = api::CreateOnboardingRequest { clan_id, contents }.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateOnboarding", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8429,12 +9037,22 @@ impl MezonTransport {
     }
 
     /// Update onboarding.
-    pub async fn update_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: api::OnboardingContent,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateOnboardingRequest {
             id,
             clan_id,
-            ..Default::default()
+            task_type: content.task_type,
+            channel_id: content.channel_id,
+            title: content.title,
+            content: content.content,
+            image_url: content.image_url,
+            answers: content.answers,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateOnboarding", body).await?;
@@ -8619,18 +9237,26 @@ impl MezonTransport {
         Ok(api::MezonOauthClient::decode(response.as_slice())?)
     }
 
-    /// Add quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -8643,18 +9269,26 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Update quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -8734,6 +9368,40 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    pub async fn update_channel_message_structured(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mode: i32,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = realtime::ChannelMessageUpdate {
+            clan_id,
+            channel_id,
+            message_id,
+            content: content_json,
+            mode,
+            is_public: false,
+            hide_editted: true,
+            create_time_seconds,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "UpdateChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!(
+                "update_channel_message_structured error: code={}",
+                code
+            ));
         }
         Ok(())
     }
@@ -8971,6 +9639,7 @@ impl MezonTransport {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -8981,6 +9650,7 @@ impl MezonTransport {
             avatar_url: avatar_url.map(str::to_string),
             about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
+            dob_seconds: dob_seconds.unwrap_or_default(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -9065,6 +9735,35 @@ impl MezonTransport {
         })
     }
 
+    pub async fn registration_password(
+        &self,
+        req: api::RegistrationEmailRequest,
+    ) -> std::result::Result<ApiSession, RegistrationPasswordError> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "RegistrationEmail", body)
+            .await
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
+        if code != 0 {
+            if code == 3 {
+                return Err(RegistrationPasswordError::IncorrectCurrentPassword);
+            }
+            return Err(RegistrationPasswordError::Api {
+                code,
+                message: String::from_utf8_lossy(&response).into_owned(),
+            });
+        }
+        let session = api::Session::decode(response.as_slice())
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id,
+            session_id: session.session_id,
+        })
+    }
+
     /// Link email.
     pub async fn link_email(&self, req: api::AccountEmail) -> Result<ApiSession> {
         let cid = self.generate_cid();
@@ -9094,20 +9793,24 @@ impl MezonTransport {
     }
 
     /// Link SMS.
-    pub async fn link_sms(&self, req: api::AccountMezon) -> Result<ApiSession> {
+    pub async fn link_sms(
+        &self,
+        req: api::AccountMezon,
+    ) -> std::result::Result<api::LinkAccountConfirmRequest, LinkPhoneError> {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
-        let (code, response) = self.send_api_request(cid, "LinkSMS", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        let (code, response) = self
+            .send_api_request(cid, "LinkSMS", body)
+            .await
+            .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
+        if code == API_CODE_ALREADY_EXISTS {
+            return Err(LinkPhoneError::AlreadyLinked);
         }
-        let session = api::Session::decode(response.as_slice())?;
-        Ok(ApiSession {
-            token: session.token,
-            refresh_token: session.refresh_token,
-            user_id: session.user_id,
-            session_id: session.session_id,
-        })
+        if code != 0 {
+            return Err(LinkPhoneError::Api(code));
+        }
+        api::LinkAccountConfirmRequest::decode(response.as_slice())
+            .map_err(|error| LinkPhoneError::Transport(error.to_string()))
     }
 
     /// Unlink Mezon (SMS).
@@ -9216,6 +9919,144 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_gift_event_keeps_original_wire_fields() {
+        let payload = LegacyVoiceInteractiveEnvelope {
+            cid: 0,
+            voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                clan_id: 10,
+                voice_channel_id: 20,
+                user_id: 30,
+                event_type: 1,
+                params: "gift-data".to_string(),
+            }),
+        }
+        .encode_to_vec();
+        let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+        let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+        else {
+            panic!("voice interactive event");
+        };
+        assert_eq!(event.sender_id, 30);
+        assert_eq!(event.receiver_id, 0);
+        assert_eq!(event.event_type, 1);
+        assert_eq!(event.params, "gift-data");
+    }
+
+    #[test]
+    fn legacy_voice_interactive_accepts_supported_app_types() {
+        for event_type in [2, 10, 11, 12] {
+            let payload = LegacyVoiceInteractiveEnvelope {
+                cid: 0,
+                voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                    clan_id: 10,
+                    voice_channel_id: 20,
+                    user_id: 30,
+                    event_type,
+                    params: "event-data".to_string(),
+                }),
+            }
+            .encode_to_vec();
+            let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+            let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+            else {
+                panic!("voice interactive event");
+            };
+            assert_eq!(event.event_type, event_type);
+            assert_eq!(event.params, "event-data");
+        }
+    }
+
+    #[test]
+    fn voice_interactive_cid_response_returns_params() {
+        let expected = realtime::VoiceInteractiveEvent {
+            clan_id: 10,
+            voice_channel_id: 20,
+            sender_id: 30,
+            receiver_id: 30,
+            event_type: 10,
+            params: "signed-data".to_string(),
+        };
+        let decoded = decode_voice_interactive_response(&expected.encode_to_vec())
+            .expect("CID response")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                expected.clone(),
+            )),
+        };
+        let decoded = decode_voice_interactive_response(&envelope.encode_to_vec())
+            .expect("CID envelope")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        assert!(decode_voice_interactive_response(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn voice_interactive_cid_only_or_invalid_payload_is_no_event() {
+        let cid_only = realtime::Envelope {
+            cid: 7,
+            message: None,
+        }
+        .encode_to_vec();
+        assert!(
+            decode_voice_interactive_response(&cid_only)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(&[0x08, 0x07])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(b"not protobuf")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_null_blob_is_no_data_not_a_decode_error() {
+        let null = b"null";
+        assert!(blob_is_json_null(null));
+        assert!(parse_message_reactions(null).is_empty());
+        assert!(parse_message_references(null).is_empty());
+        assert!(parse_message_mentions(null).is_empty());
+        assert!(parse_message_attachments(null).is_empty());
+        assert!(blob_is_json_null(b"  null\n"));
+        assert!(!blob_is_json_null(b"[]"));
+        assert!(!blob_is_json_null(b"nullish"));
+    }
+
+    #[test]
+    fn a_reference_without_a_sender_id_is_kept() {
+        let value = serde_json::json!([{
+            "message_ref_id": 1840651252770279424i64,
+            "content": "{\"t\":\"quoted body\"}",
+            "message_sender_username": "huy.lexuan",
+        }]);
+        let refs = parse_references_json_value(&value);
+        assert_eq!(
+            refs.len(),
+            1,
+            "React's MessageReply gates only on message_ref_id and renders \
+             message_sender_id 0 with the default avatar, so dropping the whole \
+             reference loses a quote the web app still shows"
+        );
+        assert_eq!(refs[0].message_sender_id, 0);
+        assert_eq!(refs[0].message_sender_username, "huy.lexuan");
+        assert_eq!(refs[0].content, "{\"t\":\"quoted body\"}");
+    }
+
+    #[test]
+    fn a_reference_without_a_ref_id_is_still_dropped() {
+        let value = serde_json::json!([{ "content": "orphan", "message_sender_id": 42 }]);
+        assert!(parse_references_json_value(&value).is_empty());
+    }
 
     #[test]
     fn envelope_cid_last_moves_cid_after_empty_submessage() {
@@ -9873,6 +10714,49 @@ mod tests {
     }
 
     #[test]
+    fn detect_markdown_tags_social_links_by_platform() {
+        assert_eq!(
+            detect_markdown("https://www.youtube.com/watch?v=lHW3fsJQ1sg"),
+            vec![md("lk_yt", 0, 43)]
+        );
+        assert_eq!(
+            detect_markdown("https://youtu.be/abc"),
+            vec![md("lk_yt", 0, 20)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.tiktok.com/@user/video/123"),
+            vec![md("lk_tt", 0, 38)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.facebook.com/reel/456"),
+            vec![md("lk_fb", 0, 33)]
+        );
+        assert_eq!(detect_markdown("https://a.com"), vec![md("lk", 0, 13)]);
+    }
+
+    #[test]
+    fn link_markdown_kind_matches_js_ascii_classes() {
+        // mezon-react's getLinkType uses JS `\w`/`\d`, which are ASCII-only. Tagging a link the
+        // web client's own regex then fails to expand leaves it with a broken embed there.
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/José/videos/abc"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/jose/videos/abc"),
+            "lk_fb"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/١٢٣"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/123"),
+            "lk_tt"
+        );
+    }
+
+    #[test]
     fn detect_markdown_link_inside_code_block_is_not_separately_detected() {
         assert_eq!(
             detect_markdown("```http://x.com```"),
@@ -10226,6 +11110,35 @@ mod tests {
             Some(&1),
             "an expired token must be renewed before the send"
         );
+    }
+
+    #[tokio::test]
+    async fn message_fetches_fall_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let channel_page = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap();
+        let topic_page = t.list_topic_messages(1, 2, 3, 0, 3, 50).await.unwrap();
+
+        assert!(channel_page.messages.is_empty());
+        assert!(topic_page.messages.is_empty());
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/ListChannelMessages"), Some(&2));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn message_fetch_keeps_using_an_open_socket() {
+        let (port, hits) = fake_api().await;
+        let t = transport(false);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let error = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap_err();
+
+        assert!(error.to_string().contains("mock send failed"));
+        assert!(hits.lock().is_empty());
     }
 
     /// A burst of sends must share one refresh, not spend the refresh token once per message.

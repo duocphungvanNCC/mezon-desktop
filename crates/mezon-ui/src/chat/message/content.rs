@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit, Pixels,
-    SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
+    AnyElement, App, Bounds, Entity, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit,
+    Pixels, SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
     prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
@@ -23,7 +23,8 @@ use super::selection::{
 };
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{CopyButton, Icon, IconName};
+use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
@@ -36,8 +37,19 @@ const YOUTUBE_ACCENT: u32 = 0xff_00_1f;
 const TIKTOK_ACCENT: u32 = 0xff_00_50;
 const FACEBOOK_ACCENT: u32 = 0x18_77_f2;
 const SOCIAL_CARD_BG: u32 = 0x2b_2d_31;
+const SOCIAL_POSTER_BG: u32 = 0x1e_1f_22;
+const SOCIAL_CARD_WIDTH: f32 = 400.;
+const SOCIAL_CARD_PADDING: f32 = 16.;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
+
+/// The image proxy is asked for the emoji at the size it will actually be
+/// painted on a 2x display. An atlas tile smaller than its box is magnified
+/// with a linear filter across a gutterless atlas, which samples the
+/// neighbouring tile -- the next animation frame -- into the emoji's edges.
+fn emoji_source_px(size: Pixels) -> u32 {
+    (f32::from(size) * 2.0).round().max(1.0) as u32
+}
 pub(crate) const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
 pub(crate) const ATTACHMENT_PLACEHOLDER: char = '\u{fffc}';
 const RICH_TEXT_PLAN_LIMIT: usize = 512;
@@ -177,7 +189,7 @@ fn render_message_content_with_options(
         );
     }
     let mut row = rich_content_row(body_color, options.inline);
-    let mut link_key = 0usize;
+    let mut span_key = 0usize;
     match msg
         .rich_layout
         .as_deref()
@@ -194,14 +206,14 @@ fn render_message_content_with_options(
                         ctx,
                         body_color,
                         emoji_size,
-                        &mut link_key,
+                        &mut span_key,
                     ),
                 };
             }
         }
         None => {
             for span in &msg.spans {
-                row = append_span(row, span, ctx, body_color, emoji_size, &mut link_key);
+                row = append_span(row, span, ctx, body_color, emoji_size, &mut span_key);
             }
         }
     }
@@ -565,13 +577,13 @@ fn render_mention_only_content(
         return div().into_any_element();
     }
     let mut row = rich_content_row(body_color, inline);
-    let mut link_key = 0usize;
+    let mut span_key = 0usize;
     for span in msg
         .spans
         .iter()
         .filter(|s| matches!(s, MessageSpan::Mention { .. }))
     {
-        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE), &mut link_key);
+        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE), &mut span_key);
     }
     if msg.is_edited {
         row = row.child(edited_marker(ctx.theme, ctx.locale));
@@ -697,7 +709,7 @@ fn render_selectable_segmented_spans(
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
                 row = row.child(SelectableRegion::new(
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size),
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -749,7 +761,11 @@ fn render_selectable_segmented_spans(
                 );
                 base = end;
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
@@ -766,7 +782,12 @@ fn render_selectable_segmented_spans(
                         .bg(ctx.theme.tokens.bg_markdown_code)
                         .text_size(px(14.))
                         .text_color(ctx.theme.tokens.text_theme_message)
-                        .child(styled),
+                        .child(styled)
+                        .child(code_block_copy_overlay(
+                            SharedString::from(format!("code-copy-{}-{base}", msg.row_anchor_id.0)),
+                            fenced_source.clone(),
+                            ctx.theme,
+                        )),
                 );
                 base = end;
             }
@@ -843,18 +864,20 @@ fn render_selectable_segmented_spans(
                         url_row = url_row.child(styled);
                         part_base += part.len();
                     }
-                    url_col = url_col.child(if line.trim().is_empty() {
-                        empty_text_line()
-                    } else {
-                        url_row
-                    });
+                    url_col = url_col.child(url_row);
                     line_base += line.len() + 1;
                 }
+                let card_key = link_part_index;
+                link_part_index += 1;
+                let poster = social_poster(*kind, resolved.as_ref())
+                    .map(|poster| (poster, ctx.social_cache.clone()));
                 row = row.child(render_social_link_card(
                     *kind,
                     &ctx.selection,
                     resolved,
+                    card_key,
                     url_col,
+                    poster,
                 ));
                 base += text.len();
             }
@@ -1090,6 +1113,18 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+pub(crate) fn code_block_copy_overlay(
+    id: impl Into<gpui::ElementId>,
+    text: SharedString,
+    theme: &Theme,
+) -> gpui::Div {
+    let overlay = div().absolute().top(px(8.)).right(px(8.));
+    if text.is_empty() {
+        return overlay;
+    }
+    overlay.child(CopyButton::new(id, text, theme.tokens.text_theme_message))
 }
 
 fn append_selectable_section(text: &mut String, section: &str) {
@@ -1401,10 +1436,6 @@ pub(crate) enum CachedSelectableTextPiece {
     LineBreak,
 }
 
-fn empty_text_line() -> gpui::Div {
-    div().w_full().h(rems(1.375))
-}
-
 fn memoized_selectable_text_pieces(
     text: &SharedString,
     ctx: &RowCtx,
@@ -1624,7 +1655,7 @@ fn append_span(
     ctx: &RowCtx,
     body_color: gpui::Rgba,
     emoji_size: Pixels,
-    link_key: &mut usize,
+    span_key: &mut usize,
 ) -> gpui::Div {
     let theme = ctx.theme;
     match span {
@@ -1669,16 +1700,20 @@ fn append_span(
                 .child(text.clone()),
         ),
         MessageSpan::Link { text, url, kind } if *kind != LinkKind::Plain => {
+            let key = *span_key;
+            *span_key += 1;
             row.child(render_social_link_card(
                 *kind,
                 &ctx.selection,
                 SharedString::from(resolve_link_url(url, text)),
+                key,
                 render_social_link_url_row(text, theme),
+                None,
             ))
         }
         MessageSpan::Link { text, url, .. } => {
-            let key = *link_key;
-            *link_key += 1;
+            let key = *span_key;
+            *span_key += 1;
             row.child(message_link_element(
                 text,
                 &resolve_link_url(url, text),
@@ -1708,9 +1743,13 @@ fn append_span(
             name,
             emoji_id,
             src,
-        } => row.child(render_emoji_span(
-            name, emoji_id, src, body_color, ctx, emoji_size,
-        )),
+        } => {
+            let key = *span_key;
+            *span_key += 1;
+            row.child(render_emoji_span(
+                name, emoji_id, src, body_color, ctx, emoji_size, key,
+            ))
+        }
         MessageSpan::Canvas { title, .. } => row.child(render_canvas_chip(title.clone())),
         MessageSpan::Heading { level, text } => row.child(render_heading(*level, text.clone())),
     }
@@ -1807,52 +1846,148 @@ fn render_social_link_url_row(text: &SharedString, theme: &Theme) -> AnyElement 
         .into_any_element()
 }
 
+struct SocialPoster {
+    source: SharedString,
+    width: f32,
+    height: f32,
+}
+
+fn social_poster(kind: LinkKind, url: &str) -> Option<SocialPoster> {
+    match kind {
+        LinkKind::YouTube => {
+            let video_id = mezon_client::social::youtube_video_id(url)?;
+            let (width, height) = if mezon_client::social::is_youtube_shorts(url) {
+                (169., 300.)
+            } else {
+                (400., 225.)
+            };
+            Some(SocialPoster {
+                source: mezon_client::social::youtube_poster_url(video_id).into(),
+                width,
+                height,
+            })
+        }
+        LinkKind::TikTok => Some(SocialPoster {
+            source: SharedString::from(url.to_string()),
+            width: 253.,
+            height: 450.,
+        }),
+        LinkKind::Facebook | LinkKind::Plain => None,
+    }
+}
+
+fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .max_w(px(poster.width))
+        .h(px(poster.height))
+        .flex_shrink_0()
+        .mt_1()
+        .rounded(px(8.))
+        .overflow_hidden()
+        .bg(rgb(SOCIAL_POSTER_BG))
+        .image_cache(cache)
+        .child(
+            div().absolute().inset_0().overflow_hidden().child(
+                img(poster.source)
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(|| div().w_full().h_full().into_any_element()),
+            ),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(48.))
+                        .rounded_full()
+                        .bg(gpui::Rgba {
+                            r: 0.,
+                            g: 0.,
+                            b: 0.,
+                            a: 0.5,
+                        })
+                        .child(
+                            Icon::new(IconName::PlayButton)
+                                .size(px(20.))
+                                .text_color(gpui::white()),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
 fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
     resolved: SharedString,
+    // Keyed by position, not by url: the same social link twice in one message would otherwise
+    // hash to one id and the two cards would share their interactive state.
+    key: usize,
     url_row: impl IntoElement,
+    poster: Option<(SocialPoster, Entity<LruImageCache>)>,
 ) -> AnyElement {
     let (accent, label) = match kind {
         LinkKind::YouTube => (YOUTUBE_ACCENT, "YouTube"),
         LinkKind::Facebook => (FACEBOOK_ACCENT, "Facebook"),
         LinkKind::TikTok => (TIKTOK_ACCENT, "TikTok"),
-        LinkKind::Plain => (SOCIAL_CARD_BG, ""),
+        LinkKind::Plain => return gpui::Empty.into_any_element(),
     };
-    let id = hashed_element_id("msg-social", &resolved);
+    let id = ("msg-social", key);
     let selection = selection.clone();
+    let card_width = poster.as_ref().map_or(SOCIAL_CARD_WIDTH, |(poster, _)| {
+        (poster.width + SOCIAL_CARD_PADDING * 2.).max(SOCIAL_CARD_WIDTH)
+    });
     div()
-        .id(id)
         .flex()
-        .flex_col()
-        .gap_1()
-        .when(kind != LinkKind::Plain, |card| {
-            card.flex_basis(relative(1.))
-        })
+        .flex_row()
+        .flex_basis(relative(1.))
         .w_full()
         .min_w_0()
-        .max_w(px(400.))
-        .my_1()
-        .p(px(16.))
-        .rounded(px(4.))
-        .border_l_4()
-        .border_color(rgb(accent))
-        .bg(rgb(SOCIAL_CARD_BG))
-        .overflow_hidden()
-        .cursor_pointer()
-        .on_click(move |_, _, cx| {
-            if !selection.borrow().has_selection() {
-                open_message_link(resolved.to_string(), cx);
-            }
-        })
         .child(
             div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(accent))
-                .child(label),
+                .id(id)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w_0()
+                .max_w(px(card_width))
+                .my_1()
+                .p(px(SOCIAL_CARD_PADDING))
+                .rounded(px(4.))
+                .border_l_4()
+                .border_color(rgb(accent))
+                .bg(rgb(SOCIAL_CARD_BG))
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    if !selection.borrow().has_selection() {
+                        PlatformStore::open_app_window(resolved.to_string(), cx);
+                    }
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(accent))
+                        .child(label),
+                )
+                .child(url_row)
+                .when_some(poster, |card, (poster, cache)| {
+                    card.child(render_social_poster(poster, cache))
+                }),
         )
-        .child(url_row)
         .into_any_element()
 }
 
@@ -1863,9 +1998,10 @@ fn render_emoji_span(
     body_color: gpui::Rgba,
     ctx: &RowCtx,
     size: Pixels,
+    key: usize,
 ) -> AnyElement {
     let src: SharedString = if precomputed_src.is_empty() {
-        crate::util::imgproxy::emoji_url(ctx.app, emoji_id).into()
+        crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
     } else {
         precomputed_src.clone()
     };
@@ -1881,6 +2017,7 @@ fn render_emoji_span(
         .image_cache(ctx.icon_cache.clone())
         .child(
             img(src)
+                .id(("msg-emoji-frames", key))
                 .size(size)
                 .object_fit(ObjectFit::Contain)
                 .with_fallback(super::reaction_detail::emoji_error_fallback(
@@ -2094,7 +2231,7 @@ fn hashtag_chip_for(
     }
     if parsed_channel.is_some() {
         return HashtagChip {
-            label: SharedString::new_static(mezon_i18n::t(locale, "message.noAccess")),
+            label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
             icon: IconName::LockedPrivate,
             italic: false,
             channel_id: None,
@@ -2255,7 +2392,13 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
         .borrow_mut()
         .registry
         .insert(msg.id, inline.text_layout());
-    Some(inline.into_any_element())
+    Some(
+        div()
+            .max_w_full()
+            .min_w_0()
+            .child(inline)
+            .into_any_element(),
+    )
 }
 
 fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
@@ -2895,10 +3038,10 @@ mod hashtag_label_tests {
     }
 
     #[test]
-    fn inaccessible_channel_shows_no_access() {
+    fn inaccessible_channel_shows_private_channel() {
         let chip = chip("#secret", Some(999), None);
 
-        assert_eq!(chip.label, "No Access");
+        assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
         assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
     }

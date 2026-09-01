@@ -42,14 +42,21 @@ impl ClanLoadScheduler {
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(active) = event {
-                match active {
+        let clan_sub = cx.subscribe(
+            &ClanList::global(cx),
+            |this, _clan, event, cx| match event {
+                ClanEvent::ActiveClanChanged(active) => match active {
                     Some(clan_id) => this.start(*clan_id, cx),
                     None => this.reset(cx),
+                },
+                ClanEvent::Joined(clan_id) => {
+                    if ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id) {
+                        this.start(*clan_id, cx);
+                    }
                 }
-            }
-        });
+                ClanEvent::Deleted(_) | ClanEvent::OwnerChanged { .. } => {}
+            },
+        );
 
         Self {
             generation: 0,
@@ -77,6 +84,19 @@ impl ClanLoadScheduler {
                 ChannelList::global(cx)
                     .update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
             });
+
+            // The gate: `clan_join` fans out to the clan's private channels and
+            // threads only if the gateway already has the channel listing cached
+            // for this user, so it has to follow the structure fetch, never race
+            // it. See `ChannelList::ensure_clan_joined`.
+            cx.update(|cx| {
+                ChannelList::global(cx)
+                    .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+            })
+            .await;
+            if !is_current(&this, cx, generation) {
+                return;
+            }
 
             cx.update(|cx| {
                 ChannelList::global(cx).update(cx, |channels, cx| channels.seed_badges(clan_id, cx))

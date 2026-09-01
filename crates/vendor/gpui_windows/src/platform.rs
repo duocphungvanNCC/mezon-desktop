@@ -65,13 +65,14 @@ pub(crate) struct WindowsPlatformState {
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with each window so `WM_SETCURSOR` can read it directly.
     pub(crate) cursor_visible: Arc<AtomicBool>,
+    pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
 #[derive(Default)]
 struct PlatformCallbacks {
     open_urls: Cell<Option<Box<dyn FnMut(Vec<String>)>>>,
-    quit: Cell<Option<Box<dyn FnMut()>>>,
+    quit: Cell<Option<Box<dyn FnMut() -> bool>>>,
     reopen: Cell<Option<Box<dyn FnMut()>>>,
     app_menu_action: Cell<Option<Box<dyn FnMut(&dyn Action)>>>,
     will_open_app_menu: Cell<Option<Box<dyn FnMut()>>>,
@@ -90,6 +91,7 @@ impl WindowsPlatformState {
             jump_list: RefCell::new(jump_list),
             current_cursor: Cell::new(current_cursor),
             cursor_visible: Arc::new(AtomicBool::new(true)),
+            draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
         }
@@ -230,6 +232,7 @@ impl WindowsPlatform {
             disable_direct_composition: self.disable_direct_composition,
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
+            draw_coordinator: self.inner.state.draw_coordinator.clone(),
         }
     }
 
@@ -292,6 +295,18 @@ impl WindowsPlatform {
             .iter()
             .find(|hwnd| hwnd.as_raw() == active_window_hwnd)
             .map(|hwnd| hwnd.as_raw())
+    }
+
+    /// A shell dialog with no owner can come up *behind* the app, which reads to
+    /// the user as "the dialog never opened". Fall back to any window we own so
+    /// it is always modal to something visible.
+    fn dialog_owner_window(&self) -> Option<HWND> {
+        self.find_current_active_window().or_else(|| {
+            self.raw_window_handles
+                .read()
+                .first()
+                .map(|hwnd| hwnd.as_raw())
+        })
     }
 
     fn begin_vsync_thread(&self) {
@@ -560,7 +575,7 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
+        let window = self.dialog_owner_window();
         self.foreground_executor()
             .spawn(async move {
                 let _ = tx.send(file_open_dialog(options, window));
@@ -578,7 +593,7 @@ impl Platform for WindowsPlatform {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
+        let window = self.dialog_owner_window();
         self.foreground_executor()
             .spawn(async move {
                 let _ = tx.send(file_save_dialog(directory, suggested_name, window));
@@ -621,7 +636,7 @@ impl Platform for WindowsPlatform {
             .detach();
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.inner.state.callbacks.quit.set(Some(callback));
     }
 
@@ -882,7 +897,8 @@ impl WindowsPlatformInner {
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+            | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             _ => None,
         };
         if let Some(result) = handled {
@@ -906,8 +922,24 @@ impl WindowsPlatformInner {
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
         }
+    }
+
+    fn handle_end_session(&self) -> Option<isize> {
+        let mut shutdown_completed = false;
+        self.with_callback(
+            |callbacks| &callbacks.quit,
+            |callback| shutdown_completed = callback(),
+        );
+        log::logger().flush();
+        if shutdown_completed {
+            std::process::exit(0);
+        }
+
+        unsafe { PostQuitMessage(0) };
+        Some(0)
     }
 
     fn close_one_window(&self, target_window: HWND) -> bool {
@@ -1060,6 +1092,7 @@ pub(crate) struct WindowCreationInfo {
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
     pub(crate) invalidate_devices: Arc<AtomicBool>,
+    pub(crate) draw_coordinator: Rc<DrawCoordinator>,
 }
 
 struct PlatformWindowCreateContext {
@@ -1135,6 +1168,17 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
     })
 }
 
+/// `IFileDialog::Show` reports a cancelled dialog as `ERROR_CANCELLED`. Every
+/// other failure means the dialog never came up, and reporting that as a cancel
+/// leaves the caller silently doing nothing at all.
+fn dialog_cancelled(error: windows::core::Error) -> Result<()> {
+    if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+        Ok(())
+    } else {
+        Err(error).context("failed to show the file dialog")
+    }
+}
+
 fn file_open_dialog(
     options: PathPromptOptions,
     window: Option<HWND>,
@@ -1158,9 +1202,8 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
-        if folder_dialog.Show(window).is_err() {
-            // User cancelled
-            return Ok(None);
+        if let Err(error) = folder_dialog.Show(window) {
+            return dialog_cancelled(error).map(|()| None);
         }
     }
 
@@ -1218,9 +1261,8 @@ fn file_save_dialog(
             pszName: windows::core::w!("All files"),
             pszSpec: windows::core::w!("*.*"),
         }])?;
-        if dialog.Show(window).is_err() {
-            // User cancelled
-            return Ok(None);
+        if let Err(error) = dialog.Show(window) {
+            return dialog_cancelled(error).map(|()| None);
         }
     }
     let shell_item = unsafe { dialog.GetResult()? };

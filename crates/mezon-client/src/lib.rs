@@ -17,6 +17,7 @@ pub mod ogp;
 pub mod search_message;
 pub mod server_clock;
 pub mod session;
+pub mod social;
 pub mod tls_crypto;
 pub mod transport;
 pub mod transport_adapter;
@@ -24,12 +25,12 @@ pub mod transport_runtime;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment,
-    sanitize_upload_filename,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, PresignedAttachment, UploadFile,
+    UploadThumbnail, UrlAttachment, sanitize_upload_filename,
 };
 pub use attachment_download::{
-    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
-    write_bytes_to_downloads,
+    clean_download_url, download_url_to_downloads, reserve_path_in, resolve_download_filename,
+    sanitize_filename, unique_path_in, write_bytes_to_downloads,
 };
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
@@ -41,7 +42,7 @@ pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
     INBOX_PAGE_LIMIT, InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification,
     MarkedInboxMessageInput, TopicDiscussion, TopicReplyPreview, attachment_link_is_image,
-    display_text_from_message_content, inbox_notification_from_api,
+    attachment_link_is_video, display_text_from_message_content, inbox_notification_from_api,
     inbox_notification_from_marked_message, inbox_notification_from_marked_message_local,
     inbox_notifications_from_list, is_pending_inbox_notification_id, message_content_is_attachment,
     pending_inbox_notification_id, topic_discussion_from_api, topic_reply_preview,
@@ -65,15 +66,17 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::Session;
+pub use session::{Session, jwt_expires_at};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
-    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, HttpFallbackSession,
-    api_status_from_error, is_channel_limit_api_error, parse_search_attachment_field,
-    parse_search_mentions_field,
+    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
+    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, TIKTOK_LINK_MARKDOWN_KIND,
+    UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error,
+    is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
+    parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

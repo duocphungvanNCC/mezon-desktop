@@ -6,13 +6,15 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, InVoiceInfo, PinnedMessagesStore, Settings,
-    StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, FriendEvent, FriendStore,
+    InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
+use crate::chat::call_actions::call_current_dm;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
@@ -40,11 +42,15 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    pub blocked_by_me: bool,
+    /// Peer presence for a 1:1 DM; always `None` for a group.
+    pub presence: DmAvatarPresence,
     pub label: SharedString,
     pub avatar_src: SharedString,
     pub avatar_raw: SharedString,
     pub members_text: Option<SharedString>,
     pub edit_tooltip: SharedString,
+    pub add_members_tooltip: SharedString,
     pub locale: SharedString,
 }
 
@@ -240,7 +246,7 @@ impl ChannelHeader {
     pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
-        let icon_color = theme.text_muted;
+        let icon_color = theme.tokens.bg_icon_theme;
         let icon_active = theme.text_primary;
         let bell_icon = if self.muted {
             IconName::MuteBell
@@ -257,12 +263,22 @@ impl ChannelHeader {
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
-        let dm_actions: &[(&str, IconName)] = &[
-            ("hdr-members", IconName::MemberList),
-            ("hdr-pin", IconName::PinRight),
-        ];
+        let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
+        let dm_one_to_one_blocked = self
+            .dm_header
+            .as_ref()
+            .is_some_and(|info| !info.is_group && info.blocked_by_me);
         let actions: Vec<(&str, IconName)> = if self.dm {
-            dm_actions.to_vec()
+            let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
+            if dm_one_to_one && !dm_one_to_one_blocked {
+                items.push(("hdr-call", IconName::IconPhoneDM));
+                items.push(("hdr-video-call", IconName::IconMeetDM));
+            }
+            if !dm_one_to_one_blocked {
+                items.push(("hdr-members", IconName::MemberList));
+            }
+            items.push(("hdr-pin", IconName::PinRight));
+            items
         } else {
             channel_only_actions.to_vec()
         };
@@ -306,7 +322,11 @@ impl ChannelHeader {
         } else {
             None
         };
-        let buttons = Self::build_action_buttons(
+        let add_members_button = dm_header
+            .as_ref()
+            .filter(|info| info.is_group)
+            .map(|info| Self::render_add_members_button(info, icon_color, bg_hover));
+        let mut buttons = Self::build_action_buttons(
             actions,
             theme,
             icon_color,
@@ -331,6 +351,9 @@ impl ChannelHeader {
             notification_trigger,
             cx,
         );
+        if let Some(button) = add_members_button {
+            buttons.insert(0, button);
+        }
 
         div()
             .flex()
@@ -376,7 +399,16 @@ impl ChannelHeader {
                         } else if !info.avatar_raw.is_empty() {
                             avatar = avatar.src(info.avatar_raw.clone());
                         }
-                        avatar
+                        div()
+                            .relative()
+                            .flex_shrink_0()
+                            .size(px(32.))
+                            .child(avatar)
+                            .children(crate::util::user_status::presence_badge_element(
+                                info.presence,
+                                theme.bg_primary,
+                                theme,
+                            ))
                     }))
                     .child({
                         let name_el = div()
@@ -469,6 +501,10 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(
                 div()
+                    .relative()
+                    .children(crate::tour::probe(
+                        crate::tour::TourAnchor::ChannelHeaderTools,
+                    ))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -525,6 +561,37 @@ impl ChannelHeader {
             on_toggle_timeline: None,
         };
         header.render_inbox_button(theme, cx)
+    }
+
+    fn render_add_members_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+    ) -> AnyElement {
+        let tooltip = info.add_members_tooltip.clone();
+        let channel_id = info.channel_id;
+        let locale = info.locale.clone();
+        div()
+            .id("hdr-add-members")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(tooltip))
+            .occlude()
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(icon_color),
+            )
+            .on_click(move |_, window, cx| {
+                AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
+            })
+            .into_any_element()
     }
 
     fn build_action_buttons(
@@ -620,6 +687,30 @@ impl ChannelHeader {
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
+            if id == "hdr-call" || id == "hdr-video-call" {
+                let video = id == "hdr-video-call";
+                let tooltip = if video {
+                    "Start video call"
+                } else {
+                    "Start voice call"
+                };
+                let button = div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(bg_hover))
+                    .tooltip(Tooltip::text(tooltip))
+                    .occlude()
+                    .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
+                    .on_click(move |_, _, cx| call_current_dm(video, cx));
+                buttons.push(button.into_any_element());
+                continue;
+            }
             if id == "hdr-timeline" {
                 if !timeline_action {
                     continue;
@@ -870,6 +961,17 @@ impl ChannelHeader {
     }
 }
 
+/// The DM peer's badge, matching the sidebar row: the live presence, with the
+/// DM list's `online` flag only bootstrapping it until presence is known.
+/// Groups never carry one.
+fn dm_peer_presence(dm: &mezon_store::DirectChannel, cx: &App) -> DmAvatarPresence {
+    dm.peer_user_id
+        .filter(|_| dm.kind != DirectKind::Group)
+        .zip(mezon_store::PresenceStore::try_global(cx))
+        .map(|(user_id, presence)| presence.read(cx).dm_avatar_presence(user_id, dm.online))
+        .unwrap_or(DmAvatarPresence::None)
+}
+
 pub struct ChatHeader {
     name: SharedString,
     icon: Option<ChannelIcon>,
@@ -900,7 +1002,9 @@ pub struct ChatHeader {
     _notification_observe: Subscription,
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
+    _friend_subscribe: Subscription,
     _group_members_observe: Subscription,
+    _presence_subscribe: Subscription,
 }
 
 impl ChatHeader {
@@ -921,9 +1025,26 @@ impl ChatHeader {
         let _direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
             this.refresh_dm_header(cx)
         });
+        let _friend_subscribe = cx.subscribe(
+            &FriendStore::global(cx),
+            |this, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.refresh_dm_header(cx);
+                }
+            },
+        );
         let _group_members_observe = cx.observe(
             &mezon_store::GroupMembersStore::global(cx),
             |this, _, cx| this.refresh_dm_header(cx),
+        );
+        // Only the status event: presence also notifies on every typing tick.
+        let _presence_subscribe = cx.subscribe(
+            &mezon_store::PresenceStore::global(cx),
+            |this, _, event, cx| {
+                if matches!(event, mezon_store::PresenceEvent::StatusChanged) {
+                    this.refresh_dm_presence(cx);
+                }
+            },
         );
         Self {
             name: SharedString::default(),
@@ -953,7 +1074,9 @@ impl ChatHeader {
             _notification_observe,
             _pinned_observe,
             _direct_observe,
+            _friend_subscribe,
             _group_members_observe,
+            _presence_subscribe,
         }
     }
 
@@ -971,6 +1094,12 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
+            !is_group
+                && FriendStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
+        let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
             String::new()
         } else {
@@ -994,12 +1123,17 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            blocked_by_me,
+            presence,
             label: SharedString::from(dm.label.clone()),
             avatar_src: SharedString::from(avatar_src),
             avatar_raw: SharedString::from(dm.avatar.clone()),
             members_text,
             edit_tooltip: SharedString::from(
                 mezon_i18n::t(locale, "channelTopbar.tooltips.clickToEdit").to_string(),
+            ),
+            add_members_tooltip: SharedString::from(
+                mezon_i18n::t(locale, "channelTopbar.tooltips.addFriendsToDM").to_string(),
             ),
             locale: SharedString::from(locale.to_string()),
         })
@@ -1014,6 +1148,33 @@ impl ChatHeader {
         };
         self.dm_header.as_ref().map(|info| info.channel_id) == route_id
             && self.locale.as_deref() == locale
+    }
+
+    /// Presence-only refresh. The status tick fires for every peer the app
+    /// tracks, so it patches the cached block's badge in place instead of
+    /// rebuilding it -- a hash lookup rather than a fresh set of strings.
+    fn refresh_dm_presence(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self
+            .dm_header
+            .as_ref()
+            .filter(|info| !info.is_group)
+            .map(|info| info.channel_id)
+        else {
+            return;
+        };
+        let next = DirectMessageStore::try_global(cx)
+            .and_then(|store| {
+                let store = store.read(cx);
+                let dm = store.find(channel_id)?;
+                Some(dm_peer_presence(dm, cx))
+            })
+            .unwrap_or(DmAvatarPresence::None);
+        if let Some(info) = self.dm_header.as_mut()
+            && info.presence != next
+        {
+            info.presence = next;
+            cx.notify();
+        }
     }
 
     fn refresh_dm_header(&mut self, cx: &mut Context<Self>) {
@@ -1383,7 +1544,7 @@ impl ThreadPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1462,7 +1623,7 @@ impl InboxPopoverTrigger {
             open,
             show_badge,
             badge_color,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.interactive_active,
             bg_hover: theme.bg_hover,
             on_click: None,
@@ -1549,7 +1710,7 @@ impl PinPopoverTrigger {
             open,
             show_badge,
             badge_color,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1634,7 +1795,7 @@ impl CanvasPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted.into(),
+            icon_color: theme.tokens.bg_icon_theme.into(),
             on_click: None,
         }
     }
@@ -1731,7 +1892,7 @@ struct GalleryTrigger {
 impl GalleryTrigger {
     fn new(theme: &Theme) -> Self {
         Self {
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1813,7 +1974,7 @@ struct FilesPopoverTrigger {
 impl FilesPopoverTrigger {
     fn new(theme: &Theme) -> Self {
         Self {
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1897,7 +2058,7 @@ impl NotificationSettingTrigger {
             } else {
                 IconName::Bell
             },
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
