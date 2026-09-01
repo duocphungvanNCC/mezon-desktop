@@ -16,6 +16,7 @@ use super::create_message_group_modal::CreateMessageGroupModal;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::command_palette::CommandPaletteModal;
@@ -536,10 +537,18 @@ fn build_dm_menu(
     }
 
     if is_group && let Some(target) = target.as_ref() {
+        let add_locale = locale.to_string();
+        menu = menu.separator().item(
+            t("common.addMembers"),
+            move |window: &mut Window, cx: &mut App| {
+                AddMembersToGroupModal::open(channel_id, add_locale.clone(), window, cx);
+            },
+        );
+
         let group_label = target.label.clone();
         let group_avatar = target.avatar.clone();
         let group_locale = locale.to_string();
-        menu = menu.separator().item(
+        menu = menu.item(
             t("directMessage.contextMenu.editGroup"),
             move |window: &mut Window, cx: &mut App| {
                 let modal = cx.new(|cx| {
@@ -695,6 +704,7 @@ impl DirectSidebar {
         div()
             .id("dm-friends")
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsButton))
             .w_full()
             .flex()
             .flex_row()
@@ -892,6 +902,7 @@ impl Render for DirectSidebar {
         });
 
         div()
+            .children(crate::tour::probe(crate::tour::TourAnchor::DirectList))
             .flex()
             .flex_col()
             .size_full()

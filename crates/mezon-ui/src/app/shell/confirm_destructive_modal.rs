@@ -7,7 +7,18 @@ use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
 pub(super) type ConfirmAction = Rc<dyn Fn(&mut App) -> Task<anyhow::Result<()>>>;
-pub(super) type ConfirmEpilogue = Rc<dyn Fn(&mut App)>;
+
+/// What a destructive confirmation says and does. Named fields, because every label is a
+/// `SharedString` and a transposed pair would type-check and ship the wrong text.
+pub(super) struct ConfirmDestructive {
+    pub(super) id: &'static str,
+    pub(super) title: SharedString,
+    pub(super) description: SharedString,
+    pub(super) cancel_label: SharedString,
+    pub(super) confirm_label: SharedString,
+    pub(super) failed_message: SharedString,
+    pub(super) action: ConfirmAction,
+}
 
 pub(super) struct ConfirmDestructiveModal {
     pub(super) focus_handle: FocusHandle,
@@ -19,7 +30,6 @@ pub(super) struct ConfirmDestructiveModal {
     pub(super) confirm_label: SharedString,
     pub(super) failed_message: SharedString,
     pub(super) action: ConfirmAction,
-    pub(super) after_success: ConfirmEpilogue,
     pub(super) running: bool,
 }
 
@@ -31,7 +41,10 @@ impl Render for ConfirmDestructiveModal {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.running {
+                    return;
+                }
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
             .w(px(440.))
@@ -63,9 +76,12 @@ impl Render for ConfirmDestructiveModal {
                         Button::new(self.cancel_id.clone())
                             .label(self.cancel_label.clone())
                             .ghost()
-                            .on_click(|_, _window, cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                if this.running {
+                                    return;
+                                }
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
-                            }),
+                            })),
                     )
                     .child(
                         Button::new(self.confirm_id.clone())
@@ -79,7 +95,6 @@ impl Render for ConfirmDestructiveModal {
                                 this.running = true;
                                 cx.notify();
                                 let failed = this.failed_message.clone();
-                                let after_success = this.after_success.clone();
                                 let task = (this.action)(cx);
                                 cx.spawn(async move |this, cx| {
                                     let result = task.await;
@@ -95,9 +110,6 @@ impl Render for ConfirmDestructiveModal {
                                                 shell.error(failed, cx);
                                             }
                                         });
-                                        if result.is_ok() {
-                                            after_success(cx);
-                                        }
                                     });
                                 })
                                 .detach();

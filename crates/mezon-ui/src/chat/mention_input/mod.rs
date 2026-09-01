@@ -815,6 +815,7 @@ impl MentionInput {
         Vec<OutgoingAttachment>,
         Option<OutgoingOgp>,
     )> {
+        let swallow = self.input.read(cx).pending_send_ime_token();
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -835,7 +836,7 @@ impl MentionInput {
             self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
-                input.set_value("", window, cx);
+                input.clear_after_send(swallow.clone(), window, cx);
             });
             return None;
         }
@@ -847,7 +848,7 @@ impl MentionInput {
         self.close_popup();
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
-            input.set_value("", window, cx);
+            input.clear_after_send(swallow, window, cx);
         });
         Some((text, content, attachments, ogp))
     }
@@ -1004,7 +1005,7 @@ impl MentionInput {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let pending = cx
@@ -1683,7 +1684,9 @@ impl MentionInput {
             cx.subscribe(
                 &DirectMessageStore::global(cx),
                 |this, _, event: &DirectEvent, cx| {
-                    let DirectEvent::Changed { channel_id } = event;
+                    let DirectEvent::Changed { channel_id } = event else {
+                        return;
+                    };
                     if channel_id.is_none() || *channel_id == mention_direct_id(cx) {
                         this.invalidate_pool(Sigil::At, cx);
                     }
@@ -1739,6 +1742,11 @@ impl MentionInput {
         if let Some(store) = EmojiStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, _: &EmojiEvent, cx| {
                 this.invalidate_pool(Sigil::Colon, cx)
+            }));
+        }
+        if let Some(store) = QuickMenuStore::try_global(cx) {
+            subs.push(cx.observe(&store, |this, _, cx| {
+                this.invalidate_pool(Sigil::Slash, cx);
             }));
         }
         subs
@@ -1801,7 +1809,7 @@ impl MentionInput {
         let query_lc = query.to_lowercase();
         self.session_commands
             .iter()
-            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .filter(|command| command.display_lc.contains(&query_lc))
             .map(|command| Suggestion::SlashCommand(command.clone()))
             .collect()
     }
@@ -2126,6 +2134,10 @@ impl MentionInput {
         cx.set_global(ActiveComposer(entity.downgrade()));
     }
 
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<ActiveComposer>()
             .and_then(|composer| composer.0.upgrade())
@@ -2145,6 +2157,17 @@ impl MentionInput {
 
     pub(crate) fn probe_text(&self, cx: &App) -> SharedString {
         self.input.read(cx).value_shared()
+    }
+
+    /// Names of the files staged on the composer, in the order they will be
+    /// sent. Reading a file off disk happens on a background task, so a drop
+    /// only shows up here once the attachment is actually staged — which is what
+    /// makes it the thing to poll before submitting.
+    pub(crate) fn probe_attachments(&self) -> Vec<String> {
+        self.pending_attachments
+            .iter()
+            .map(|att| att.filename.clone())
+            .collect()
     }
 
     pub(crate) fn probe_suggestions(&self) -> (bool, usize, Vec<String>) {
@@ -2946,6 +2969,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -3014,6 +3038,8 @@ impl Render for MentionInput {
             });
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()

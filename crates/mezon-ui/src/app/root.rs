@@ -40,6 +40,11 @@ pub struct RootView {
     call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
+    tour_autostart: Option<Task<()>>,
+    tour_autostart_for: Option<&'static str>,
+    tour_autostart_last: Option<&'static str>,
+    tour_autostart_attempts: u8,
+    tour_autostart_armed: bool,
 }
 
 fn surface_recording_toast(
@@ -63,16 +68,22 @@ fn surface_recording_toast(
         mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
     };
     let (kind, message) = match toast {
-        mezon_store::RecordingToast::Saved(path) => (
-            crate::components::primitives::ToastKind::Success,
-            format!(
-                "{} {}",
-                mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        ),
+        mezon_store::RecordingToast::Saved(path) => {
+            // Hand the finished file straight to the system player — the desktop can do what the
+            // web app cannot. `Saved` already means playable: the recorder only reports it after
+            // `container::is_playable`, so there is nothing left to check here.
+            cx.open_with_system(&path);
+            (
+                crate::components::primitives::ToastKind::Success,
+                format!(
+                    "{} {}",
+                    mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ),
+            )
+        }
         mezon_store::RecordingToast::Failed(error) => (
             crate::components::primitives::ToastKind::Error,
             format!(
@@ -134,7 +145,15 @@ impl RootView {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
+            this.schedule_tour_autostart(cx);
             cx.notify();
+        })
+        .detach();
+
+        cx.observe(&ClanList::global(cx), |this, _clans, cx| {
+            if crate::tour::eligibility_undecided(cx) {
+                this.schedule_tour_autostart(cx);
+            }
         })
         .detach();
 
@@ -148,8 +167,20 @@ impl RootView {
                 this.connecting_since = None;
                 this._splash_delay = None;
             }
+            if matches!(*auth_state.read(cx), AuthState::Authenticated(_)) {
+                this.tour_autostart_armed = true;
+                this.schedule_tour_autostart(cx);
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                this.tour_autostart_armed = false;
+                this.tour_autostart = None;
+                this.tour_autostart_for = None;
+                this.tour_autostart_last = None;
+                this.tour_autostart_attempts = 0;
+                crate::tour::shutdown(cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 crate::image_viewer::close_image_viewer(cx);
+                crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
                 crate::image_cache::clear_all_image_caches(cx);
                 mezon_canvas::reset_canvas_image_caches(cx);
@@ -289,7 +320,46 @@ impl RootView {
             network_online,
             _splash_delay: splash_delay,
             _recording_toasts: recording_toasts,
+            tour_autostart: None,
+            tour_autostart_for: None,
+            tour_autostart_last: None,
+            tour_autostart_attempts: 0,
+            tour_autostart_armed: false,
         }
+    }
+
+    fn schedule_tour_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.tour_autostart_armed {
+            return;
+        }
+        let Some(id) = crate::tour::pending_core_track(cx) else {
+            return;
+        };
+        if self.tour_autostart_for == Some(id) {
+            return;
+        }
+        if self.tour_autostart_last == Some(id) {
+            if self.tour_autostart_attempts >= TOUR_AUTOSTART_MAX_ATTEMPTS {
+                return;
+            }
+        } else {
+            self.tour_autostart_attempts = 0;
+        }
+        self.tour_autostart_attempts += 1;
+        self.tour_autostart_last = Some(id);
+        self.tour_autostart_for = Some(id);
+        self.tour_autostart = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
+            let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
+            if !started {
+                this.update(cx, |this, _| {
+                    if this.tour_autostart_for == Some(id) {
+                        this.tour_autostart_for = None;
+                    }
+                })
+                .ok();
+            }
+        }));
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
@@ -490,6 +560,8 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
+const TOUR_AUTOSTART_MAX_ATTEMPTS: u8 = 3;
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;

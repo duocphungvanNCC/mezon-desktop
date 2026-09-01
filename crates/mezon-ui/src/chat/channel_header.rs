@@ -6,13 +6,14 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
-    Settings, StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, FriendEvent, FriendStore,
+    InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::call_actions::call_current_dm;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
@@ -41,6 +42,7 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    pub blocked_by_me: bool,
     /// Peer presence for a 1:1 DM; always `None` for a group.
     pub presence: DmAvatarPresence,
     pub label: SharedString,
@@ -48,6 +50,7 @@ pub struct DmHeaderInfo {
     pub avatar_raw: SharedString,
     pub members_text: Option<SharedString>,
     pub edit_tooltip: SharedString,
+    pub add_members_tooltip: SharedString,
     pub locale: SharedString,
 }
 
@@ -261,13 +264,19 @@ impl ChannelHeader {
             ("hdr-files", IconName::FileIcon),
         ];
         let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
+        let dm_one_to_one_blocked = self
+            .dm_header
+            .as_ref()
+            .is_some_and(|info| !info.is_group && info.blocked_by_me);
         let actions: Vec<(&str, IconName)> = if self.dm {
             let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
-            if dm_one_to_one {
+            if dm_one_to_one && !dm_one_to_one_blocked {
                 items.push(("hdr-call", IconName::IconPhoneDM));
                 items.push(("hdr-video-call", IconName::IconMeetDM));
             }
-            items.push(("hdr-members", IconName::MemberList));
+            if !dm_one_to_one_blocked {
+                items.push(("hdr-members", IconName::MemberList));
+            }
             items.push(("hdr-pin", IconName::PinRight));
             items
         } else {
@@ -313,7 +322,11 @@ impl ChannelHeader {
         } else {
             None
         };
-        let buttons = Self::build_action_buttons(
+        let add_members_button = dm_header
+            .as_ref()
+            .filter(|info| info.is_group)
+            .map(|info| Self::render_add_members_button(info, icon_color, bg_hover));
+        let mut buttons = Self::build_action_buttons(
             actions,
             theme,
             icon_color,
@@ -338,6 +351,9 @@ impl ChannelHeader {
             notification_trigger,
             cx,
         );
+        if let Some(button) = add_members_button {
+            buttons.insert(0, button);
+        }
 
         div()
             .flex()
@@ -485,6 +501,10 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(
                 div()
+                    .relative()
+                    .children(crate::tour::probe(
+                        crate::tour::TourAnchor::ChannelHeaderTools,
+                    ))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -541,6 +561,37 @@ impl ChannelHeader {
             on_toggle_timeline: None,
         };
         header.render_inbox_button(theme, cx)
+    }
+
+    fn render_add_members_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+    ) -> AnyElement {
+        let tooltip = info.add_members_tooltip.clone();
+        let channel_id = info.channel_id;
+        let locale = info.locale.clone();
+        div()
+            .id("hdr-add-members")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(tooltip))
+            .occlude()
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(icon_color),
+            )
+            .on_click(move |_, window, cx| {
+                AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
+            })
+            .into_any_element()
     }
 
     fn build_action_buttons(
@@ -951,6 +1002,7 @@ pub struct ChatHeader {
     _notification_observe: Subscription,
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
+    _friend_subscribe: Subscription,
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
 }
@@ -973,6 +1025,14 @@ impl ChatHeader {
         let _direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
             this.refresh_dm_header(cx)
         });
+        let _friend_subscribe = cx.subscribe(
+            &FriendStore::global(cx),
+            |this, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.refresh_dm_header(cx);
+                }
+            },
+        );
         let _group_members_observe = cx.observe(
             &mezon_store::GroupMembersStore::global(cx),
             |this, _, cx| this.refresh_dm_header(cx),
@@ -1014,6 +1074,7 @@ impl ChatHeader {
             _notification_observe,
             _pinned_observe,
             _direct_observe,
+            _friend_subscribe,
             _group_members_observe,
             _presence_subscribe,
         }
@@ -1033,6 +1094,11 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
+            !is_group
+                && FriendStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
         let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
             String::new()
@@ -1057,6 +1123,7 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            blocked_by_me,
             presence,
             label: SharedString::from(dm.label.clone()),
             avatar_src: SharedString::from(avatar_src),
@@ -1064,6 +1131,9 @@ impl ChatHeader {
             members_text,
             edit_tooltip: SharedString::from(
                 mezon_i18n::t(locale, "channelTopbar.tooltips.clickToEdit").to_string(),
+            ),
+            add_members_tooltip: SharedString::from(
+                mezon_i18n::t(locale, "channelTopbar.tooltips.addFriendsToDM").to_string(),
             ),
             locale: SharedString::from(locale.to_string()),
         })

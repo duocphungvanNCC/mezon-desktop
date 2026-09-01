@@ -132,27 +132,34 @@ impl DmRow {
         let suppress_hover = self.suppress_hover;
         let on_close = self.on_close;
 
-        let close_btn = (!suppress_hover).then(|| {
-            div()
-                .id(self.close_id.clone())
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(20.))
-                .text_size(px(24.))
-                .opacity(0.)
-                .text_color(muted)
-                .cursor_pointer()
-                .group_hover(self.group_name.clone(), |this| this.opacity(1.))
-                .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    if let Some((channel_id, handler)) = on_close {
-                        handler(channel_id, window, cx);
-                    }
-                })
-                .child("×")
-        });
+        // Always mounted: dropping it while the list scrolls would take its 20px box and the
+        // row's gap out of the flex line, reflowing every label on each wheel tick.
+        let close_btn = div()
+            .id(self.close_id.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(20.))
+            .text_size(px(24.))
+            .opacity(0.)
+            .text_color(muted)
+            .cursor_pointer()
+            .when(!suppress_hover, |this| {
+                this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
+                    .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
+            })
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                // While hover is suppressed the × is invisible; swallow the click as before
+                // rather than closing a conversation the user cannot see they are aiming at.
+                if suppress_hover {
+                    return;
+                }
+                if let Some((channel_id, handler)) = on_close {
+                    handler(channel_id, window, cx);
+                }
+            })
+            .child("×");
 
         div()
             .id(self.elem_id.clone())
@@ -219,7 +226,7 @@ impl DmRow {
                     None => name_el.flex_1().min_w_0().into_any_element(),
                 }
             })
-            .children(close_btn)
+            .child(close_btn)
     }
 
     fn render_avatar(&self, theme: &Theme) -> AnyElement {

@@ -969,6 +969,7 @@ impl Render for ChannelSidebar {
 
         div()
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::ChannelList))
             .flex()
             .flex_col()
             .w_full()
@@ -982,6 +983,7 @@ impl Render for ChannelSidebar {
                 let has_clan = self.active_clan_id.is_some();
                 div()
                     .relative()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanHeader))
                     .w_full()
                     .h(px(50.))
                     .border_b_1()
@@ -1542,8 +1544,56 @@ fn render_banner_and_events(
     let route = crate::router::Router::global(cx).read(cx).route();
     let members_active = matches!(route, crate::router::Route::ClanMembers { .. });
     let channels_active = matches!(route, crate::router::Route::ClanChannels { .. });
+    let guide_active = matches!(route, crate::router::Route::ClanGuide { .. });
+    let clan_has_onboarding = members_clan_id.is_some_and(|clan_id| {
+        ClanList::global(cx)
+            .read(cx)
+            .clan(clan_id)
+            .is_some_and(|clan| clan.is_onboarding)
+    });
+    let guide_row = div()
+        .group("clan-guide-nav")
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .px_2()
+        .h(px(34.))
+        .gap_2()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .when(guide_active, |element| element.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover))
+        .text_color(if guide_active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        })
+        .child(
+            gpui::img(IconName::GuideIcon.path())
+                .size(px(20.))
+                .flex_none()
+                .when(!guide_active, |icon| {
+                    icon.opacity(0.65)
+                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
+                }),
+        )
+        .child(
+            div()
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(mezon_i18n::t(locale, "channelList.navigation.clanGuide")),
+        )
+        .id("clan-guide-nav")
+        .on_click(move |_, _, cx| {
+            if let Some(clan_id) = members_clan_id {
+                crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
+            }
+        });
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
+        .relative()
+        .children(crate::tour::probe(crate::tour::TourAnchor::ClanMembersRow))
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
@@ -1616,6 +1666,7 @@ fn render_banner_and_events(
         .w_full()
         .p_2()
         .gap_1()
+        .when(clan_has_onboarding, |element| element.child(guide_row))
         .child(events_row)
         .child(members_row)
         .when(can_view_channels, |element| element.child(channels_row));
@@ -1820,6 +1871,8 @@ fn render_sidebar_item(
                     el.child(
                         div()
                             .id(SharedString::from(format!("cat-add-{elem_id}")))
+                            .relative()
+                            .children(crate::tour::probe(crate::tour::TourAnchor::CreateChannel))
                             .flex()
                             .items_center()
                             .justify_center()
