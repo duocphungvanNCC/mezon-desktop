@@ -11,7 +11,7 @@ done
 # The tarball holds only the binary: unlike the .deb, nothing here pulls in the
 # GStreamer decoders Mezon needs at runtime. Without one the app still starts, but
 # videos neither play nor get a thumbnail, and GStreamer reports that only in the
-# log -- so install it here, the same way `scripts/linux-deps` installs build deps,
+# log -- so install it here, the same way scripts/linux-deps installs build deps,
 # and fall back to naming the package if we cannot.
 if [ "$(id -u)" -eq 0 ]; then
   maysudo=''
@@ -19,27 +19,32 @@ else
   maysudo="$(command -v sudo || true)"
 fi
 
+h264_decoder_elements="avdec_h264 openh264dec vah264dec vaapih264dec nvh264dec v4l2h264dec"
+h264_decoder_plugins="libgstlibav.so libgstopenh264.so libgstva.so libgstvaapi.so libgstnvcodec.so libgstvideo4linux2.so"
+
 video_decoder_installed() {
+  local element dir plugin
   if command -v gst-inspect-1.0 >/dev/null 2>&1; then
-    if gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 ||
-       gst-inspect-1.0 openh264dec >/dev/null 2>&1; then
-      return 0
-    fi
-    return 1
+    for element in $h264_decoder_elements; do
+      if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
   fi
-  local dir
   for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
              /usr/lib/*/gstreamer-1.0 /usr/local/lib/gstreamer-1.0; do
-    if [[ -e "${dir}/libgstlibav.so" || -e "${dir}/libgstopenh264.so" ]]; then
-      return 0
-    fi
+    for plugin in $h264_decoder_plugins; do
+      if [[ -e "${dir}/${plugin}" ]]; then
+        return 0
+      fi
+    done
   done
   return 1
 }
 
 video_decoder_hint() {
   if command -v apt-get >/dev/null 2>&1; then
-    echo "sudo apt-get install -y gstreamer1.0-libav gstreamer1.0-plugins-good"
+    echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-good"
   elif command -v dnf >/dev/null 2>&1; then
     echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good"
   elif command -v pacman >/dev/null 2>&1; then
@@ -56,7 +61,9 @@ install_video_decoder() {
     return 1
   fi
   if command -v apt-get >/dev/null 2>&1; then
-    $maysudo apt-get update
+    if ! $maysudo apt-get update; then
+      echo "warning: apt-get update failed; installing against a stale package index" >&2
+    fi
     $maysudo apt-get install -y --no-install-recommends \
       gstreamer1.0-libav gstreamer1.0-plugins-good
   elif command -v dnf >/dev/null 2>&1; then
@@ -144,15 +151,10 @@ command -v update-desktop-database >/dev/null 2>&1 &&
 command -v gtk-update-icon-cache >/dev/null 2>&1 &&
   gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
-echo "==> Installed Mezon ${version} to ${app_dir}/mezon"
-case ":$PATH:" in
-  *":${bin_dir}:"*) echo "Run: mezon" ;;
-  *) echo "Note: ${bin_dir} is not in PATH; run ${app_dir}/mezon or add it to PATH" ;;
-esac
-
 if ! video_decoder_installed; then
   echo ""
-  echo "==> No GStreamer H.264 decoder found; installing one (videos need it)"
+  echo "==> No GStreamer H.264 decoder found; installing one (videos need it)."
+  echo "    This needs root, so you may be asked for your password."
   if install_video_decoder && video_decoder_installed; then
     echo "==> Video decoder installed"
   else
@@ -162,3 +164,9 @@ if ! video_decoder_installed; then
     echo "    $(video_decoder_hint)"
   fi
 fi
+
+echo "==> Installed Mezon ${version} to ${app_dir}/mezon"
+case ":$PATH:" in
+  *":${bin_dir}:"*) echo "Run: mezon" ;;
+  *) echo "Note: ${bin_dir} is not in PATH; run ${app_dir}/mezon or add it to PATH" ;;
+esac
