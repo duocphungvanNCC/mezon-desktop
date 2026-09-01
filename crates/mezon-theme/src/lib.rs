@@ -4,9 +4,9 @@ pub mod tokens;
 
 use std::sync::Arc;
 
-use gpui::{App, Background, Global, Hsla, Rgba};
+use gpui::{App, Global, Rgba};
 
-use crate::surface::{GradientStop, SurfaceGradient, ThemeSurface, ThemeSurfaces};
+use crate::surface::{ThemeSurface, ThemeSurfaces};
 use crate::tokens::ThemeTokens;
 
 struct GlobalTheme(Arc<Theme>);
@@ -105,18 +105,37 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
     ::theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(zed));
 }
 
-pub fn resolve_theme(theme_name: &str) -> Theme {
+fn canonical_theme_name(theme_name: &str) -> &'static str {
     match theme_name {
+        "dark" => "dark",
+        "light" => "light",
+        "purple" | "purple_haze" => "purple_haze",
+        "abyss" | "abyss_dark" => "abyss_dark",
+        "red_dark" | "redDark" => "redDark",
+        "sunrise" => "sunrise",
+        "sunset" => "sunset",
+        "cisher" => "cisher",
+        "berrynade" => "berrynade",
+        _ => "dark",
+    }
+}
+
+pub fn resolve_theme(theme_name: &str) -> Theme {
+    match canonical_theme_name(theme_name) {
         "light" => Theme::light(),
-        "purple" | "purple_haze" => Theme::purple(),
-        "abyss" | "abyss_dark" => Theme::abyss(),
-        "red_dark" | "redDark" => Theme::red_dark(),
+        "purple_haze" => Theme::purple(),
+        "abyss_dark" => Theme::abyss(),
+        "redDark" => Theme::red_dark(),
         "sunrise" => Theme::sunrise(),
         "sunset" => Theme::sunset(),
         "cisher" => Theme::cisher(),
         "berrynade" => Theme::berrynade(),
         _ => Theme::dark(),
     }
+}
+
+pub fn preview_surface(theme_name: &str) -> ThemeSurface {
+    surfaces::preview_surface(canonical_theme_name(theme_name))
 }
 
 /// Mezon dark theme color tokens — matching #313338 background (Discord-style dark)
@@ -167,238 +186,6 @@ pub struct Theme {
 
     pub tokens: ThemeTokens,
     pub surfaces: ThemeSurfaces,
-    pub preview: ThemeSurface,
-}
-
-const SUNRISE_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.87843,
-            g: 0.76471,
-            b: 0.98824,
-            a: 1.0,
-        },
-        position: 0.0,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.98431,
-            g: 0.76078,
-            b: 0.92157,
-            a: 1.0,
-        },
-        position: 0.5,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 1.0,
-            g: 0.94510,
-            b: 0.92157,
-            a: 1.0,
-        },
-        position: 1.0,
-    },
-];
-const PURPLE_HAZE_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.65490,
-            g: 0.54510,
-            b: 0.98039,
-            a: 1.0,
-        },
-        position: 0.0,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.95686,
-            g: 0.44706,
-            b: 0.71373,
-            a: 1.0,
-        },
-        position: 0.5,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.37647,
-            g: 0.64706,
-            b: 0.98039,
-            a: 1.0,
-        },
-        position: 1.0,
-    },
-];
-const RED_DARK_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.23137,
-            g: 0.03922,
-            b: 0.03922,
-            a: 1.0,
-        },
-        position: 0.0,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.49804,
-            g: 0.11373,
-            b: 0.11373,
-            a: 1.0,
-        },
-        position: 0.5,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.88235,
-            g: 0.11373,
-            b: 0.28235,
-            a: 1.0,
-        },
-        position: 1.0,
-    },
-];
-const ABYSS_DARK_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.05882,
-            g: 0.09020,
-            b: 0.16471,
-            a: 1.0,
-        },
-        position: 0.0,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.11765,
-            g: 0.22745,
-            b: 0.54118,
-            a: 1.0,
-        },
-        position: 0.5,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.42745,
-            g: 0.15686,
-            b: 0.85098,
-            a: 1.0,
-        },
-        position: 1.0,
-    },
-];
-const BERRYNADE_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.68627,
-            g: 0.10196,
-            b: 0.42353,
-            a: 1.0,
-        },
-        position: 0.1879,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.76078,
-            g: 0.41961,
-            b: 0.12549,
-            a: 1.0,
-        },
-        position: 0.4976,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.90588,
-            g: 0.64706,
-            b: 0.14510,
-            a: 1.0,
-        },
-        position: 0.8072,
-    },
-];
-const CISHER_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.95294,
-            g: 0.70196,
-            b: 0.21176,
-            a: 1.0,
-        },
-        position: 0.311,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.93333,
-            g: 0.52157,
-            b: 0.34510,
-            a: 1.0,
-        },
-        position: 0.6709,
-    },
-];
-const SUNSET_PREVIEW: &[GradientStop] = &[
-    GradientStop {
-        color: Rgba {
-            r: 0.28235,
-            g: 0.15686,
-            b: 0.54902,
-            a: 1.0,
-        },
-        position: 0.2757,
-    },
-    GradientStop {
-        color: Rgba {
-            r: 0.85882,
-            g: 0.49804,
-            b: 0.29412,
-            a: 1.0,
-        },
-        position: 0.7125,
-    },
-];
-
-fn preview_surface(name: &str) -> ThemeSurface {
-    let (solid, gradient) = match name {
-        "light" => (rgba(255, 255, 255, 1.0), None),
-        "sunrise" => (
-            rgba(242, 215, 238, 1.0),
-            Some((135.0, SUNRISE_PREVIEW, None)),
-        ),
-        "purple_haze" => (
-            rgba(167, 139, 250, 1.0),
-            Some((135.0, PURPLE_HAZE_PREVIEW, None)),
-        ),
-        "redDark" => (
-            rgba(127, 29, 29, 1.0),
-            Some((135.0, RED_DARK_PREVIEW, None)),
-        ),
-        "abyss_dark" => (
-            rgba(30, 58, 138, 1.0),
-            Some((135.0, ABYSS_DARK_PREVIEW, None)),
-        ),
-        "berrynade" => (
-            rgba(58, 25, 22, 1.0),
-            Some((161.03, BERRYNADE_PREVIEW, Some(rgba(0, 0, 0, 0.7)))),
-        ),
-        "cisher" => (
-            rgba(250, 222, 190, 1.0),
-            Some((180.0, CISHER_PREVIEW, Some(rgba(255, 255, 255, 0.65)))),
-        ),
-        "sunset" => (
-            rgba(44, 25, 36, 1.0),
-            Some((141.68, SUNSET_PREVIEW, Some(rgba(0, 0, 0, 0.7)))),
-        ),
-        _ => (rgba(38, 39, 43, 1.0), None),
-    };
-    ThemeSurface {
-        solid,
-        gradient: gradient.map(|(angle, stops, overlay)| SurfaceGradient {
-            angle,
-            stops,
-            overlay,
-            base: None,
-            viewport_anchored: false,
-        }),
-    }
 }
 
 fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
@@ -467,7 +254,6 @@ impl Theme {
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
             surfaces: ThemeSurfaces::solid(&tokens),
-            preview: preview_surface("dark"),
             tokens,
         }
     }
@@ -508,36 +294,8 @@ impl Theme {
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
             surfaces: ThemeSurfaces::solid(&tokens),
-            preview: preview_surface("light"),
             tokens,
         }
-    }
-
-    /// Resolves a flat base colour to the gradient surface the theme defines as
-    /// the same colour.
-    ///
-    /// `from_tokens` aliases every base background onto a token that also backs a
-    /// `ThemeSurface` (`bg_tertiary` == `--bg-primary`, and so on), so painting the
-    /// raw base value drops a flattened fill on top of the matching gradient. Flat
-    /// themes, where the two genuinely differ, keep the base colour.
-    pub fn surface_for(&self, base: Rgba) -> Background {
-        let surfaces = [
-            self.surfaces.primary,
-            self.surfaces.secondary,
-            self.surfaces.surface,
-            self.surfaces.direct_message,
-            self.surfaces.input_primary,
-            self.surfaces.active_friend_list,
-            self.surfaces.modal_search,
-            self.surfaces.outside_footer,
-            self.surfaces.footer,
-        ];
-        for surface in surfaces {
-            if surface.gradient.is_some() && surface.solid == base {
-                return surface.ramp();
-            }
-        }
-        Background::from(Hsla::from(base))
     }
 
     fn from_tokens(mut base: Theme, t: ThemeTokens, name: &str) -> Theme {
@@ -552,7 +310,6 @@ impl Theme {
         base.text_link = t.color_mention_hover;
         base.title_bar_bg = t.bg_primary;
         base.surfaces = ThemeSurfaces::for_theme(name, &t);
-        base.preview = preview_surface(name);
         base.tokens = t;
         base
     }
@@ -610,34 +367,30 @@ mod tests {
     }
 
     #[test]
-    fn surface_for_promotes_aliased_base_colors() {
-        for name in ["sunrise", "purple_haze", "redDark"] {
-            let theme = Theme::from_react(name);
-            // from_tokens aliases these onto tokens that also back a gradient surface.
-            for base in [theme.bg_tertiary, theme.bg_primary, theme.bg_secondary] {
-                assert!(
-                    theme.surface_for(base).as_solid().is_none(),
-                    "{name}: {base:?} should resolve to its gradient surface"
-                );
-            }
+    fn preview_aliases_match_their_canonical_theme() {
+        for (alias, canonical) in [
+            ("purple", "purple_haze"),
+            ("abyss", "abyss_dark"),
+            ("red_dark", "redDark"),
+        ] {
+            assert_eq!(preview_surface(alias), preview_surface(canonical));
         }
     }
 
     #[test]
-    fn surface_for_keeps_flat_theme_colors() {
-        for name in ["dark", "light"] {
-            let theme = if name == "dark" {
-                Theme::dark()
-            } else {
-                Theme::light()
-            };
-            // dark/light carry no gradients at all, so every base colour must come
-            // back untouched.
-            assert!(theme.surfaces.primary.gradient.is_none());
-            assert_eq!(
-                theme.surface_for(theme.bg_tertiary).as_solid(),
-                Some(Hsla::from(theme.bg_tertiary)),
-                "{name} must keep its own tertiary"
+    fn every_gradient_theme_has_a_gradient_preview() {
+        for name in [
+            "sunrise",
+            "purple_haze",
+            "redDark",
+            "abyss_dark",
+            "berrynade",
+            "cisher",
+            "sunset",
+        ] {
+            assert!(
+                preview_surface(name).gradient.is_some(),
+                "{name} should not silently fall back to the dark swatch"
             );
         }
     }

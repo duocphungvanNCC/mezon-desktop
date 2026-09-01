@@ -1,6 +1,6 @@
 use crate::components::primitives::{Avatar, Icon, IconName, Label, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
-use crate::theme::{ActiveTheme, Theme, resolve_theme, set_theme};
+use crate::theme::{ActiveTheme, Theme, preview_surface, resolve_theme, set_theme};
 use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
 use mezon_store::{AccountStore, Settings};
 use ui::Tooltip;
@@ -96,7 +96,7 @@ fn swatch_background(key: &str) -> impl IntoElement {
         .absolute()
         .inset_0()
         .rounded_full()
-        .bg(resolve_theme(key).preview.ramp())
+        .bg(preview_surface(key).ramp())
 }
 
 fn theme_swatch(
