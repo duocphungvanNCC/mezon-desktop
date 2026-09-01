@@ -51,7 +51,7 @@ impl AddMembersToGroupModal {
         });
     }
 
-    pub fn new(
+    fn new(
         channel_id: ChannelId,
         locale: String,
         window: &mut Window,
@@ -99,8 +99,6 @@ impl AddMembersToGroupModal {
                 }
             },
         );
-        search_input.update(cx, |input, cx| input.focus(window, cx));
-
         let title = mezon_i18n::t(&locale, "common.addMembers")
             .to_string()
             .into();
@@ -130,7 +128,8 @@ impl AddMembersToGroupModal {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let current = self.current_member_ids(cx);
+        let (current, member_count) = self.current_members(cx);
+        self.member_count = member_count;
         let friends = FriendStore::global(cx);
         let friends = friends.read(cx);
         self.all_rows = friends
@@ -147,7 +146,7 @@ impl AddMembersToGroupModal {
         self.refilter(cx);
     }
 
-    fn current_member_ids(&mut self, cx: &App) -> HashSet<UserId> {
+    fn current_members(&self, cx: &App) -> (HashSet<UserId>, usize) {
         let members: Vec<UserId> = GroupMembersStore::try_global(cx)
             .map(|store| {
                 store
@@ -158,7 +157,7 @@ impl AddMembersToGroupModal {
                     .collect()
             })
             .unwrap_or_default();
-        self.member_count = if members.is_empty() {
+        let member_count = if members.is_empty() {
             DirectMessageStore::try_global(cx)
                 .and_then(|store| {
                     store
@@ -170,7 +169,7 @@ impl AddMembersToGroupModal {
         } else {
             members.len()
         };
-        members.into_iter().collect()
+        (members.into_iter().collect(), member_count)
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {

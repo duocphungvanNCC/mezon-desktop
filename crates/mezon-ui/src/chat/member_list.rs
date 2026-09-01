@@ -1375,7 +1375,7 @@ impl MemberMenuPermissions {
                 is_blocked,
                 blocked_by_me,
                 show_remove_from_group,
-                channel_id: show_remove_from_group.then_some(group_channel).flatten(),
+                channel_id: group_channel.filter(|_| show_remove_from_group),
                 ..Default::default()
             };
         };
@@ -1746,17 +1746,25 @@ fn can_remove_from_group(
 }
 
 fn remove_member_from_group(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
+    let success: SharedString =
+        mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeSuccess").into();
     let failure: SharedString =
         mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeFailed").into();
     let task = GroupMembersStore::global(cx)
         .update(cx, |store, cx| store.remove_member(channel_id, user_id, cx));
     cx.spawn(async move |cx| {
-        if let Err(error) = task.await {
-            tracing::error!("remove member {user_id} from group {channel_id} failed: {error}");
-            cx.update(|cx| {
-                Shell::global(cx).update(cx, |shell, cx| shell.error(failure, cx));
+        let result = task.await;
+        cx.update(|cx| {
+            Shell::global(cx).update(cx, |shell, cx| match result {
+                Ok(()) => shell.success(success, cx),
+                Err(error) => {
+                    tracing::error!(
+                        "remove member {user_id} from group {channel_id} failed: {error}"
+                    );
+                    shell.error(failure, cx);
+                }
             });
-        }
+        });
     })
     .detach();
 }

@@ -365,14 +365,14 @@ Parameters: none.",
         name: "member_menu_pick",
         description: "\
 Run one row of the open member context menu (Profile, Message, Add Friend, Unblock, Remove Friend,
-Ban, Unban, Kick, Remove from thread).
+Ban, Unban, Kick, Remove from thread, Remove from group).
 
 Call member_menu_open first and pick the index from its item list. Rows of kind \"submenu\" or
 \"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
 (seconds; 0 means until the ban is lifted).
 
-Destructive: Kick, Ban and Remove-from-thread hit the server immediately; Remove Friend and Kick
-open a confirmation modal instead.
+Destructive: Kick, Ban, Remove-from-thread and Remove-from-group hit the server immediately;
+Remove Friend and Kick open a confirmation modal instead.
 
 Parameters:
 - index (required): item index from member_menu_open/member_menu_state.
