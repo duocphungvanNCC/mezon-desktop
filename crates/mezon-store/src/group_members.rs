@@ -232,6 +232,21 @@ impl GroupMembersStore {
         })
     }
 
+    pub fn remove_member(
+        &mut self,
+        channel_id: ChannelId,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.remove_channel_users(channel_id.get(), vec![user_id.get().to_string()])
+                .await?;
+            this.update(cx, |this, _| this.cache.mark_stale(&channel_id))?;
+            Ok(())
+        })
+    }
+
     fn fetch(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if !self.loading.insert(channel_id) {
             return;
