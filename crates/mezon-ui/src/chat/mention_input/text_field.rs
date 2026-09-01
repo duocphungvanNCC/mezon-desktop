@@ -1427,7 +1427,11 @@ impl MentionTextElement {
             return;
         }
         let display_text = input.display_text();
-        if input.measured_for.as_ref() == Some(&(display_text.clone(), width)) {
+        if input
+            .measured_for
+            .as_ref()
+            .is_some_and(|(text, measured_width)| *measured_width == width && *text == display_text)
+        {
             return;
         }
         let marked_range = input.marked_range.clone();

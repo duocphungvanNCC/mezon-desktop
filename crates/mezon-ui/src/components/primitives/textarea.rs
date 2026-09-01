@@ -108,6 +108,7 @@ pub struct TextArea {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
+    measured_for: Option<(SharedString, Pixels)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -160,6 +161,7 @@ impl TextArea {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
+            measured_for: None,
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -1190,6 +1192,48 @@ impl IntoElement for TextAreaElement {
     }
 }
 
+impl TextAreaElement {
+    fn measure_rows_for_layout(&mut self, window: &mut Window, cx: &mut App) {
+        let input = self.input.read(cx);
+        if input.single_line || input.content.is_empty() {
+            return;
+        }
+        let Some(width) = input.last_bounds.map(|bounds| bounds.size.width) else {
+            return;
+        };
+        if width <= Pixels::ZERO {
+            return;
+        }
+        let display_text = input.content.clone();
+        if input
+            .measured_for
+            .as_ref()
+            .is_some_and(|(text, measured_width)| *measured_width == width && *text == display_text)
+        {
+            return;
+        }
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let wrapped = window
+            .text_system()
+            .shape_text(display_text.clone(), font_size, &[run], Some(width), None)
+            .unwrap_or_default();
+        let rows = wrapped.len().max(1);
+        self.input.update(cx, |input, _| {
+            input.measured_rows = rows;
+            input.measured_for = Some((display_text, width));
+        });
+    }
+}
+
 impl Element for TextAreaElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1209,6 +1253,7 @@ impl Element for TextAreaElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        self.measure_rows_for_layout(window, cx);
         let input = self.input.read(cx);
         let visible = input.visible_line_count().clamp(1, input.max_visible_lines);
         let mut style = Style::default();
