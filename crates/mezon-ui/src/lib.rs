@@ -21,6 +21,8 @@ pub mod tour;
 pub mod util;
 pub mod window_layout;
 
+pub use mezon_widgets::clipboard;
+
 pub use app::root::RootView;
 pub use app::shell::Shell;
 pub use app::threads_toast::ThreadCreateToastBridge;

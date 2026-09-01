@@ -6211,6 +6211,7 @@ dependencies = [
  "gpui",
  "mezon-store",
  "mezon-theme",
+ "objc",
  "tracing",
  "unicode-segmentation",
 ]
