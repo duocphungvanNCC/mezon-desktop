@@ -156,7 +156,9 @@ pub use gifts::{
     flower_price, format_flower_amount, is_uncertain_transfer_error,
     parse_flower_interactive_params, serialize_flower_interactive_params,
 };
-pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
+pub use group_members::{
+    AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
+};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};

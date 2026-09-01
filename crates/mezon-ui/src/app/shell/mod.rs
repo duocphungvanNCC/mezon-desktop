@@ -33,6 +33,7 @@ mod confirm_leave_clan_modal;
 mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
+mod confirm_remove_group_member_modal;
 mod disable_clan_community_modal;
 mod transfer_owner_modal;
 mod upload_limit_modal;
@@ -57,6 +58,7 @@ use confirm_leave_dm_group_modal::ConfirmLeaveDmGroupModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
+use confirm_remove_group_member_modal::ConfirmRemoveGroupMemberModal;
 use disable_clan_community_modal::DisableClanCommunityModal;
 use transfer_owner_modal::{TransferOwnerModal, TransferOwnerParty};
 use upload_limit_modal::UploadLimitModal;
@@ -1340,6 +1342,36 @@ impl Shell {
             confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
             failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
             leaving: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_remove_group_member(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        user_id: mezon_store::UserId,
+        display_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "directMessage.removeFromGroup.description")
+            .replace("{{username}}", display_name);
+        let view = cx.new(|cx| ConfirmRemoveGroupMemberModal {
+            focus_handle: cx.focus_handle(),
+            channel_id,
+            user_id,
+            title: mezon_i18n::t(locale, "directMessage.contextMenu.removeFromGroup").into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            confirm_label: mezon_i18n::t(locale, "common.confirm").into(),
+            success_message: mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeSuccess")
+                .into(),
+            failed_message: mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeFailed")
+                .into(),
+            removing: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
