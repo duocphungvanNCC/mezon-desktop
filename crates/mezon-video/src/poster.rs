@@ -13,6 +13,11 @@ pub(crate) fn encode_poster_jpeg(
     max_edge: u32,
 ) -> Option<Vec<u8>> {
     let rgb = bgra_to_rgb(bgra, width, height, stride, bottom_up)?;
+    encode_rgb_jpeg(rgb, max_edge)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn encode_rgb_jpeg(rgb: RgbImage, max_edge: u32) -> Option<Vec<u8>> {
     let rgb = downscale(rgb, max_edge);
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, POSTER_JPEG_QUALITY)

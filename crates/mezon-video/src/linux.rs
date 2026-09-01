@@ -196,6 +196,17 @@ pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
     if path.is_empty() {
         return None;
     }
+    let probe = gstreamer_probe(path, max_poster_edge);
+    if probe.as_ref().is_some_and(|p| p.poster_jpeg.is_some()) {
+        return probe;
+    }
+    // Almost always a decoder this box does not have. Decode the keyframe ourselves
+    // rather than send the video with no thumbnail, and keep whatever GStreamer did
+    // manage to report if even that fails.
+    crate::poster_fallback::probe_without_decoder(path, max_poster_edge).or(probe)
+}
+
+fn gstreamer_probe(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe> {
     ensure_gstreamer().ok()?;
     let uri = match gst::glib::filename_to_uri(path, None) {
         Ok(uri) => uri,
