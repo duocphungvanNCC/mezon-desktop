@@ -334,7 +334,8 @@ Parameters: none.",
 Return the member-list context menu that is currently open, if any.
 
 Includes the target user, the resolved permission/relationship flags that decide which rows show
-(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread,
+show_remove_from_group), and the item list
 with the index to pass to member_menu_pick.
 
 Parameters: none.",
@@ -371,8 +372,8 @@ Call member_menu_open first and pick the index from its item list. Rows of kind 
 \"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
 (seconds; 0 means until the ban is lifted).
 
-Destructive: Kick, Ban, Remove-from-thread and Remove-from-group hit the server immediately;
-Remove Friend and Kick open a confirmation modal instead.
+Destructive: Ban and Remove-from-thread hit the server immediately; Remove Friend, Kick and
+Remove-from-group open a confirmation modal instead.
 
 Parameters:
 - index (required): item index from member_menu_open/member_menu_state.
