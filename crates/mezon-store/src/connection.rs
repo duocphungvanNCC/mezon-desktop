@@ -91,6 +91,9 @@ pub struct ConnectionStore {
     connecting_attempt: u32,
     transport: Arc<TransportClient>,
     wake: Arc<tokio::sync::Notify>,
+    /// Bumped whenever the live connection is replaced. Callbacks captured by an
+    /// older attempt compare against it and stay quiet, so a socket that dies
+    /// while its successor is already up cannot mark the new one disconnected.
     connection_generation: Arc<AtomicU64>,
     _manager: Task<()>,
     _auth_observe: Subscription,
@@ -140,6 +143,8 @@ impl ConnectionStore {
         let connection_generation = self.connection_generation.clone();
         cx.background_executor()
             .spawn(async move {
+                // Retire the live connection first: its close callback must not
+                // land on the attempt this reconnect is about to start.
                 connection_generation.fetch_add(1, Ordering::AcqRel);
                 if let Err(e) = transport.close().await {
                     tracing::warn!("Failed to close the transport before reconnect: {e}");
@@ -688,6 +693,9 @@ impl ConnectionStore {
                             res = connect_ack_rx.changed() => res.is_ok(),
                             _ = exec.timer(CONNECT_CONFIRM_GRACE) => false,
                         };
+                        // Running out the grace period is not evidence the gateway
+                        // accepted us — it only means nothing arrived yet. Ask the
+                        // socket directly instead of assuming.
                         let handshake_ok = if !transport.is_open().await {
                             false
                         } else if signaled {

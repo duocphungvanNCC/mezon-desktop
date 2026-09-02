@@ -14,10 +14,9 @@ const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SOCKET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const SOCK_HOST_IP_ENV: &str = "MEZON_SOCK_HOST_IP";
-// Budget for one whole connect attempt: TCP + TLS + I/O-loop startup. Below the
-// 15s this used to allow for TCP alone, but generous enough that a slow mobile
-// link is not misread as an unreachable endpoint — which would open the circuit
-// breaker on it and drop a connection that was merely slow.
+// Budget for one whole connect attempt: TCP, the TLS handshake and I/O-loop
+// startup share it. Only the TCP leg used to be bounded, so a stalled TLS
+// handshake or a wedged I/O loop hung the reconnect forever.
 const CONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(debug_assertions)]
@@ -761,6 +760,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+
         let deadline = tokio::time::Instant::now() + CONNECT_ATTEMPT_TIMEOUT;
 
         tracing::debug!("TCP connecting...");
@@ -769,6 +769,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 Ok(tcp) => tcp,
                 Err(e) => {
                     tracing::warn!("pinned socket host failed ({e}); falling back to DNS");
+                    // Fresh budget: the pinned attempt may already have spent it all.
                     let dns_deadline = tokio::time::Instant::now() + CONNECT_ATTEMPT_TIMEOUT;
                     connect_tcp(host, port, dns_deadline).await?
                 }
