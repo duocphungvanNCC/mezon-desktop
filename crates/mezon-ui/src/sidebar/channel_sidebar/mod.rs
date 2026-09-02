@@ -766,6 +766,15 @@ impl ChannelSidebar {
 
     fn open_channel_menu(&mut self, menu: OpenMenu, cx: &mut Context<Self>) {
         self.clear_overlays();
+        // Permissions load in the deferred tier of clan load, so a menu opened right after a clan
+        // switch would gate every manage item off. The load is a no-op once the clan is known and
+        // the sidebar observes the store, so the menu fills in when it lands.
+        let clan_id = menu.clan_id;
+        if let Some(permissions) = PermissionStore::try_global(cx) {
+            permissions.update(cx, |permissions, cx| {
+                permissions.load_clan_permissions(clan_id, cx);
+            });
+        }
         self.open_menu = Some(menu);
         cx.notify();
     }
@@ -969,6 +978,7 @@ impl Render for ChannelSidebar {
 
         div()
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::ChannelList))
             .flex()
             .flex_col()
             .w_full()
@@ -982,6 +992,7 @@ impl Render for ChannelSidebar {
                 let has_clan = self.active_clan_id.is_some();
                 div()
                     .relative()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanHeader))
                     .w_full()
                     .h(px(50.))
                     .border_b_1()
@@ -1550,6 +1561,7 @@ fn render_banner_and_events(
             .is_some_and(|clan| clan.is_onboarding)
     });
     let guide_row = div()
+        .group("clan-guide-nav")
         .flex()
         .flex_row()
         .items_center()
@@ -1569,7 +1581,11 @@ fn render_banner_and_events(
         .child(
             gpui::img(IconName::GuideIcon.path())
                 .size(px(20.))
-                .flex_none(),
+                .flex_none()
+                .when(!guide_active, |icon| {
+                    icon.opacity(0.65)
+                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
+                }),
         )
         .child(
             div()
@@ -1585,6 +1601,8 @@ fn render_banner_and_events(
         });
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
+        .relative()
+        .children(crate::tour::probe(crate::tour::TourAnchor::ClanMembersRow))
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
@@ -1862,6 +1880,8 @@ fn render_sidebar_item(
                     el.child(
                         div()
                             .id(SharedString::from(format!("cat-add-{elem_id}")))
+                            .relative()
+                            .children(crate::tour::probe(crate::tour::TourAnchor::CreateChannel))
                             .flex()
                             .items_center()
                             .justify_center()

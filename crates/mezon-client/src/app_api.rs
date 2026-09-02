@@ -1374,6 +1374,22 @@ impl AppApi {
         self.transport.create_event(request).await
     }
 
+    pub async fn update_event(&self, request: mezon_proto::api::UpdateEventRequest) -> Result<()> {
+        self.transport.update_event(request).await
+    }
+
+    pub async fn delete_event(&self, request: mezon_proto::api::DeleteEventRequest) -> Result<()> {
+        self.transport.delete_event(request).await
+    }
+
+    pub async fn add_user_event(&self, clan_id: i64, event_id: i64) -> Result<()> {
+        self.transport.add_user_event(clan_id, event_id).await
+    }
+
+    pub async fn delete_user_event(&self, clan_id: i64, event_id: i64) -> Result<()> {
+        self.transport.delete_user_event(clan_id, event_id).await
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
@@ -2322,6 +2338,29 @@ impl AppApi {
         attachments: Vec<UrlAttachment>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
+        self.send_message_with_attachment_urls_reply(
+            clan_id,
+            channel_id,
+            is_public,
+            mode,
+            attachments,
+            None,
+            flags,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_with_attachment_urls_reply(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<UrlAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
             .map(|a| mezon_proto::api::MessageAttachment {
@@ -2357,7 +2396,7 @@ impl AppApi {
                 is_public,
                 mode,
                 proto,
-                None,
+                reply,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -3037,6 +3076,10 @@ impl AppApi {
 
     pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         self.transport.leave_thread(clan_id, channel_id).await
+    }
+
+    pub async fn close_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        self.transport.close_dm_by_channel_id(channel_id).await
     }
 
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
