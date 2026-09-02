@@ -45,6 +45,10 @@ pub struct HealthyEndpointSession {
     pub tcp_url: Option<String>,
     #[serde(alias = "endpointId")]
     pub endpoint_id: i32,
+    /// Refreshed catalog. Absent on older gateways, in which case the pool we
+    /// already hold stays as it is rather than collapsing to this one endpoint.
+    #[serde(default)]
+    pub endpoints: Vec<ServiceEndpoint>,
 }
 
 impl HealthyEndpointSession {
@@ -218,14 +222,29 @@ impl Session {
         self.tcp_url = tcp_url.clone();
         self.tcp_host = tcp_host;
         self.tcp_port = tcp_port;
-        self.endpoints = vec![ServiceEndpoint {
+        let current = ServiceEndpoint {
             id: endpoint_id.unwrap_or(&candidate.id).to_string(),
             region: candidate.region,
             api_url,
             ws_url,
             tcp_url,
             priority: 0,
-        }];
+        };
+        // A fresh catalog replaces the old one wholesale. Without one, keep every
+        // endpoint we already knew about and only update the entry we just moved
+        // to — overwriting the list with a single entry would delete the
+        // alternates and leave the next outage with nowhere to go.
+        if !endpoint.endpoints.is_empty() {
+            self.endpoints = endpoint.endpoints.clone();
+        } else if let Some(slot) = self
+            .endpoints
+            .iter_mut()
+            .find(|existing| existing.id == current.id)
+        {
+            *slot = current;
+        } else {
+            self.endpoints.insert(0, current);
+        }
         true
     }
 
@@ -400,6 +419,80 @@ pub(crate) fn decode_jwt_claims(token: &str) -> (String, String, Option<u64>) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_healthy_endpoint_without_a_catalog_keeps_the_alternates_we_already_knew() {
+        let mut session = Session {
+            user_id: "7".into(),
+            endpoints: vec![
+                ServiceEndpoint {
+                    id: "0".into(),
+                    tcp_url: Some("sock-a.example.com:4433".into()),
+                    ..Default::default()
+                },
+                ServiceEndpoint {
+                    id: "1".into(),
+                    tcp_url: Some("sock-b.example.com:4433".into()),
+                    priority: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let moved = HealthyEndpointSession {
+            user_id: "7".into(),
+            tcp_url: Some("sock-b.example.com:4433".into()),
+            endpoint_id: 1,
+            ..Default::default()
+        };
+        assert!(session.apply_healthy_endpoint(&moved, "", Some(4433), None));
+
+        // Both nodes must survive: collapsing to the one we moved to would leave
+        // the next outage with nowhere to fail over.
+        assert_eq!(session.endpoints.len(), 2);
+        let ids = session
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"0") && ids.contains(&"1"), "got {ids:?}");
+    }
+
+    #[test]
+    fn a_healthy_endpoint_catalog_replaces_the_pool() {
+        let mut session = Session {
+            user_id: "7".into(),
+            endpoints: vec![ServiceEndpoint {
+                id: "0".into(),
+                tcp_url: Some("old.example.com:4433".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let refreshed = HealthyEndpointSession {
+            user_id: "7".into(),
+            tcp_url: Some("new-a.example.com:4433".into()),
+            endpoint_id: 5,
+            endpoints: vec![
+                ServiceEndpoint {
+                    id: "5".into(),
+                    tcp_url: Some("new-a.example.com:4433".into()),
+                    ..Default::default()
+                },
+                ServiceEndpoint {
+                    id: "6".into(),
+                    tcp_url: Some("new-b.example.com:4433".into()),
+                    priority: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(session.apply_healthy_endpoint(&refreshed, "", Some(4433), None));
+        assert_eq!(session.endpoints.len(), 2);
+        assert_eq!(session.endpoints[0].id, "5");
+    }
     use super::*;
 
     #[test]
@@ -560,6 +653,7 @@ mod tests {
             ws_url: Some("wss://new-sock.example.com".into()),
             tcp_url: Some("new-sock.example.com:4433".into()),
             endpoint_id: 2,
+            ..Default::default()
         };
 
         assert!(session.apply_healthy_endpoint(&response, "vn-south", Some(4433), None));

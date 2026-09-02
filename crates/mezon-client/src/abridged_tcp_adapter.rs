@@ -14,7 +14,11 @@ const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SOCKET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const SOCK_HOST_IP_ENV: &str = "MEZON_SOCK_HOST_IP";
-const CONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+// Budget for one whole connect attempt: TCP + TLS + I/O-loop startup. Below the
+// 15s this used to allow for TCP alone, but generous enough that a slow mobile
+// link is not misread as an unreachable endpoint — which would open the circuit
+// breaker on it and drop a connection that was merely slow.
+const CONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(debug_assertions)]
 fn sock_host_ip_override(host: &str) -> Option<String> {
@@ -36,7 +40,7 @@ fn sock_host_ip_override(_host: &str) -> Option<String> {
 async fn connect_tcp(host: &str, port: u16, deadline: tokio::time::Instant) -> Result<TcpStream> {
     tokio::time::timeout_at(deadline, TcpStream::connect(format!("{host}:{port}")))
         .await
-        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 4s"))?
+        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 10s"))?
         .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))
 }
 
@@ -765,7 +769,8 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 Ok(tcp) => tcp,
                 Err(e) => {
                     tracing::warn!("pinned socket host failed ({e}); falling back to DNS");
-                    connect_tcp(host, port, deadline).await?
+                    let dns_deadline = tokio::time::Instant::now() + CONNECT_ATTEMPT_TIMEOUT;
+                    connect_tcp(host, port, dns_deadline).await?
                 }
             },
             None => connect_tcp(host, port, deadline).await?,
@@ -781,7 +786,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("Starting TLS handshake...");
         let tls = tokio::time::timeout_at(deadline, connector.connect(domain, tcp))
             .await
-            .map_err(|_| anyhow::anyhow!("TLS handshake timed out after 4s"))?
+            .map_err(|_| anyhow::anyhow!("TLS handshake timed out after 10s"))?
             .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
         tracing::debug!("TLS handshake complete");
 
@@ -810,7 +815,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("Waiting for I/O loop to be ready...");
         tokio::time::timeout_at(deadline, ready_rx)
             .await
-            .map_err(|_| anyhow::anyhow!("I/O loop startup timed out after 4s"))?
+            .map_err(|_| anyhow::anyhow!("I/O loop startup timed out after 10s"))?
             .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
         tracing::info!("I/O loop confirmed READY");
         *self.io_task.lock().await = Some(task);

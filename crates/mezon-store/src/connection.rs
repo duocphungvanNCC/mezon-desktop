@@ -426,6 +426,13 @@ impl ConnectionStore {
                                         continue;
                                     }
                                     if request.reason == HealthyEndpointReason::HighLatency {
+                                        // The backend has decided this node is where we
+                                        // belong. Stop asking until the next reconnect —
+                                        // re-reporting every two minutes churns session
+                                        // credentials for a link that is merely slow.
+                                        endpoint_pool
+                                            .lock()
+                                            .disable_slow_reports(&request.endpoint.id);
                                         tracing::warn!(
                                             "Backend returned the current realtime endpoint for a high-latency report — keeping the live connection"
                                         );
@@ -652,16 +659,20 @@ impl ConnectionStore {
                                 tracing::warn!("TCP transport closed with error");
                             }
                             if connection_confirmed_for_close.load(Ordering::Acquire) {
-                                endpoint_pool_for_close
-                                    .lock()
-                                    .record_unreachable(&endpoint_id_for_close, Instant::now());
-                                let _ = endpoint_refresh_tx_for_close.send(
-                                    EndpointRefreshRequest {
-                                        endpoint: endpoint_for_close.clone(),
-                                        reason: HealthyEndpointReason::Unreachable,
-                                        generation,
-                                    },
-                                );
+                                let exhausted = {
+                                    let mut pool = endpoint_pool_for_close.lock();
+                                    pool.record_unreachable(&endpoint_id_for_close, Instant::now());
+                                    !pool.has_available(Instant::now())
+                                };
+                                if exhausted {
+                                    let _ = endpoint_refresh_tx_for_close.send(
+                                        EndpointRefreshRequest {
+                                            endpoint: endpoint_for_close.clone(),
+                                            reason: HealthyEndpointReason::Unreachable,
+                                            generation,
+                                        },
+                                    );
+                                }
                             }
                             api_for_close.set_status(ConnectionStatus::Disconnected);
                             wake_for_close.notify_one();
@@ -807,14 +818,22 @@ impl ConnectionStore {
                 consecutive_failures += 1;
                 let refused = outcome == ConnectOutcome::Refused;
                 if outcome == ConnectOutcome::Unreachable {
-                    endpoint_pool
-                        .lock()
-                        .record_unreachable(&endpoint_id, Instant::now());
-                    let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
-                        endpoint: endpoint.clone(),
-                        reason: HealthyEndpointReason::Unreachable,
-                        generation,
-                    });
+                    // The catalog already says where else we may go, so try those
+                    // first. Asking the gateway on every single failure is both
+                    // redundant and expensive: a move mints a session credential,
+                    // and a user only has ten slots.
+                    let exhausted = {
+                        let mut pool = endpoint_pool.lock();
+                        pool.record_unreachable(&endpoint_id, Instant::now());
+                        !pool.has_available(Instant::now())
+                    };
+                    if exhausted {
+                        let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                            endpoint: endpoint.clone(),
+                            reason: HealthyEndpointReason::Unreachable,
+                            generation,
+                        });
+                    }
                     wake.notify_one();
                 }
                 if refused {
@@ -1010,14 +1029,18 @@ impl ConnectionStore {
                             continue;
                         }
                         tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
-                        endpoint_pool
-                            .lock()
-                            .record_unreachable(&endpoint.id, Instant::now());
-                        let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
-                            endpoint,
-                            reason: HealthyEndpointReason::Unreachable,
-                            generation: next_generation,
-                        });
+                        let exhausted = {
+                            let mut pool = endpoint_pool.lock();
+                            pool.record_unreachable(&endpoint.id, Instant::now());
+                            !pool.has_available(Instant::now())
+                        };
+                        if exhausted {
+                            let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                                endpoint,
+                                reason: HealthyEndpointReason::Unreachable,
+                                generation: next_generation,
+                            });
+                        }
                         let _ = transport.close().await;
                         api.set_status(ConnectionStatus::Disconnected);
                         wake.notify_one();

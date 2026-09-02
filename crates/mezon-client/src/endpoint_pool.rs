@@ -24,6 +24,7 @@ struct EndpointHealth {
     circuit_open_until: Option<Instant>,
     better_streak: u8,
     slow_report_suppressed_until: Option<Instant>,
+    slow_reports_disabled: bool,
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +96,19 @@ impl EndpointPool {
             health.consecutive_failures = 0;
             health.circuit_open_until = None;
             health.better_streak = 0;
+            health.slow_reports_disabled = false;
+        }
+    }
+
+    /// Stop reporting high latency for this endpoint until the next successful
+    /// connect. Called when the backend answers a high-latency report with the
+    /// same endpoint: it has decided this node is where we belong, so asking
+    /// again every two minutes only churns credentials for a link that is slow
+    /// but working.
+    pub fn disable_slow_reports(&mut self, id: &str) {
+        if let Some(health) = self.health.get_mut(id) {
+            health.slow_reports_disabled = true;
+            health.better_streak = 0;
         }
     }
 
@@ -109,6 +123,10 @@ impl EndpointPool {
             return false;
         };
         update_ewma(&mut health.ewma_rtt, rtt);
+        if health.slow_reports_disabled {
+            health.better_streak = 0;
+            return false;
+        }
         if health
             .slow_report_suppressed_until
             .is_some_and(|until| until > now)
@@ -244,6 +262,35 @@ mod tests {
             after_dwell + SLOW_SWITCH_COOLDOWN
         ));
         assert_eq!(pool.active_id(), Some("a"));
+    }
+
+    #[test]
+    fn a_backend_confirmed_slow_endpoint_stops_reporting_until_the_next_connect() {
+        let now = Instant::now();
+        let mut pool = EndpointPool::default();
+        pool.replace(vec![endpoint("a", 0)]);
+        pool.record_connected("a", now);
+
+        let dwelled = now + SLOW_SWITCH_COOLDOWN;
+        for _ in 0..2 {
+            assert!(!pool.record_active_probe(Duration::from_millis(800), dwelled));
+        }
+        assert!(pool.record_active_probe(Duration::from_millis(800), dwelled));
+
+        // Backend answered with the same endpoint, so stop asking.
+        pool.disable_slow_reports("a");
+        let much_later = dwelled + SLOW_SWITCH_COOLDOWN * 10;
+        for _ in 0..10 {
+            assert!(!pool.record_active_probe(Duration::from_millis(800), much_later));
+        }
+
+        // A fresh connect re-arms it — the link may genuinely have changed.
+        pool.record_connected("a", much_later);
+        let redwelled = much_later + SLOW_SWITCH_COOLDOWN;
+        for _ in 0..2 {
+            assert!(!pool.record_active_probe(Duration::from_millis(800), redwelled));
+        }
+        assert!(pool.record_active_probe(Duration::from_millis(800), redwelled));
     }
 
     #[test]

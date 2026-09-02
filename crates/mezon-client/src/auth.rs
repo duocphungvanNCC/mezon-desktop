@@ -88,6 +88,10 @@ struct ApiSession {
     tcp_url: Option<String>,
     #[serde(default, alias = "endpointId")]
     endpoint_id: i32,
+    /// Every realtime endpoint this client may use. The gateway omits it on old
+    /// builds, in which case we fall back to the single endpoint above.
+    #[serde(default)]
+    endpoints: Vec<crate::ServiceEndpoint>,
 }
 
 /// Response from the OTP request endpoint.
@@ -454,9 +458,18 @@ impl MezonClient {
         let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
         let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
         let (tcp_host, tcp_port, _) = parse_endpoint(api.tcp_url.as_deref());
-        let endpoints = if api.endpoint_id > 0 && (tcp_host.is_some() || ws_host.is_some()) {
+        // The gateway sends the whole catalog; that list *is* the failover pool, so
+        // prefer it. `endpoint_id` alone only ever describes the node we logged in
+        // through — building the pool from it leaves nothing to fail over to.
+        let endpoints = if !api.endpoints.is_empty() {
+            api.endpoints.clone()
+        } else if tcp_host.is_some() || ws_host.is_some() {
             vec![crate::ServiceEndpoint {
-                id: api.endpoint_id.to_string(),
+                id: if api.endpoint_id > 0 {
+                    api.endpoint_id.to_string()
+                } else {
+                    String::new()
+                },
                 region: String::new(),
                 api_url: api.api_url.clone(),
                 ws_url: api.ws_url.clone(),
@@ -679,6 +692,22 @@ mod tests {
     }
 
     #[test]
+    fn a_login_catalog_becomes_the_failover_pool() {
+        let api: ApiSession = serde_json::from_str(
+            r#"{"token":"t","refresh_token":"r","api_url":"http://127.0.0.1:7350",
+                "ws_url":"127.0.0.1:4433","tcp_url":"127.0.0.1:4433",
+                "endpoints":[
+                  {"id":"0","tcp_url":"127.0.0.1:4433"},
+                  {"id":"1","tcp_url":"127.0.0.1:4444","priority":1}]}"#,
+        )
+        .expect("valid login response");
+        assert_eq!(api.endpoints.len(), 2);
+        // endpoint_id is absent for machine 0 (proto3 omits zero), so the pool has
+        // to come from the catalog, not from endpoint_id.
+        assert_eq!(api.endpoint_id, 0);
+    }
+
+    #[test]
     fn healthy_endpoint_status_errors_preserve_the_http_code() {
         let error = anyhow::Error::new(HealthyEndpointStatusError { status: 401 });
         assert_eq!(
@@ -702,6 +731,7 @@ mod tests {
             ws_url: Some("wss://sock2.example.com".into()),
             tcp_url: Some("sock2.example.com:4433".into()),
             endpoint_id: 2,
+            endpoints: Vec::new(),
         });
 
         assert_eq!(session.endpoints.len(), 1);
