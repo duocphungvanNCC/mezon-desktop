@@ -1666,6 +1666,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_two_minute_outage_cannot_spend_the_users_session_slots() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut last_ask: Option<Instant> = None;
+        let mut retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+        let mut asks = 0u32;
+
+        while now.duration_since(start) < Duration::from_secs(120) {
+            if endpoint_refresh_retry_in(last_ask, retry_secs, now).is_zero() {
+                asks += 1;
+                last_ask = Some(now);
+                retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+            }
+            now += Duration::from_secs(1);
+        }
+
+        assert!(
+            asks <= 5,
+            "a two-minute outage asked the gateway {asks} times; the user holds ten session slots and each answer mints one"
+        );
+    }
+
     #[gpui::test]
     async fn healthy_endpoint_timeout_runs_on_the_gpui_executor(cx: &mut gpui::TestAppContext) {
         let request = futures::future::pending::<anyhow::Result<HealthyEndpointSession>>();
