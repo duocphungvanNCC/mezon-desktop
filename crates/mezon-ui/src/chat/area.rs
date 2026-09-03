@@ -65,9 +65,13 @@ pub struct ChatArea {
 const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
 
 fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
-    if route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id) {
+    let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
+    if viewing {
         navigate(cx, Route::Friends);
     }
+    // After the navigate, so the entry `navigate` just pushed goes too: a conversation the
+    // store dropped must not be reachable through Back or Forward either.
+    Router::global(cx).update(cx, |router, _| router.forget_conversation(channel_id));
 }
 
 fn route_targets_conversation(route: &Route, channel_id: ChannelId) -> bool {

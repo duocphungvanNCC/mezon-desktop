@@ -342,6 +342,14 @@ impl Router {
         self.forward.retain(|route| !route.targets_clan(clan_id));
     }
 
+    /// Drop a conversation the store no longer has, so Back cannot walk into a channel
+    /// with no sidebar row and no header.
+    pub fn forget_conversation(&mut self, channel_id: ChannelId) {
+        let targets = |route: &Route| matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id);
+        self.backward.retain(|route| !targets(route));
+        self.forward.retain(|route| !targets(route));
+    }
+
     pub fn go_back(&mut self) {
         if let Some(prev) = self.backward.pop_back() {
             self.forward

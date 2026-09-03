@@ -1,30 +1,50 @@
-use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelId, DirectMessageStore};
+use std::rc::Rc;
+
+use gpui::{App, Context, FocusHandle, SharedString, Task, Window, div, prelude::*, px};
 
 use super::Shell;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
-pub(super) struct ConfirmLeaveDmGroupModal {
-    pub(super) focus_handle: FocusHandle,
-    pub(super) channel_id: ChannelId,
+pub(super) type ConfirmAction = Rc<dyn Fn(&mut App) -> Task<anyhow::Result<()>>>;
+
+/// What a destructive confirmation says and does. Named fields, because every label is a
+/// `SharedString` and a transposed pair would type-check and ship the wrong text.
+pub(super) struct ConfirmDestructive {
+    pub(super) id: &'static str,
     pub(super) title: SharedString,
     pub(super) description: SharedString,
     pub(super) cancel_label: SharedString,
     pub(super) confirm_label: SharedString,
     pub(super) failed_message: SharedString,
-    pub(super) leaving: bool,
+    pub(super) action: ConfirmAction,
 }
 
-impl Render for ConfirmLeaveDmGroupModal {
+pub(super) struct ConfirmDestructiveModal {
+    pub(super) focus_handle: FocusHandle,
+    pub(super) cancel_id: SharedString,
+    pub(super) confirm_id: SharedString,
+    pub(super) title: SharedString,
+    pub(super) description: SharedString,
+    pub(super) cancel_label: SharedString,
+    pub(super) confirm_label: SharedString,
+    pub(super) failed_message: SharedString,
+    pub(super) action: ConfirmAction,
+    pub(super) running: bool,
+}
+
+impl Render for ConfirmDestructiveModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let leaving = self.leaving;
+        let running = self.running;
 
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.running {
+                    return;
+                }
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
             .w(px(440.))
@@ -53,37 +73,39 @@ impl Render for ConfirmLeaveDmGroupModal {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("confirm-leave-dm-group-cancel")
+                        Button::new(self.cancel_id.clone())
                             .label(self.cancel_label.clone())
                             .ghost()
-                            .on_click(|_, _window, cx| {
-                                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
-                            }),
-                    )
-                    .child(
-                        Button::new("confirm-leave-dm-group-confirm")
-                            .label(self.confirm_label.clone())
-                            .danger()
-                            .disabled(leaving)
                             .on_click(cx.listener(|this, _, _window, cx| {
-                                if this.leaving {
+                                if this.running {
                                     return;
                                 }
-                                this.leaving = true;
+                                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(self.confirm_id.clone())
+                            .label(self.confirm_label.clone())
+                            .danger()
+                            .disabled(running)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                if this.running {
+                                    return;
+                                }
+                                this.running = true;
                                 cx.notify();
-                                let channel_id = this.channel_id;
                                 let failed = this.failed_message.clone();
-                                let task = DirectMessageStore::global(cx)
-                                    .update(cx, |store, cx| store.leave_group(channel_id, cx));
+                                let task = (this.action)(cx);
                                 cx.spawn(async move |this, cx| {
                                     let result = task.await;
+                                    let owner = this.entity_id();
                                     let _ = this.update(cx, |this, cx| {
-                                        this.leaving = false;
+                                        this.running = false;
                                         cx.notify();
                                     });
                                     cx.update(|cx| {
                                         Shell::global(cx).update(cx, |shell, cx| {
-                                            shell.close_modal(cx);
+                                            shell.close_modal_if_current(owner, cx);
                                             if result.is_err() {
                                                 shell.error(failed, cx);
                                             }
