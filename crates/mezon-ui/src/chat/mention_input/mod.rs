@@ -774,7 +774,7 @@ impl MentionInput {
         self.committed = committed_from_compose_tokens(&text, tokens);
         self.pending_attachments = attachments;
         self.reset_popup();
-        self.close_popup();
+        self.close_popup(window, cx);
         self.clear_suggestions(cx);
         self.clear_ephemeral(cx);
         self.clear_ogp_preview(cx);
@@ -832,7 +832,7 @@ impl MentionInput {
             self.convert_text_to_file(text, window, cx);
             self.committed.clear();
             self.reset_popup();
-            self.close_popup();
+            self.close_popup(window, cx);
             self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
@@ -845,7 +845,7 @@ impl MentionInput {
         let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
-        self.close_popup();
+        self.close_popup(window, cx);
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
             input.clear_after_send(swallow, window, cx);
@@ -2042,7 +2042,7 @@ impl MentionInput {
     fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(popup) = &self.popup {
             if popup.read(cx).active_tab() == tab {
-                self.close_popup();
+                self.close_popup(window, cx);
             } else {
                 popup.update(cx, |popup, cx| popup.set_tab(tab, window, cx));
             }
@@ -2079,7 +2079,7 @@ impl MentionInput {
                 ),
                 GifStickerEmojiEvent::Sticker { url, filename } => {
                     this.abandon_search_ime(window, cx);
-                    this.close_popup();
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendSticker {
                         url: url.clone(),
                         filename: filename.clone(),
@@ -2088,7 +2088,7 @@ impl MentionInput {
                 }
                 GifStickerEmojiEvent::Gif { url, width, height } => {
                     this.abandon_search_ime(window, cx);
-                    this.close_popup();
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendGif {
                         url: url.clone(),
                         width: *width,
@@ -2098,7 +2098,7 @@ impl MentionInput {
                 }
                 GifStickerEmojiEvent::Sound { url, filename } => {
                     this.abandon_search_ime(window, cx);
-                    this.close_popup();
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendSound {
                         url: url.clone(),
                         filename: filename.clone(),
@@ -2107,17 +2107,26 @@ impl MentionInput {
                 }
             },
         );
-        let dismiss_sub = cx.subscribe(&popup, |this, _popup, _: &DismissEvent, cx| {
-            this.close_popup();
-            cx.notify();
-        });
+        let dismiss_sub = cx.subscribe_in(
+            &popup,
+            window,
+            |this, _popup, _: &DismissEvent, window, cx| {
+                this.close_popup(window, cx);
+                cx.notify();
+            },
+        );
         self._popup_subs = vec![pick_sub, dismiss_sub];
         self.popup = Some(popup);
     }
 
-    fn close_popup(&mut self) {
+    fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_open = self.popup.is_some();
         self.popup = None;
         self._popup_subs.clear();
+        if was_open {
+            let handle = self.input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
     }
 
     pub fn show_panel(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -2129,8 +2138,8 @@ impl MentionInput {
         cx.notify();
     }
 
-    pub fn hide_panel(&mut self, cx: &mut Context<Self>) {
-        self.close_popup();
+    pub fn hide_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popup(window, cx);
         cx.notify();
     }
 
@@ -2207,9 +2216,10 @@ impl MentionInput {
         filename: String,
         width: i32,
         height: i32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        self.close_popup();
+        self.close_popup(window, cx);
         match kind {
             "sticker" => cx.emit(MentionInputEvent::SendSticker { url, filename }),
             "gif" => cx.emit(MentionInputEvent::SendGif {
@@ -2309,7 +2319,7 @@ impl MentionInput {
                 input.set_value("", window, cx);
             });
         } else if self.popup.is_some() {
-            self.close_popup();
+            self.close_popup(window, cx);
             cx.notify();
         } else {
             cx.emit(MentionInputEvent::Cancel);
@@ -2512,11 +2522,11 @@ impl MentionInput {
                     .mb(px(10.))
                     .occlude()
                     .on_mouse_down_out(cx.listener(
-                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        move |this, event: &gpui::MouseDownEvent, window, cx| {
                             if toggle_bounds.get().contains(&event.position) {
                                 return;
                             }
-                            this.close_popup();
+                            this.close_popup(window, cx);
                             cx.notify();
                         },
                     ))

@@ -1109,7 +1109,15 @@ impl X11Client {
 
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
+        let composing = state.composing || state.pre_edit_text.is_some();
+        if !composing {
+            return;
+        }
         state.composing = false;
+        if let Some(compose_state) = state.compose_state.as_mut() {
+            compose_state.reset();
+        }
+        state.pre_edit_text.take();
         if let Some(im) = state.im.as_mut() {
             im.reset();
             drop(state);
@@ -1789,9 +1797,6 @@ impl X11Client {
                     .im
                     .as_ref()
                     .is_some_and(|im| im.ibus_fcitx_shim());
-                if !fcitx_shim {
-                    self.reset_ime();
-                }
                 let mut state = self.0.borrow_mut();
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 if let Some(compose_state) = state.compose_state.as_mut() {

@@ -517,12 +517,19 @@ impl WaylandClientStatePtr {
 
     pub fn reset_ime(&self) {
         let client = self.get_client();
-        let composing = {
-            let state = client.borrow();
-            state.composing || state.pre_edit_text.is_some()
-        };
-        if !composing {
-            return;
+        {
+            let mut state = client.borrow_mut();
+            let composing =
+                state.composing || state.pre_edit_text.is_some() || state.ime_pre_edit.is_some();
+            if !composing {
+                return;
+            }
+            state.pre_edit_text.take();
+            state.ime_pre_edit.take();
+            state.pending_preedit.take();
+            if let Some(compose) = state.compose_state.as_mut() {
+                compose.reset();
+            }
         }
         self.disable_ime();
         self.enable_ime();

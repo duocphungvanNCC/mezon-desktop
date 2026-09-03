@@ -27,7 +27,8 @@ use crate::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -242,17 +243,12 @@ impl InputState {
         let Some(marked) = self.marked_range.take() else {
             return;
         };
-        let start = marked.start.min(self.content.len());
-        let end = marked.end.min(self.content.len()).max(start);
-        if start >= end {
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
             return;
-        }
-        self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
-        let mut next = String::with_capacity(self.content.len() - (end - start));
-        next.push_str(&self.content[..start]);
-        next.push_str(&self.content[end..]);
+        };
+        self.discard_ime_commit = Some(discarded);
         self.content = next.into();
-        self.selected_range = start..start;
+        self.selected_range = caret..caret;
         self.refresh_filter_token_chips(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
