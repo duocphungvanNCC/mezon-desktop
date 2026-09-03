@@ -86,12 +86,10 @@ struct ApiSession {
     ws_url: Option<String>,
     /// The TCP endpoint URL returned by the server after auth.
     tcp_url: Option<String>,
+    /// The gateway's id for the node it put us on. Omitted for machine 0 — proto3
+    /// drops a zero — so this is a hint, never a guarantee.
     #[serde(default, alias = "endpointId")]
     endpoint_id: i32,
-    /// Every realtime endpoint this client may use. The gateway omits it on old
-    /// builds, in which case we fall back to the single endpoint above.
-    #[serde(default)]
-    endpoints: Vec<crate::ServiceEndpoint>,
 }
 
 /// Response from the OTP request endpoint.
@@ -389,15 +387,15 @@ impl MezonClient {
         }
     }
 
+    /// Ask the gateway which realtime node this session belongs on. It answers with
+    /// exactly one — it has already decided — so there is nothing to choose from here.
     pub async fn get_healthy_endpoint(
         &self,
         token: &str,
         current_endpoint_id: i32,
         reason: HealthyEndpointReason,
-        geo_ip: &str,
     ) -> Result<HealthyEndpointSession> {
-        let url =
-            healthy_endpoint_url(&self.base_url(), current_endpoint_id, reason as i32, geo_ip)?;
+        let url = healthy_endpoint_url(&self.base_url(), current_endpoint_id, reason as i32)?;
         let request = http::Request::builder()
             .method(http::Method::GET)
             .uri(url.as_str())
@@ -458,27 +456,6 @@ impl MezonClient {
         let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
         let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
         let (tcp_host, tcp_port, _) = parse_endpoint(api.tcp_url.as_deref());
-        // The gateway sends the whole catalog; that list *is* the failover pool, so
-        // prefer it. `endpoint_id` alone only ever describes the node we logged in
-        // through — building the pool from it leaves nothing to fail over to.
-        let endpoints = if !api.endpoints.is_empty() {
-            api.endpoints.clone()
-        } else if tcp_host.is_some() || ws_host.is_some() {
-            vec![crate::ServiceEndpoint {
-                id: if api.endpoint_id > 0 {
-                    api.endpoint_id.to_string()
-                } else {
-                    String::new()
-                },
-                region: String::new(),
-                api_url: api.api_url.clone(),
-                ws_url: api.ws_url.clone(),
-                tcp_url: api.tcp_url.clone(),
-                priority: 0,
-            }]
-        } else {
-            Vec::new()
-        };
         Session {
             token: api.token,
             refresh_token: api.refresh_token,
@@ -493,7 +470,7 @@ impl MezonClient {
             tcp_url: api.tcp_url,
             tcp_host,
             tcp_port,
-            endpoints,
+            endpoint_id: api.endpoint_id,
             ws_url: api.ws_url,
             ws_host,
             ws_port,
@@ -601,7 +578,6 @@ fn healthy_endpoint_url(
     base_url: &str,
     current_endpoint_id: i32,
     reason_code: i32,
-    geo_ip: &str,
 ) -> Result<url::Url> {
     let mut url = url::Url::parse(&format!(
         "{}/v2/healthy/endpoint",
@@ -611,7 +587,8 @@ fn healthy_endpoint_url(
     url.query_pairs_mut()
         .append_pair("currentEndpointId", &current_endpoint_id.to_string())
         .append_pair("reasonCode", &reason_code.to_string())
-        .append_pair("geoIp", geo_ip);
+        // The client has no region to declare; the gateway reads the source IP.
+        .append_pair("geoIp", "");
     Ok(url)
 }
 
@@ -666,15 +643,14 @@ mod tests {
 
     #[test]
     fn healthy_endpoint_url_matches_the_gateway_query_contract() {
-        let url = healthy_endpoint_url("https://gw.example.com:8081/", 7, 2, "vn-south")
-            .expect("valid URL");
+        let url = healthy_endpoint_url("https://gw.example.com:8081/", 7, 2).expect("valid URL");
         assert_eq!(url.path(), "/v2/healthy/endpoint");
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             vec![
                 ("currentEndpointId".into(), "7".into()),
                 ("reasonCode".into(), "2".into()),
-                ("geoIp".into(), "vn-south".into()),
+                ("geoIp".into(), "".into()),
             ]
         );
     }
@@ -689,22 +665,6 @@ mod tests {
         assert_eq!(endpoint.session_id, "sid");
         assert_eq!(endpoint.tcp_url.as_deref(), Some("sock.example.com:4433"));
         assert_eq!(endpoint.endpoint_id, 2);
-    }
-
-    #[test]
-    fn a_login_catalog_becomes_the_failover_pool() {
-        let api: ApiSession = serde_json::from_str(
-            r#"{"token":"t","refresh_token":"r","api_url":"http://127.0.0.1:7350",
-                "ws_url":"127.0.0.1:4433","tcp_url":"127.0.0.1:4433",
-                "endpoints":[
-                  {"id":"0","tcp_url":"127.0.0.1:4433"},
-                  {"id":"1","tcp_url":"127.0.0.1:4444","priority":1}]}"#,
-        )
-        .expect("valid login response");
-        assert_eq!(api.endpoints.len(), 2);
-        // endpoint_id is absent for machine 0 (proto3 omits zero), so the pool has
-        // to come from the catalog, not from endpoint_id.
-        assert_eq!(api.endpoint_id, 0);
     }
 
     #[test]
@@ -731,14 +691,32 @@ mod tests {
             ws_url: Some("wss://sock2.example.com".into()),
             tcp_url: Some("sock2.example.com:4433".into()),
             endpoint_id: 2,
-            endpoints: Vec::new(),
         });
 
-        assert_eq!(session.endpoints.len(), 1);
-        assert_eq!(session.endpoints[0].id, "2");
-        assert_eq!(
-            session.endpoints[0].tcp_url.as_deref(),
-            Some("sock2.example.com:4433")
-        );
+        assert_eq!(session.endpoint_id, 2);
+        let endpoint = session
+            .realtime_endpoint("default.example.com", Some(4433))
+            .expect("a node");
+        assert_eq!(endpoint.id, "2");
+        assert_eq!(endpoint.host, "sock2.example.com");
+        assert_eq!(endpoint.port, 4433);
+    }
+
+    #[test]
+    fn a_login_without_an_endpoint_id_still_names_the_node_it_landed_on() {
+        let api: ApiSession = serde_json::from_str(
+            r#"{"token":"t","refresh_token":"r","api_url":"http://127.0.0.1:7350",
+                "ws_url":"127.0.0.1:4433","tcp_url":"127.0.0.1:4433"}"#,
+        )
+        .expect("valid login response");
+        // Machine 0 has no id on the wire; the node itself still has to be usable.
+        assert_eq!(api.endpoint_id, 0);
+
+        let session = MezonClient::default().parse_session(api);
+        let endpoint = session
+            .realtime_endpoint("default.example.com", Some(4433))
+            .expect("a node");
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 4433);
     }
 }

@@ -6,7 +6,7 @@ pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
 pub mod channel_app_launch;
-pub mod endpoint_pool;
+pub mod endpoint_health;
 pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
@@ -38,7 +38,7 @@ pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use auth::{HealthyEndpointStatusError, MezonClient};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
-pub use endpoint_pool::{EndpointCandidate, EndpointPool};
+pub use endpoint_health::{EndpointHealth, RealtimeEndpoint};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
@@ -68,9 +68,7 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::{
-    HealthyEndpointReason, HealthyEndpointSession, ServiceEndpoint, Session, jwt_expires_at,
-};
+pub use session::{HealthyEndpointReason, HealthyEndpointSession, Session, jwt_expires_at};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
