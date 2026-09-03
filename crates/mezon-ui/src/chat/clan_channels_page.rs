@@ -128,6 +128,10 @@ impl ClanChannelsPage {
         if self.clan_id == clan_id {
             return;
         }
+        if !self.clan_id.is_zero() {
+            ChannelSettingsStore::global(cx)
+                .update(cx, |store, cx| store.reset_clan(self.clan_id, cx));
+        }
         self.clan_id = clan_id;
         self.reset_search(cx);
         self.expanded.clear();
@@ -157,11 +161,6 @@ impl ClanChannelsPage {
     }
 
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
-        if self.clan_id.get() != 0 {
-            ChannelSettingsStore::global(cx)
-                .update(cx, |store, cx| store.reset_clan(self.clan_id, cx));
-            self.clan_id = ClanId(0);
-        }
         self.reset_search(cx);
     }
 
@@ -926,6 +925,7 @@ fn build_channel_list_menu(
     let current_user_id =
         BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
     let is_creator = current_user_id == Some(state.row.creator_id);
+    let can_access = can_access_channel(state.row.private, current_user_id, &state.row.user_ids);
     let permissions = PermissionStore::try_global(cx);
     let has_permission = |permission| {
         permissions
@@ -946,13 +946,14 @@ fn build_channel_list_menu(
             has_manage_clan,
             has_manage_channel,
         );
-    let can_edit = manage_allowed_by_server(
-        is_creator,
-        has_owner,
-        has_admin,
-        has_manage_clan,
-        has_manage_channel,
-    );
+    let can_edit = can_access
+        && manage_allowed_by_server(
+            is_creator,
+            has_owner,
+            has_admin,
+            has_manage_clan,
+            has_manage_channel,
+        );
     let can_delete = !is_welcome
         && delete_allowed_by_server(
             is_creator,
@@ -1041,6 +1042,10 @@ fn build_channel_list_menu(
         });
     }
     menu
+}
+
+fn can_access_channel(private: bool, current_user_id: Option<UserId>, user_ids: &[UserId]) -> bool {
+    !private || current_user_id.is_some_and(|user_id| user_ids.contains(&user_id))
 }
 
 fn tr(locale: &str, key: &'static str) -> String {
@@ -1206,5 +1211,18 @@ mod tests {
     fn search_normalization_removes_diacritics() {
         assert_eq!(normalize_diacritics("Hiền"), "hien");
         assert_eq!(normalize_diacritics("Đà Nẵng"), "da nang");
+    }
+
+    #[test]
+    fn public_channels_are_accessible_without_membership() {
+        assert!(can_access_channel(false, Some(UserId(1)), &[]));
+    }
+
+    #[test]
+    fn private_channels_require_current_user_membership() {
+        let members = [UserId(2), UserId(3)];
+        assert!(can_access_channel(true, Some(UserId(2)), &members));
+        assert!(!can_access_channel(true, Some(UserId(1)), &members));
+        assert!(!can_access_channel(true, None, &members));
     }
 }
