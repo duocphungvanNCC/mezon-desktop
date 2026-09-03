@@ -7,13 +7,10 @@ use crate::RealtimeEndpoint;
 const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
 #[cfg(debug_assertions)]
 const DEBUG_FAILOVER_UNREACHABLE_PRIMARY: &str = "unreachable-primary";
-/// Spent once the gateway has answered, so the simulated outage is the *first*
-/// connect only and the node the gateway names afterwards is used for real.
 #[cfg(debug_assertions)]
 static DEBUG_FAILOVER_POISON_SPENT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Why we are asking the gateway for a node. The gateway reads it as `reasonCode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum HealthyEndpointReason {
@@ -21,7 +18,6 @@ pub enum HealthyEndpointReason {
     HighLatency = 2,
 }
 
-/// `GET /v2/healthy/endpoint` — one node, already chosen by the gateway.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct HealthyEndpointSession {
@@ -35,7 +31,7 @@ pub struct HealthyEndpointSession {
     pub ws_url: Option<String>,
     #[serde(alias = "tcpUrl")]
     pub tcp_url: Option<String>,
-    #[serde(alias = "endpointId")]
+    #[serde(alias = "endpointId", deserialize_with = "deserialize_endpoint_id")]
     pub endpoint_id: i32,
 }
 
@@ -43,21 +39,36 @@ impl HealthyEndpointSession {
     pub fn realtime_endpoint(&self, default_port: Option<u16>) -> Option<RealtimeEndpoint> {
         let (tcp_host, tcp_port, _) = parse_endpoint(self.tcp_url.as_deref());
         let (ws_host, ws_port, _) = parse_endpoint(self.ws_url.as_deref());
-        let host = tcp_host.or(ws_host)?;
+        let host = named_host(tcp_host).or_else(|| named_host(ws_host))?;
         Some(RealtimeEndpoint {
-            id: endpoint_id_label(self.endpoint_id),
+            id: self.endpoint_id,
             host,
             port: tcp_port.or(ws_port).or(default_port).unwrap_or(443),
         })
     }
 }
 
-fn endpoint_id_label(endpoint_id: i32) -> String {
-    if endpoint_id > 0 {
-        endpoint_id.to_string()
-    } else {
-        String::new()
+fn named_host(host: Option<String>) -> Option<String> {
+    host.filter(|host| !host.is_empty())
+}
+
+pub(crate) fn deserialize_endpoint_id<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireEndpointId {
+        Number(i64),
+        Text(String),
+        Unset,
     }
+
+    Ok(match WireEndpointId::deserialize(deserializer)? {
+        WireEndpointId::Number(id) => i32::try_from(id).unwrap_or_default(),
+        WireEndpointId::Text(id) => id.trim().parse().unwrap_or_default(),
+        WireEndpointId::Unset => 0,
+    })
 }
 
 /// Authenticated session returned after login.
@@ -100,8 +111,6 @@ pub struct Session {
     pub tcp_host: Option<String>,
     /// Parsed TCP port returned by the server after auth
     pub tcp_port: Option<u16>,
-    /// The gateway's id for the node this session is on. Absent (0) whenever the
-    /// gateway did not name one — proto3 omits a zero, so 0 also *is* machine 0.
     #[serde(default)]
     pub endpoint_id: i32,
     /// User ID
@@ -161,26 +170,19 @@ impl Session {
         }
     }
 
-    /// Adopt the node `/v2/healthy/endpoint` named. The gateway picked it, so there
-    /// is nothing to weigh here: the session simply moves.
     pub fn apply_healthy_endpoint(
         &mut self,
         endpoint: &HealthyEndpointSession,
         default_port: Option<u16>,
     ) -> bool {
-        let Some(moved_to) = endpoint.realtime_endpoint(default_port) else {
+        if endpoint.realtime_endpoint(default_port).is_none() {
             return false;
-        };
+        }
         if !endpoint.user_id.is_empty() && endpoint.user_id != self.user_id {
             return false;
         }
-        let same_node = self
-            .realtime_endpoint("", default_port)
-            .is_some_and(|current| current.host == moved_to.host && current.port == moved_to.port);
+        let node_before = (self.named_realtime_host(), self.realtime_port(default_port));
 
-        if !endpoint.session_id.is_empty() {
-            self.session_id = endpoint.session_id.clone();
-        }
         let api_url = endpoint
             .api_url
             .clone()
@@ -211,23 +213,25 @@ impl Session {
         self.tcp_url = tcp_url;
         self.tcp_host = tcp_host;
         self.tcp_port = tcp_port;
-        // An unchanged node keeps the id we already knew: the gateway leaves the
-        // field out for machine 0, and forgetting the id would send the next
-        // request back as `currentEndpointId=0`.
+
+        let node_after = (self.named_realtime_host(), self.realtime_port(default_port));
+        let stays_on_the_same_node = node_before.0.is_some() && node_before == node_after;
+
+        if !endpoint.session_id.is_empty()
+            && (!stays_on_the_same_node || self.session_id.is_empty())
+        {
+            self.session_id = endpoint.session_id.clone();
+        }
         self.endpoint_id = if endpoint.endpoint_id > 0 {
             endpoint.endpoint_id
-        } else if same_node {
+        } else if stays_on_the_same_node {
             self.endpoint_id
         } else {
             0
         };
-        #[cfg(debug_assertions)]
-        DEBUG_FAILOVER_POISON_SPENT.store(true, std::sync::atomic::Ordering::Release);
         true
     }
 
-    /// The node this session points at. There is only ever one — the gateway hands
-    /// back a single endpoint, so there is no pool here to choose from.
     pub fn realtime_endpoint(
         &self,
         default_host: &str,
@@ -238,39 +242,40 @@ impl Session {
             return Some(poisoned);
         }
         let host = self
-            .tcp_host
-            .clone()
-            .or_else(|| self.ws_host.clone())
+            .named_realtime_host()
             .unwrap_or_else(|| default_host.to_string());
         if host.is_empty() {
             return None;
         }
         Some(RealtimeEndpoint {
-            id: endpoint_id_label(self.endpoint_id),
+            id: self.endpoint_id,
             host,
-            port: self
-                .tcp_port
-                .or(self.ws_port)
-                .or(default_port)
-                .unwrap_or(443),
+            port: self.realtime_port(default_port),
         })
+    }
+
+    fn named_realtime_host(&self) -> Option<String> {
+        named_host(self.tcp_host.clone()).or_else(|| named_host(self.ws_host.clone()))
+    }
+
+    fn realtime_port(&self, default_port: Option<u16>) -> u16 {
+        self.tcp_port
+            .or(self.ws_port)
+            .or(default_port)
+            .unwrap_or(443)
     }
 }
 
-/// `MEZON_DEBUG_FAILOVER_SIMULATION=unreachable-primary` makes the first connect
-/// attempt of the run hit a dead port, so the client has to ask the gateway for a
-/// node and then live on whatever it answers with — the whole failover path, on a
-/// machine with a single backend.
 #[cfg(debug_assertions)]
 fn debug_failover_poisoned_endpoint() -> Option<RealtimeEndpoint> {
     if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
         != Ok(DEBUG_FAILOVER_UNREACHABLE_PRIMARY)
-        || DEBUG_FAILOVER_POISON_SPENT.load(std::sync::atomic::Ordering::Acquire)
+        || DEBUG_FAILOVER_POISON_SPENT.swap(true, std::sync::atomic::Ordering::AcqRel)
     {
         return None;
     }
     Some(RealtimeEndpoint {
-        id: "debug-unreachable-primary".to_string(),
+        id: 0,
         host: "127.0.0.1".to_string(),
         port: 1,
     })
@@ -448,10 +453,9 @@ mod tests {
         let endpoint = session
             .realtime_endpoint("default.example.com", Some(7349))
             .expect("a node");
-        assert_eq!(endpoint.id, "2");
+        assert_eq!(endpoint.id, 2);
         assert_eq!(endpoint.host, "sock2.example.com");
         assert_eq!(endpoint.port, 4433);
-        assert_eq!(endpoint.backend_id(), 2);
     }
 
     #[test]
@@ -463,8 +467,86 @@ mod tests {
             .expect("a node");
         assert_eq!(endpoint.host, "default.example.com");
         assert_eq!(endpoint.port, 7349);
-        // Nothing to send as `currentEndpointId` — the gateway names the node.
-        assert_eq!(endpoint.backend_id(), 0);
+        assert_eq!(endpoint.id, 0);
+    }
+
+    #[test]
+    fn an_empty_realtime_url_falls_back_instead_of_producing_a_nameless_node() {
+        let session = Session {
+            tcp_url: Some(String::new()),
+            tcp_host: Some(String::new()),
+            ws_host: Some("sock.example.com".into()),
+            ws_port: Some(4433),
+            ..Default::default()
+        };
+
+        let endpoint = session
+            .realtime_endpoint("default.example.com", Some(7349))
+            .expect("an empty tcp host must not shadow the ws host");
+        assert_eq!(endpoint.host, "sock.example.com");
+    }
+
+    #[test]
+    fn a_gateway_answer_that_leaves_the_session_where_it_is_is_not_a_move() {
+        let mut session = Session {
+            user_id: "7".into(),
+            session_id: "live-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            tcp_host: Some("sock.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+        let confirmed = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "minted-sid".into(),
+            ws_url: Some("wss://sock.example.com".into()),
+            tcp_url: Some(String::new()),
+            ..Default::default()
+        };
+
+        assert!(session.apply_healthy_endpoint(&confirmed, Some(4433)));
+        assert_eq!(session.tcp_host.as_deref(), Some("sock.example.com"));
+        assert_eq!(session.tcp_port, Some(4433));
+        assert_eq!(
+            session.session_id, "live-sid",
+            "a 60-second credential must not replace the one the live socket uses"
+        );
+    }
+
+    #[test]
+    fn moving_to_another_node_adopts_the_credential_minted_for_it() {
+        let mut session = Session {
+            user_id: "7".into(),
+            session_id: "old-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            tcp_host: Some("sock.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+        let moved = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "minted-sid".into(),
+            tcp_url: Some("sock2.example.com:4433".into()),
+            ..Default::default()
+        };
+
+        assert!(session.apply_healthy_endpoint(&moved, Some(4433)));
+        assert_eq!(session.session_id, "minted-sid");
+        assert_eq!(session.tcp_host.as_deref(), Some("sock2.example.com"));
+    }
+
+    #[test]
+    fn an_endpoint_id_the_gateway_sends_as_a_string_still_decodes() {
+        let numeric: HealthyEndpointSession =
+            serde_json::from_str(r#"{"tcp_url":"sock:4433","endpoint_id":11}"#).expect("numeric");
+        let text: HealthyEndpointSession =
+            serde_json::from_str(r#"{"tcp_url":"sock:4433","endpoint_id":"11"}"#).expect("string");
+        let absent: HealthyEndpointSession =
+            serde_json::from_str(r#"{"tcp_url":"sock:4433"}"#).expect("absent");
+
+        assert_eq!(numeric.endpoint_id, 11);
+        assert_eq!(text.endpoint_id, 11);
+        assert_eq!(absent.endpoint_id, 0);
     }
 
     #[test]
@@ -528,7 +610,6 @@ mod tests {
             tcp_port: Some(4433),
             ..Default::default()
         };
-        // proto3 omits a zero, so a gateway that means "stay put" sends no id.
         let confirmed = HealthyEndpointSession {
             user_id: "7".into(),
             tcp_url: Some("sock.example.com:4433".into()),
@@ -538,7 +619,6 @@ mod tests {
         assert!(session.apply_healthy_endpoint(&confirmed, Some(4433)));
         assert_eq!(session.endpoint_id, 3);
 
-        // A different node without an id is genuinely unknown, so stop claiming one.
         let moved = HealthyEndpointSession {
             user_id: "7".into(),
             tcp_url: Some("sock2.example.com:4433".into()),

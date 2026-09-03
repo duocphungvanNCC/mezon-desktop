@@ -86,9 +86,11 @@ struct ApiSession {
     ws_url: Option<String>,
     /// The TCP endpoint URL returned by the server after auth.
     tcp_url: Option<String>,
-    /// The gateway's id for the node it put us on. Omitted for machine 0 — proto3
-    /// drops a zero — so this is a hint, never a guarantee.
-    #[serde(default, alias = "endpointId")]
+    #[serde(
+        default,
+        alias = "endpointId",
+        deserialize_with = "crate::session::deserialize_endpoint_id"
+    )]
     endpoint_id: i32,
 }
 
@@ -387,8 +389,6 @@ impl MezonClient {
         }
     }
 
-    /// Ask the gateway which realtime node this session belongs on. It answers with
-    /// exactly one — it has already decided — so there is nothing to choose from here.
     pub async fn get_healthy_endpoint(
         &self,
         token: &str,
@@ -587,7 +587,6 @@ fn healthy_endpoint_url(
     url.query_pairs_mut()
         .append_pair("currentEndpointId", &current_endpoint_id.to_string())
         .append_pair("reasonCode", &reason_code.to_string())
-        // The client has no region to declare; the gateway reads the source IP.
         .append_pair("geoIp", "");
     Ok(url)
 }
@@ -697,9 +696,19 @@ mod tests {
         let endpoint = session
             .realtime_endpoint("default.example.com", Some(4433))
             .expect("a node");
-        assert_eq!(endpoint.id, "2");
+        assert_eq!(endpoint.id, 2);
         assert_eq!(endpoint.host, "sock2.example.com");
         assert_eq!(endpoint.port, 4433);
+    }
+
+    #[test]
+    fn a_login_endpoint_id_sent_as_a_string_does_not_break_the_login() {
+        let api: ApiSession = serde_json::from_str(
+            r#"{"token":"t","refresh_token":"r","api_url":"https://api.example.com",
+                "tcp_url":"sock.example.com:4433","endpointId":"11"}"#,
+        )
+        .expect("an int64 endpoint id arrives as a JSON string");
+        assert_eq!(api.endpoint_id, 11);
     }
 
     #[test]
@@ -709,7 +718,6 @@ mod tests {
                 "ws_url":"127.0.0.1:4433","tcp_url":"127.0.0.1:4433"}"#,
         )
         .expect("valid login response");
-        // Machine 0 has no id on the wire; the node itself still has to be usable.
         assert_eq!(api.endpoint_id, 0);
 
         let session = MezonClient::default().parse_session(api);
