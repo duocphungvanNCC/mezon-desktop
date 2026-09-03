@@ -227,8 +227,11 @@ pub fn splice_out_byte_range(
     content: &str,
     range: Range<usize>,
 ) -> Option<(String, String, usize)> {
+    if range.start >= range.end {
+        return None;
+    }
     let start = floor_char_boundary(content, range.start);
-    let end = floor_char_boundary(content, range.end).max(start);
+    let end = ceil_char_boundary(content, range.end).max(start);
     if start >= end {
         return None;
     }
@@ -565,6 +568,17 @@ mod tests {
     fn splice_out_byte_range_returns_none_when_empty_after_clamp() {
         assert_eq!(splice_out_byte_range("à", 1..1), None);
         assert_eq!(splice_out_byte_range("", 0..0), None);
+    }
+
+    #[test]
+    fn splice_out_byte_range_ceils_end_so_last_preedit_char_is_not_left_behind() {
+        let content = "xin chào";
+        assert!(!content.is_char_boundary(7));
+        let (next, discarded, caret) = splice_out_byte_range(content, 6..7).unwrap();
+        assert_eq!(discarded, "à");
+        assert_eq!(next, "xin cho");
+        assert_eq!(caret, 6);
+        assert!(next.is_char_boundary(caret));
     }
 
     #[test]

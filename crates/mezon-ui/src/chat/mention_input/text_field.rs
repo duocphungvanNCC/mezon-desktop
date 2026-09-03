@@ -826,7 +826,7 @@ impl MentionInputState {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
-        if event.keystroke.key == "enter" {
+        if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
             return;
         }
         self.discard_ime_commit = None;

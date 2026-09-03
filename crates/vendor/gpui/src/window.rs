@@ -5409,6 +5409,9 @@ impl Window {
         self.platform_window.hide();
     }
 
+    /// mezon vendor edit: cancel in-progress IME composition at the platform
+    /// level (Linux DBus Reset / zwp_text_input disable-enable) so a picker or
+    /// field switch can drop an uncommitted preedit while App is already borrowed.
     pub fn reset_ime(&self) {
         self.platform_window.reset_ime();
     }
@@ -5433,8 +5436,6 @@ impl Window {
                 if let Some(bounds) = bounds {
                     window.platform_window.set_ime_surrounding_hint(surrounding);
                     window.platform_window.update_ime_position(bounds);
-                    window.platform_window.set_ime_surrounding_hint(None);
-                } else {
                     window.platform_window.set_ime_surrounding_hint(None);
                 }
             }

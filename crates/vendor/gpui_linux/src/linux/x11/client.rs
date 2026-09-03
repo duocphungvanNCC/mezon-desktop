@@ -1109,19 +1109,15 @@ impl X11Client {
 
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
-        let composing = state.composing || state.pre_edit_text.is_some();
-        if !composing {
-            return;
-        }
-        state.composing = false;
         if let Some(compose_state) = state.compose_state.as_mut() {
             compose_state.reset();
         }
         state.pre_edit_text.take();
+        state.composing = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
             drop(state);
-            self.drain_dbus_im();
+            self.discard_dbus_im_events();
             return;
         }
         if let Some(mut ximc) = state.ximc.take() {
@@ -1309,6 +1305,17 @@ impl X11Client {
 
     fn drain_dbus_im(&self) {
         self.drain_dbus_im_with(false);
+    }
+
+    fn discard_dbus_im_events(&self) {
+        let mut state = self.0.borrow_mut();
+        let Some(mut im) = state.im.take() else {
+            return;
+        };
+        drop(state);
+        im.process_io();
+        let _ = im.take_events();
+        self.0.borrow_mut().im = Some(im);
     }
 
     fn drain_dbus_im_with(&self, keep_preedit: bool) {
@@ -1791,12 +1798,6 @@ impl X11Client {
                 }
                 let window = self.get_window(event.event)?;
                 window.set_active(false);
-                let fcitx_shim = self
-                    .0
-                    .borrow()
-                    .im
-                    .as_ref()
-                    .is_some_and(|im| im.ibus_fcitx_shim());
                 let mut state = self.0.borrow_mut();
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 if let Some(compose_state) = state.compose_state.as_mut() {
@@ -1806,6 +1807,7 @@ impl X11Client {
                 state.restore_cursor_after_hide();
                 state.dbus_im_focused = false;
                 state.ime_resync = true;
+                let fcitx_shim = state.im.as_ref().is_some_and(|im| im.ibus_fcitx_shim());
                 if !fcitx_shim {
                     state.ime_stale = true;
                     if let Some(im) = state.im.as_mut() {

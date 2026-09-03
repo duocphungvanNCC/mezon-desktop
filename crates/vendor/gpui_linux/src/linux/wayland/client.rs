@@ -532,7 +532,17 @@ impl WaylandClientStatePtr {
             }
         }
         self.disable_ime();
-        self.enable_ime();
+        let mut state = client.borrow_mut();
+        state.ime_enabled = Some(true);
+        state.last_ime_cursor_rectangle = None;
+        let Some(text_input) = state.text_input.take() else {
+            return;
+        };
+        drop(state);
+        text_input.enable();
+        text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
+        commit_text_input(&client, &text_input);
+        client.borrow_mut().text_input = Some(text_input);
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
