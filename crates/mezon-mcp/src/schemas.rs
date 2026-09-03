@@ -568,10 +568,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["paths"],
         )),
-        "send_buzz" => Arc::new(object(
-            json!({ "text": string("Buzz text.") }),
-            &[],
-        )),
+        "send_buzz" => Arc::new(object(json!({ "text": string("Buzz text.") }), &[])),
         "send_attachment" => Arc::new(object(
             json!({
                 "path": string("Local filesystem path to one file to send."),

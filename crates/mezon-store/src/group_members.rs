@@ -85,21 +85,29 @@ impl GroupBucket {
         self.members.get(idx)
     }
 
-    fn upsert(&mut self, member: GroupMember) {
+    /// Returns whether the roster actually moved, so a redelivered event does not
+    /// claim a change.
+    fn upsert(&mut self, member: GroupMember) -> bool {
         if let Some(&idx) = self.by_id.get(&member.user.id) {
+            if self.members[idx] == member {
+                return false;
+            }
             self.members[idx] = member;
         } else {
             self.by_id.insert(member.user.id, self.members.len());
             self.members.push(member);
         }
+        true
     }
 
-    fn remove_ids(&mut self, user_ids: &[UserId]) {
+    fn remove_ids(&mut self, user_ids: &[UserId]) -> bool {
         let before = self.members.len();
         self.members.retain(|m| !user_ids.contains(&m.user.id));
-        if self.members.len() != before {
+        let removed = self.members.len() != before;
+        if removed {
             self.reindex();
         }
+        removed
     }
 }
 
@@ -378,13 +386,14 @@ fn apply_add_members(
     let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
+    let mut changed = false;
     for user in users {
         let Some(member) = group_member_from_redis(user) else {
             continue;
         };
-        bucket.upsert(member);
+        changed |= bucket.upsert(member);
     }
-    true
+    changed
 }
 
 fn apply_remove_members(
@@ -395,8 +404,7 @@ fn apply_remove_members(
     let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
-    bucket.remove_ids(user_ids);
-    true
+    bucket.remove_ids(user_ids)
 }
 
 #[cfg(test)]
@@ -543,6 +551,61 @@ mod tests {
         assert_eq!(ids, vec![UserId(1), UserId(3)]);
         assert!(bucket.get(UserId(2)).is_none());
         assert_index_consistent(bucket);
+    }
+
+    #[test]
+    fn removing_a_user_who_already_left_reports_no_change() {
+        let mut by_channel = cache_with(
+            ChannelId(1),
+            GroupBucket::from_members(group_members_from_proto(&proto_response(&[10, 11]))),
+        );
+
+        assert!(apply_remove_members(
+            &mut by_channel,
+            ChannelId(1),
+            &[UserId(10)]
+        ));
+        assert!(
+            !apply_remove_members(&mut by_channel, ChannelId(1), &[UserId(10)]),
+            "a no-op removal must not claim a change, or every stale event rebuilds the list"
+        );
+        assert!(!apply_remove_members(
+            &mut by_channel,
+            ChannelId(1),
+            &[UserId(99)]
+        ));
+    }
+
+    #[test]
+    fn re_adding_a_user_who_is_already_in_the_bucket_reports_no_change() {
+        let mut by_channel = cache_with(ChannelId(1), GroupBucket::default());
+        let users = vec![realtime::UserProfileRedis {
+            user_id: 7,
+            username: "bob".into(),
+            ..Default::default()
+        }];
+
+        assert!(apply_add_members(&mut by_channel, ChannelId(1), &users));
+        assert!(
+            !apply_add_members(&mut by_channel, ChannelId(1), &users),
+            "a redelivered add must not claim a change, or every stale event rebuilds the list"
+        );
+        assert!(
+            !apply_add_members(&mut by_channel, ChannelId(1), &[]),
+            "an add with no users is not a change"
+        );
+        assert!(
+            apply_add_members(
+                &mut by_channel,
+                ChannelId(1),
+                &[realtime::UserProfileRedis {
+                    user_id: 7,
+                    username: "bobby".into(),
+                    ..Default::default()
+                }]
+            ),
+            "a profile that actually moved is a change"
+        );
     }
 
     #[test]

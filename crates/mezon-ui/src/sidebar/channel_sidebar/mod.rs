@@ -766,6 +766,15 @@ impl ChannelSidebar {
 
     fn open_channel_menu(&mut self, menu: OpenMenu, cx: &mut Context<Self>) {
         self.clear_overlays();
+        // Permissions load in the deferred tier of clan load, so a menu opened right after a clan
+        // switch would gate every manage item off. The load is a no-op once the clan is known and
+        // the sidebar observes the store, so the menu fills in when it lands.
+        let clan_id = menu.clan_id;
+        if let Some(permissions) = PermissionStore::try_global(cx) {
+            permissions.update(cx, |permissions, cx| {
+                permissions.load_clan_permissions(clan_id, cx);
+            });
+        }
         self.open_menu = Some(menu);
         cx.notify();
     }
