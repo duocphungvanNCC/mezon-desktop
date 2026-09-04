@@ -249,6 +249,15 @@ pub fn manage_allowed_by_server(
     is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
 }
 
+pub fn channel_access_allowed(
+    private: bool,
+    is_creator: bool,
+    current_user_id: Option<UserId>,
+    user_ids: &[UserId],
+) -> bool {
+    !private || is_creator || current_user_id.is_some_and(|user_id| user_ids.contains(&user_id))
+}
+
 pub fn can_archive_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
     ChannelList::global(cx)
         .read(cx)
@@ -294,9 +303,16 @@ fn archive_permission_for(
     let creator_id = channel
         .map(|channel| channel.creator_id)
         .unwrap_or_else(|| fallback.as_ref().unwrap().creator_id);
-    let is_creator = BadgeService::try_global(cx)
-        .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == creator_id);
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = current_user_id == Some(creator_id);
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -320,23 +336,25 @@ fn delete_permission_for(
     if ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id) {
         return false;
     }
-    let creator_id = channel_list
-        .channel(clan_id, channel_id)
+    let channel = channel_list.channel(clan_id, channel_id);
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let creator_id = channel
         .map(|channel| channel.creator_id)
-        .or_else(|| {
-            ChannelSettingsStore::try_global(cx).and_then(|store| {
-                store
-                    .read(cx)
-                    .row_by_id(clan_id, channel_id)
-                    .map(|row| row.creator_id)
-            })
-        });
+        .or_else(|| fallback.as_ref().map(|row| row.creator_id));
     let Some(creator_id) = creator_id else {
         return false;
     };
-    let is_creator = BadgeService::try_global(cx)
-        .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == creator_id);
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = current_user_id == Some(creator_id);
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -356,22 +374,22 @@ fn manage_permission_for(
     channel_id: ChannelId,
     cx: &App,
 ) -> bool {
-    let creator_id = channel_list
-        .channel(clan_id, channel_id)
+    let channel = channel_list.channel(clan_id, channel_id);
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let creator_id = channel
         .map(|channel| channel.creator_id)
-        .or_else(|| {
-            ChannelSettingsStore::try_global(cx).and_then(|store| {
-                store
-                    .read(cx)
-                    .row_by_id(clan_id, channel_id)
-                    .map(|row| row.creator_id)
-            })
-        });
-    let is_creator = creator_id.is_some_and(|creator_id| {
-        BadgeService::try_global(cx)
-            .and_then(|badges| badges.read(cx).current_user_id(cx))
-            .is_some_and(|me| me == creator_id)
-    });
+        .or_else(|| fallback.as_ref().map(|row| row.creator_id));
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = creator_id.is_some_and(|creator_id| current_user_id == Some(creator_id));
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -10316,6 +10334,25 @@ mod tests {
         assert!(manage_allowed_by_server(false, false, false, true, false));
         assert!(manage_allowed_by_server(false, true, false, false, false));
         assert!(!manage_allowed_by_server(false, false, false, false, false));
+    }
+
+    #[test]
+    fn private_channel_access_accepts_creator_or_member_only() {
+        let members = [UserId(2)];
+        assert!(channel_access_allowed(true, true, Some(UserId(1)), &[]));
+        assert!(channel_access_allowed(
+            true,
+            false,
+            Some(UserId(2)),
+            &members
+        ));
+        assert!(!channel_access_allowed(
+            true,
+            false,
+            Some(UserId(1)),
+            &members
+        ));
+        assert!(channel_access_allowed(false, false, None, &[]));
     }
 
     #[test]

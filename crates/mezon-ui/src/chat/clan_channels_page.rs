@@ -11,8 +11,8 @@ use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType,
     ClanId, ClanList, ClanMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UserId,
-    archive_allowed_by_server, archive_menu_hidden, delete_allowed_by_server,
-    manage_allowed_by_server,
+    archive_allowed_by_server, archive_menu_hidden, channel_access_allowed,
+    delete_allowed_by_server, manage_allowed_by_server,
 };
 use ui::Tooltip;
 
@@ -161,6 +161,8 @@ impl ClanChannelsPage {
     }
 
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.expanded.clear();
+        self.visible_row_keys.clear();
         self.reset_search(cx);
     }
 
@@ -925,7 +927,12 @@ fn build_channel_list_menu(
     let current_user_id =
         BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
     let is_creator = current_user_id == Some(state.row.creator_id);
-    let can_access = can_access_channel(state.row.private, current_user_id, &state.row.user_ids);
+    let can_access = channel_access_allowed(
+        state.row.private,
+        is_creator,
+        current_user_id,
+        &state.row.user_ids,
+    );
     let permissions = PermissionStore::try_global(cx);
     let has_permission = |permission| {
         permissions
@@ -936,7 +943,8 @@ fn build_channel_list_menu(
     let has_admin = has_permission(PERMISSION_ADMINISTRATOR);
     let has_manage_clan = has_permission(PERMISSION_MANAGE_CLAN);
     let has_manage_channel = has_permission(PERMISSION_MANAGE_CHANNEL);
-    let can_archive = state.row.active != 0
+    let can_archive = can_access
+        && state.row.active != 0
         && !archive_menu_hidden(channel_type, is_welcome)
         && archive_allowed_by_server(
             is_thread,
@@ -954,7 +962,8 @@ fn build_channel_list_menu(
             has_manage_clan,
             has_manage_channel,
         );
-    let can_delete = !is_welcome
+    let can_delete = can_access
+        && !is_welcome
         && delete_allowed_by_server(
             is_creator,
             has_owner,
@@ -969,6 +978,14 @@ fn build_channel_list_menu(
             cx.notify();
         });
     });
+    if !has_channel_menu_actions(can_archive, can_edit, can_delete) {
+        return menu
+            .item(
+                tr(&locale, "common.permissionNotification.permissionDenied"),
+                |_window, _cx| {},
+            )
+            .disabled(true);
+    }
     if can_archive {
         let locale = locale.clone();
         menu = menu.item(
@@ -1044,8 +1061,8 @@ fn build_channel_list_menu(
     menu
 }
 
-fn can_access_channel(private: bool, current_user_id: Option<UserId>, user_ids: &[UserId]) -> bool {
-    !private || current_user_id.is_some_and(|user_id| user_ids.contains(&user_id))
+fn has_channel_menu_actions(can_archive: bool, can_edit: bool, can_delete: bool) -> bool {
+    can_archive || can_edit || can_delete
 }
 
 fn tr(locale: &str, key: &'static str) -> String {
@@ -1215,14 +1232,37 @@ mod tests {
 
     #[test]
     fn public_channels_are_accessible_without_membership() {
-        assert!(can_access_channel(false, Some(UserId(1)), &[]));
+        assert!(channel_access_allowed(false, false, Some(UserId(1)), &[]));
     }
 
     #[test]
     fn private_channels_require_current_user_membership() {
         let members = [UserId(2), UserId(3)];
-        assert!(can_access_channel(true, Some(UserId(2)), &members));
-        assert!(!can_access_channel(true, Some(UserId(1)), &members));
-        assert!(!can_access_channel(true, None, &members));
+        assert!(channel_access_allowed(
+            true,
+            false,
+            Some(UserId(2)),
+            &members
+        ));
+        assert!(!channel_access_allowed(
+            true,
+            false,
+            Some(UserId(1)),
+            &members
+        ));
+        assert!(!channel_access_allowed(true, false, None, &members));
+    }
+
+    #[test]
+    fn private_channel_creator_is_accessible_before_membership_syncs() {
+        assert!(channel_access_allowed(true, true, Some(UserId(1)), &[]));
+    }
+
+    #[test]
+    fn detects_when_channel_context_menu_has_no_actions() {
+        assert!(!has_channel_menu_actions(false, false, false));
+        assert!(has_channel_menu_actions(true, false, false));
+        assert!(has_channel_menu_actions(false, true, false));
+        assert!(has_channel_menu_actions(false, false, true));
     }
 }
