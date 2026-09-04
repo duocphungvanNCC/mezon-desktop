@@ -1,27 +1,25 @@
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, MouseButton, Render, SharedString, Subscription, Task,
-    Window, deferred, div, prelude::*, px,
+    AnyElement, Context, Entity, FontWeight, MouseButton, Render, ScrollHandle, SharedString,
+    Subscription, Task, Window, deferred, div, point, prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanId, Settings};
+use mezon_store::{ChannelList, ClanId, ClanMembersStore, Settings, UserId};
 use ui::utils::{DateTimeType, format_distance_from_now};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, h_flex,
-    v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
+    Sizable, Size, h_flex, pagination_button, pagination_items, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::text_utils::normalize_diacritics;
 
 #[derive(Clone, PartialEq, Eq)]
 struct ArchivedChannelRow {
     channel_id: i64,
     channel_label: SharedString,
     channel_private: bool,
-    category_name: SharedString,
-    topic: SharedString,
-    creator_name: SharedString,
-    member_count: i32,
-    create_timestamp: Option<i64>,
+    category_id: i64,
+    creator_id: i64,
     age_restricted: bool,
     last_active_timestamp: Option<i64>,
 }
@@ -34,7 +32,12 @@ pub struct ArchivedChannelPage {
     settings: Entity<Settings>,
     channels: Vec<ArchivedChannelRow>,
     search: Option<Entity<InputState>>,
+    search_locale: String,
     _search_sub: Option<Subscription>,
+    _member_sub: Subscription,
+    filtered_indices: Vec<usize>,
+    rows_dirty: bool,
+    list_scroll: ScrollHandle,
     page: usize,
     page_size: usize,
     page_size_picker_open: bool,
@@ -52,13 +55,20 @@ impl ArchivedChannelPage {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
+        ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        let member_sub = cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify());
         let mut this = Self {
             clan_id,
             channel_list,
             settings,
             channels: Vec::new(),
             search: None,
+            search_locale: String::new(),
             _search_sub: None,
+            _member_sub: member_sub,
+            filtered_indices: Vec::new(),
+            rows_dirty: true,
+            list_scroll: ScrollHandle::new(),
             page: 0,
             page_size: PAGE_SIZES[0],
             page_size_picker_open: false,
@@ -105,16 +115,15 @@ impl ArchivedChannelPage {
                                 channel_id: desc.channel_id,
                                 channel_label: desc.channel_label.into(),
                                 channel_private: desc.channel_private,
-                                category_name: desc.category_name.into(),
-                                topic: desc.topic.into(),
-                                creator_name: desc.creator_name.into(),
-                                member_count: desc.member_count,
-                                create_timestamp: desc.create_timestamp,
+                                category_id: desc.category_id,
+                                creator_id: desc.creator_id,
                                 age_restricted: desc.age_restricted,
                                 last_active_timestamp: desc.last_active_timestamp,
                             })
                             .collect();
                         this.page = 0;
+                        this.rows_dirty = true;
+                        this.scroll_to_top();
                     }
                     Err(err) => {
                         tracing::error!("fetch archived channels failed: {err}");
@@ -153,8 +162,8 @@ impl ArchivedChannelPage {
                 this.restoring = None;
                 if let Ok(()) = result {
                     this.channels.retain(|row| row.channel_id != channel_id);
-                    let page_count = this.channels.len().div_ceil(this.page_size).max(1);
-                    this.page = this.page.min(page_count - 1);
+                    this.rows_dirty = true;
+                    this.scroll_to_top();
                     this.channel_list
                         .update(cx, |store, cx| store.refresh_clan(clan_id, cx));
                 } else if let Err(err) = &result {
@@ -201,14 +210,16 @@ impl ArchivedChannelPage {
     }
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some() {
+        let locale = self.settings.read(cx).language.clone();
+        let placeholder =
+            mezon_i18n::t(&locale, "clanSettings.archivedChannels.searchPlaceholder").to_string();
+        if let Some(input) = &self.search {
+            if locale != self.search_locale {
+                input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+                self.search_locale = locale;
+            }
             return;
         }
-        let placeholder = mezon_i18n::t(
-            &self.settings.read(cx).language,
-            "clanSettings.archivedChannels.searchPlaceholder",
-        )
-        .to_string();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
@@ -221,106 +232,76 @@ impl ArchivedChannelPage {
             if matches!(event, InputEvent::Change) {
                 this.page = 0;
                 this.page_size_picker_open = false;
+                this.rows_dirty = true;
+                this.scroll_to_top();
                 cx.notify();
             }
         }));
         self.search = Some(input);
+        self.search_locale = locale;
     }
 
-    fn matches_search(row: &ArchivedChannelRow, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
+    fn filtered_indices(&mut self, cx: &Context<Self>) -> &[usize] {
+        if !self.rows_dirty {
+            return &self.filtered_indices;
         }
-        let query = query.to_lowercase();
-        row.channel_label.to_lowercase().contains(&query)
+        let query = self
+            .search
+            .as_ref()
+            .map(|input| normalize_diacritics(input.read(cx).value().trim()))
+            .unwrap_or_default();
+        self.filtered_indices = self
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                query.is_empty() || normalize_diacritics(&row.channel_label).contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.rows_dirty = false;
+        &self.filtered_indices
     }
 
-    fn format_created(timestamp_sec: Option<i64>) -> Option<String> {
-        let timestamp = timestamp_sec?;
-        chrono::DateTime::from_timestamp(timestamp, 0).map(|date| {
-            date.with_timezone(&chrono::Local)
-                .format("%b %d, %Y")
-                .to_string()
-        })
+    fn scroll_to_top(&self) {
+        self.list_scroll.set_offset(point(px(0.0), px(0.0)));
+    }
+
+    fn category_name(&self, category_id: i64, cx: &Context<Self>) -> Option<String> {
+        let category_id = category_id.to_string();
+        self.channel_list
+            .read(cx)
+            .categories_for_clan(self.clan_id)
+            .iter()
+            .find(|category| category.id == category_id)
+            .map(|category| category.name.clone())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn creator_name(&self, creator_id: i64, cx: &Context<Self>) -> Option<String> {
+        if creator_id <= 0 {
+            return None;
+        }
+        ClanMembersStore::global(cx)
+            .read(cx)
+            .member(self.clan_id, UserId(creator_id))
+            .map(|member| member.name().to_string())
+            .filter(|name| !name.is_empty())
     }
 
     fn metadata_chip(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
         div()
+            .max_w(px(190.0))
             .px(px(8.0))
             .py(px(3.0))
             .rounded_full()
             .bg(theme.bg_hover)
             .text_xs()
             .text_color(theme.text_secondary)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .text_ellipsis()
             .child(text.into())
-    }
-
-    fn pagination_item(current: usize, pages: usize) -> Vec<Option<usize>> {
-        if pages <= 7 {
-            return (0..pages).map(Some).collect();
-        }
-        let mut items = vec![Some(0)];
-        let start = current.saturating_sub(1).max(1);
-        let end = (current + 1).min(pages - 2);
-        if start > 1 {
-            items.push(None);
-        }
-        items.extend((start..=end).map(Some));
-        if end < pages - 2 {
-            items.push(None);
-        }
-        items.push(Some(pages - 1));
-        items
-    }
-
-    fn page_button(
-        &self,
-        label: &str,
-        disabled: bool,
-        selected: bool,
-        cx: &Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let is_arrow = label.parse::<usize>().is_err();
-        let is_left = label == "‹";
-        div()
-            .id(format!("archived-page-{label}-{selected}-{disabled}"))
-            .w(px(40.0))
-            .h(px(32.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(if selected {
-                cx.theme().text_primary
-            } else {
-                cx.theme().border
-            })
-            .bg(if selected {
-                cx.theme().tokens.bg_active_button
-            } else {
-                cx.theme().brand
-            })
-            .text_color(if is_arrow {
-                gpui::white()
-            } else {
-                gpui::Hsla::from(cx.theme().text_primary)
-            })
-            .when(disabled, |el| el.opacity(0.5))
-            .when(!disabled, |el| el.cursor_pointer())
-            .when(is_arrow, |el| {
-                el.child(
-                    Icon::new(IconName::ArrowRight)
-                        .size(px(20.0))
-                        .text_color(gpui::white())
-                        .when(is_left, |icon| {
-                            icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                std::f32::consts::PI,
-                            )))
-                        }),
-                )
-            })
-            .when(!is_arrow, |el| el.child(label.to_string()))
     }
 
     fn render_pagination(&self, pages: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -329,22 +310,36 @@ impl ArchivedChannelPage {
         }
         let mut bar = h_flex().items_center().gap_2();
         bar = bar.child(
-            self.page_button("‹", self.page == 0, false, cx)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.page > 0 {
-                        this.page -= 1;
-                        cx.notify();
-                    }
-                })),
+            pagination_button(
+                "archived-channels",
+                PaginationButton::Previous,
+                self.page == 0,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.page > 0 {
+                    this.page -= 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         );
-        for item in Self::pagination_item(self.page, pages) {
+        for item in pagination_items(self.page, pages) {
             if let Some(page) = item {
                 bar = bar.child(
-                    self.page_button(&(page + 1).to_string(), false, page == self.page, cx)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            cx.notify();
-                        })),
+                    pagination_button(
+                        "archived-channels",
+                        PaginationButton::Page(page + 1),
+                        false,
+                        page == self.page,
+                        cx.theme(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = page;
+                        this.scroll_to_top();
+                        cx.notify();
+                    })),
                 );
             } else {
                 bar = bar.child(
@@ -356,13 +351,20 @@ impl ArchivedChannelPage {
             }
         }
         bar.child(
-            self.page_button("›", self.page + 1 >= pages, false, cx)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.page + 1 < pages {
-                        this.page += 1;
-                        cx.notify();
-                    }
-                })),
+            pagination_button(
+                "archived-channels",
+                PaginationButton::Next,
+                self.page + 1 >= pages,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.page + 1 < pages {
+                    this.page += 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         )
         .into_any_element()
     }
@@ -431,6 +433,7 @@ impl ArchivedChannelPage {
                                 this.page_size = size;
                                 this.page = 0;
                                 this.page_size_picker_open = false;
+                                this.scroll_to_top();
                                 cx.notify();
                             }),
                         ),
@@ -527,7 +530,8 @@ impl ArchivedChannelPage {
             IconName::Hashtag
         };
         let subtitle = Self::format_active_subtitle(row.last_active_timestamp, locale);
-        let created = Self::format_created(row.create_timestamp);
+        let category_name = self.category_name(row.category_id, cx);
+        let creator_name = self.creator_name(row.creator_id, cx);
         let restoring = self.restoring == Some(channel_id);
 
         h_flex()
@@ -568,52 +572,45 @@ impl ArchivedChannelPage {
                             .child(row.channel_label.clone()),
                     )
                     .child(
-                        div()
-                            .mt(px(2.0))
-                            .text_xs()
-                            .text_color(theme.text_primary)
-                            .child(subtitle),
-                    )
-                    .when(!row.topic.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .mt(px(6.0))
-                                .max_w(px(620.0))
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(row.topic.clone()),
-                        )
-                    })
-                    .child(
                         h_flex()
-                            .mt(px(8.0))
+                            .mt(px(5.0))
+                            .min_w(px(0.0))
+                            .overflow_hidden()
                             .gap(px(6.0))
-                            .flex_wrap()
-                            .when(!row.category_name.is_empty(), |el| {
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(theme.text_primary)
+                                    .whitespace_nowrap()
+                                    .child(subtitle),
+                            )
+                            .when_some(category_name, |el, category_name| {
                                 el.child(Self::metadata_chip(
-                                    format!("Category: {}", row.category_name),
+                                    format!(
+                                        "{}: {category_name}",
+                                        mezon_i18n::t(
+                                            locale,
+                                            "channelSetting.categoryManagement.category"
+                                        )
+                                    ),
                                     theme,
                                 ))
                             })
-                            .when(!row.creator_name.is_empty(), |el| {
+                            .when_some(creator_name, |el, creator_name| {
                                 el.child(Self::metadata_chip(
-                                    format!("Created by {}", row.creator_name),
+                                    format!(
+                                        "{}{creator_name}",
+                                        mezon_i18n::t(locale, "eventMenu.detail.createdBy")
+                                    ),
                                     theme,
                                 ))
-                            })
-                            .when(row.member_count > 0, |el| {
-                                el.child(Self::metadata_chip(
-                                    format!("{} members", row.member_count),
-                                    theme,
-                                ))
-                            })
-                            .when_some(created, |el, created| {
-                                el.child(Self::metadata_chip(format!("Created {created}"), theme))
                             })
                             .when(row.age_restricted, |el| {
-                                el.child(Self::metadata_chip("Age restricted", theme))
+                                el.child(Self::metadata_chip(
+                                    mezon_i18n::t(locale, "ageRestricted.title"),
+                                    theme,
+                                ))
                             }),
                     ),
             )
@@ -638,24 +635,15 @@ impl Render for ArchivedChannelPage {
         self.ensure_search(window, cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let query = self
-            .search
-            .as_ref()
-            .map(|input| input.read(cx).value().trim().to_string())
-            .unwrap_or_default();
-        let filtered = self
-            .channels
-            .iter()
-            .filter(|row| Self::matches_search(row, &query))
-            .collect::<Vec<_>>();
-        let total = filtered.len();
+        let filtered_indices = self.filtered_indices(cx).to_vec();
+        let total = filtered_indices.len();
         let pages = total.div_ceil(self.page_size).max(1);
         self.page = self.page.min(pages - 1);
-        let visible = filtered
+        let visible = filtered_indices
             .into_iter()
             .skip(self.page * self.page_size)
             .take(self.page_size)
-            .cloned()
+            .filter_map(|index| self.channels.get(index).cloned())
             .collect::<Vec<_>>();
 
         v_flex()
@@ -729,6 +717,7 @@ impl Render for ArchivedChannelPage {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .track_scroll(&self.list_scroll)
                         .pr(px(4.0))
                         .child(
                             v_flex()

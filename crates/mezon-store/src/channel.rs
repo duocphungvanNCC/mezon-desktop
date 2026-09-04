@@ -135,11 +135,8 @@ pub struct ArchivedChannelDesc {
     pub channel_id: i64,
     pub channel_label: String,
     pub channel_private: bool,
-    pub category_name: String,
-    pub topic: String,
-    pub creator_name: String,
-    pub member_count: i32,
-    pub create_timestamp: Option<i64>,
+    pub category_id: i64,
+    pub creator_id: i64,
     pub age_restricted: bool,
     pub last_active_timestamp: Option<i64>,
 }
@@ -1319,12 +1316,8 @@ impl ChannelList {
                     channel_id: d.channel_id,
                     channel_label: d.channel_label,
                     channel_private: d.channel_private != 0,
-                    category_name: d.category_name,
-                    topic: d.topic,
-                    creator_name: d.creator_name,
-                    member_count: d.member_count,
-                    create_timestamp: (d.create_time_seconds > 0)
-                        .then_some(i64::from(d.create_time_seconds)),
+                    category_id: d.category_id,
+                    creator_id: d.creator_id,
                     age_restricted: d.age_restricted != 0,
                     last_active_timestamp: d
                         .last_sent_message
