@@ -55,6 +55,7 @@ pub struct ClanChannelsPage {
     visible_row_keys: Vec<VisibleRowKey>,
     list_state: ListState,
     open_menu: Option<ChannelListMenuState>,
+    pending_edit_channel: Option<ChannelId>,
 }
 
 #[derive(Clone)]
@@ -92,6 +93,27 @@ impl ClanChannelsPage {
             cx.notify();
         })
         .detach();
+        cx.observe(&ChannelList::global(cx), |this, _, cx| {
+            let Some(channel_id) = this.pending_edit_channel else {
+                return;
+            };
+            let channel_list = ChannelList::global(cx);
+            let channel_list = channel_list.read(cx);
+            if channel_list.channel(this.clan_id, channel_id).is_some() {
+                this.pending_edit_channel = None;
+                crate::router::navigate(
+                    cx,
+                    crate::router::Route::ChannelSettings {
+                        clan_id: this.clan_id,
+                        channel_id,
+                        tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
+                    },
+                );
+            } else if !channel_list.is_resolving_channel_detail(channel_id) {
+                this.pending_edit_channel = None;
+            }
+        })
+        .detach();
         cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
             if this.sort_field == Some(SortField::Creator) {
                 this.rows_dirty = true;
@@ -121,6 +143,7 @@ impl ClanChannelsPage {
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
             open_menu: None,
+            pending_edit_channel: None,
         }
     }
 
@@ -138,6 +161,7 @@ impl ClanChannelsPage {
         self.visible_row_keys.clear();
         self.rows_dirty = true;
         self.page_size_picker_open = false;
+        self.pending_edit_channel = None;
         self.open_menu = None;
         ChannelSettingsStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, ChannelId(0), cx)
@@ -163,7 +187,31 @@ impl ClanChannelsPage {
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
         self.visible_row_keys.clear();
+        self.pending_edit_channel = None;
         self.reset_search(cx);
+    }
+
+    fn open_channel_settings(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let channel_list = ChannelList::global(cx);
+        if channel_list
+            .read(cx)
+            .channel(self.clan_id, channel_id)
+            .is_some()
+        {
+            crate::router::navigate(
+                cx,
+                crate::router::Route::ChannelSettings {
+                    clan_id: self.clan_id,
+                    channel_id,
+                    tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
+                },
+            );
+            return;
+        }
+        self.pending_edit_channel = Some(channel_id);
+        channel_list.update(cx, |channels, cx| {
+            channels.ensure_channel_for_settings(self.clan_id, channel_id, cx);
+        });
     }
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -927,12 +975,17 @@ fn build_channel_list_menu(
     let current_user_id =
         BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
     let is_creator = current_user_id == Some(state.row.creator_id);
-    let can_access = channel_access_allowed(
-        state.row.private,
-        is_creator,
-        current_user_id,
-        &state.row.user_ids,
-    );
+    let parent = if is_thread && !state.row.parent_id.is_zero() {
+        ChannelSettingsStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .row_by_id(clan_id, state.row.parent_id)
+                .cloned()
+        })
+    } else {
+        None
+    };
+    let can_access = channel_list_menu_access_allowed(&state.row, parent.as_ref(), current_user_id);
     let permissions = PermissionStore::try_global(cx);
     let has_permission = |permission| {
         permissions
@@ -1015,15 +1068,12 @@ fn build_channel_list_menu(
                 "channelMenu.menu.organizationMenu.edit"
             },
         );
+        let edit_page = page.clone();
         menu = menu.item(label, move |_window, cx| {
-            crate::router::navigate(
-                cx,
-                crate::router::Route::ChannelSettings {
-                    clan_id,
-                    channel_id,
-                    tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
-                },
-            );
+            let _ = edit_page.update(cx, |this, cx| {
+                this.open_menu = None;
+                this.open_channel_settings(channel_id, cx);
+            });
         });
     }
     if can_delete {
@@ -1059,6 +1109,24 @@ fn build_channel_list_menu(
         });
     }
     menu
+}
+
+fn channel_list_row_access_allowed(row: &ChannelSetting, current_user_id: Option<UserId>) -> bool {
+    channel_access_allowed(
+        row.private,
+        current_user_id == Some(row.creator_id),
+        current_user_id,
+        &row.user_ids,
+    )
+}
+
+fn channel_list_menu_access_allowed(
+    row: &ChannelSetting,
+    parent: Option<&ChannelSetting>,
+    current_user_id: Option<UserId>,
+) -> bool {
+    channel_list_row_access_allowed(row, current_user_id)
+        && parent.is_none_or(|parent| channel_list_row_access_allowed(parent, current_user_id))
 }
 
 fn has_channel_menu_actions(can_archive: bool, can_edit: bool, can_delete: bool) -> bool {
@@ -1256,6 +1324,54 @@ mod tests {
     #[test]
     fn private_channel_creator_is_accessible_before_membership_syncs() {
         assert!(channel_access_allowed(true, true, Some(UserId(1)), &[]));
+    }
+
+    #[test]
+    fn public_thread_is_inaccessible_when_private_parent_is_inaccessible() {
+        let current_user_id = Some(UserId(1));
+        let thread = ChannelSetting {
+            id: ChannelId(11),
+            parent_id: ChannelId(10),
+            private: false,
+            ..Default::default()
+        };
+        let parent = ChannelSetting {
+            id: ChannelId(10),
+            creator_id: UserId(2),
+            private: true,
+            user_ids: vec![UserId(2)],
+            ..Default::default()
+        };
+
+        assert!(!channel_list_menu_access_allowed(
+            &thread,
+            Some(&parent),
+            current_user_id,
+        ));
+    }
+
+    #[test]
+    fn thread_requires_both_parent_and_own_access() {
+        let current_user_id = Some(UserId(1));
+        let parent = ChannelSetting {
+            id: ChannelId(10),
+            private: false,
+            ..Default::default()
+        };
+        let private_thread = ChannelSetting {
+            id: ChannelId(11),
+            parent_id: parent.id,
+            creator_id: UserId(2),
+            private: true,
+            user_ids: vec![UserId(2)],
+            ..Default::default()
+        };
+
+        assert!(!channel_list_menu_access_allowed(
+            &private_thread,
+            Some(&parent),
+            current_user_id,
+        ));
     }
 
     #[test]
