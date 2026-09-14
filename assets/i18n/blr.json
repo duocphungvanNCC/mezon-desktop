@@ -1096,6 +1096,7 @@
   "channelVoice.micPermissionBody": "Mezon не можа атрымаць доступ да мікрафона. Уключыце яго ў Сістэмных наладах → Прыватнасць і бяспека → Мікрафон, потым далучыцеся да званка зноў.",
   "channelVoice.micPermissionTitle": "Патрэбны доступ да мікрафона",
   "channelVoice.muteMemberFailed": "Не ўдалося адключыць мікрафон удзельніка",
+  "channelVoice.mutedByModerator": "Мадэратар канала адключыў ваш мікрафон",
   "channelVoice.muteModal.content": "Вы ўпэўнены, што хочаце заглушыць \"{{userName}}\"?",
   "channelVoice.muteModal.mute": "Заглушыць",
   "channelVoice.muteModal.title": "Заглушыць удзельніка",

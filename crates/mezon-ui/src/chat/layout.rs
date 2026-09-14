@@ -282,6 +282,11 @@ impl ChatLayout {
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
+            if voice.update(cx, |store, _| store.take_muted_by_moderator()) {
+                let locale = this.settings.read(cx).language.clone();
+                let msg = mezon_i18n::t(&locale, "channelVoice.mutedByModerator").to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+            }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
             this.sync_stream_frame_pump(cx);

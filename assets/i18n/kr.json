@@ -1096,6 +1096,7 @@
   "channelVoice.micPermissionBody": "Mezon이 마이크에 접근할 수 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 허용한 후 통화에 다시 참여하세요.",
   "channelVoice.micPermissionTitle": "마이크 접근 권한 필요",
   "channelVoice.muteMemberFailed": "멤버를 음소거하지 못했습니다",
+  "channelVoice.mutedByModerator": "채널 관리자가 회원님을 음소거했습니다",
   "channelVoice.muteModal.content": "\\\"{{userName}}\\\"를ミュート하시겠습니까?",
   "channelVoice.muteModal.mute": "ミュート",
   "channelVoice.muteModal.title": "멤버ミュート",

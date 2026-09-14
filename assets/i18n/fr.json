@@ -1096,6 +1096,7 @@
   "channelVoice.micPermissionBody": "Mezon ne peut pas accéder à votre microphone. Activez-le dans Réglages Système → Confidentialité et sécurité → Microphone, puis rejoignez l'appel.",
   "channelVoice.micPermissionTitle": "Accès au microphone requis",
   "channelVoice.muteMemberFailed": "Impossible de couper le micro du membre",
+  "channelVoice.mutedByModerator": "Un modérateur du salon a coupé votre micro",
   "channelVoice.muteModal.content": "Êtes-vous sûr de vouloir couper le son de « {{userName}} » ?",
   "channelVoice.muteModal.mute": "Couper le son",
   "channelVoice.muteModal.title": "Couper le son du membre",

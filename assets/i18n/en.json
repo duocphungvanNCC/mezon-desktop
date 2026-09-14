@@ -1101,6 +1101,7 @@
   "channelVoice.lowerHand": "Lower Hand",
   "channelVoice.membersWillBeNotified": "{{participantsCount}} members will be notified",
   "channelVoice.muteMemberFailed": "Failed to mute member",
+  "channelVoice.mutedByModerator": "You have been muted by a channel moderator",
   "channelVoice.muteModal.content": "Please confirm if you would like to mute \"{{userName}}\"?",
   "channelVoice.muteModal.mute": "Mute",
   "channelVoice.muteModal.title": "Mute member",

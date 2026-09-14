@@ -9263,13 +9263,12 @@ impl MezonTransport {
         Ok(api::GenerateMeetTokenResponse::decode(response.as_slice())?)
     }
 
-    /// Remove participant Mezon meet.
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: i64,
         clan_id: i64,
         user_id: i64,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             user_id,
@@ -9277,13 +9276,14 @@ impl MezonTransport {
             clan_id,
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "RemoveParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response)
+            .ok_or_else(|| anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token"))
     }
 
     pub async fn mute_participant_mezon_meet(
@@ -9291,7 +9291,7 @@ impl MezonTransport {
         channel_id: i64,
         clan_id: i64,
         user_id: i64,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             user_id,
@@ -9299,13 +9299,14 @@ impl MezonTransport {
             clan_id,
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "MuteParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response)
+            .ok_or_else(|| anyhow::anyhow!("MuteParticipantMezonMeet returned no SFU action token"))
     }
 
     /// Create room channel apps.
