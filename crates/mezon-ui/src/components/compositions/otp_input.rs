@@ -29,7 +29,7 @@ impl OtpInput {
             })
             .collect();
 
-        let _subscriptions = inputs
+        let mut _subscriptions: Vec<Subscription> = inputs
             .iter()
             .enumerate()
             .map(|(i, _)| {
@@ -108,6 +108,14 @@ impl OtpInput {
                 })
             })
             .collect();
+        for (i, input) in inputs.iter().enumerate() {
+            let focus_handle = input.focus_handle(cx);
+            _subscriptions.push(
+                cx.on_focus(&focus_handle, window, move |this, _window, cx| {
+                    this.inputs[i].update(cx, |input, cx| input.select_all_content(cx));
+                }),
+            );
+        }
 
         Self {
             digit_count,
@@ -149,7 +157,6 @@ impl OtpInput {
             .collect()
     }
 
-    /// The digit boxes in typing order, for `focus_cycle`.
     pub fn field_handles(&self, cx: &App) -> Vec<FocusHandle> {
         self.inputs
             .iter()

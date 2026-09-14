@@ -144,7 +144,6 @@ pub(super) fn setup_modal(
         .into_any_element()
 }
 
-/// `fields` are the editor's text inputs in layout order — what Tab walks through.
 pub(super) fn editor_modal(
     body: AnyElement,
     footer: AnyElement,

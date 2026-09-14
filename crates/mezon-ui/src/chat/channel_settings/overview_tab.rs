@@ -871,10 +871,12 @@ impl Render for OverviewTab {
 
         v_flex()
             .id("channel-overview-tab")
-            .focus_cycle(vec![
-                self.name_input.focus_handle(cx),
-                self.topic_input.focus_handle(cx),
-            ])
+            .when(can_edit, |el| {
+                el.focus_cycle([
+                    self.name_input.focus_handle(cx),
+                    self.topic_input.focus_handle(cx),
+                ])
+            })
             .w_full()
             .text_size(px(15.0))
             .child(

@@ -972,14 +972,12 @@ impl CommunitySettingPage {
 
         v_flex()
             .w_full()
-            // Laid out description → about → vanity; Tab must follow that, not field order.
             .focus_cycle(
                 self.description_input
                     .iter()
+                    .chain(&self.about_input)
                     .map(|input| input.focus_handle(cx))
-                    .chain(self.about_input.iter().map(|input| input.focus_handle(cx)))
-                    .chain(self.vanity_input.iter().map(|input| input.focus_handle(cx)))
-                    .collect(),
+                    .chain(self.vanity_input.iter().map(|input| input.focus_handle(cx))),
             )
             .min_w(px(0.0))
             .gap_8()

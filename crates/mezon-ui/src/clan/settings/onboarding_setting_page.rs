@@ -2276,8 +2276,6 @@ impl OnboardingSettingPage {
                     ),
             )
             .into_any_element();
-        // Answer and Resource lay out title then description; Mission has a single field,
-        // which `focus_cycle` leaves alone.
         let fields = match editor {
             Editor::Answer {
                 title, description, ..

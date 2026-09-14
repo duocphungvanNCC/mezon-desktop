@@ -1559,17 +1559,12 @@ impl Render for CreateEventModal {
             Step::Details => self.details_content(cx),
             Step::Review => self.review_content(cx),
         };
-        // Only the fields this step actually lays out, so Tab never reaches an input
-        // belonging to another step.
         let fields: Vec<FocusHandle> = match self.step {
-            Step::Location if self.location_kind == Some(LocationKind::Somewhere) => {
-                vec![self.address.focus_handle(cx)]
-            }
-            Step::Location | Step::Review => Vec::new(),
             Step::Details => vec![
                 self.topic.focus_handle(cx),
                 self.description.focus_handle(cx),
             ],
+            Step::Location | Step::Review => Vec::new(),
         };
         let footer = div()
             .mt_5()
@@ -1631,7 +1626,7 @@ impl Render for CreateEventModal {
             );
         let card = div()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .focus_cycle_with_context("menu", fields)
             .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
                 if !this.creating {
                     this.return_to_events(window, cx)
@@ -1651,7 +1646,6 @@ impl Render for CreateEventModal {
             .child(
                 div()
                     .id("create-event-scroll")
-                    .focus_cycle(fields)
                     .max_h(px(520.))
                     .flex_shrink_1()
                     .min_h_0()

@@ -782,7 +782,7 @@ impl Render for CreateFlashMessageModal {
             )
             .child(
                 v_flex()
-                    .focus_cycle(vec![
+                    .focus_cycle([
                         self.name_input.focus_handle(cx),
                         self.content_input.focus_handle(cx),
                     ])

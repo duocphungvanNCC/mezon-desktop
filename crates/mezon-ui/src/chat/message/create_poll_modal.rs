@@ -169,6 +169,9 @@ impl CreatePollModal {
         let focus_handle = picker.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
         self.emoji_subs = vec![
+            cx.on_focus_out(&focus_handle, window, |this, _event, _window, cx| {
+                this.close_emoji_picker(cx)
+            }),
             cx.subscribe(
                 &picker,
                 move |this, _picker, event: &ReactionPickerEvent, cx| {
@@ -612,7 +615,12 @@ impl Render for CreatePollModal {
 
         div()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .focus_cycle_with_context(
+                "menu",
+                std::iter::once(&self.question)
+                    .chain(&self.answers)
+                    .map(|input| input.focus_handle(cx)),
+            )
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
                 if this.emoji_picker.is_some() {
                     this.close_emoji_picker(cx);
@@ -637,12 +645,6 @@ impl Render for CreatePollModal {
             .child(
                 div()
                     .id("poll-body-scroll")
-                    .focus_cycle(
-                        std::iter::once(&self.question)
-                            .chain(&self.answers)
-                            .map(|input| input.focus_handle(cx))
-                            .collect(),
-                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

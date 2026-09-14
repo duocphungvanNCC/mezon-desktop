@@ -42,6 +42,7 @@ pub struct SendTokenModal {
     suppress_search_change: bool,
     amount_reformat_queued: bool,
     _search_sub: Subscription,
+    _search_blur_sub: Subscription,
     _amount_sub: Subscription,
 }
 
@@ -137,6 +138,17 @@ impl SendTokenModal {
                 },
             );
 
+            let search_blur_sub = cx.on_focus_out(
+                &search.focus_handle(cx),
+                window,
+                |this: &mut Self, _event, _window, cx| {
+                    if this.dropdown_open {
+                        this.dropdown_open = false;
+                        cx.notify();
+                    }
+                },
+            );
+
             let mut this = Self {
                 focus_handle: cx.focus_handle(),
                 locale,
@@ -152,6 +164,7 @@ impl SendTokenModal {
                 suppress_search_change: false,
                 amount_reformat_queued: false,
                 _search_sub: search_sub,
+                _search_blur_sub: search_blur_sub,
                 _amount_sub: amount_sub,
             };
             this.note
@@ -623,7 +636,10 @@ impl Render for SendTokenModal {
 
         div()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .focus_cycle_with_context(
+                "menu",
+                [&self.search, &self.amount, &self.note].map(|input| input.focus_handle(cx)),
+            )
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
                 if this.dropdown_open {
                     this.dropdown_open = false;
@@ -644,11 +660,6 @@ impl Render for SendTokenModal {
             .child(
                 div()
                     .id("send-token-body-scroll")
-                    .focus_cycle(
-                        [&self.search, &self.amount, &self.note]
-                            .map(|input| input.focus_handle(cx))
-                            .to_vec(),
-                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

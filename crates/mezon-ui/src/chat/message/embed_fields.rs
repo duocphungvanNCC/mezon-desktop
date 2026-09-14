@@ -63,32 +63,20 @@ pub fn render_embed_fields(
         .into_any_element()
 }
 
-/// The embed's text inputs in layout order — what Tab walks through. Only this embed's own
-/// fields, so a second embed on the same message (or the composer behind) is never stepped into.
-///
-/// This runs from `render` inside `gpui::list`, once per embed in the viewport per frame, so it
-/// allocates only for an embed that actually has two inputs to move between — a read-only card
-/// (the common case) walks its fields and returns without touching the heap.
-fn text_input_fields(
-    fields: &[EmbedField],
+fn text_input_fields<'a>(
+    fields: &'a [EmbedField],
     message_id: MessageId,
-    ctx: &RowCtx,
-) -> Vec<FocusHandle> {
-    let mut inputs = fields
+    ctx: &'a RowCtx,
+) -> impl Iterator<Item = FocusHandle> + 'a {
+    fields
         .iter()
-        .filter_map(|field| match field.input.as_ref() {
-            // A disabled input renders as read-only text, with no entity to focus.
-            Some(EmbedInput::Text(text)) if !text.disabled => {
-                ctx.embed_inputs.get(&(message_id, text.id.clone()))
-            }
+        .filter_map(move |field| match field.input.as_ref() {
+            Some(EmbedInput::Text(text)) if !text.disabled => ctx
+                .embed_inputs
+                .get(&(message_id, text.id.clone()))
+                .map(|state| state.focus_handle(ctx.app)),
             _ => None,
-        });
-    let (Some(first), Some(second)) = (inputs.next(), inputs.next()) else {
-        return Vec::new();
-    };
-    let mut handles = vec![first.focus_handle(ctx.app), second.focus_handle(ctx.app)];
-    handles.extend(inputs.map(|state| state.focus_handle(ctx.app)));
-    handles
+        })
 }
 
 fn group_fields(fields: &[EmbedField]) -> Vec<Vec<&EmbedField>> {

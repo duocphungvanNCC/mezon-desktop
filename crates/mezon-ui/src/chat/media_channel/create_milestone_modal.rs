@@ -341,8 +341,7 @@ impl Render for CreateMilestoneModal {
                     .id("create-milestone-scroll")
                     .focus_cycle(
                         [&self.title_input, &self.description_input]
-                            .map(|input| input.focus_handle(cx))
-                            .to_vec(),
+                            .map(|input| input.focus_handle(cx)),
                     )
                     .flex_1()
                     .min_h_0()

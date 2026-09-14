@@ -320,7 +320,13 @@ impl Render for PasswordModal {
 
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .focus_cycle_with_context(
+                "menu",
+                self.current_input
+                    .iter()
+                    .chain([&self.password_input, &self.confirm_input])
+                    .map(|input| input.focus_handle(cx)),
+            )
             .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
@@ -388,13 +394,6 @@ impl Render for PasswordModal {
             .child(
                 v_flex()
                     .id("password-modal-scroll")
-                    .focus_cycle(
-                        self.current_input
-                            .iter()
-                            .chain([&self.password_input, &self.confirm_input])
-                            .map(|input| input.focus_handle(cx))
-                            .collect(),
-                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

@@ -473,8 +473,7 @@ impl RoleSettingPage {
         let fields = [&self.rgb_r_input, &self.rgb_g_input, &self.rgb_b_input]
             .into_iter()
             .flatten()
-            .map(|input| input.focus_handle(cx))
-            .collect();
+            .map(|input| input.focus_handle(cx));
         h_flex()
             .focus_cycle(fields)
             .gap_2()

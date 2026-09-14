@@ -1,21 +1,7 @@
-//! Tab / Shift-Tab movement between the fields of one form.
-//!
-//! GPUI ships a window-wide tab-stop map (`Window::focus_next`), but a mezon window keeps
-//! background surfaces rendered behind a modal — the composer, a search box, an embed form in
-//! the message list — so a window-wide cycle would hand focus to fields the user cannot see.
-//! Each form instead declares its own ordered list of fields and Tab cycles inside that list.
-//!
-//! A form opts in with a single call on its container element:
-//!
-//! ```ignore
-//! div().focus_cycle(vec![email.focus_handle(cx), password.focus_handle(cx)])
-//! ```
-
 use std::rc::Rc;
 
-use gpui::{App, FocusHandle, InteractiveElement, KeyBinding, Window, actions};
+use gpui::{App, FocusHandle, InteractiveElement, KeyBinding, KeyContext, Window, actions};
 
-/// Key context a form container declares to opt into tab navigation.
 pub const FORM_KEY_CONTEXT: &str = "MezonForm";
 
 actions!(mezon_form, [FocusNextField, FocusPrevField]);
@@ -31,8 +17,6 @@ fn form_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-/// The field Tab lands on, wrapping at both ends. `current` is `None` when focus sits somewhere
-/// else in the form (a button, the container itself) — Tab then enters at the matching end.
 fn next_field(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
     if len == 0 {
         return None;
@@ -45,7 +29,6 @@ fn next_field(current: Option<usize>, len: usize, forward: bool) -> Option<usize
     })
 }
 
-/// Move focus to the next (or previous) field of `fields`.
 pub fn cycle_focus(fields: &[FocusHandle], forward: bool, window: &mut Window, cx: &mut App) {
     let current = fields.iter().position(|field| field.is_focused(window));
     let Some(next) = next_field(current, fields.len(), forward) else {
@@ -54,20 +37,29 @@ pub fn cycle_focus(fields: &[FocusHandle], forward: bool, window: &mut Window, c
     window.focus(&fields[next], cx);
 }
 
-/// Give a form container Tab / Shift-Tab movement across `fields`, in the order listed.
-///
-/// A form with fewer than two fields is left untouched: Tab would land back where it started,
-/// and this runs from `render` — the embed-form caller renders inside `gpui::list`, so the
-/// cheapest thing to do for the many surfaces with nothing to cycle is nothing at all.
 pub trait FocusCycle: InteractiveElement + Sized {
-    fn focus_cycle(self, fields: Vec<FocusHandle>) -> Self {
+    fn focus_cycle(self, fields: impl IntoIterator<Item = FocusHandle>) -> Self {
+        let fields: Vec<FocusHandle> = fields.into_iter().collect();
         if fields.len() < 2 {
             return self;
         }
-        // One allocation shared by both listeners, instead of a `Vec` clone per listener.
+        self.focus_cycle_with_context(KeyContext::default(), fields)
+    }
+
+    fn focus_cycle_with_context(
+        self,
+        context: impl TryInto<KeyContext>,
+        fields: impl IntoIterator<Item = FocusHandle>,
+    ) -> Self {
+        let mut context = context.try_into().unwrap_or_default();
+        let fields: Vec<FocusHandle> = fields.into_iter().collect();
+        if fields.len() < 2 {
+            return self.key_context(context);
+        }
+        context.add(FORM_KEY_CONTEXT);
         let forward: Rc<[FocusHandle]> = fields.into();
         let backward = forward.clone();
-        self.key_context(FORM_KEY_CONTEXT)
+        self.key_context(context)
             .on_action(move |_: &FocusNextField, window, cx| {
                 cycle_focus(&forward, true, window, cx);
             })
@@ -84,8 +76,8 @@ mod tests {
     use super::*;
     use crate::input::InputState;
     use gpui::{
-        Context, Entity, Focusable, KeyContext, Render, TestAppContext, VisualTestContext, div,
-        prelude::*,
+        Context, Entity, Focusable, KeyContext, Render, ScrollHandle, TestAppContext,
+        VisualTestContext, div, prelude::*, px,
     };
 
     #[test]
@@ -114,7 +106,6 @@ mod tests {
         assert_eq!(next_field(Some(0), 1, false), Some(0));
     }
 
-    /// A form with two text fields, the shape every wired surface has.
     struct TestForm {
         first: Entity<InputState>,
         second: Entity<InputState>,
@@ -123,10 +114,7 @@ mod tests {
     impl Render for TestForm {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
-                .focus_cycle(vec![
-                    self.first.focus_handle(cx),
-                    self.second.focus_handle(cx),
-                ])
+                .focus_cycle([self.first.focus_handle(cx), self.second.focus_handle(cx)])
                 .child(self.first.clone())
                 .child(self.second.clone())
         }
@@ -166,13 +154,124 @@ mod tests {
             "shift-tab must move focus back to the first field"
         );
 
-        // The last field wraps round to the first, the way a browser form does.
         cx.update(|window, cx| window.focus(&second, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("tab");
         assert!(
             cx.update(|window, _| first.is_focused(window)),
             "tab must wrap from the last field to the first"
+        );
+    }
+
+    struct FocusedCardForm {
+        card: gpui::FocusHandle,
+        first: Entity<InputState>,
+        second: Entity<InputState>,
+    }
+
+    impl Render for FocusedCardForm {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.card)
+                .focus_cycle_with_context(
+                    "menu",
+                    [self.first.focus_handle(cx), self.second.focus_handle(cx)],
+                )
+                .child(self.first.clone())
+                .child(self.second.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn tab_enters_the_form_from_its_focused_card_and_keeps_the_card_context(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            crate::text_actions::init(cx);
+            init(cx);
+        });
+
+        let window = cx.add_window(|window, cx| FocusedCardForm {
+            card: cx.focus_handle(),
+            first: cx.new(|cx| InputState::new(window, cx)),
+            second: cx.new(|cx| InputState::new(window, cx)),
+        });
+        let (card, first) = window
+            .update(cx, |form, _, cx| {
+                (form.card.clone(), form.first.focus_handle(cx))
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        cx.update(|window, cx| window.focus(&card, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        assert!(
+            cx.update(|window, _| first.is_focused(window)),
+            "tab from the focused card must enter the form at its first field"
+        );
+
+        let mut expected = KeyContext::default();
+        expected.add("menu");
+        expected.add(FORM_KEY_CONTEXT);
+        let card_context = cx.update(|window, _| {
+            window
+                .context_stack()
+                .into_iter()
+                .find(|context| context.contains("menu"))
+        });
+        assert_eq!(
+            card_context,
+            Some(expected),
+            "the card must keep its menu context alongside the form context"
+        );
+    }
+
+    struct ScrollingForm {
+        scroll: ScrollHandle,
+        far: Entity<InputState>,
+    }
+
+    impl Render for ScrollingForm {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("scrolling-form")
+                .h(px(100.))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(div().h(px(1000.)))
+                .child(self.far.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn focusing_a_field_below_the_fold_scrolls_it_into_view(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            crate::text_actions::init(cx);
+            init(cx);
+        });
+
+        let window = cx.add_window(|window, cx| ScrollingForm {
+            scroll: ScrollHandle::new(),
+            far: cx.new(|cx| InputState::new(window, cx)),
+        });
+        let (scroll, far) = window
+            .update(cx, |form, _, cx| {
+                (form.scroll.clone(), form.far.focus_handle(cx))
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert_eq!(scroll.offset().y, px(0.));
+
+        cx.update(|window, cx| window.focus(&far, cx));
+        cx.run_until_parked();
+        assert!(
+            scroll.offset().y < px(0.),
+            "focusing a field below the fold must scroll its container to reveal it"
         );
     }
 

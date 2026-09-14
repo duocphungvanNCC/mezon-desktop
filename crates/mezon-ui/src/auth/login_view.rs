@@ -541,7 +541,6 @@ impl LoginView {
         });
     }
 
-    /// The fields Tab walks through, in the order they are laid out for the current method.
     fn form_fields(&self, cx: &App) -> Vec<FocusHandle> {
         let text_field = |input: &Option<Entity<InputState>>| {
             input
@@ -554,7 +553,7 @@ impl LoginView {
             LoginMethod::Password => text_field(&self.email_input)
                 .chain(text_field(&self.password_input))
                 .collect(),
-            LoginMethod::Otp if self.otp_step == 0 => text_field(&self.email_input).collect(),
+            LoginMethod::Otp if self.otp_step == 0 => Vec::new(),
             LoginMethod::Otp => self
                 .otp_input
                 .as_ref()

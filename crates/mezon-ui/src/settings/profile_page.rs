@@ -925,8 +925,7 @@ impl ProfilePage {
                         self.about_me_input
                             .iter()
                             .map(|input| input.focus_handle(cx)),
-                    )
-                    .collect(),
+                    ),
             )
             .child(
                 v_flex()
