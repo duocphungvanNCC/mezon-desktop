@@ -14,9 +14,7 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
-use mezon_voice::{
-    IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession,
-};
+use mezon_voice::{IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -25,8 +23,7 @@ pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
-    system_screen_share_pick,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -728,7 +725,8 @@ impl VoiceStore {
                 .any(|old| old.session_id == p.session_id && old.speaking);
             if p.speaking && !was_speaking {
                 self.speak_seq += 1;
-                self.speak_ranks.insert(p.session_id.clone(), self.speak_seq);
+                self.speak_ranks
+                    .insert(p.session_id.clone(), self.speak_seq);
             }
         }
         self.speak_ranks
@@ -1032,7 +1030,13 @@ impl VoiceStore {
         {
             return;
         }
-        self.open_interactive_app(app, event.sender_id, event.clan_id, cx);
+        self.open_interactive_app_with_params(
+            app,
+            event.sender_id,
+            event.clan_id,
+            (!event.params.is_empty()).then(|| event.params.clone()),
+            cx,
+        );
     }
 
     fn open_interactive_app(
@@ -1040,6 +1044,17 @@ impl VoiceStore {
         app: VoiceInteractiveApp,
         sender_id: i64,
         clan_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_interactive_app_with_params(app, sender_id, clan_id, None, cx);
+    }
+
+    fn open_interactive_app_with_params(
+        &mut self,
+        app: VoiceInteractiveApp,
+        sender_id: i64,
+        clan_id: i64,
+        params: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let mut hasher = DefaultHasher::new();
@@ -1085,7 +1100,7 @@ impl VoiceStore {
                     return;
                 }
             };
-            let url = build_channel_app_url(
+            let mut url = build_channel_app_url(
                 &base_url,
                 ChannelAppLaunchParams {
                     web_app_data: &hash.web_app_data,
@@ -1093,6 +1108,14 @@ impl VoiceStore {
                     clan_name: clan_name.as_deref(),
                 },
             );
+            if let Some(params) = params.filter(|params| !params.is_empty())
+                && let Ok(mut parsed) = url::Url::parse(&url)
+            {
+                parsed
+                    .query_pairs_mut()
+                    .extend_pairs(url::form_urlencoded::parse(params.as_bytes()));
+                url = parsed.to_string();
+            }
             tracing::info!(
                 url = %redact_interactive_app_url(&url),
                 event_type = app.event_type() as i32,
@@ -3087,15 +3110,20 @@ impl VoiceStore {
             return;
         };
         let api = self.api.clone();
+        let params = if app == VoiceInteractiveApp::Blackboard {
+            format!("userId={user_id}")
+        } else {
+            String::new()
+        };
         cx.spawn(async move |_this, _cx| {
             match api
                 .write_voice_interactive_event(
                     clan_id,
                     voice_channel_id,
                     user_id,
-                    0,
+                    user_id,
                     app.event_type() as i32,
-                    String::new(),
+                    params,
                 )
                 .await
             {
@@ -3104,7 +3132,7 @@ impl VoiceStore {
                         clan_id,
                         voice_channel_id,
                         sender_id = user_id,
-                        receiver_id = 0,
+                        receiver_id = user_id,
                         event_type = app.event_type() as i32,
                         "VoiceInteractiveEvent acknowledged with CID payload"
                     );
