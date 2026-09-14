@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "ボイスに参加",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "スピーカーとして参加",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "リスナーとして参加",
+  "channelVoice.joinFailed": "このボイスルームに参加できませんでした。もう一度お試しください。",
+  "channelVoice.sfuNotConfigured": "ボイスサーバーが設定されていません。管理者に連絡してください。",
   "channelVoice.audience": "リスナー",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "ボイスチャンネルから退出させられました。",

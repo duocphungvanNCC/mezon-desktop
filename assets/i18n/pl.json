@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Dołącz do rozmowy głosowej",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Dołącz jako mówca",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Dołącz jako słuchacz",
+  "channelVoice.joinFailed": "Nie udało się przyłączyć do tego pokoju głosowego. Spróbuj ponownie.",
+  "channelVoice.sfuNotConfigured": "Serwer głosowy nie jest skonfigurowany. Skontaktuj się z administratorem.",
   "channelVoice.audience": "Słuchacz",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Zostałeś usunięty z kanału głosowego.",

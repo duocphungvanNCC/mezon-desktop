@@ -44,7 +44,12 @@ pub struct ApiStatusError {
 
 impl ApiStatusError {
     pub const INVALID_ARGUMENT: u32 = 3;
+    pub const NOT_FOUND: u32 = 5;
+    pub const PERMISSION_DENIED: u32 = 7;
+    pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
+    pub const INTERNAL: u32 = 13;
+    pub const UNAUTHENTICATED: u32 = 16;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
@@ -54,8 +59,24 @@ impl ApiStatusError {
         self.code == Self::INVALID_ARGUMENT
     }
 
+    pub fn is_permission_denied(self) -> bool {
+        self.code == Self::PERMISSION_DENIED
+    }
+
     pub fn is_create_channel_limit_exceeded(self) -> bool {
         self.is_out_of_range()
+    }
+}
+
+fn grpc_code_from_envelope_status(http_like_code: i32) -> u32 {
+    match http_like_code {
+        400 => ApiStatusError::INVALID_ARGUMENT,
+        401 => ApiStatusError::UNAUTHENTICATED,
+        403 => ApiStatusError::PERMISSION_DENIED,
+        404 => ApiStatusError::NOT_FOUND,
+        429 => ApiStatusError::RESOURCE_EXHAUSTED,
+        500 => ApiStatusError::INTERNAL,
+        _ => 2,
     }
 }
 
@@ -3768,16 +3789,16 @@ impl MezonTransport {
         if let Some(error) = realtime_error_from_body(&response) {
             tracing::error!(
                 target: "socket",
-                "api_err: action={api_name} cid={cid} envelope_code={} {} {}",
+                "api_err: action={api_name} cid={cid} envelope_code={} {}",
                 error.code,
-                error.message.trim(),
-                meet_token_body_debug(&response)
+                error.message.trim()
             );
-            anyhow::bail!(
+            let grpc_code = grpc_code_from_envelope_status(error.code);
+            return Err(api_status_error(grpc_code)).context(format!(
                 "{api_name} failed: {} (code={})",
                 error.message.trim(),
                 error.code
-            );
+            ));
         }
         self.log_api_ok(api_name, cid, code, response.len(), args, started);
         Ok((code, response))
@@ -3975,21 +3996,6 @@ impl MezonTransport {
             );
         }
 
-        if let Some(error) = realtime_error_from_body(&bytes) {
-            tracing::error!(
-                target: "socket",
-                "api_http_err: action={api_name} envelope_code={} {} {}",
-                error.code,
-                error.message.trim(),
-                meet_token_body_debug(&bytes)
-            );
-            anyhow::bail!(
-                "{api_name} failed: {} (code={})",
-                error.message.trim(),
-                error.code
-            );
-        }
-
         tracing::info!(
             target: "socket",
             "api_http_ok: action={api_name} bytes={} took={}ms",
@@ -4054,9 +4060,7 @@ impl MezonTransport {
         match api::ChannelDescList::decode(response) {
             Ok(list) => Ok(list),
             Err(decode_err) => {
-                if let Ok(error) = realtime::Error::decode(response)
-                    && (error.code != 0 || !error.message.is_empty())
-                {
+                if let Some(error) = realtime_error_from_body(response) {
                     return Err(anyhow::anyhow!(
                         "API error: code={} {}",
                         error.code,
@@ -4727,7 +4731,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        api_response_or_realtime_error(code, &response, api_name)?;
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -4782,7 +4786,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        api_response_or_realtime_error(code, &response, api_name)?;
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -10061,45 +10065,6 @@ impl MezonTransport {
     }
 }
 
-fn meet_token_status_name(code: u32) -> &'static str {
-    match code {
-        0 => "OK",
-        1 => "CANCELLED",
-        2 => "UNKNOWN",
-        3 => "INVALID_ARGUMENT",
-        4 => "DEADLINE_EXCEEDED",
-        5 => "NOT_FOUND",
-        6 => "ALREADY_EXISTS",
-        7 => "PERMISSION_DENIED",
-        8 => "RESOURCE_EXHAUSTED",
-        13 => "INTERNAL",
-        16 => "UNAUTHENTICATED",
-        _ => "UNMAPPED",
-    }
-}
-
-fn meet_token_body_debug(body: &[u8]) -> String {
-    const PREFIX_LEN: usize = 16;
-    let shown = body.len().min(PREFIX_LEN);
-    let hex = body[..shown]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    match std::str::from_utf8(body) {
-        Ok(text) => {
-            let token = text.trim().trim_matches('"');
-            format!(
-                "len={} utf8=true eyj={} dots={} prefix=[{hex}]",
-                body.len(),
-                token.starts_with("eyJ"),
-                token.matches('.').count()
-            )
-        }
-        Err(_) => format!("len={} utf8=false prefix=[{hex}]", body.len()),
-    }
-}
-
 fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     let envelope = realtime::Envelope::decode(body).ok()?;
     match envelope.message {
@@ -10112,78 +10077,35 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
-fn meet_token_envelope_error(body: &[u8]) -> Option<realtime::Error> {
-    realtime_error_from_body(body)
-}
-
-fn api_response_or_realtime_error(code: u32, body: &[u8], api_name: &str) -> Result<()> {
-    if let Some(error) = realtime_error_from_body(body) {
-        tracing::error!(
-            target: "socket",
-            "{api_name} envelope error: {} (code={}) {}",
-            error.message.trim(),
-            error.code,
-            meet_token_body_debug(body)
-        );
-        anyhow::bail!(
-            "{api_name} failed: {} (code={})",
-            error.message.trim(),
-            error.code
-        );
-    }
+fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     if code != 0 {
-        tracing::error!(
-            target: "socket",
-            "{api_name} failed: {} (code={code}) {}",
-            meet_token_status_name(code),
-            meet_token_body_debug(body)
-        );
-        anyhow::bail!(
-            "{api_name} failed: {} (code={code})",
-            meet_token_status_name(code)
-        );
+        tracing::error!(target: "socket", "{api_name} failed: code={code}");
+        return Err(api_status_error(code)).context(format!("{api_name} failed (code={code})"));
     }
     Ok(())
 }
 
 fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
-    if let Some(error) = meet_token_envelope_error(body) {
-        tracing::error!(
-            target: "socket",
-            "GenerateMeetToken envelope error: {} (code={}) {}",
-            error.message.trim(),
-            error.code,
-            meet_token_body_debug(body)
-        );
-        anyhow::bail!(
-            "GenerateMeetToken failed: {} (code={})",
-            error.message.trim(),
-            error.code
-        );
-    }
     if code != 0 {
-        tracing::error!(
-            target: "socket",
-            "GenerateMeetToken failed: {} (code={code}) {}",
-            meet_token_status_name(code),
-            meet_token_body_debug(body)
-        );
-        anyhow::bail!(
-            "GenerateMeetToken failed: {} (code={code})",
-            meet_token_status_name(code)
-        );
+        tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
+        return Err(api_status_error(code))
+            .context(format!("GenerateMeetToken failed (code={code})"));
     }
     if body.is_empty() {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
     }
-    bare_jwt(body).ok_or_else(|| {
-        tracing::error!(
-            target: "socket",
-            "GenerateMeetToken failed: response is not a JWT (code=0) {}",
-            meet_token_body_debug(body)
-        );
-        anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
-    })
+    if let Some(jwt) = bare_jwt(body) {
+        return Ok(jwt);
+    }
+    if let Ok(wrapped) = api::GenerateMeetTokenResponse::decode(body)
+        && !wrapped.token.is_empty()
+    {
+        return Ok(wrapped.token);
+    }
+    tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+    Err(anyhow::anyhow!(
+        "GenerateMeetToken failed: response is not a JWT (code=0)"
+    ))
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -12028,20 +11950,14 @@ mod tests {
     }
 
     #[test]
-    fn a_protobuf_token_wrapper_is_rejected_as_not_a_jwt() {
+    fn a_protobuf_token_wrapper_is_unwrapped_as_a_fallback() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
             token: jwt.to_owned(),
         }
         .encode_to_vec();
         assert_eq!(bare_jwt(&encoded), None);
-        let err = meet_token_from_raw_body(0, &encoded).unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("response is not a JWT"));
-        assert!(!message.contains("utf8="));
-        assert!(!message.contains("prefix="));
-        assert!(!message.contains("failed to decode Protobuf"));
-        assert!(!message.contains(jwt));
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
     }
 
     #[test]
@@ -12049,29 +11965,19 @@ mod tests {
         let err = meet_token_from_raw_body(0, &[0x08, 0x07]).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("response is not a JWT"));
-        assert!(!message.contains("utf8="));
-        assert!(!message.contains("prefix="));
         assert!(!message.contains("failed to decode Protobuf"));
         assert!(!message.contains("Varint"));
     }
 
     #[test]
-    fn meet_token_api_error_names_permission_denied() {
+    fn meet_token_api_error_is_typed_and_carries_the_raw_code() {
         let err = meet_token_from_raw_body(7, &[]).unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("PERMISSION_DENIED"));
-        assert!(message.contains("code=7"));
-        assert!(!message.contains("len="));
-    }
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        assert!(err.to_string().contains("code=7"));
 
-    #[test]
-    fn meet_token_api_error_names_invalid_argument_and_internal() {
-        let invalid = meet_token_from_raw_body(3, &[]).unwrap_err().to_string();
-        assert!(invalid.contains("INVALID_ARGUMENT"));
-        assert!(invalid.contains("code=3"));
-        let internal = meet_token_from_raw_body(13, &[]).unwrap_err().to_string();
-        assert!(internal.contains("INTERNAL"));
-        assert!(internal.contains("code=13"));
+        let invalid = meet_token_from_raw_body(3, &[]).unwrap_err();
+        assert!(api_status_from_error(&invalid).is_some_and(|s| s.is_invalid_argument()));
+        assert!(invalid.to_string().contains("code=3"));
     }
 
     #[test]
@@ -12087,7 +11993,7 @@ mod tests {
     }
 
     #[test]
-    fn meet_token_unwraps_realtime_permission_denied_envelope() {
+    fn envelope_error_body_is_extracted_with_its_http_like_code() {
         let body = realtime::Envelope {
             cid: 100,
             message: Some(realtime::envelope::Message::Error(realtime::Error {
@@ -12097,26 +12003,57 @@ mod tests {
             })),
         }
         .encode_to_vec();
-        let err = meet_token_from_raw_body(0, &body).unwrap_err().to_string();
-        assert!(err.contains("Permission denied"));
-        assert!(err.contains("code=403"));
-        assert!(!err.contains("not a JWT"));
-        assert!(!err.contains("failed to decode Protobuf"));
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+        assert_eq!(grpc_code_from_envelope_status(error.code), 7);
     }
 
     #[test]
-    fn meet_token_unwraps_logged_lobbyby_error_bytes() {
+    fn envelope_error_survives_a_cid_field_before_it_lobbyby_bytes() {
         let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
         body.extend_from_slice(b"Permission denied.");
         assert_eq!(body.len(), 27);
-        let err = meet_token_from_raw_body(0, &body).unwrap_err().to_string();
-        assert!(err.contains("Permission denied"));
-        assert!(err.contains("code=403"));
-        let list_err = api_response_or_realtime_error(0, &body, "ListChannelMessages")
-            .unwrap_err()
-            .to_string();
-        assert!(list_err.contains("ListChannelMessages failed: Permission denied"));
-        assert!(list_err.contains("code=403"));
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+    }
+
+    #[test]
+    fn complete_api_request_rejects_a_realtime_error_envelope_with_a_typed_status() {
+        let t = transport(true);
+        let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
+        body.extend_from_slice(b"Permission denied.");
+        let err = t
+            .complete_api_request("ListChannelMessages", 1, 0, body, 0, Instant::now())
+            .unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        let message = err.to_string();
+        assert!(message.contains("ListChannelMessages failed: Permission denied"));
+        assert!(message.contains("code=403"));
+    }
+
+    #[test]
+    fn complete_api_request_passes_through_a_clean_success_body() {
+        let t = transport(true);
+        let (code, response) = t
+            .complete_api_request(
+                "ListChannelMessages",
+                1,
+                0,
+                b"ok".to_vec(),
+                0,
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(response, b"ok");
+    }
+
+    #[test]
+    fn api_response_or_realtime_error_maps_a_nonzero_frame_code() {
+        let err = api_response_or_realtime_error(7, "ListTopicMessages").unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
     }
 
     #[test]

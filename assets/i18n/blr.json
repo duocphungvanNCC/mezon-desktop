@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Далучыцца да галасавога",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Далучыцца як прамоўца",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Далучыцца як слухач",
+  "channelVoice.joinFailed": "Не ўдалося далучыцца да гэтага голасавога пакоя. Паспрабуйце зноў.",
+  "channelVoice.sfuNotConfigured": "Голасавы сервер не наладжаны. Звярніцеся да адміністратара.",
   "channelVoice.audience": "Слухач",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Вас выдалілі з галасавога канала.",

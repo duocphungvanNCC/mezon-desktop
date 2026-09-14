@@ -1092,7 +1092,7 @@
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Join as Speaker",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Join as Audience",
   "channelVoice.joinFailed": "Couldn't join this voice room. Please try again.",
-  "channelVoice.joinPermissionDenied": "You don't have permission to join this voice room.",
+  "channelVoice.sfuNotConfigured": "Voice server is not configured. Please contact your administrator.",
   "channelVoice.audience": "Audience",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "You have been removed from the voice channel.",

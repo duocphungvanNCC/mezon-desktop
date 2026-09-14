@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Rejoindre la voix",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Rejoindre en tant qu'orateur",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Rejoindre en tant qu'auditeur",
+  "channelVoice.joinFailed": "Impossible de rejoindre ce salon vocal. Veuillez réessayer.",
+  "channelVoice.sfuNotConfigured": "Le serveur vocal n'est pas configuré. Contactez votre administrateur.",
   "channelVoice.audience": "Auditeur",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Vous avez été retiré du salon vocal.",

@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Bij stem betreden",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Deelnemen als spreker",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Deelnemen als luisteraar",
+  "channelVoice.joinFailed": "Kan niet deelnemen aan deze spraakruimte. Probeer het opnieuw.",
+  "channelVoice.sfuNotConfigured": "Spraakserver is niet geconfigureerd. Neem contact op met je beheerder.",
   "channelVoice.audience": "Luisteraar",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Je bent uit het spraakkanaal verwijderd.",

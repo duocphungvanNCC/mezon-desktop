@@ -1091,6 +1091,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Шалтыратуга кушылу",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Сөйләүче буларак кушылу",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Тыңлаучы буларак кушылу",
+  "channelVoice.joinFailed": "Бу тавыш бүлмәсенә кушылу мөмкин булмады. Зинһар, тагын бер тапкыр омтылып карагыз.",
+  "channelVoice.sfuNotConfigured": "Тавыш серверы конфигурацияләнмәгән. Зинһар, администратор белән бәйләнешкә керегез.",
   "channelVoice.audience": "Тыңлаучы",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Сез тавыш каналыннан чыгарылдыгыз.",

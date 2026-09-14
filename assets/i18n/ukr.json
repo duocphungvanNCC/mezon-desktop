@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Приєднатися до голосового",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Приєднатися як мовець",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Приєднатися як слухач",
+  "channelVoice.joinFailed": "Не вдалося приєднатися до цієї голосової кімнати. Спробуйте ще раз.",
+  "channelVoice.sfuNotConfigured": "Голосовий сервер не налаштований. Зверніться до адміністратора.",
   "channelVoice.audience": "Слухач",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Вас видалено з голосового каналу.",

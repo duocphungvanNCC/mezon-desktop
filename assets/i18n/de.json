@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Sprachanruf beitreten",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Als Sprecher beitreten",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Als Zuhörer beitreten",
+  "channelVoice.joinFailed": "Der Beitritt zu diesem Sprachraum ist fehlgeschlagen. Bitte versuche es erneut.",
+  "channelVoice.sfuNotConfigured": "Der Sprachserver ist nicht konfiguriert. Bitte wende dich an deinen Administrator.",
   "channelVoice.audience": "Zuhörer",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "Du wurdest aus dem Sprachkanal entfernt.",
