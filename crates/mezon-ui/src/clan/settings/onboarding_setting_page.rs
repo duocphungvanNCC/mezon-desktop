@@ -2276,9 +2276,21 @@ impl OnboardingSettingPage {
                     ),
             )
             .into_any_element();
+        // Answer and Resource lay out title then description; Mission has a single field,
+        // which `focus_cycle` leaves alone.
+        let fields = match editor {
+            Editor::Answer {
+                title, description, ..
+            }
+            | Editor::Resource {
+                title, description, ..
+            } => vec![title.focus_handle(cx), description.focus_handle(cx)],
+            Editor::Mission { .. } => Vec::new(),
+        };
         Some(onboarding_modal::editor_modal(
             body,
             footer,
+            fields,
             theme,
             move |_, _, cx| {
                 let _ = close.update(cx, |this, cx| {
