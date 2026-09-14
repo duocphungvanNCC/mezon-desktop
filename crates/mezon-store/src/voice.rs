@@ -1030,13 +1030,7 @@ impl VoiceStore {
         {
             return;
         }
-        self.open_interactive_app_with_params(
-            app,
-            event.sender_id,
-            event.clan_id,
-            (!event.params.is_empty()).then(|| event.params.clone()),
-            cx,
-        );
+        self.open_interactive_app(app, event.sender_id, event.clan_id, cx);
     }
 
     fn open_interactive_app(
@@ -1044,17 +1038,6 @@ impl VoiceStore {
         app: VoiceInteractiveApp,
         sender_id: i64,
         clan_id: i64,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_interactive_app_with_params(app, sender_id, clan_id, None, cx);
-    }
-
-    fn open_interactive_app_with_params(
-        &mut self,
-        app: VoiceInteractiveApp,
-        sender_id: i64,
-        clan_id: i64,
-        params: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let mut hasher = DefaultHasher::new();
@@ -1108,12 +1091,12 @@ impl VoiceStore {
                     clan_name: clan_name.as_deref(),
                 },
             );
-            if let Some(params) = params.filter(|params| !params.is_empty())
+            if app == VoiceInteractiveApp::Blackboard
                 && let Ok(mut parsed) = url::Url::parse(&url)
             {
                 parsed
                     .query_pairs_mut()
-                    .extend_pairs(url::form_urlencoded::parse(params.as_bytes()));
+                    .append_pair("userId", &sender_id.to_string());
                 url = parsed.to_string();
             }
             tracing::info!(
