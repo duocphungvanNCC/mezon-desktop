@@ -71,9 +71,10 @@ mod linux {
         fn new(core: pw::core::Core) -> Self {
             Self {
                 own_pid: std::process::id().to_string(),
-                own_binary: std::env::current_exe()
-                    .ok()
-                    .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
+                own_binary: std::env::current_exe().ok().and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }),
                 core,
                 own_node: None,
                 own_ports: HashMap::new(),
@@ -188,7 +189,9 @@ mod linux {
                 .ports
                 .iter()
                 .filter(|(id, port)| {
-                    port.output && self.app_nodes.contains(&port.node) && !self.links.contains_key(id)
+                    port.output
+                        && self.app_nodes.contains(&port.node)
+                        && !self.links.contains_key(id)
                 })
                 .map(|(id, port)| (*id, port.channel.clone()))
                 .collect();
@@ -420,10 +423,10 @@ mod wasapi {
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
-        ActivateAudioInterfaceAsync, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
-        AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+        AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync,
         IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
         IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
         PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -446,6 +449,7 @@ mod wasapi {
     const BUFFER_DURATION_100NS: i64 = 2_000_000;
     const WAIT_SLICE_MS: u32 = 100;
     const BYTES_PER_SAMPLE: u32 = 2;
+    const MAX_PACKET_FRAMES: u32 = SCREEN_AUDIO_SAMPLE_RATE;
 
     #[derive(Clone, Copy)]
     struct EventHandle(isize);
@@ -505,9 +509,8 @@ mod wasapi {
         let thread = std::thread::Builder::new()
             .name("mezon-screen-audio".into())
             .spawn(move || {
-                let com = unsafe {
-                    CoInitializeEx(None, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)
-                };
+                let com =
+                    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE) };
                 if com.is_err() {
                     let _ = init_tx.try_send(Err(format!("screen audio COM init failed: {com}")));
                     return;
@@ -560,8 +563,7 @@ mod wasapi {
                 return;
             }
         };
-        let max_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
-        tracing::info!(max_frames, "screen audio step: buffer sized");
+        tracing::info!("screen audio step: loopback opened");
         if let Err(e) = unsafe { client.Start() } {
             let _ = init_tx.try_send(Err(format!("screen audio start failed: {e}")));
             return;
@@ -575,7 +577,7 @@ mod wasapi {
             if unsafe { WaitForSingleObject(wake.raw(), WAIT_SLICE_MS) } != WAIT_OBJECT_0 {
                 continue;
             }
-            drain_packets(&capture, channels, max_frames, &mut logged_first, tx);
+            drain_packets(&capture, channels, &mut logged_first, tx);
         }
         tracing::info!("screen audio step: capture loop left");
         unsafe {
@@ -586,7 +588,6 @@ mod wasapi {
     fn drain_packets(
         capture: &IAudioCaptureClient,
         channels: usize,
-        max_frames: u32,
         logged_first: &mut bool,
         tx: &flume::Sender<Vec<i16>>,
     ) {
@@ -598,7 +599,8 @@ mod wasapi {
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
-            if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err() {
+            if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err()
+            {
                 return;
             }
             if !*logged_first {
@@ -606,12 +608,12 @@ mod wasapi {
                 tracing::info!(pending, frames, flags, "screen audio step: first packet");
             }
             let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
-            let oversized = max_frames > 0 && frames > max_frames;
+            let oversized = frames > MAX_PACKET_FRAMES;
             if oversized {
                 tracing::error!(
                     frames,
-                    max_frames,
-                    "screen audio packet exceeds the client buffer; dropping it"
+                    limit = MAX_PACKET_FRAMES,
+                    "screen audio packet exceeds the packet limit; dropping it"
                 );
             }
             if frames > 0 && !silent && !oversized && !data.is_null() {

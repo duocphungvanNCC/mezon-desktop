@@ -989,7 +989,15 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            this.child(div().text_color(theme.danger_text).text_sm().child(message))
+            this.child(
+                div()
+                    .max_w(px(360.))
+                    .px_4()
+                    .text_center()
+                    .text_color(theme.danger_text)
+                    .text_sm()
+                    .child(message),
+            )
         })
         .child(join);
 

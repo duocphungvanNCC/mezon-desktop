@@ -1,9 +1,9 @@
-
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use base64::Engine as _;
 use futures::{SinkExt as _, StreamExt as _};
 use libwebrtc::audio_track::RtcAudioTrack;
 use libwebrtc::media_stream_track::{MediaStreamTrack, RtcTrackState};
@@ -22,8 +22,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::{IceServerConfig, TokenRefresher};
 use crate::video::track_frame_key;
+use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher};
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
@@ -61,6 +61,9 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const RECONNECT_FAST_ATTEMPTS: u32 = 2;
 const MAX_RECONNECT_ATTEMPTS: u32 = 40;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
+const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+const SELF_MUTE_CORRELATION: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -106,7 +109,6 @@ pub struct SfuPeer {
 pub struct ScreenTrack {
     pub track: RtcVideoTrack,
     pub width: u32,
-    pub height: u32,
 }
 
 pub enum SfuEvent {
@@ -120,6 +122,7 @@ pub enum SfuEvent {
     Reconnected,
     Disconnected { reason: String },
     Removed { reason: String },
+    MutedByModerator,
     Error(String),
 }
 
@@ -132,6 +135,7 @@ enum EngineCommand {
     SetScreenActive(bool),
     SetScreenAudio(bool),
     PushToTalk(bool),
+    ParticipantAction(String),
     Close,
 }
 
@@ -187,6 +191,10 @@ impl SfuEngine {
 
     pub fn push_to_talk(&self, active: bool) {
         let _ = self.cmd_tx.send(EngineCommand::PushToTalk(active));
+    }
+
+    pub fn participant_action(&self, token: String) {
+        let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
     pub fn close(&self) {
@@ -273,7 +281,11 @@ impl Membership {
         self.by_peer.remove(&peer_id);
         let mut released = Vec::new();
         for mid in mids.iter().filter(|m| **m != 0).map(u32::to_string) {
-            if self.peer_by_mid.get(&mid).is_some_and(|owner| *owner != peer_id) {
+            if self
+                .peer_by_mid
+                .get(&mid)
+                .is_some_and(|owner| *owner != peer_id)
+            {
                 continue;
             }
             self.peer_by_mid.remove(&mid);
@@ -306,8 +318,7 @@ impl Membership {
                     user_id: m.user_id.clone(),
                     muted: m.is_mute,
                     is_audience: m.is_audience(),
-                    audio: (m.mid_audio != 0)
-                        .then(|| remote_frame_key(&m.mid_audio.to_string())),
+                    audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
                     camera: (m.camera_active && m.mid_video != 0)
                         .then(|| remote_frame_key(&camera_mid)),
                     screenshare: (m.screen_active && m.mid_screen != 0)
@@ -462,7 +473,11 @@ fn stable_prefix(address: IpAddr) -> IpAddr {
 
 fn route_source_address(target: &str) -> Option<IpAddr> {
     let target: SocketAddr = target.parse().ok()?;
-    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let socket = UdpSocket::bind(bind).ok()?;
     socket.connect(target).ok()?;
     let address = socket.local_addr().ok()?.ip();
@@ -477,43 +492,48 @@ async fn engine_main(
 ) -> Result<()> {
     let mut local = LocalTracks::new();
     let mut attempts: u32 = 0;
+    let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
     let mut retiring = RetiredPeerConnection(None);
+    let mut first_session = true;
 
     loop {
-        let (joined, reason, stale_token) =
-            match run_session(
-                &config,
-                &factory,
-                &mut local,
-                &cmd_rx,
-                evt_tx,
-                ever_joined,
-                &mut attempts,
-                &mut retiring.0,
-            )
-            .await
-            {
-                SessionOutcome::Closed => {
-                    let _ = evt_tx.send(SfuEvent::Disconnected {
-                        reason: "left".into(),
-                    });
-                    return Ok(());
-                }
-                SessionOutcome::Fatal(reason) => {
-                    let _ = evt_tx.send(SfuEvent::Disconnected { reason });
-                    return Ok(());
-                }
-                SessionOutcome::Removed(reason) => {
-                    let _ = evt_tx.send(SfuEvent::Removed {
-                        reason: reason.clone(),
-                    });
-                    let _ = evt_tx.send(SfuEvent::Disconnected { reason });
-                    return Ok(());
-                }
-                SessionOutcome::Dropped { joined, reason } => (joined, reason, false),
-                SessionOutcome::DroppedStaleToken { joined, reason } => (joined, reason, true),
-            };
+        if !first_session {
+            ensure_fresh_token(&mut config, &mut token_refreshes).await;
+        }
+        first_session = false;
+        let (joined, reason, stale_token) = match run_session(
+            &config,
+            &factory,
+            &mut local,
+            &cmd_rx,
+            evt_tx,
+            ever_joined,
+            &mut attempts,
+            &mut retiring.0,
+        )
+        .await
+        {
+            SessionOutcome::Closed => {
+                let _ = evt_tx.send(SfuEvent::Disconnected {
+                    reason: "left".into(),
+                });
+                return Ok(());
+            }
+            SessionOutcome::Fatal(reason) => {
+                let _ = evt_tx.send(SfuEvent::Disconnected { reason });
+                return Ok(());
+            }
+            SessionOutcome::Removed(reason) => {
+                let _ = evt_tx.send(SfuEvent::Removed {
+                    reason: reason.clone(),
+                });
+                let _ = evt_tx.send(SfuEvent::Disconnected { reason });
+                return Ok(());
+            }
+            SessionOutcome::Dropped { joined, reason } => (joined, reason, false),
+            SessionOutcome::DroppedStaleToken { joined, reason } => (joined, reason, true),
+        };
 
         if local.ptt_active {
             local.ptt_active = false;
@@ -522,14 +542,22 @@ async fn engine_main(
         }
 
         ever_joined |= joined;
-        let refreshed = stale_token && refresh_session_token(&mut config).await;
-        if !ever_joined && !refreshed {
+        if joined {
+            token_refreshes = 0;
+        }
+        let refreshed =
+            stale_token && refresh_session_token(&mut config, &mut token_refreshes).await;
+        let token_retries_spent =
+            stale_token && !refreshed && token_refreshes >= MEET_TOKEN_RETRY_LIMIT;
+        if token_retries_spent || (!ever_joined && !refreshed) {
             let _ = evt_tx.send(SfuEvent::Disconnected { reason });
             return Ok(());
         }
         let _ = evt_tx.send(SfuEvent::Reconnecting);
         if LocalRoutes::probe().is_empty() {
-            tracing::warn!("sfu link dropped ({reason}); parking until the machine has a route again");
+            tracing::warn!(
+                "sfu link dropped ({reason}); parking until the machine has a route again"
+            );
             match wait_for_local_route(&cmd_rx, &mut local, config.role, evt_tx).await {
                 OfflineWait::Closed => {
                     let _ = evt_tx.send(SfuEvent::Disconnected {
@@ -548,7 +576,11 @@ async fn engine_main(
             return Ok(());
         }
         tracing::warn!("sfu link dropped ({reason}); retry {attempts}");
-        let backoff = if attempts <= RECONNECT_FAST_ATTEMPTS { RECONNECT_DELAY_FAST } else { RECONNECT_DELAY };
+        let backoff = if attempts <= RECONNECT_FAST_ATTEMPTS {
+            RECONNECT_DELAY_FAST
+        } else {
+            RECONNECT_DELAY
+        };
         tokio::time::sleep(backoff).await;
     }
 }
@@ -611,15 +643,68 @@ fn apply_offline_command(
         }
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
+        | EngineCommand::ParticipantAction(_)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
 }
 
-async fn refresh_session_token(config: &mut SfuConfig) -> bool {
+fn claim_token_refresh(refreshes: &mut u32) -> bool {
+    if *refreshes >= MEET_TOKEN_RETRY_LIMIT {
+        return false;
+    }
+    *refreshes += 1;
+    true
+}
+
+async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32) {
+    let Some(refresher) = config.refresh_token.clone() else {
+        return;
+    };
+    let remaining = token_seconds_left(&config.token);
+    if remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
+        return;
+    }
+    if !claim_token_refresh(refreshes) {
+        return;
+    }
+    match refresher.mint().await {
+        Some(fresh) if fresh != config.token => {
+            tracing::info!(?remaining, "sfu join token refreshed before reconnecting");
+            config.token = fresh;
+        }
+        _ => tracing::warn!(
+            ?remaining,
+            "sfu join token refresh failed; reusing the current token"
+        ),
+    }
+}
+
+fn token_seconds_left(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(exp - now)
+}
+
+async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> bool {
     let Some(refresher) = config.refresh_token.clone() else {
         return false;
     };
+    if !claim_token_refresh(refreshes) {
+        tracing::warn!(
+            refreshes = *refreshes,
+            "sfu join token rejected again; refresh limit reached"
+        );
+        return false;
+    }
     match refresher.mint().await {
         Some(fresh) if fresh != config.token => {
             tracing::info!("sfu join token refreshed after the server rejected it");
@@ -735,6 +820,8 @@ async fn session_loop(
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_offer: Option<(u64, String)> = None;
+    let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
+    let mut forced_mute_deadline: Option<tokio::time::Instant> = None;
     let mut media_wait_started: Option<Instant> = None;
     let mut ice_up_since: Option<Instant> = None;
     let mut transport_connected = false;
@@ -853,6 +940,7 @@ async fn session_loop(
                         tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         membership.absorb_msids(&sdp);
                         pending_offer = Some((offer_generation, sdp));
+                        offer_reissue_deadline = None;
                     }
                     ServerMessage::RoomSnapshot { self_peer_id, members } => {
                         tracing::info!(members = members.len(), "sfu room snapshot");
@@ -869,8 +957,23 @@ async fn session_loop(
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                     }
-                    ServerMessage::PeerJoined { peer } | ServerMessage::PeerUpdated { peer } => {
+                    ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
+                            membership.apply(peer);
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        }
+                    }
+                    ServerMessage::PeerUpdated { peer } => {
+                        if let Some(peer) = peer {
+                            if joined
+                                && peer.is_mute
+                                && !local.muted
+                                && peer.peer_id == membership.self_peer_id
+                            {
+                                forced_mute_deadline.get_or_insert_with(|| {
+                                    tokio::time::Instant::now() + SELF_MUTE_CORRELATION
+                                });
+                            }
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                         }
@@ -891,8 +994,10 @@ async fn session_loop(
                         local.apply_audio_gate(pc.as_ref(), config.role);
                         let _ = evt_tx.send(SfuEvent::PttActive(active));
                     }
-                    ServerMessage::MuteChanged { .. }
-                    | ServerMessage::VisibilityChanged { .. }
+                    ServerMessage::MuteChanged { .. } => {
+                        forced_mute_deadline = None;
+                    }
+                    ServerMessage::VisibilityChanged { .. }
                     | ServerMessage::RoleChanged { .. }
                     | ServerMessage::Unknown => {}
                     ServerMessage::Error { message } => {
@@ -900,6 +1005,30 @@ async fn session_loop(
                             local.ptt_active = false;
                             local.apply_audio_gate(pc.as_ref(), config.role);
                             let _ = evt_tx.send(SfuEvent::PttActive(false));
+                            continue;
+                        }
+                        if matches!(message.as_str(), "stale_offer_generation" | "future_offer_generation") {
+                            if pending_offer.is_some() {
+                                tracing::info!(%message, joined, "sfu rejected an older answer; answering the newer offer");
+                                continue;
+                            }
+                            tracing::info!(%message, joined, "sfu rejected the answer generation; waiting for the reissued offer");
+                            offer_reissue_deadline
+                                .get_or_insert_with(|| tokio::time::Instant::now() + OFFER_REISSUE_DEADLINE);
+                            continue;
+                        }
+                        if joined
+                            && matches!(
+                                message.as_str(),
+                                "invalid_token"
+                                    | "token_room_mismatch"
+                                    | "target_not_found"
+                                    | "invalid_participant_action"
+                                    | "unsupported_participant_action"
+                                    | "auth_not_configured"
+                            )
+                        {
+                            tracing::warn!(%message, "sfu rejected the participant action");
                             continue;
                         }
                         tracing::warn!(%message, joined, "sfu reported an error");
@@ -965,6 +1094,15 @@ async fn session_loop(
                     EngineCommand::SetScreenAudio(active) => {
                         local.screen_audio = active;
                         local.apply_audio_gate(pc.as_ref(), config.role);
+                    }
+                    EngineCommand::ParticipantAction(token) => {
+                        if !joined {
+                            tracing::warn!("sfu participant action dropped before the join completed");
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::ParticipantAction { token }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "participant_action send failed".into() };
+                        }
                     }
                     EngineCommand::PushToTalk(active) => {
                         local.ptt_requested = active;
@@ -1136,6 +1274,21 @@ async fn session_loop(
                     offline_ticks = 0;
                 }
             }
+            () = tokio::time::sleep_until(offer_reissue_deadline.unwrap_or_else(tokio::time::Instant::now)), if offer_reissue_deadline.is_some() => {
+                return SessionOutcome::Dropped {
+                    joined,
+                    reason: "sfu never reissued the rejected offer".into(),
+                };
+            }
+            () = tokio::time::sleep_until(forced_mute_deadline.unwrap_or_else(tokio::time::Instant::now)), if forced_mute_deadline.is_some() => {
+                forced_mute_deadline = None;
+                if !local.muted {
+                    tracing::info!("sfu moderator muted this device");
+                    local.muted = true;
+                    local.apply_audio_gate(pc.as_ref(), config.role);
+                    let _ = evt_tx.send(SfuEvent::MutedByModerator);
+                }
+            }
             () = std::future::ready(()), if pending_offer.is_some() => {
                 let Some((generation, offer_sdp)) = pending_offer.take() else {
                     continue;
@@ -1174,7 +1327,6 @@ async fn session_loop(
                 tokio::time::sleep(RENEGOTIATION_SETTLE).await;
             }
         }
-
     }
 }
 
@@ -1229,8 +1381,7 @@ fn build_ws_url(base: &str, token: &str) -> String {
         return String::new();
     }
     let separator = if base.contains('?') { '&' } else { '?' };
-    let encoded =
-        percent_encoding::utf8_percent_encode(token, percent_encoding::NON_ALPHANUMERIC);
+    let encoded = percent_encoding::utf8_percent_encode(token, percent_encoding::NON_ALPHANUMERIC);
     format!("{base}{separator}access_token={encoded}")
 }
 
@@ -1389,7 +1540,12 @@ async fn log_media_stats(pc: &PeerConnection) {
         }
     }
 
-    let endpoint = |id: &str| candidates.get(id).cloned().unwrap_or_else(|| "?".to_owned());
+    let endpoint = |id: &str| {
+        candidates
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "?".to_owned())
+    };
     let mut pairs: Vec<String> = Vec::new();
     for stat in &stats {
         match stat {
@@ -1563,27 +1719,27 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks) {
         };
         let (max_bitrate, max_framerate, scalability, degradation, scale_down, priority) =
             match mid.as_str() {
-            MID_CAMERA => (
-                CAMERA_MAX_BITRATE,
-                CAMERA_MAX_FRAMERATE,
-                None,
-                DegradationPreference::MaintainFramerate,
-                1.0,
-                Priority::High,
-            ),
-            MID_SCREEN => (
-                SCREEN_MAX_BITRATE,
-                SCREEN_MAX_FRAMERATE,
-                Some(SCREEN_SCALABILITY_MODE.to_owned()),
-                DegradationPreference::MaintainResolution,
-                local
-                    .screen
-                    .as_ref()
-                    .map_or(1.0, |screen| screen_scale_down(screen.width)),
-                Priority::High,
-            ),
-            _ => continue,
-        };
+                MID_CAMERA => (
+                    CAMERA_MAX_BITRATE,
+                    CAMERA_MAX_FRAMERATE,
+                    None,
+                    DegradationPreference::MaintainFramerate,
+                    1.0,
+                    Priority::High,
+                ),
+                MID_SCREEN => (
+                    SCREEN_MAX_BITRATE,
+                    SCREEN_MAX_FRAMERATE,
+                    Some(SCREEN_SCALABILITY_MODE.to_owned()),
+                    DegradationPreference::MaintainResolution,
+                    local
+                        .screen
+                        .as_ref()
+                        .map_or(1.0, |screen| screen_scale_down(screen.width)),
+                    Priority::High,
+                ),
+                _ => continue,
+            };
 
         let sender = transceiver.sender();
         let mut parameters = sender.parameters();
@@ -1615,7 +1771,9 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks) {
                 "publish limits applied"
             ),
             Err(e) => {
-                tracing::warn!("publish limits rejected on mid {mid}: {e}; retrying without scalability");
+                tracing::warn!(
+                    "publish limits rejected on mid {mid}: {e}; retrying without scalability"
+                );
                 let mut retry = sender.parameters();
                 for encoding in retry.encodings.iter_mut() {
                     encoding.max_bitrate = Some(max_bitrate);
@@ -1792,7 +1950,19 @@ mod tests {
             let mut local = LocalTracks::new();
             local.ptt_requested = true;
             let factory = PeerConnectionFactory::default();
-            run_session(&config, &factory, &mut local, &cmd_rx, &evt_tx, true).await
+            let mut attempts = 0;
+            let mut retiring = None;
+            run_session(
+                &config,
+                &factory,
+                &mut local,
+                &cmd_rx,
+                &evt_tx,
+                true,
+                &mut attempts,
+                &mut retiring,
+            )
+            .await
         });
 
         let (socket, _) = listener.accept().await.unwrap();
@@ -1957,7 +2127,10 @@ mod tests {
         membership.apply(member(3, "7", [3, 4, 5]));
         assert_eq!(membership.peer_by_mid.get("3"), Some(&3));
         assert_eq!(membership.peer_by_mid.get("5"), Some(&3));
-        assert_eq!(membership.user_by_mid.get("4").map(String::as_str), Some("7"));
+        assert_eq!(
+            membership.user_by_mid.get("4").map(String::as_str),
+            Some("7")
+        );
     }
 
     #[test]
@@ -1967,15 +2140,21 @@ mod tests {
             membership.apply(member(peer_id, "7", [0, 0, 0]));
         }
         assert_eq!(
-            membership.peers().iter().map(|p| p.peer_id).collect::<Vec<_>>(),
+            membership
+                .peers()
+                .iter()
+                .map(|p| p.peer_id)
+                .collect::<Vec<_>>(),
             vec![3, 7, 9]
         );
     }
 
     #[test]
     fn only_the_local_connection_is_excluded_for_a_shared_account() {
-        let mut membership = Membership::default();
-        membership.self_peer_id = 3;
+        let mut membership = Membership {
+            self_peer_id: 3,
+            ..Default::default()
+        };
         membership.apply(member(3, "7", [0, 0, 0]));
         let mut other_device = member(9, "7", [3, 4, 5]);
         other_device.screen_active = true;
@@ -1999,7 +2178,10 @@ mod tests {
         let mut membership = Membership::default();
         membership.apply(member(3, "7", [3, 4, 5]));
         let released = membership.remove_peer(3, [3, 4, 5]);
-        assert_eq!(released, vec!["3".to_owned(), "4".to_owned(), "5".to_owned()]);
+        assert_eq!(
+            released,
+            vec!["3".to_owned(), "4".to_owned(), "5".to_owned()]
+        );
         assert!(membership.peer_by_mid.is_empty());
         assert!(membership.peers().is_empty());
     }
@@ -2040,7 +2222,10 @@ mod tests {
         let mut membership = Membership::default();
         membership.apply(member(3, "7", [3, 4, 5]));
         membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:room-u999-mic t\r\n");
-        assert_eq!(membership.user_by_mid.get("3").map(String::as_str), Some("999"));
+        assert_eq!(
+            membership.user_by_mid.get("3").map(String::as_str),
+            Some("999")
+        );
         assert_eq!(
             membership.peer_by_mid.get("3"),
             Some(&3),
@@ -2052,7 +2237,10 @@ mod tests {
     fn msids_fill_in_mids_membership_has_not_named_yet() {
         let mut membership = Membership::default();
         membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:6\r\na=msid:room-u42-mic t\r\n");
-        assert_eq!(membership.user_by_mid.get("6").map(String::as_str), Some("42"));
+        assert_eq!(
+            membership.user_by_mid.get("6").map(String::as_str),
+            Some("42")
+        );
     }
 
     #[test]
@@ -2065,7 +2253,8 @@ mod tests {
         membership.apply(joiner);
         assert_eq!(membership.peers()[0].audio, None);
 
-        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
 
         assert_eq!(
             membership.peer_by_mid.get("3"),
@@ -2080,7 +2269,8 @@ mod tests {
     #[test]
     fn a_peer_update_after_the_offer_keeps_the_msid_learned_mid() {
         let mut membership = Membership::default();
-        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
         membership.apply(member(9, "8", [0, 0, 0]));
         assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
     }
@@ -2090,7 +2280,8 @@ mod tests {
         let mut membership = Membership::default();
         membership.apply(member(3, "7", [3, 4, 5]));
         membership.apply(member(9, "8", [0, 0, 0]));
-        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
         let released = membership.remove_peer(3, [3, 4, 5]);
         assert_eq!(released, vec!["4".to_owned(), "5".to_owned()]);
         assert_eq!(membership.peer_by_mid.get("3"), Some(&9));
@@ -2103,8 +2294,11 @@ mod tests {
         membership.apply(member(3, "7", [3, 4, 5]));
         membership.remove_peer(3, [3, 4, 5]);
         membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:room-u42-mic t\r\n");
-        assert_eq!(membership.user_by_mid.get("3").map(String::as_str), Some("42"));
-        assert!(membership.peer_by_mid.get("3").is_none());
+        assert_eq!(
+            membership.user_by_mid.get("3").map(String::as_str),
+            Some("42")
+        );
+        assert!(!membership.peer_by_mid.contains_key("3"));
     }
 
     #[test]
@@ -2211,7 +2405,11 @@ mod tests {
     fn a_display_already_narrow_enough_is_left_alone() {
         assert_eq!(screen_scale_down(1920), 1.0);
         assert_eq!(screen_scale_down(1280), 1.0);
-        assert_eq!(screen_scale_down(0), 1.0, "an unknown size must not divide by zero");
+        assert_eq!(
+            screen_scale_down(0),
+            1.0,
+            "an unknown size must not divide by zero"
+        );
     }
 
     #[test]
@@ -2257,5 +2455,86 @@ mod tests {
     #[test]
     fn a_normal_closure_is_still_retried() {
         assert_eq!(classify_close(Some(CloseCode::Normal)), CloseVerdict::Retry);
+    }
+
+    fn jwt_with_exp(exp: i64, padded: bool) -> String {
+        use base64::Engine as _;
+        let claims = serde_json::json!({ "exp": exp, "sub": 7 }).to_string();
+        let payload = if padded {
+            base64::engine::general_purpose::URL_SAFE.encode(&claims)
+        } else {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&claims)
+        };
+        format!("eyJhbGciOiJIUzI1NiJ9.{payload}.c2ln")
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn a_token_reports_its_remaining_lifetime() {
+        let left = token_seconds_left(&jwt_with_exp(unix_now() + 3_600, false)).unwrap();
+        assert!((3_595..=3_600).contains(&left), "got {left}");
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() - 10, false)).unwrap() < 0);
+    }
+
+    #[test]
+    fn a_padded_or_malformed_token_is_handled() {
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() + 60, true)).is_some());
+        assert_eq!(token_seconds_left("not-a-jwt"), None);
+        assert_eq!(token_seconds_left("a.b.c"), None);
+        assert_eq!(token_seconds_left("a.e30.c"), None);
+    }
+
+    fn counting_refresher(mints_fresh_token: bool) -> (TokenRefresher, impl Fn() -> u32) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let minted = calls.clone();
+        let refresher = TokenRefresher::new(move || {
+            let call = minted.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { mints_fresh_token.then(|| format!("fresh-token-{call}")) }
+        });
+        (refresher, move || calls.load(Ordering::SeqCst))
+    }
+
+    fn config_with_refresher(token: &str, refresher: TokenRefresher) -> SfuConfig {
+        SfuConfig {
+            ws_url: String::new(),
+            token: token.into(),
+            room: "test-room".into(),
+            role: SfuRole::Speaker,
+            fallback_ice_servers: Vec::new(),
+            refresh_token: Some(refresher),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_refreshed_at_most_the_retry_limit() {
+        let (refresher, calls) = counting_refresher(true);
+        let mut config = config_with_refresher("rejected-token", refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT {
+            assert!(refresh_session_token(&mut config, &mut refreshes).await);
+        }
+        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn refreshing_before_a_reconnect_spends_the_same_retry_limit() {
+        let (refresher, calls) = counting_refresher(false);
+        let mut config = config_with_refresher("not-a-jwt", refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
+            ensure_fresh_token(&mut config, &mut refreshes).await;
+        }
+        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
     }
 }
