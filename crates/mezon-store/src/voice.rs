@@ -16,7 +16,10 @@ use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{
     AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
 };
-use mezon_voice::{IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession};
+use mezon_voice::{
+    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
+    VoiceSession,
+};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -237,6 +240,7 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    muted_by_moderator: bool,
     agent_pending: bool,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
@@ -268,6 +272,7 @@ pub struct VoiceStore {
     session: Option<VoiceSession>,
     session_generation: u64,
     reconnect_generation: u64,
+    reconnect_token_fetches: u32,
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
@@ -588,7 +593,7 @@ impl VoiceStore {
             mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
-            noise_suppression_enabled: true,
+            noise_suppression_enabled: false,
             noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
             auto_focused_screen: None,
@@ -599,6 +604,7 @@ impl VoiceStore {
             pending_kick: None,
             pending_removals: HashMap::new(),
             moderation_error: None,
+            muted_by_moderator: false,
             agent_pending: false,
             participants: Vec::new(),
             join_ranks: Vec::new(),
@@ -630,6 +636,7 @@ impl VoiceStore {
             session: None,
             session_generation: 0,
             reconnect_generation: 0,
+            reconnect_token_fetches: 0,
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
@@ -781,7 +788,6 @@ impl VoiceStore {
 
     pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
         self.noise_suppression_enabled = !self.noise_suppression_enabled;
-        self.sync_noise_suppression();
         cx.notify();
     }
 
@@ -791,17 +797,7 @@ impl VoiceStore {
             return;
         }
         self.noise_suppression_level = level;
-        self.sync_noise_suppression();
         cx.notify();
-    }
-
-    fn sync_noise_suppression(&self) {
-        if let Some(session) = &self.session {
-            session.set_noise_suppression(
-                self.noise_suppression_enabled,
-                self.noise_suppression_level,
-            );
-        }
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -2008,6 +2004,10 @@ impl VoiceStore {
         self.moderation_error.take()
     }
 
+    pub fn take_muted_by_moderator(&mut self) -> bool {
+        std::mem::take(&mut self.muted_by_moderator)
+    }
+
     pub fn mute_participant(&mut self, identity: String, cx: &mut Context<Self>) {
         self.moderate_participant(identity, ModerationAction::Mute, cx);
     }
@@ -2289,18 +2289,38 @@ impl VoiceStore {
                         .await
                 }
             };
-            if let Err(e) = result {
-                tracing::warn!("participant moderation failed: {e:#}");
-                let _ = this.update(cx, |this, cx| {
-                    if matches!(action, ModerationAction::Kick) {
-                        this.pending_removals.remove(&identity);
+            let _ = this.update(cx, |this, cx| {
+                let delivered = match result {
+                    Ok(token) => this.deliver_participant_action(token),
+                    Err(e) => {
+                        tracing::warn!("participant moderation failed: {e:#}");
+                        false
                     }
-                    this.moderation_error = Some(action.error());
-                    cx.notify();
-                });
-            }
+                };
+                if delivered {
+                    return;
+                }
+                if matches!(action, ModerationAction::Kick) {
+                    this.pending_removals.remove(&identity);
+                }
+                this.moderation_error = Some(action.error());
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    fn deliver_participant_action(&self, token: String) -> bool {
+        let Some(session) = &self.session else {
+            tracing::warn!("participant moderation has no voice session to reach the sfu");
+            return false;
+        };
+        if matches!(self.call_status, VoiceCallStatus::Reconnecting) {
+            tracing::warn!("participant moderation skipped while the sfu link is reconnecting");
+            return false;
+        }
+        session.participant_action(token);
+        true
     }
 
     fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
@@ -2484,7 +2504,6 @@ impl VoiceStore {
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);
-        self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
             let mut pending: Option<VoiceEvent> = None;
@@ -2620,6 +2639,7 @@ impl VoiceStore {
 
     fn cancel_reconnect_watchdog(&mut self) {
         self.reconnect_generation = self.reconnect_generation.wrapping_add(1);
+        self.reconnect_token_fetches = 0;
         self._reconnect_watch_task = None;
     }
 
@@ -2637,8 +2657,17 @@ impl VoiceStore {
                 if !this.reconnect_still_pending(generation) {
                     return None;
                 }
+                if this.reconnect_token_fetches >= MEET_TOKEN_RETRY_LIMIT {
+                    tracing::warn!(
+                        fetches = this.reconnect_token_fetches,
+                        "voice reconnect token retry limit reached"
+                    );
+                    return None;
+                }
                 this._reconnect_watch_task = None;
-                this.reconnect_snapshot(cx)
+                let snapshot = this.reconnect_snapshot(cx)?;
+                this.reconnect_token_fetches += 1;
+                Some(snapshot)
             }) {
                 Ok(snapshot) => snapshot,
                 Err(_) => return,
@@ -2783,6 +2812,8 @@ impl VoiceStore {
         }
         let reason = reason.trim();
         reason != "left"
+            && !reason.contains("invalid_token")
+            && !reason.contains("missing_token")
             && !reason.contains("ClientInitiated")
             && !reason.contains("ParticipantRemoved")
             && !reason.contains("RoomDeleted")
@@ -2847,6 +2878,10 @@ impl VoiceStore {
                 self.mic_enabled = active;
                 self.ptt_active = active;
                 cx.notify();
+            }
+            VoiceEvent::MutedByModerator => {
+                self.mic_enabled = false;
+                self.muted_by_moderator = true;
             }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
@@ -3815,7 +3850,7 @@ impl VoiceStore {
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
-        self.noise_suppression_enabled = true;
+        self.noise_suppression_enabled = false;
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
         self.auto_focused_screen = None;

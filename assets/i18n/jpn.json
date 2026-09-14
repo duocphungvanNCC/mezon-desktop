@@ -1098,6 +1098,7 @@
   "channelVoice.micPermissionBody": "Mezon がマイクにアクセスできません。システム設定 → プライバシーとセキュリティ → マイク で許可してから、通話に再参加してください。",
   "channelVoice.micPermissionTitle": "マイクへのアクセスが必要です",
   "channelVoice.muteMemberFailed": "メンバーをミュートできませんでした",
+  "channelVoice.mutedByModerator": "チャンネルのモデレーターによってミュートされました",
   "channelVoice.muteModal.content": "本当に\"{{userName}}\"をミュートしますか？",
   "channelVoice.muteModal.mute": "ミュート",
   "channelVoice.muteModal.title": "メンバーをミュート",

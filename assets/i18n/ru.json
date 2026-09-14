@@ -1107,6 +1107,7 @@
   "channelVoice.micPermissionBody": "Mezon не может получить доступ к микрофону. Включите его в Системных настройках → Конфиденциальность и безопасность → Микрофон, затем присоединитесь к звонку снова.",
   "channelVoice.micPermissionTitle": "Требуется доступ к микрофону",
   "channelVoice.muteMemberFailed": "Не удалось отключить микрофон участника",
+  "channelVoice.mutedByModerator": "Модератор канала отключил ваш микрофон",
   "channelVoice.muteModal.content": "Пожалуйста, подтвердите, если Вы хотите заглушить \"{{userName}}\"?",
   "channelVoice.muteModal.mute": "Заглушить",
   "channelVoice.muteModal.title": "Заглушить участника",

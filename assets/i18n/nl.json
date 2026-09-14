@@ -1098,6 +1098,7 @@
   "channelVoice.micPermissionBody": "Mezon heeft geen toegang tot je microfoon. Schakel dit in bij Systeeminstellingen → Privacy en beveiliging → Microfoon en neem opnieuw deel aan het gesprek.",
   "channelVoice.micPermissionTitle": "Microfoontoegang vereist",
   "channelVoice.muteMemberFailed": "Lid dempen mislukt",
+  "channelVoice.mutedByModerator": "Je bent gedempt door een kanaalmoderator",
   "channelVoice.muteModal.content": "Weet je zeker dat je \"{{userName}}\" wilt dempen?",
   "channelVoice.muteModal.mute": "Dempen",
   "channelVoice.muteModal.title": "Lid dempen",

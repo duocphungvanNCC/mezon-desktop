@@ -1098,6 +1098,7 @@
   "channelVoice.micPermissionBody": "Mezon không truy cập được micro. Hãy bật trong System Settings → Privacy & Security → Microphone, sau đó vào lại cuộc gọi.",
   "channelVoice.micPermissionTitle": "Cần quyền truy cập micro",
   "channelVoice.muteMemberFailed": "Không thể tắt tiếng thành viên",
+  "channelVoice.mutedByModerator": "Bạn đã bị quản trị viên kênh tắt tiếng",
   "channelVoice.muteModal.content": "Bạn có chắc muốn tắt tiếng \"{{userName}}\"?",
   "channelVoice.muteModal.mute": "Tắt tiếng",
   "channelVoice.muteModal.title": "Tắt tiếng thành viên",

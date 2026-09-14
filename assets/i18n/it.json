@@ -1098,6 +1098,7 @@
   "channelVoice.micPermissionBody": "Mezon non può accedere al microfono. Attivalo in Impostazioni di sistema → Privacy e sicurezza → Microfono, poi rientra nella chiamata.",
   "channelVoice.micPermissionTitle": "Serve l'accesso al microfono",
   "channelVoice.muteMemberFailed": "Impossibile silenziare il membro",
+  "channelVoice.mutedByModerator": "Sei stato silenziato da un moderatore del canale",
   "channelVoice.muteModal.content": "Sei sicuro di voler silenziare \"{{userName}}\"?",
   "channelVoice.muteModal.mute": "Silenzia",
   "channelVoice.muteModal.title": "Silenzia membro",

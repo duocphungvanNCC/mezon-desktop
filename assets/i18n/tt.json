@@ -1107,6 +1107,7 @@
   "channelVoice.micPermissionBody": "Mezon микрофонга керә алмый. Аны Система көйләүләрендә → Хосусыйлык һәм куркынычсызлык → Микрофон бүлегендә ачыгыз, аннары шалтыратуга кабат кушылыгыз.",
   "channelVoice.micPermissionTitle": "Микрофонга рөхсәт кирәк",
   "channelVoice.muteMemberFailed": "Катнашучыны тавышсыз итеп булмады",
+  "channelVoice.mutedByModerator": "Канал модераторы сезнең микрофонны сүндерде",
   "channelVoice.muteModal.content": "Зинһар, \"{{userName}}\" тындырасыгыз килүен раслагыз?",
   "channelVoice.muteModal.mute": "Тындыру",
   "channelVoice.muteModal.title": "Катнашучыны тындыру",
