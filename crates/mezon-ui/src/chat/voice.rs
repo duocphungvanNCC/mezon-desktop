@@ -9,12 +9,10 @@ use gpui::{
     div, img, point, prelude::*, px, relative, rems,
 };
 use mezon_store::{
-    AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind,
-    DeviceMenuKind, DisplayedFlower, DisplayedReaction, PERMISSION_MANAGE_CHANNEL,
-    PermissionStore, RecordingState, Settings, SfuRole, UserId, VoiceCallStatus,
-    VoiceConnection,
-    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
-    flower_menu_blocked,
+    AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
+    DisplayedReaction, PERMISSION_MANAGE_CHANNEL, PermissionStore, RecordingState, Settings,
+    SfuRole, UserId, VoiceCallStatus, VoiceConnection, VoiceInteractiveApp, VoiceMember,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
 };
 
 use crate::ChatLayout;
@@ -369,11 +367,9 @@ pub fn render_mini_bar(
             (neutral_bg.into(), neutral_hover, theme.text_primary.into())
         };
         push_to_talk_press(
-            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color)
-                .tooltip(Tooltip::text(mezon_i18n::t(
-                    locale,
-                    "channelVoice.pushToTalk.hold",
-                ))),
+            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color).tooltip(
+                Tooltip::text(mezon_i18n::t(locale, "channelVoice.pushToTalk.hold")),
+            ),
             voice,
         )
     });
@@ -791,8 +787,7 @@ fn render_pre_join(
             .justify_center()
             .gap_2()
             .children(members.iter().take(max_members).map(|m| {
-                let (name, avatar_url, avatar_raw) =
-                    resolve_voice_member(cx, channel.clan_id, m);
+                let (name, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
                 let mut avatar = Avatar::new().name(name).size_px(px(56.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
@@ -1202,8 +1197,6 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     }
     updated
 }
-
-
 
 const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
 
@@ -2097,7 +2090,9 @@ fn in_call_placeholder_cells(
         let identity = uid.to_string();
         let (name, avatar_url, avatar_raw) =
             resolve_voice_identity(cx, clan_id, room_members, &identity, &fallback);
-        cells.push(VideoCell::placeholder(identity, name, avatar_url, avatar_raw));
+        cells.push(VideoCell::placeholder(
+            identity, name, avatar_url, avatar_raw,
+        ));
     }
     for member in room_members {
         if Some(member.user_id) == local_id {
@@ -3073,6 +3068,18 @@ fn control_bar(
     let can_record = store.can_record();
     let is_audience = store.is_audience();
     let ptt_active = store.push_to_talk_active();
+    let interactive_app_clan_id = store
+        .connection()
+        .connected_channel()
+        .and_then(|(_, clan)| clan.parse::<i64>().ok())
+        .map(ClanId);
+    let can_open_interactive_app = interactive_app_clan_id.is_some_and(|clan_id| {
+        PermissionStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+        })
+    });
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -3214,7 +3221,7 @@ fn control_bar(
         )
     });
 
-    let interactive_app_button = {
+    let interactive_app_button = can_open_interactive_app.then(|| {
         let button = InteractiveAppTrigger::new(
             neutral_bg.into(),
             neutral_hover,
@@ -3233,7 +3240,7 @@ fn control_bar(
                 }))
             })
             .trigger(button)
-    };
+    });
 
     let record_button = can_record.then(|| {
         let voice = voice.clone();
@@ -3514,7 +3521,7 @@ fn control_bar(
         .gap_3()
         .child(emoji_button)
         .child(sound_button)
-        .child(interactive_app_button)
+        .children(interactive_app_button)
         .children(record_button)
         .children(record_badge);
 
@@ -4167,7 +4174,9 @@ mod device_menu_tests {
 
 #[cfg(test)]
 mod visual_order_tests {
-    use super::{VideoCell, VoiceParticipant, VoiceVisualState, stable_visual_order, target_visual_order};
+    use super::{
+        VideoCell, VoiceParticipant, VoiceVisualState, stable_visual_order, target_visual_order,
+    };
 
     fn device(session_id: &str, is_local: bool, screen: Option<u64>) -> VoiceParticipant {
         VoiceParticipant {
@@ -4188,9 +4197,19 @@ mod visual_order_tests {
     fn cells_for(people: &[VoiceParticipant]) -> Vec<VideoCell> {
         let mut cells = Vec::new();
         for p in people {
-            cells.push(VideoCell::camera(p, p.name.clone(), String::new(), String::new()));
+            cells.push(VideoCell::camera(
+                p,
+                p.name.clone(),
+                String::new(),
+                String::new(),
+            ));
             if p.screenshare.is_some() {
-                cells.push(VideoCell::screen(p, p.name.clone(), String::new(), String::new()));
+                cells.push(VideoCell::screen(
+                    p,
+                    p.name.clone(),
+                    String::new(),
+                    String::new(),
+                ));
             }
         }
         cells
@@ -4215,7 +4234,13 @@ mod visual_order_tests {
         people.push(device("audience", false, None));
         let mut cells = cells_for(&people);
         let target = target_visual_order(&cells, &rank, &|_| 0);
-        assert_eq!(target.iter().collect::<std::collections::HashSet<_>>().len(), 7);
+        assert_eq!(
+            target
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            7
+        );
         let expected = stable_visual_order(&mut state, &target, 3);
         for _ in 0..20 {
             cells.rotate_left(1);
@@ -4233,6 +4258,9 @@ mod visual_order_tests {
         ]);
         let expected = target_visual_order(&cells, &|_| usize::MAX, &|_| 0);
         cells.reverse();
-        assert_eq!(target_visual_order(&cells, &|_| usize::MAX, &|_| 0), expected);
+        assert_eq!(
+            target_visual_order(&cells, &|_| usize::MAX, &|_| 0),
+            expected
+        );
     }
 }
