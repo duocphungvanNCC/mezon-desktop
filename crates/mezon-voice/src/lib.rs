@@ -36,7 +36,9 @@ use parking_lot::{Condvar, Mutex};
 
 use sfu::{SfuConfig, SfuEngine, SfuEvent, SfuPeer};
 
-pub use audio::{AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels};
+pub use audio::{
+    AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
+};
 pub use camera::{
     CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
     start_camera_into,
@@ -387,7 +389,7 @@ const MICROPHONE_SILENCE_GRACE: Duration = Duration::from_millis(30);
 
 type ScreenAudioBus = Arc<Mutex<std::collections::VecDeque<i16>>>;
 
-const LOCAL_AUDIO_KEY: u64 = 0x10CA_1_A0D_10;
+const LOCAL_AUDIO_KEY: u64 = 0x10_CA1A_0D10;
 const SPEAKING_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 #[allow(clippy::too_many_arguments)]
@@ -440,8 +442,7 @@ async fn session_main(
                 UPLINK_CHANNELS,
                 AUDIO_SOURCE_QUEUE_SIZE_MS,
             );
-            let uplink_track =
-                factory.create_audio_track("microphone", uplink_source.clone());
+            let uplink_track = factory.create_audio_track("microphone", uplink_source.clone());
             engine.set_local_audio(Some(uplink_track));
 
             microphone_task = Some(runtime::runtime().spawn(uplink_pump(
@@ -978,7 +979,9 @@ fn mix_screen_audio(bus: &ScreenAudioBus, out: &mut [i16]) -> Option<i16> {
     }
     let mut peak = 0i16;
     for sample in out.iter_mut() {
-        let Some(shared) = queue.pop_front() else { break };
+        let Some(shared) = queue.pop_front() else {
+            break;
+        };
         peak = peak.max(shared.saturating_abs());
         *sample = audio::clamp_i16(*sample as f32 + shared as f32);
     }
@@ -1033,7 +1036,7 @@ async fn start_screen_track(
     tracing::info!("starting screen share (share system audio: {share_audio})");
     let (stopper, source_rx) =
         screen::start_screen(identity.to_string(), frame_store, full_res, pick);
-    let (source, width, height) = source_rx
+    let (source, width, _height) = source_rx
         .recv_async()
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
@@ -1046,7 +1049,6 @@ async fn start_screen_track(
     let track = sfu::ScreenTrack {
         track: screen_track,
         width,
-        height,
     };
 
     let audio = if share_audio {
@@ -1274,8 +1276,16 @@ fn spawn_video(
                 ) {
                     invalid_frames += 1;
                     if invalid_frames % 100 == 1 {
-                        tracing::warn!(key, invalid_frames, width, height, sy, su, sv,
-                            "dropping invalid decoded video frame");
+                        tracing::warn!(
+                            key,
+                            invalid_frames,
+                            width,
+                            height,
+                            sy,
+                            su,
+                            sv,
+                            "dropping invalid decoded video frame"
+                        );
                     }
                     continue;
                 }
@@ -1360,8 +1370,7 @@ fn emit_participants(
             is_local: false,
             is_agent: false,
             is_audience: peer.is_audience,
-            speaking: !peer.muted
-                && peer.audio.is_some_and(|key| speaking.is_speaking(key)),
+            speaking: !peer.muted && peer.audio.is_some_and(|key| speaking.is_speaking(key)),
             muted: peer.muted,
             camera: peer.camera,
             screenshare: peer.screenshare,
@@ -1375,7 +1384,6 @@ fn emit_participants(
     last.clone_from(&participants);
     let _ = evt_tx.send(VoiceEvent::Participants(participants));
 }
-
 
 #[cfg(test)]
 mod remote_video_tests {
