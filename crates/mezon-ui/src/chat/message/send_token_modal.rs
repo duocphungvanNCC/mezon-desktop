@@ -11,7 +11,7 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
+    Avatar, Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
 };
 use crate::theme::ActiveTheme;
 
@@ -644,6 +644,11 @@ impl Render for SendTokenModal {
             .child(
                 div()
                     .id("send-token-body-scroll")
+                    .focus_cycle(
+                        [&self.search, &self.amount, &self.note]
+                            .map(|input| input.focus_handle(cx))
+                            .to_vec(),
+                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

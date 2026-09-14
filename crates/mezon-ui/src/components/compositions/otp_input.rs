@@ -1,5 +1,8 @@
 use crate::components::primitives::{Input, InputEvent, InputState};
-use gpui::{App, Context, Entity, KeyDownEvent, Subscription, Window, div, prelude::*};
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Subscription, Window, div,
+    prelude::*,
+};
 
 use crate::components::OtpCompleteHandler;
 use crate::theme::ActiveTheme;
@@ -143,6 +146,14 @@ impl OtpInput {
         self.inputs
             .iter()
             .map(|input| input.read(cx).value().to_string())
+            .collect()
+    }
+
+    /// The digit boxes in typing order, for `focus_cycle`.
+    pub fn field_handles(&self, cx: &App) -> Vec<FocusHandle> {
+        self.inputs
+            .iter()
+            .map(|input| input.focus_handle(cx))
             .collect()
     }
 }

@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use gpui::{AnyElement, FontWeight, Rgba, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{
+    AnyElement, FocusHandle, Focusable, FontWeight, Rgba, SharedString, div, img, prelude::*, px,
+    rgb,
+};
 use mezon_store::{
     EmbedAnimation, EmbedField, EmbedGrid, EmbedInput, EmbedRadio, EmbedRadioOption,
     EmbedTextInput, Message, MessageId, MessagesStore, SpriteAtlas,
@@ -9,7 +12,7 @@ use mezon_store::{
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use super::message_actions_panel::{button_bg, render_message_button, render_message_select};
-use crate::components::primitives::TextAreaField;
+use crate::components::primitives::{FocusCycle, TextAreaField};
 
 const INPUT_WIDTH: f32 = 300.0;
 const INPUT_HEIGHT: f32 = 36.0;
@@ -56,7 +59,36 @@ pub fn render_embed_fields(
         }
         grid = grid.child(row);
     }
-    grid.into_any_element()
+    grid.focus_cycle(text_input_fields(fields, msg.id, ctx))
+        .into_any_element()
+}
+
+/// The embed's text inputs in layout order — what Tab walks through. Only this embed's own
+/// fields, so a second embed on the same message (or the composer behind) is never stepped into.
+///
+/// This runs from `render` inside `gpui::list`, once per embed in the viewport per frame, so it
+/// allocates only for an embed that actually has two inputs to move between — a read-only card
+/// (the common case) walks its fields and returns without touching the heap.
+fn text_input_fields(
+    fields: &[EmbedField],
+    message_id: MessageId,
+    ctx: &RowCtx,
+) -> Vec<FocusHandle> {
+    let mut inputs = fields
+        .iter()
+        .filter_map(|field| match field.input.as_ref() {
+            // A disabled input renders as read-only text, with no entity to focus.
+            Some(EmbedInput::Text(text)) if !text.disabled => {
+                ctx.embed_inputs.get(&(message_id, text.id.clone()))
+            }
+            _ => None,
+        });
+    let (Some(first), Some(second)) = (inputs.next(), inputs.next()) else {
+        return Vec::new();
+    };
+    let mut handles = vec![first.focus_handle(ctx.app), second.focus_handle(ctx.app)];
+    handles.extend(inputs.map(|state| state.focus_handle(ctx.app)));
+    handles
 }
 
 fn group_fields(fields: &[EmbedField]) -> Vec<Vec<&EmbedField>> {

@@ -1,7 +1,7 @@
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex,
-    v_flex,
+    Button as GpuiButton, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent,
+    InputState, h_flex, v_flex,
 };
 use crate::theme::ActiveTheme;
 use gpui::{
@@ -388,6 +388,13 @@ impl Render for PasswordModal {
             .child(
                 v_flex()
                     .id("password-modal-scroll")
+                    .focus_cycle(
+                        self.current_input
+                            .iter()
+                            .chain([&self.password_input, &self.confirm_input])
+                            .map(|input| input.focus_handle(cx))
+                            .collect(),
+                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

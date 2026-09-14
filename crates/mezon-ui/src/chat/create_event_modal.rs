@@ -12,7 +12,8 @@ use std::rc::Rc;
 use crate::app::shell::Shell;
 use crate::components::primitives::{
     Button, ButtonVariants, DatePicker, DatePickerEvent, Dropdown, DropdownPlacement,
-    DropdownTriggerStyle, Icon, IconName, Input, InputEvent, InputState, TextArea, TextAreaEvent,
+    DropdownTriggerStyle, FocusCycle, Icon, IconName, Input, InputEvent, InputState, TextArea,
+    TextAreaEvent,
 };
 use crate::theme::ActiveTheme;
 
@@ -1558,6 +1559,18 @@ impl Render for CreateEventModal {
             Step::Details => self.details_content(cx),
             Step::Review => self.review_content(cx),
         };
+        // Only the fields this step actually lays out, so Tab never reaches an input
+        // belonging to another step.
+        let fields: Vec<FocusHandle> = match self.step {
+            Step::Location if self.location_kind == Some(LocationKind::Somewhere) => {
+                vec![self.address.focus_handle(cx)]
+            }
+            Step::Location | Step::Review => Vec::new(),
+            Step::Details => vec![
+                self.topic.focus_handle(cx),
+                self.description.focus_handle(cx),
+            ],
+        };
         let footer = div()
             .mt_5()
             .flex_shrink_0()
@@ -1638,6 +1651,7 @@ impl Render for CreateEventModal {
             .child(
                 div()
                     .id("create-event-scroll")
+                    .focus_cycle(fields)
                     .max_h(px(520.))
                     .flex_shrink_1()
                     .min_h_0()

@@ -7,7 +7,7 @@ use mezon_store::MessagesStore;
 use super::{ReactionPicker, ReactionPickerEvent};
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
+    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
 };
 use crate::theme::ActiveTheme;
 
@@ -637,6 +637,12 @@ impl Render for CreatePollModal {
             .child(
                 div()
                     .id("poll-body-scroll")
+                    .focus_cycle(
+                        std::iter::once(&self.question)
+                            .chain(&self.answers)
+                            .map(|input| input.focus_handle(cx))
+                            .collect(),
+                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
