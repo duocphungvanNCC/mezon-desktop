@@ -13,7 +13,9 @@ use gpui::{
     Subscription, Task, Window,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
-use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
+use mezon_client::{
+    AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
+};
 use mezon_voice::{
     IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
     VoiceSession,
@@ -26,8 +28,7 @@ pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
-    system_screen_share_pick,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -129,6 +130,19 @@ fn parse_raise_token(token: &str) -> Option<bool> {
 fn reaction_scatter(seq: u64, salt: u64) -> f32 {
     let h = seq.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+fn current_locale(cx: &App) -> String {
+    Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default()
+}
+
+fn voice_join_error_message(err: &anyhow::Error, locale: &str) -> String {
+    match api_status_from_error(err) {
+        Some(status) => mezon_i18n::api_error(locale, status.code).to_string(),
+        None => mezon_i18n::t(locale, "channelVoice.joinFailed").to_string(),
+    }
 }
 
 struct CachedMeetToken {
@@ -733,7 +747,8 @@ impl VoiceStore {
                 .any(|old| old.session_id == p.session_id && old.speaking);
             if p.speaking && !was_speaking {
                 self.speak_seq += 1;
-                self.speak_ranks.insert(p.session_id.clone(), self.speak_seq);
+                self.speak_ranks
+                    .insert(p.session_id.clone(), self.speak_seq);
             }
         }
         self.speak_ranks
@@ -1476,9 +1491,7 @@ impl VoiceStore {
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
+        let locale = current_locale(cx);
         let local_is_receiver = self.local_user_id().as_deref() == Some(receiver_id.as_str());
         let label = SharedString::from(if local_is_receiver {
             mezon_i18n::t(&locale, "channelVoice.giveFlowerReceived")
@@ -2056,9 +2069,7 @@ impl VoiceStore {
         let balance = wallet
             .as_ref()
             .and_then(|store| store.read(cx).balance().map(str::to_string));
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
+        let locale = current_locale(cx);
 
         match can_give_flower(
             identity == local_id,
@@ -2359,9 +2370,10 @@ impl VoiceStore {
 
         let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
+            let locale = current_locale(cx);
             self.connection = VoiceConnection::Failed {
                 channel_id,
-                message: "SFU server URL is not configured".into(),
+                message: mezon_i18n::t(&locale, "channelVoice.sfuNotConfigured").to_string(),
             };
             cx.notify();
             return;
@@ -2414,9 +2426,13 @@ impl VoiceStore {
                 }
                 Err(e) => {
                     tracing::error!("failed to generate meet token: {e:#}");
+                    if this.connection.active_channel_id() != Some(channel_id.as_str()) {
+                        return;
+                    }
+                    let locale = current_locale(cx);
                     this.connection = VoiceConnection::Failed {
                         channel_id,
-                        message: e.to_string(),
+                        message: voice_join_error_message(&e, &locale),
                     };
                     cx.notify();
                 }
@@ -2935,7 +2951,19 @@ impl VoiceStore {
                     return;
                 }
                 tracing::info!("voice disconnected: {reason}");
+                let unjoined_channel = match &self.connection {
+                    VoiceConnection::Connecting { channel_id, .. }
+                    | VoiceConnection::Failed { channel_id, .. } => Some(channel_id.clone()),
+                    _ => None,
+                };
                 self.teardown(None, cx);
+                if let Some(channel_id) = unjoined_channel {
+                    let locale = current_locale(cx);
+                    self.connection = VoiceConnection::Failed {
+                        channel_id,
+                        message: mezon_i18n::t(&locale, "channelVoice.joinFailed").to_string(),
+                    };
+                }
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -2944,11 +2972,6 @@ impl VoiceStore {
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
-                } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
-                    self.connection = VoiceConnection::Failed {
-                        channel_id: channel_id.clone(),
-                        message,
-                    };
                 }
             }
         }
@@ -3418,9 +3441,7 @@ impl VoiceStore {
                         Err(error) => {
                             tracing::error!("could not reserve a path for the recording: {error}");
                             let _ = this.update(cx, |this, cx| {
-                                let locale = crate::Settings::try_global(cx)
-                                    .map(|settings| settings.read(cx).language.clone())
-                                    .unwrap_or_default();
+                                let locale = current_locale(cx);
                                 this.recording = RecordingState::Idle;
                                 cx.emit(VoiceStoreEvent::RecordingFinished(
                                     RecordingToast::Failed(
@@ -3948,9 +3969,9 @@ mod tests {
     use super::parse_raise_token;
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
-        RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, flower_pair_key, is_duplicate_flower,
-        is_duplicate_interactive_launch, redact_interactive_app_url, solo_tile_for,
-        validate_sound_file,
+        RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
+        is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
+        solo_tile_for, validate_sound_file, voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
@@ -4327,6 +4348,52 @@ mod tests {
         assert_eq!(
             default_focus_tile_for(&participants),
             Some(camera_tile_id("a"))
+        );
+    }
+
+    #[test]
+    fn active_channel_id_only_tracks_connecting_and_connected() {
+        assert_eq!(
+            VoiceConnection::Connecting {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Connected {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Failed {
+                channel_id: "a".into(),
+                message: "boom".into(),
+            }
+            .active_channel_id(),
+            None
+        );
+        assert_eq!(VoiceConnection::Idle.active_channel_id(), None);
+    }
+
+    #[test]
+    fn voice_join_error_maps_typed_api_status_and_generic() {
+        let permission_denied: anyhow::Error = mezon_client::ApiStatusError { code: 7 }.into();
+        assert_eq!(
+            voice_join_error_message(&permission_denied, "en"),
+            mezon_i18n::api_error("en", 7)
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("empty body (code=0)"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("invalid_token"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
         );
     }
 
