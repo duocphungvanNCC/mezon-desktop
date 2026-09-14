@@ -1082,6 +1082,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Tham gia thoại",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Tham gia để nói",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Tham gia để nghe",
+  "channelVoice.joinFailed": "Không thể tham gia phòng thoại này. Vui lòng thử lại.",
+  "channelVoice.sfuNotConfigured": "Máy chủ thoại chưa được cấu hình. Vui lòng liên hệ quản trị viên.",
   "channelVoice.audience": "Người nghe",
   "channelVoice.pushToTalk.hold": "Giữ để nói",
   "channelVoice.removedFromChannel": "Bạn đã bị đưa ra khỏi kênh thoại.",

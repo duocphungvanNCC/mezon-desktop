@@ -1091,6 +1091,8 @@
   "channelVoice.joinChannelVoiceBS.joinVoice": "Join Voice",
   "channelVoice.joinChannelVoiceBS.joinAsSpeaker": "Join as Speaker",
   "channelVoice.joinChannelVoiceBS.joinAsAudience": "Join as Audience",
+  "channelVoice.joinFailed": "Couldn't join this voice room. Please try again.",
+  "channelVoice.sfuNotConfigured": "Voice server is not configured. Please contact your administrator.",
   "channelVoice.audience": "Audience",
   "channelVoice.pushToTalk.hold": "Hold to talk",
   "channelVoice.removedFromChannel": "You have been removed from the voice channel.",
