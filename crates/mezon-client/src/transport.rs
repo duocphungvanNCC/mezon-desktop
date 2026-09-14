@@ -9319,8 +9319,9 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        bare_jwt(&response)
-            .ok_or_else(|| anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token"))
+        bare_jwt(&response).ok_or_else(|| {
+            anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token")
+        })
     }
 
     pub async fn mute_participant_mezon_meet(
