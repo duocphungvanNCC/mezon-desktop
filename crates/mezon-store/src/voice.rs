@@ -14,9 +14,7 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
-use mezon_voice::{
-    IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession,
-};
+use mezon_voice::{IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -25,8 +23,7 @@ pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
-    system_screen_share_pick,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -128,6 +125,20 @@ fn parse_raise_token(token: &str) -> Option<bool> {
 fn reaction_scatter(seq: u64, salt: u64) -> f32 {
     let h = seq.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+fn voice_join_error_message(err: &str, locale: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    let permission = lower.contains("permission denied")
+        || err.contains("code=403")
+        || err.contains("code=7")
+        || err.contains("PERMISSION_DENIED");
+    let key = if permission {
+        "channelVoice.joinPermissionDenied"
+    } else {
+        "channelVoice.joinFailed"
+    };
+    mezon_i18n::t(locale, key).to_string()
 }
 
 struct CachedMeetToken {
@@ -728,7 +739,8 @@ impl VoiceStore {
                 .any(|old| old.session_id == p.session_id && old.speaking);
             if p.speaking && !was_speaking {
                 self.speak_seq += 1;
-                self.speak_ranks.insert(p.session_id.clone(), self.speak_seq);
+                self.speak_ranks
+                    .insert(p.session_id.clone(), self.speak_seq);
             }
         }
         self.speak_ranks
@@ -2396,9 +2408,12 @@ impl VoiceStore {
                 }
                 Err(e) => {
                     tracing::error!("failed to generate meet token: {e:#}");
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_default();
                     this.connection = VoiceConnection::Failed {
                         channel_id,
-                        message: e.to_string(),
+                        message: voice_join_error_message(&e.to_string(), &locale),
                     };
                     cx.notify();
                 }
@@ -2912,9 +2927,12 @@ impl VoiceStore {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
                 } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_default();
                     self.connection = VoiceConnection::Failed {
                         channel_id: channel_id.clone(),
-                        message,
+                        message: voice_join_error_message(&message, &locale),
                     };
                 }
             }
@@ -3917,7 +3935,7 @@ mod tests {
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, flower_pair_key, is_duplicate_flower,
         is_duplicate_interactive_launch, redact_interactive_app_url, solo_tile_for,
-        validate_sound_file,
+        validate_sound_file, voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
@@ -4294,6 +4312,25 @@ mod tests {
         assert_eq!(
             default_focus_tile_for(&participants),
             Some(camera_tile_id("a"))
+        );
+    }
+
+    #[test]
+    fn voice_join_error_maps_permission_and_generic() {
+        assert_eq!(
+            voice_join_error_message(
+                "GenerateMeetToken failed: Permission denied. (code=403)",
+                "en"
+            ),
+            mezon_i18n::t("en", "channelVoice.joinPermissionDenied")
+        );
+        assert_eq!(
+            voice_join_error_message("GenerateMeetToken failed: empty body (code=0)", "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+        assert_eq!(
+            voice_join_error_message("invalid_token", "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
         );
     }
 
