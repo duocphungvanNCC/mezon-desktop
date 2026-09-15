@@ -263,7 +263,7 @@ impl BadgeService {
         }
     }
 
-    fn is_mention(
+    fn classify_message_targets(
         &self,
         content: &str,
         references: &[u8],
@@ -271,7 +271,7 @@ impl BadgeService {
         user_id: i64,
         clan_id: ClanId,
         cx: &App,
-    ) -> bool {
+    ) -> mezon_client::transport::MessageTargetClassification {
         let store = ClanMembersStore::global(cx);
         let store = store.read(cx);
         let role_ids: Vec<i64> = store
@@ -283,36 +283,7 @@ impl BadgeService {
                     .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
             })
             .unwrap_or_default();
-        mezon_client::transport::is_mention_or_reply(
-            content,
-            references,
-            mention_bytes,
-            user_id,
-            &role_ids,
-        )
-    }
-
-    fn is_inbox_mention(
-        &self,
-        content: &str,
-        references: &[u8],
-        mention_bytes: &[u8],
-        user_id: i64,
-        clan_id: ClanId,
-        cx: &App,
-    ) -> bool {
-        let store = ClanMembersStore::global(cx);
-        let store = store.read(cx);
-        let role_ids: Vec<i64> = store
-            .self_role_ids(clan_id)
-            .map(<[i64]>::to_vec)
-            .or_else(|| {
-                store
-                    .member(clan_id, UserId(user_id))
-                    .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
-            })
-            .unwrap_or_default();
-        mezon_client::transport::is_inbox_mention_or_reply(
+        mezon_client::transport::classify_message_targets(
             content,
             references,
             mention_bytes,
@@ -395,32 +366,27 @@ impl BadgeService {
                     );
                     let (needs_mention_check, needs_inbox_mention_check) =
                         mention_check_policy(is_new_message, seen, already_seen, removed_by_other);
+                    let targets = if !from_me
+                        && (needs_mention_check || needs_inbox_mention_check)
+                        && !skip_unread_activity
+                    {
+                        user_id.map(|uid| {
+                            self.classify_message_targets(
+                                &m.content,
+                                &m.references,
+                                &m.mentions,
+                                uid,
+                                clan_id,
+                                cx,
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     let mentions_me = needs_mention_check
-                        && user_id
-                            .map(|uid| {
-                                self.is_mention(
-                                    &m.content,
-                                    &m.references,
-                                    &m.mentions,
-                                    uid,
-                                    clan_id,
-                                    cx,
-                                )
-                            })
-                            .unwrap_or(false);
+                        && targets.is_some_and(|targets| targets.is_badge_mention());
                     let inbox_mentions_me = needs_inbox_mention_check
-                        && user_id
-                            .map(|uid| {
-                                self.is_inbox_mention(
-                                    &m.content,
-                                    &m.references,
-                                    &m.mentions,
-                                    uid,
-                                    clan_id,
-                                    cx,
-                                )
-                            })
-                            .unwrap_or(false);
+                        && targets.is_some_and(|targets| targets.is_inbox_mention());
                     let is_mention = is_new_message && !seen && !already_seen && mentions_me;
                     let badge_mention = is_mention
                         && mark_badge_processed(
@@ -497,12 +463,21 @@ impl BadgeService {
                         InboxStore::global(cx).update(cx, |inbox, cx| {
                             inbox.note_filtered_here_badge(
                                 &m.clan_id.to_string(),
+                                &channel_id.to_string(),
                                 &m.message_id.to_string(),
+                                m.create_time_seconds,
                                 cx,
                             );
                         });
                     }
                     if removed_by_other && mentions_me {
+                        InboxStore::global(cx).update(cx, |inbox, cx| {
+                            inbox.remove_filtered_here_badge(
+                                &m.clan_id.to_string(),
+                                &m.message_id.to_string(),
+                                cx,
+                            );
+                        });
                         let message_ts = deleted_message_timestamp(m);
                         let deleted_channel = ChannelId(m.channel_id);
                         let decremented = ChannelList::global(cx).update(cx, |cl, cx| {
