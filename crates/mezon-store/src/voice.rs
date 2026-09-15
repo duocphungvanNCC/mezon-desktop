@@ -287,6 +287,8 @@ pub struct VoiceStore {
     role: SfuRole,
     ptt_active: bool,
     ptt_held: bool,
+    hold_to_talk: bool,
+    ptt_hint_dismissed: bool,
     pending_join_role: SfuRole,
     join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
@@ -651,6 +653,8 @@ impl VoiceStore {
             role: SfuRole::Speaker,
             ptt_active: false,
             ptt_held: false,
+            hold_to_talk: false,
+            ptt_hint_dismissed: false,
             pending_join_role: SfuRole::Speaker,
             join_role_menu_open: false,
             meet_token_prefetching: None,
@@ -2373,6 +2377,8 @@ impl VoiceStore {
         self.channel_label = channel_label;
         self.role = role;
         self.ptt_held = false;
+        self.hold_to_talk = false;
+        self.ptt_hint_dismissed = false;
         self.pending_join_role = role;
         self.join_role_menu_open = false;
 
@@ -3000,6 +3006,7 @@ impl VoiceStore {
         if self.is_audience() {
             return;
         }
+        self.hold_to_talk = false;
         self.set_mic_enabled(!self.mic_enabled, cx);
     }
 
@@ -3041,8 +3048,23 @@ impl VoiceStore {
         self.ptt_active
     }
 
+    pub fn ptt_hint_dismissed(&self) -> bool {
+        self.ptt_hint_dismissed
+    }
+
+    pub fn dismiss_ptt_hint(&mut self, cx: &mut Context<Self>) {
+        if !self.ptt_hint_dismissed {
+            self.ptt_hint_dismissed = true;
+            cx.notify();
+        }
+    }
+
     pub fn set_push_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
-        if !self.is_audience() || self.ptt_held == active {
+        if self.ptt_held == active {
+            return;
+        }
+        if !self.is_audience() {
+            self.set_hold_to_talk(active, cx);
             return;
         }
         if active && mezon_voice::microphone_denied() {
@@ -3060,6 +3082,23 @@ impl VoiceStore {
             self.mic_enabled = false;
         }
         cx.notify();
+    }
+
+    fn set_hold_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.ptt_held = active;
+        if active {
+            if self.mic_enabled {
+                return;
+            }
+            self.set_mic_enabled(true, cx);
+            self.hold_to_talk = self.mic_enabled;
+        } else if self.hold_to_talk {
+            self.hold_to_talk = false;
+            self.set_mic_enabled(false, cx);
+        }
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -3860,6 +3899,8 @@ impl VoiceStore {
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
         self.mic_enabled = false;
+        self.hold_to_talk = false;
+        self.ptt_held = false;
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;

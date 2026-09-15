@@ -3125,28 +3125,6 @@ impl ChatLayout {
                                 let focus = self.voice_focus.clone();
                                 move |_, window, cx| window.focus(&focus, cx)
                             })
-                            .on_key_down({
-                                let voice = self.voice_store.clone();
-                                move |event, _, cx| {
-                                    if event.keystroke.key.as_str() != "space" || event.is_held {
-                                        return;
-                                    }
-                                    voice.update(cx, |store, cx| {
-                                        store.set_push_to_talk(true, cx);
-                                    });
-                                }
-                            })
-                            .on_key_up({
-                                let voice = self.voice_store.clone();
-                                move |event, _, cx| {
-                                    if event.keystroke.key.as_str() != "space" {
-                                        return;
-                                    }
-                                    voice.update(cx, |store, cx| {
-                                        store.set_push_to_talk(false, cx);
-                                    });
-                                }
-                            })
                             .child(voice_view)
                             .when_some(self.voice_emoji_picker.clone(), |el, picker| {
                                 el.child(deferred(
