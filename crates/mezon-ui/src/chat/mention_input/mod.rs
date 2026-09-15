@@ -2965,6 +2965,10 @@ impl Render for MentionInput {
                 div()
                     .id("mic-record")
                     .absolute()
+                    // The toolbar floats over the text field: without occluding, the mouse-down
+                    // also reaches the field, which moves the caret to the end of the line under
+                    // the button — so a picked emoji lands there instead of where the user was.
+                    .occlude()
                     .right(px(96.))
                     .top(px(12.))
                     .flex()
@@ -3000,6 +3004,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .occlude()
                     .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
