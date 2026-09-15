@@ -11,7 +11,7 @@ use gpui::{
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
     MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
-    RichToken, UserId, is_here_user_id,
+    RichToken, UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -2598,9 +2598,20 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(invite_id) = clan_invite_id(&url, cx) {
+        crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
+        return;
+    }
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+fn clan_invite_id(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    is_clan_invite_url(url, Some(&cfg.domain_url))
+        .then(|| invite_id_from_url(url))
+        .flatten()
 }
 
 pub(crate) fn resolve_message_link_url(url: &str, text: &str) -> String {
