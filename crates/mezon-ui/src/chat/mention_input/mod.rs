@@ -24,7 +24,7 @@ use mezon_store::{
     GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
     OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp,
-    first_previewable_url, internal_invite_id,
+    first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -1459,7 +1459,9 @@ impl MentionInput {
         self.ogp_generation += 1;
         let generation = self.ogp_generation;
         cx.notify();
-        let invite_id = internal_invite_id(&url, internal_domain.as_deref());
+        let invite_id = is_clan_invite_url(&url, internal_domain.as_deref())
+            .then(|| internal_invite_id(&url, internal_domain.as_deref()))
+            .flatten();
         let invite_gateway = invite_id
             .is_some()
             .then(|| {
