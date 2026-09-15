@@ -3076,6 +3076,18 @@ fn control_bar(
     let can_record = store.can_record();
     let is_audience = store.is_audience();
     let ptt_active = store.push_to_talk_active();
+    let interactive_app_clan_id = store
+        .connection()
+        .connected_channel()
+        .and_then(|(_, clan)| clan.parse::<i64>().ok())
+        .map(ClanId);
+    let can_open_interactive_app = interactive_app_clan_id.is_some_and(|clan_id| {
+        PermissionStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+        })
+    });
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -3217,7 +3229,7 @@ fn control_bar(
         )
     });
 
-    let interactive_app_button = {
+    let interactive_app_button = can_open_interactive_app.then(|| {
         let button = InteractiveAppTrigger::new(
             neutral_bg.into(),
             neutral_hover,
@@ -3236,7 +3248,7 @@ fn control_bar(
                 }))
             })
             .trigger(button)
-    };
+    });
 
     let record_button = can_record.then(|| {
         let voice = voice.clone();
@@ -3517,7 +3529,7 @@ fn control_bar(
         .gap_3()
         .child(emoji_button)
         .child(sound_button)
-        .child(interactive_app_button)
+        .children(interactive_app_button)
         .children(record_button)
         .children(record_badge);
 

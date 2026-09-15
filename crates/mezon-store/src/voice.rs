@@ -1094,7 +1094,7 @@ impl VoiceStore {
                     return;
                 }
             };
-            let url = build_channel_app_url(
+            let mut url = build_channel_app_url(
                 &base_url,
                 ChannelAppLaunchParams {
                     web_app_data: &hash.web_app_data,
@@ -1102,6 +1102,14 @@ impl VoiceStore {
                     clan_name: clan_name.as_deref(),
                 },
             );
+            if app == VoiceInteractiveApp::Blackboard
+                && let Ok(mut parsed) = url::Url::parse(&url)
+            {
+                parsed
+                    .query_pairs_mut()
+                    .append_pair("userId", &sender_id.to_string());
+                url = parsed.to_string();
+            }
             tracing::info!(
                 url = %redact_interactive_app_url(&url),
                 event_type = app.event_type() as i32,
@@ -3143,15 +3151,20 @@ impl VoiceStore {
             return;
         };
         let api = self.api.clone();
+        let params = if app == VoiceInteractiveApp::Blackboard {
+            format!("userId={user_id}")
+        } else {
+            String::new()
+        };
         cx.spawn(async move |_this, _cx| {
             match api
                 .write_voice_interactive_event(
                     clan_id,
                     voice_channel_id,
                     user_id,
-                    0,
+                    user_id,
                     app.event_type() as i32,
-                    String::new(),
+                    params,
                 )
                 .await
             {
@@ -3160,7 +3173,7 @@ impl VoiceStore {
                         clan_id,
                         voice_channel_id,
                         sender_id = user_id,
-                        receiver_id = 0,
+                        receiver_id = user_id,
                         event_type = app.event_type() as i32,
                         "VoiceInteractiveEvent acknowledged with CID payload"
                     );
