@@ -2292,8 +2292,21 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true));
+            let input_for_sub = input.clone();
+            cx.subscribe_in(&input, window, move |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let name = input_for_sub.read(cx).value();
+                    let invalid = !name.trim().is_empty()
+                        && mezon_store::validate_channel_name(name).is_err();
+                    ThreadsStore::global(cx).update(cx, |store, cx| {
+                        store.clear_name_error(cx);
+                        store.set_name_live_invalid(invalid, cx);
+                    });
+                }
+            })
+            .detach();
+            self.thread_name_input = Some(input);
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();

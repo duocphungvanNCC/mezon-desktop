@@ -11010,6 +11010,15 @@ mod tests {
             validate_channel_name(&too_long),
             Err(CreateChannelError::InvalidName)
         );
+        // Punctuation the thread form used to hand straight to the server.
+        assert_eq!(
+            validate_channel_name("19/8"),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("hahah!"),
+            Err(CreateChannelError::InvalidName)
+        );
         assert_eq!(
             validate_channel_name("it's"),
             Err(CreateChannelError::InvalidName)
