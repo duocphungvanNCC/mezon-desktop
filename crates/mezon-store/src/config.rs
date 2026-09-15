@@ -186,6 +186,16 @@ impl AppConfig {
 
     pub fn from_env() -> Self {
         let defaults = Self::dev_defaults();
+        let mmn_api_url = opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url);
+        let indexer_api_url = opt_str(
+            baked_env::NX_CHAT_APP_INDEXER_API_URL,
+            &defaults.indexer_api_url,
+        );
+        let indexer_api_url = if indexer_api_url.is_empty() {
+            sibling_wallet_service_url(&mmn_api_url, "indexer-api").unwrap_or_default()
+        } else {
+            indexer_api_url
+        };
         Self {
             api_host: opt_str(baked_env::NX_CHAT_APP_API_HOST, &defaults.api_host),
             api_port: opt_u16(baked_env::NX_CHAT_APP_API_PORT, defaults.api_port),
@@ -284,11 +294,8 @@ impl AppConfig {
                 &defaults.mezon_treasury_url_network,
             ),
 
-            mmn_api_url: opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url),
-            indexer_api_url: opt_str(
-                baked_env::NX_CHAT_APP_INDEXER_API_URL,
-                &defaults.indexer_api_url,
-            ),
+            mmn_api_url,
+            indexer_api_url,
             zk_api_url: opt_str(baked_env::NX_CHAT_APP_ZK_API_URL, &defaults.zk_api_url),
             dong_service_api_url: opt_str(
                 baked_env::NX_CHAT_APP_DONG_SERVICE_API_URL,
@@ -735,6 +742,11 @@ fn normalize(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
+fn sibling_wallet_service_url(mmn_api_url: &str, service: &str) -> Option<String> {
+    let base = mmn_api_url.trim_end_matches('/').strip_suffix("/mmn-api")?;
+    Some(format!("{base}/{service}/"))
+}
+
 fn opt_str(value: Option<&'static str>, default: &str) -> String {
     normalize(value)
         .map(str::to_owned)
@@ -784,6 +796,24 @@ mod tests {
     #[test]
     fn media_dimensions_landscape_caps_to_available_width() {
         assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn indexer_url_is_derived_from_the_mmn_url_when_unset() {
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/mmn-api/", "indexer-api").as_deref(),
+            Some("https://dong.mezon.ai/indexer-api/")
+        );
+        assert_eq!(
+            sibling_wallet_service_url("https://dev-mmn.nccsoft.vn/mmn-api", "indexer-api")
+                .as_deref(),
+            Some("https://dev-mmn.nccsoft.vn/indexer-api/")
+        );
+        assert_eq!(sibling_wallet_service_url("", "indexer-api"), None);
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/wallet/", "indexer-api"),
+            None
+        );
     }
 
     #[test]
