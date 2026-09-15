@@ -13,10 +13,14 @@ use crate::theme::{ActiveTheme, Theme};
 const RAIL_W: f32 = 44.;
 const PANEL_RADIUS: f32 = 8.;
 const ACCENT_BLUE: u32 = 0x5865f2;
+/// React `grid grid-cols-3 gap-4`: three equal square columns that share the content width, so
+/// the grid fills the panel instead of leaving a strip on the right.
 const STICKER_COLS: usize = 3;
-const STICKER_CELL_PX: f32 = 92.;
-const STICKER_IMG_PX: f32 = 80.;
-const STICKER_ROW_PX: f32 = 104.;
+const STICKER_GAP_PX: f32 = 16.;
+/// Inset between a cell's border and its sticker image.
+const STICKER_CELL_PAD_PX: f32 = 6.;
+/// Horizontal padding around the grid: the panel's `px_2` plus the content column's `px_2`.
+const GRID_SIDE_PAD_PX: f32 = 16. + 16.;
 const HEADER_PX: f32 = 40.;
 const PREFETCH_ROWS: usize = 4;
 
@@ -95,7 +99,8 @@ impl StickerPanel {
                 &locale,
                 "chat.stickerPicker.noStickers",
             )),
-            list_state: ListState::new(0, ListAlignment::Top, px(200.)),
+            list_state: ListState::new(0, ListAlignment::Top, px(200.))
+                .suppress_hover_while_scrolling(),
             warmed_through: std::cell::Cell::new(0),
             list_dirty: true,
             image_cache,
@@ -252,6 +257,10 @@ impl Render for StickerPanel {
         let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();
+        let cell_px = sticker_cell_px(show_rail);
+        // Hover restyles a cell (repaint); skip it while the grid is scrolling so the wheel
+        // only pays for the scroll, like the sidebars do.
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
 
         let rail = show_rail.then(|| {
             let mut rail = div()
@@ -318,9 +327,9 @@ impl Render for StickerPanel {
                         }
                     }
                     Some(PickerRow::Stickers(cells)) => {
-                        render_sticker_row(&theme, cells, &list_entity)
+                        render_sticker_row(&theme, cells, cell_px, suppress_hover, &list_entity)
                     }
-                    None => div().h(px(STICKER_ROW_PX)).into_any_element(),
+                    None => div().h(px(cell_px + STICKER_GAP_PX)).into_any_element(),
                 };
                 (row, this.sources_ahead(ix), this.image_cache.clone())
             };
@@ -408,19 +417,30 @@ fn render_header(
         .into_any_element()
 }
 
+/// Side of one square sticker cell: the grid width (panel minus side padding and, when shown,
+/// the category rail) split into `STICKER_COLS` columns around `STICKER_GAP_PX` gutters.
+fn sticker_cell_px(show_rail: bool) -> f32 {
+    let rail = if show_rail { RAIL_W } else { 0. };
+    let grid_w = super::PANEL_W - GRID_SIDE_PAD_PX - rail;
+    ((grid_w - STICKER_GAP_PX * (STICKER_COLS as f32 - 1.)) / STICKER_COLS as f32).floor()
+}
+
 fn render_sticker_row(
     theme: &Theme,
     cells: &[StickerCell],
+    cell_px: f32,
+    suppress_hover: bool,
     entity: &Entity<StickerPanel>,
 ) -> AnyElement {
     let hover_bg = theme.bg_hover;
     let border = theme.border;
+    let img_px = cell_px - STICKER_CELL_PAD_PX * 2.;
     let mut row = div()
-        .h(px(STICKER_ROW_PX))
+        .h(px(cell_px + STICKER_GAP_PX))
         .flex()
         .flex_row()
-        .items_center()
-        .gap_3();
+        .items_start()
+        .gap(px(STICKER_GAP_PX));
     for cell in cells {
         let ent = entity.clone();
         let url = cell.src.clone();
@@ -431,17 +451,18 @@ fn render_sticker_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .size(px(STICKER_CELL_PX))
+                .size(px(cell_px))
+                .flex_shrink_0()
                 .rounded_lg()
                 .border_1()
                 .border_color(border)
                 .cursor_pointer()
-                .hover(|s| s.bg(hover_bg))
+                .when(!suppress_hover, |s| s.hover(|s| s.bg(hover_bg)))
                 .when(!cell.src.is_empty(), |s| {
                     s.child(
                         img(cell.src.clone())
                             .id(cell.img_id.clone())
-                            .size(px(STICKER_IMG_PX))
+                            .size(px(img_px))
                             .object_fit(gpui::ObjectFit::Contain),
                     )
                 })
