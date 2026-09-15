@@ -51,6 +51,7 @@ use crate::message::{
     viewer_highlight_direct,
 };
 use crate::message_time::{unix_now_millis, unix_now_seconds};
+use crate::ogp::is_clan_invite_url;
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
@@ -8586,14 +8587,13 @@ pub(crate) fn build_ogp_preview(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
 ) -> Option<Box<OgpPreview>> {
+    let internal_domain = cfg.map(|c| c.domain_url.as_str());
     let token = content.mk.iter().find(|tok| {
         tok.kind.as_deref() == Some("lk_ogp")
             && !tok
                 .url
                 .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .contains("/invite/")
+                .is_some_and(|url| is_clan_invite_url(url, internal_domain))
     })?;
     let mut url = token
         .url
@@ -9174,12 +9174,13 @@ fn build_invite(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
 ) -> Option<Box<InvitePreview>> {
+    let internal_domain = cfg.map(|c| c.domain_url.as_str());
     let token = content.mk.iter().find(|tok| {
         tok.kind.as_deref() == Some("lk_ogp")
             && tok
                 .url
                 .as_deref()
-                .is_some_and(|url| url.to_ascii_lowercase().contains("/invite/"))
+                .is_some_and(|url| is_clan_invite_url(url, internal_domain))
     })?;
     let url = token.url.clone().unwrap_or_default();
     if url.is_empty() {
@@ -9524,6 +9525,38 @@ mod tests {
 
     fn source(filename: &str, path: &str) -> (String, Option<std::path::PathBuf>) {
         (filename.into(), Some(std::path::PathBuf::from(path)))
+    }
+
+    fn ogp_tokens(url: &str) -> ApiMessageContent {
+        serde_json::from_str(&format!(
+            r#"{{"t":"{url}","mk":[{{"s":0,"e":10,"type":"lk_ogp","url":"{url}","title":"MEKNOW","description":"Trợ lý tri thức","image":"https://cdn/og.png","member_count":0}}]}}"#
+        ))
+        .expect("valid content json")
+    }
+
+    #[test]
+    fn a_third_party_invite_page_is_an_ogp_embed_not_a_join_card() {
+        let cfg = AppConfig {
+            domain_url: "https://mezon.ai".into(),
+            ..AppConfig::default()
+        };
+        let content = ogp_tokens("https://meknow.mezon.vn/invite/MZ-3TKK-2D4DZS5N");
+        assert!(build_invite(&content, Some(&cfg)).is_none());
+        let ogp = build_ogp_preview(&content, Some(&cfg)).expect("ogp embed");
+        assert_eq!(ogp.title.as_ref(), "MEKNOW");
+        assert_eq!(ogp.url, "https://meknow.mezon.vn/invite/MZ-3TKK-2D4DZS5N");
+    }
+
+    #[test]
+    fn a_clan_invite_link_is_a_join_card_not_an_ogp_embed() {
+        let cfg = AppConfig {
+            domain_url: "https://mezon.ai".into(),
+            ..AppConfig::default()
+        };
+        let content = ogp_tokens("https://mezon.ai/invite/1840670747886882816");
+        let invite = build_invite(&content, Some(&cfg)).expect("join card");
+        assert_eq!(invite.title.as_ref(), "MEKNOW");
+        assert!(build_ogp_preview(&content, Some(&cfg)).is_none());
     }
 
     #[test]

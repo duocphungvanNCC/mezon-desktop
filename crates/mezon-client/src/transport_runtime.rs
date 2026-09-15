@@ -1084,20 +1084,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        username: &str,
-        room_name: &str,
-    ) -> Result<()> {
+        user_id: &str,
+    ) -> Result<String> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let username = username.to_string();
-        let room_name = room_name.to_string();
+        let user_id = user_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
             .spawn(async move {
                 transport
-                    .remove_participant_mezon_meet(channel_id, clan_id, &username, &room_name)
+                    .remove_participant_mezon_meet(channel_id, clan_id, user_id)
                     .await
             })
             .await
@@ -1108,20 +1108,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        username: &str,
-        room_name: &str,
-    ) -> Result<()> {
+        user_id: &str,
+    ) -> Result<String> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let username = username.to_string();
-        let room_name = room_name.to_string();
+        let user_id = user_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
             .spawn(async move {
                 transport
-                    .mute_participant_mezon_meet(channel_id, clan_id, &username, &room_name)
+                    .mute_participant_mezon_meet(channel_id, clan_id, user_id)
                     .await
             })
             .await

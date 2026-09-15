@@ -13,17 +13,22 @@ use gpui::{
     Subscription, Task, Window,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
-use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
-use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
+use mezon_client::{
+    AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
+};
+use mezon_voice::{
+    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
+    VoiceSession,
+};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    system_screen_share_pick,
+    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
+    VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -32,10 +37,11 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveApp,
-    VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
-    flower_event_from_payload, flower_price, format_flower_amount, is_uncertain_transfer_error,
-    serialize_flower_interactive_params,
+    FLOWER_DEDUP_WINDOW, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveApp,
+    VoiceInteractiveEventType, app_reaction_token, build_flower_transfer, can_give_flower,
+    flower_event_from_payload, flower_pair_key, flower_price, flower_reaction_token,
+    format_flower_amount, is_uncertain_transfer_error, parse_app_reaction_token,
+    parse_flower_reaction_token, serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -76,6 +82,11 @@ fn is_duplicate_interactive_launch(
     launches.contains_key(&key)
 }
 
+fn is_duplicate_flower(shown: &mut HashMap<String, Instant>, pair: &str, now: Instant) -> bool {
+    shown.retain(|_, shown_at| now.duration_since(*shown_at) < FLOWER_DEDUP_WINDOW);
+    shown.contains_key(pair)
+}
+
 fn redact_interactive_app_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return "<invalid interactive app URL>".to_string();
@@ -100,7 +111,7 @@ const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
-const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(40);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
@@ -119,6 +130,19 @@ fn parse_raise_token(token: &str) -> Option<bool> {
 fn reaction_scatter(seq: u64, salt: u64) -> f32 {
     let h = seq.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+fn current_locale(cx: &App) -> String {
+    Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default()
+}
+
+fn voice_join_error_message(err: &anyhow::Error, locale: &str) -> String {
+    match api_status_from_error(err) {
+        Some(status) => mezon_i18n::api_error(locale, status.code).to_string(),
+        None => mezon_i18n::t(locale, "channelVoice.joinFailed").to_string(),
+    }
 }
 
 struct CachedMeetToken {
@@ -216,6 +240,7 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    muted_by_moderator: bool,
     agent_pending: bool,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
@@ -230,9 +255,12 @@ pub struct VoiceStore {
     give_flower_player: Option<AudioPlayer>,
     give_flower_sound_loading: bool,
     join_sound_baseline_set: bool,
+    awaiting_room_snapshot: bool,
     last_reaction_send: Option<Instant>,
     last_flower_send: Option<Instant>,
     last_flower_effect_at: Option<Instant>,
+    shown_flowers: HashMap<String, Instant>,
+    flower_seq: u64,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
@@ -244,6 +272,7 @@ pub struct VoiceStore {
     session: Option<VoiceSession>,
     session_generation: u64,
     reconnect_generation: u64,
+    reconnect_token_fetches: u32,
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
@@ -255,6 +284,13 @@ pub struct VoiceStore {
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_work: AtomicBool,
     cached_meet_token: Option<CachedMeetToken>,
+    role: SfuRole,
+    ptt_active: bool,
+    ptt_held: bool,
+    hold_to_talk: bool,
+    ptt_hint_dismissed: bool,
+    pending_join_role: SfuRole,
+    join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
     link_copied: bool,
@@ -341,6 +377,7 @@ pub enum RecordingToast {
 pub enum VoiceStoreEvent {
     RecordingFinished(RecordingToast),
     RecordingVideoUnavailable,
+    RemovedFromChannel,
 }
 
 impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
@@ -354,8 +391,6 @@ impl VoiceStore {
         if !resolved.is_empty() {
             return resolved;
         }
-        // LiveKit hands back the identity as the name, and a raw user id in the
-        // recording reads as noise — leave the pill off instead.
         if participant.name.chars().all(|c| c.is_ascii_digit()) {
             return String::new();
         }
@@ -465,7 +500,7 @@ fn solo_tile_for(
         return participants
             .iter()
             .find(|p| p.screenshare == Some(key))
-            .map(|p| screen_tile_id(&p.identity));
+            .map(|p| screen_tile_id(&p.session_id));
     }
     if !member_strip_visible {
         return focused_tile.map(str::to_string);
@@ -498,12 +533,12 @@ enum ScreenAutoFocus {
 
 fn default_focus_tile_for(participants: &[VoiceParticipant]) -> Option<String> {
     if let Some(p) = participants.iter().find(|p| p.screenshare.is_some()) {
-        return Some(screen_tile_id(&p.identity));
+        return Some(screen_tile_id(&p.session_id));
     }
     if let Some(p) = participants.iter().find(|p| p.camera.is_some()) {
-        return Some(camera_tile_id(&p.identity));
+        return Some(camera_tile_id(&p.session_id));
     }
-    participants.first().map(|p| camera_tile_id(&p.identity))
+    participants.first().map(|p| camera_tile_id(&p.session_id))
 }
 
 fn screen_auto_focus_transition(
@@ -513,7 +548,7 @@ fn screen_auto_focus_transition(
     let auto_still_live = auto_focused.is_some_and(|id| {
         participants
             .iter()
-            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == id)
+            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.session_id) == id)
     });
     if auto_still_live {
         return ScreenAutoFocus::Keep;
@@ -521,7 +556,7 @@ fn screen_auto_focus_transition(
     let next = participants
         .iter()
         .find(|p| p.screenshare.is_some())
-        .map(|p| screen_tile_id(&p.identity));
+        .map(|p| screen_tile_id(&p.session_id));
     match next {
         Some(id) => ScreenAutoFocus::Focus(id),
         None if auto_focused.is_some() => ScreenAutoFocus::Clear,
@@ -571,6 +606,7 @@ impl VoiceStore {
             pending_kick: None,
             pending_removals: HashMap::new(),
             moderation_error: None,
+            muted_by_moderator: false,
             agent_pending: false,
             participants: Vec::new(),
             join_ranks: Vec::new(),
@@ -585,9 +621,12 @@ impl VoiceStore {
             give_flower_player: None,
             give_flower_sound_loading: false,
             join_sound_baseline_set: false,
+            awaiting_room_snapshot: false,
             last_reaction_send: None,
             last_flower_send: None,
             last_flower_effect_at: None,
+            shown_flowers: HashMap::new(),
+            flower_seq: 0,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
@@ -599,6 +638,7 @@ impl VoiceStore {
             session: None,
             session_generation: 0,
             reconnect_generation: 0,
+            reconnect_token_fetches: 0,
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
@@ -610,6 +650,13 @@ impl VoiceStore {
             pending_texture_replaces: Mutex::new(Vec::new()),
             pending_texture_work: AtomicBool::new(false),
             cached_meet_token: None,
+            role: SfuRole::Speaker,
+            ptt_active: false,
+            ptt_held: false,
+            hold_to_talk: false,
+            ptt_hint_dismissed: false,
+            pending_join_role: SfuRole::Speaker,
+            join_role_menu_open: false,
             meet_token_prefetching: None,
             last_screen_share: None,
             link_copied: false,
@@ -680,35 +727,36 @@ impl VoiceStore {
         &self.participants
     }
 
-    pub fn join_rank(&self, identity: &str) -> usize {
+    pub fn join_rank(&self, session_id: &str) -> usize {
         self.join_ranks
             .iter()
-            .position(|id| id == identity)
+            .position(|id| id == session_id)
             .unwrap_or(usize::MAX)
     }
 
-    pub fn last_spoke_rank(&self, identity: &str) -> u64 {
-        self.speak_ranks.get(identity).copied().unwrap_or(0)
+    pub fn last_spoke_rank(&self, session_id: &str) -> u64 {
+        self.speak_ranks.get(session_id).copied().unwrap_or(0)
     }
 
     fn track_visual_ranks(&mut self, list: &[VoiceParticipant]) {
         self.join_ranks
-            .retain(|id| list.iter().any(|p| p.identity == *id));
+            .retain(|id| list.iter().any(|p| p.session_id == *id));
         for p in list {
-            if !self.join_ranks.contains(&p.identity) {
-                self.join_ranks.push(p.identity.clone());
+            if !self.join_ranks.contains(&p.session_id) {
+                self.join_ranks.push(p.session_id.clone());
             }
             let was_speaking = self
                 .participants
                 .iter()
-                .any(|old| old.identity == p.identity && old.speaking);
+                .any(|old| old.session_id == p.session_id && old.speaking);
             if p.speaking && !was_speaking {
                 self.speak_seq += 1;
-                self.speak_ranks.insert(p.identity.clone(), self.speak_seq);
+                self.speak_ranks
+                    .insert(p.session_id.clone(), self.speak_seq);
             }
         }
         self.speak_ranks
-            .retain(|id, _| list.iter().any(|p| p.identity == *id));
+            .retain(|id, _| list.iter().any(|p| p.session_id == *id));
     }
 
     pub fn mic_enabled(&self) -> bool {
@@ -744,7 +792,6 @@ impl VoiceStore {
 
     pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
         self.noise_suppression_enabled = !self.noise_suppression_enabled;
-        self.sync_noise_suppression();
         cx.notify();
     }
 
@@ -754,17 +801,7 @@ impl VoiceStore {
             return;
         }
         self.noise_suppression_level = level;
-        self.sync_noise_suppression();
         cx.notify();
-    }
-
-    fn sync_noise_suppression(&self) {
-        if let Some(session) = &self.session {
-            session.set_noise_suppression(
-                self.noise_suppression_enabled,
-                self.noise_suppression_level,
-            );
-        }
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -977,14 +1014,6 @@ impl VoiceStore {
         let RealtimeEvent::VoiceInteractive(event) = event else {
             return;
         };
-        tracing::debug!(
-            clan_id = event.clan_id,
-            voice_channel_id = event.voice_channel_id,
-            sender_id = event.sender_id,
-            receiver_id = event.receiver_id,
-            event_type = event.event_type,
-            "received VoiceInteractiveEvent"
-        );
         if event.event_type == VoiceInteractiveEventType::Gift as i32 {
             let Some((channel_id, _)) = self.connection.connected_channel() else {
                 return;
@@ -992,16 +1021,17 @@ impl VoiceStore {
             let Ok(joined_channel) = channel_id.parse::<i64>() else {
                 return;
             };
-            let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
+            let Some((giver_id, receiver_id, _, _)) = flower_event_from_payload(
                 event.event_type,
                 event.sender_id,
+                event.receiver_id,
                 event.voice_channel_id,
                 &event.params,
                 joined_channel,
             ) else {
                 return;
             };
-            self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
+            self.show_flower_effect(giver_id, receiver_id, cx);
             return;
         }
         let Some(app) = VoiceInteractiveApp::from_event_type(event.event_type) else {
@@ -1068,7 +1098,7 @@ impl VoiceStore {
                     return;
                 }
             };
-            let url = build_channel_app_url(
+            let mut url = build_channel_app_url(
                 &base_url,
                 ChannelAppLaunchParams {
                     web_app_data: &hash.web_app_data,
@@ -1076,6 +1106,14 @@ impl VoiceStore {
                     clan_name: clan_name.as_deref(),
                 },
             );
+            if app == VoiceInteractiveApp::Blackboard
+                && let Ok(mut parsed) = url::Url::parse(&url)
+            {
+                parsed
+                    .query_pairs_mut()
+                    .append_pair("userId", &sender_id.to_string());
+                url = parsed.to_string();
+            }
             tracing::info!(
                 url = %redact_interactive_app_url(&url),
                 event_type = app.event_type() as i32,
@@ -1104,6 +1142,21 @@ impl VoiceStore {
         };
         if let Some(sound_url) = token.strip_prefix("sound:") {
             self.handle_sound_reaction(msg.sender_id.to_string(), sound_url.to_string(), cx);
+            return;
+        }
+        if let Some(receiver_id) = parse_flower_reaction_token(token) {
+            let receiver_id = receiver_id.to_string();
+            self.show_flower_effect(msg.sender_id.to_string(), receiver_id, cx);
+            return;
+        }
+        if let Some(app) = parse_app_reaction_token(token) {
+            let clan_id = self
+                .connection
+                .connected_channel()
+                .and_then(|(_, clan)| clan.parse::<i64>().ok());
+            if let Some(clan_id) = clan_id {
+                self.open_interactive_app(app, msg.sender_id, clan_id, cx);
+            }
             return;
         }
         let Some(raise) = parse_raise_token(token) else {
@@ -1431,18 +1484,16 @@ impl VoiceStore {
         &mut self,
         giver_id: String,
         receiver_id: String,
-        timestamp: i64,
         cx: &mut Context<Self>,
     ) {
-        let key = flower_effect_key(&giver_id, &receiver_id, timestamp);
-        if self
-            .displayed_flowers
-            .iter()
-            .any(|flower| flower.key == key)
-        {
+        let now = Instant::now();
+        let pair = flower_pair_key(&giver_id, &receiver_id);
+        if is_duplicate_flower(&mut self.shown_flowers, &pair, now) {
             return;
         }
-        let now = Instant::now();
+        self.shown_flowers.insert(pair.clone(), now);
+        self.flower_seq = self.flower_seq.wrapping_add(1);
+        let key = format!("{pair}:{}", self.flower_seq);
         let play_sound = self
             .last_flower_effect_at
             .is_none_or(|last| now.duration_since(last) >= FLOWER_RATE_LIMIT);
@@ -1452,9 +1503,7 @@ impl VoiceStore {
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
+        let locale = current_locale(cx);
         let local_is_receiver = self.local_user_id().as_deref() == Some(receiver_id.as_str());
         let label = SharedString::from(if local_is_receiver {
             mezon_i18n::t(&locale, "channelVoice.giveFlowerReceived")
@@ -1811,7 +1860,7 @@ impl VoiceStore {
         let focused = self
             .focused_tile
             .as_deref()
-            .is_some_and(|id| id == screen_tile_id(&local.identity));
+            .is_some_and(|id| id == screen_tile_id(&local.session_id));
         let fullscreen = self.fullscreen_screen == Some(screen_key);
         let pip = self.pip.as_ref().is_some_and(|p| p.key == screen_key);
         focused || fullscreen || pip
@@ -1887,7 +1936,7 @@ impl VoiceStore {
             && let Some(key) = self
                 .participants
                 .iter()
-                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == focused)
+                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.session_id) == focused)
                 .and_then(|p| p.screenshare)
         {
             return Some(key);
@@ -1967,6 +2016,10 @@ impl VoiceStore {
         self.moderation_error.take()
     }
 
+    pub fn take_muted_by_moderator(&mut self) -> bool {
+        std::mem::take(&mut self.muted_by_moderator)
+    }
+
     pub fn mute_participant(&mut self, identity: String, cx: &mut Context<Self>) {
         self.moderate_participant(identity, ModerationAction::Mute, cx);
     }
@@ -2028,9 +2081,7 @@ impl VoiceStore {
         let balance = wallet
             .as_ref()
             .and_then(|store| store.read(cx).balance().map(str::to_string));
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
+        let locale = current_locale(cx);
 
         match can_give_flower(
             identity == local_id,
@@ -2079,6 +2130,7 @@ impl VoiceStore {
             .unwrap_or_default();
         let timestamp = mezon_client::server_now_secs() as i64 * 1000;
         let params = serialize_flower_interactive_params(&identity, timestamp);
+        let reaction_token = flower_reaction_token(&identity);
         let gift_channel = channel_id.clone();
         let request = build_flower_transfer(
             local_id.clone(),
@@ -2134,7 +2186,7 @@ impl VoiceStore {
                         .connected_channel()
                         .is_some_and(|(channel, _)| channel == gift_channel);
                     if still_in_room {
-                        this.show_flower_effect(local_id, identity, timestamp, cx);
+                        this.show_flower_effect(local_id, identity, cx);
                     }
                 })
                 .ok();
@@ -2150,6 +2202,12 @@ impl VoiceStore {
                     .await
                 {
                     tracing::warn!("write_voice_interactive_event failed: {error}");
+                }
+                if let Err(error) = api
+                    .write_voice_reaction(vec![reaction_token], channel_i64)
+                    .await
+                {
+                    tracing::warn!("flower voice reaction failed: {error}");
                 }
             }
             wallet_weak
@@ -2231,31 +2289,50 @@ impl VoiceStore {
         }
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
-        let room_name = self.room_name.clone();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = match action {
                 ModerationAction::Mute => {
-                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
                 ModerationAction::Kick => {
-                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
             };
-            if let Err(e) = result {
-                tracing::warn!("participant moderation failed: {e:#}");
-                let _ = this.update(cx, |this, cx| {
-                    if matches!(action, ModerationAction::Kick) {
-                        this.pending_removals.remove(&identity);
+            let _ = this.update(cx, |this, cx| {
+                let delivered = match result {
+                    Ok(token) => this.deliver_participant_action(token),
+                    Err(e) => {
+                        tracing::warn!("participant moderation failed: {e:#}");
+                        false
                     }
-                    this.moderation_error = Some(action.error());
-                    cx.notify();
-                });
-            }
+                };
+                if delivered {
+                    return;
+                }
+                if matches!(action, ModerationAction::Kick) {
+                    this.pending_removals.remove(&identity);
+                }
+                this.moderation_error = Some(action.error());
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    fn deliver_participant_action(&self, token: String) -> bool {
+        let Some(session) = &self.session else {
+            tracing::warn!("participant moderation has no voice session to reach the sfu");
+            return false;
+        };
+        if matches!(self.call_status, VoiceCallStatus::Reconnecting) {
+            tracing::warn!("participant moderation skipped while the sfu link is reconnecting");
+            return false;
+        }
+        session.participant_action(token);
+        true
     }
 
     fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
@@ -2285,6 +2362,7 @@ impl VoiceStore {
         channel_id: String,
         clan_id: String,
         channel_label: String,
+        role: SfuRole,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
@@ -2297,12 +2375,19 @@ impl VoiceStore {
 
         self.teardown(Some(window), cx);
         self.channel_label = channel_label;
+        self.role = role;
+        self.ptt_held = false;
+        self.hold_to_talk = false;
+        self.ptt_hint_dismissed = false;
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
 
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
+            let locale = current_locale(cx);
             self.connection = VoiceConnection::Failed {
                 channel_id,
-                message: "meet server URL is not configured".into(),
+                message: mezon_i18n::t(&locale, "channelVoice.sfuNotConfigured").to_string(),
             };
             cx.notify();
             return;
@@ -2355,9 +2440,13 @@ impl VoiceStore {
                 }
                 Err(e) => {
                     tracing::error!("failed to generate meet token: {e:#}");
+                    if this.connection.active_channel_id() != Some(channel_id.as_str()) {
+                        return;
+                    }
+                    let locale = current_locale(cx);
                     this.connection = VoiceConnection::Failed {
                         channel_id,
-                        message: e.to_string(),
+                        message: voice_join_error_message(&e, &locale),
                     };
                     cx.notify();
                 }
@@ -2389,19 +2478,46 @@ impl VoiceStore {
         let session_generation = self.session_generation;
         self._events_task = None;
         self.session = None;
+        self.awaiting_room_snapshot = true;
         let ice_servers = Self::ice_servers(cx);
-        let session = VoiceSession::connect(
-            ws_url,
+        let local_user_id = AccountStore::try_global(cx)
+            .and_then(|account| {
+                account
+                    .read(cx)
+                    .account
+                    .as_ref()
+                    .map(|me| me.user_id.to_string())
+            })
+            .unwrap_or_default();
+        let refresh_api = self.api.clone();
+        let refresh_channel = channel_id.clone();
+        let session = VoiceSession::connect(VoiceConnectOptions {
+            url: ws_url,
             token,
+            room: channel_id.clone(),
+            role: self.role,
+            local_user_id,
             input_device_id,
             output_device_id,
             camera_device_id,
             ice_servers,
-        );
+            refresh_token: Some(TokenRefresher::new(move || {
+                let api = refresh_api.clone();
+                let channel_id = refresh_channel.clone();
+                async move {
+                    match api.generate_meet_token(&channel_id, "").await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            tracing::warn!("voice token refresh failed: {e:#}");
+                            None
+                        }
+                    }
+                }
+            })),
+        });
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);
-        self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
             let mut pending: Option<VoiceEvent> = None;
@@ -2497,7 +2613,7 @@ impl VoiceStore {
 
     fn reconnect_snapshot(&self, cx: &App) -> Option<VoiceReconnectSnapshot> {
         let (channel_id, clan_id) = self.active_connection_ids()?;
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             return None;
         }
@@ -2537,6 +2653,7 @@ impl VoiceStore {
 
     fn cancel_reconnect_watchdog(&mut self) {
         self.reconnect_generation = self.reconnect_generation.wrapping_add(1);
+        self.reconnect_token_fetches = 0;
         self._reconnect_watch_task = None;
     }
 
@@ -2554,8 +2671,17 @@ impl VoiceStore {
                 if !this.reconnect_still_pending(generation) {
                     return None;
                 }
+                if this.reconnect_token_fetches >= MEET_TOKEN_RETRY_LIMIT {
+                    tracing::warn!(
+                        fetches = this.reconnect_token_fetches,
+                        "voice reconnect token retry limit reached"
+                    );
+                    return None;
+                }
                 this._reconnect_watch_task = None;
-                this.reconnect_snapshot(cx)
+                let snapshot = this.reconnect_snapshot(cx)?;
+                this.reconnect_token_fetches += 1;
+                Some(snapshot)
             }) {
                 Ok(snapshot) => snapshot,
                 Err(_) => return,
@@ -2572,7 +2698,7 @@ impl VoiceStore {
                 match token {
                     Ok(token) => {
                         tracing::info!(
-                            "voice reconnect watchdog rebuilding LiveKit session for channel {}",
+                            "voice reconnect watchdog rebuilding SFU session for channel {}",
                             snapshot.channel_id
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
@@ -2580,7 +2706,7 @@ impl VoiceStore {
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
-                        this.restart_livekit_session(generation, snapshot, token, cx);
+                        this.restart_sfu_session(generation, snapshot, token, cx);
                     }
                     Err(e) => {
                         tracing::warn!("voice reconnect token refresh failed: {e:#}");
@@ -2592,6 +2718,12 @@ impl VoiceStore {
     }
 
     fn clear_session_handles(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        tracing::info!(
+            status = ?self.call_status,
+            generation = self.session_generation,
+            had_session = self.session.is_some(),
+            "voice session handles cleared"
+        );
         self.flush_recording(cx);
         self.recording = RecordingState::Idle;
         self.recording_elapsed = Duration::ZERO;
@@ -2619,7 +2751,7 @@ impl VoiceStore {
         self.flush_texture_drops(window, cx);
     }
 
-    fn restart_livekit_session(
+    fn restart_sfu_session(
         &mut self,
         generation: u64,
         snapshot: VoiceReconnectSnapshot,
@@ -2653,6 +2785,13 @@ impl VoiceStore {
             snapshot.camera_enabled,
             snapshot.screen_share,
         );
+        if self.is_audience()
+            && self.ptt_held
+            && !mezon_voice::microphone_denied()
+            && let Some(session) = &self.session
+        {
+            session.set_push_to_talk(true);
+        }
         if self.reconnect_still_pending(generation) {
             self.schedule_reconnect_recovery(generation, RECONNECT_STALL_TIMEOUT, cx);
         }
@@ -2687,6 +2826,8 @@ impl VoiceStore {
         }
         let reason = reason.trim();
         reason != "left"
+            && !reason.contains("invalid_token")
+            && !reason.contains("missing_token")
             && !reason.contains("ClientInitiated")
             && !reason.contains("ParticipantRemoved")
             && !reason.contains("RoomDeleted")
@@ -2724,6 +2865,7 @@ impl VoiceStore {
             }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
+                self.awaiting_room_snapshot = true;
                 self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
             }
             VoiceEvent::Reconnected => {
@@ -2739,6 +2881,21 @@ impl VoiceStore {
                 if matches!(self.call_status, VoiceCallStatus::WeakNetwork) {
                     self.call_status = VoiceCallStatus::Stable;
                 }
+            }
+            VoiceEvent::RemovedFromChannel { reason } => {
+                tracing::info!("removed from voice channel: {reason}");
+                self.call_status = VoiceCallStatus::Stable;
+                self.teardown(None, cx);
+                cx.emit(VoiceStoreEvent::RemovedFromChannel);
+            }
+            VoiceEvent::PushToTalkActive(active) => {
+                self.mic_enabled = active;
+                self.ptt_active = active;
+                cx.notify();
+            }
+            VoiceEvent::MutedByModerator => {
+                self.mic_enabled = false;
+                self.muted_by_moderator = true;
             }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
@@ -2763,7 +2920,12 @@ impl VoiceStore {
                 if self.participants == list {
                     return;
                 }
-                let remote_joined = self.join_sound_baseline_set
+                let settling = self.awaiting_room_snapshot;
+                if settling {
+                    self.awaiting_room_snapshot = !list.iter().any(|p| !p.is_local);
+                }
+                let remote_joined = !settling
+                    && self.join_sound_baseline_set
                     && list.iter().any(|p| {
                         !p.is_local
                             && !p.is_agent
@@ -2803,7 +2965,19 @@ impl VoiceStore {
                     return;
                 }
                 tracing::info!("voice disconnected: {reason}");
+                let unjoined_channel = match &self.connection {
+                    VoiceConnection::Connecting { channel_id, .. }
+                    | VoiceConnection::Failed { channel_id, .. } => Some(channel_id.clone()),
+                    _ => None,
+                };
                 self.teardown(None, cx);
+                if let Some(channel_id) = unjoined_channel {
+                    let locale = current_locale(cx);
+                    self.connection = VoiceConnection::Failed {
+                        channel_id,
+                        message: mezon_i18n::t(&locale, "channelVoice.joinFailed").to_string(),
+                    };
+                }
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -2812,11 +2986,6 @@ impl VoiceStore {
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
-                } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
-                    self.connection = VoiceConnection::Failed {
-                        channel_id: channel_id.clone(),
-                        message,
-                    };
                 }
             }
         }
@@ -2834,7 +3003,102 @@ impl VoiceStore {
     }
 
     pub fn toggle_mic(&mut self, cx: &mut Context<Self>) {
+        if self.is_audience() {
+            return;
+        }
+        self.hold_to_talk = false;
         self.set_mic_enabled(!self.mic_enabled, cx);
+    }
+
+    pub fn role(&self) -> SfuRole {
+        self.role
+    }
+
+    pub fn pending_join_role(&self) -> SfuRole {
+        self.pending_join_role
+    }
+
+    pub fn join_role_menu_open(&self) -> bool {
+        self.join_role_menu_open
+    }
+
+    pub fn set_pending_join_role(&mut self, role: SfuRole, cx: &mut Context<Self>) {
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
+        cx.notify();
+    }
+
+    pub fn toggle_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        self.join_role_menu_open = !self.join_role_menu_open;
+        cx.notify();
+    }
+
+    pub fn close_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        if self.join_role_menu_open {
+            self.join_role_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn is_audience(&self) -> bool {
+        self.role.is_audience()
+    }
+
+    pub fn push_to_talk_active(&self) -> bool {
+        self.ptt_active
+    }
+
+    pub fn ptt_hint_dismissed(&self) -> bool {
+        self.ptt_hint_dismissed
+    }
+
+    pub fn dismiss_ptt_hint(&mut self, cx: &mut Context<Self>) {
+        if !self.ptt_hint_dismissed {
+            self.ptt_hint_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    pub fn set_push_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.ptt_held == active {
+            return;
+        }
+        if !self.is_audience() {
+            self.set_hold_to_talk(active, cx);
+            return;
+        }
+        if active && mezon_voice::microphone_denied() {
+            self.mic_permission_denied = true;
+            cx.notify();
+            return;
+        }
+        self.mic_permission_denied = false;
+        self.ptt_held = active;
+        if let Some(session) = &self.session {
+            session.set_push_to_talk(active);
+        }
+        if !active {
+            self.ptt_active = false;
+            self.mic_enabled = false;
+        }
+        cx.notify();
+    }
+
+    fn set_hold_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.ptt_held = active;
+        if active {
+            if self.mic_enabled {
+                return;
+            }
+            self.set_mic_enabled(true, cx);
+            self.hold_to_talk = self.mic_enabled;
+        } else if self.hold_to_talk {
+            self.hold_to_talk = false;
+            self.set_mic_enabled(false, cx);
+        }
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -2926,15 +3190,20 @@ impl VoiceStore {
             return;
         };
         let api = self.api.clone();
+        let params = if app == VoiceInteractiveApp::Blackboard {
+            format!("userId={user_id}")
+        } else {
+            String::new()
+        };
         cx.spawn(async move |_this, _cx| {
             match api
                 .write_voice_interactive_event(
                     clan_id,
                     voice_channel_id,
                     user_id,
-                    0,
+                    user_id,
                     app.event_type() as i32,
-                    String::new(),
+                    params,
                 )
                 .await
             {
@@ -2943,7 +3212,7 @@ impl VoiceStore {
                         clan_id,
                         voice_channel_id,
                         sender_id = user_id,
-                        receiver_id = 0,
+                        receiver_id = user_id,
                         event_type = app.event_type() as i32,
                         "VoiceInteractiveEvent acknowledged with CID payload"
                     );
@@ -2957,6 +3226,12 @@ impl VoiceStore {
                 Err(error) => {
                     tracing::warn!("write_voice_interactive_event failed: {error:#}");
                 }
+            }
+            if let Err(error) = api
+                .write_voice_reaction(vec![app_reaction_token(app)], voice_channel_id)
+                .await
+            {
+                tracing::warn!("interactive app voice reaction failed: {error:#}");
             }
         })
         .detach();
@@ -3218,9 +3493,7 @@ impl VoiceStore {
                         Err(error) => {
                             tracing::error!("could not reserve a path for the recording: {error}");
                             let _ = this.update(cx, |this, cx| {
-                                let locale = crate::Settings::try_global(cx)
-                                    .map(|settings| settings.read(cx).language.clone())
-                                    .unwrap_or_default();
+                                let locale = current_locale(cx);
                                 this.recording = RecordingState::Idle;
                                 cx.emit(VoiceStoreEvent::RecordingFinished(
                                     RecordingToast::Failed(
@@ -3354,12 +3627,14 @@ impl VoiceStore {
                 .into_iter()
                 .enumerate()
                 .map(|(index, (identity, name))| VoiceParticipant {
+                    session_id: identity.clone(),
                     screenshare: (index == 0 && options.screenshare)
                         .then_some(SIMULATED_SCREEN_KEY),
                     identity,
                     name,
                     is_local: false,
                     is_agent: false,
+                    is_audience: false,
                     speaking: index == 0,
                     muted: index % 3 == 2,
                     camera: None,
@@ -3378,7 +3653,7 @@ impl VoiceStore {
             .simulated_participants
             .first()
             .filter(|_| options.screenshare)
-            .map(|p| p.identity.clone());
+            .map(|p| p.session_id.clone());
         self.focused_tile = match (&screen_owner, options.focus) {
             (Some(identity), true) => Some(screen_tile_id(identity)),
             _ => None,
@@ -3465,7 +3740,7 @@ impl VoiceStore {
         self.participants
             .iter()
             .find(|p| p.screenshare == Some(key))
-            .map(|p| screen_tile_id(&p.identity))
+            .map(|p| screen_tile_id(&p.session_id))
     }
 
     fn publish_recording_scene(&self, cx: &App) {
@@ -3483,7 +3758,7 @@ impl VoiceStore {
                 .get(&participant.identity)
                 .and_then(|entry| entry.image.clone());
             if let Some(key) = participant.screenshare {
-                let id = screen_tile_id(&participant.identity);
+                let id = screen_tile_id(&participant.session_id);
                 let solo_tile = solo.as_deref() == Some(id.as_str());
                 if solo.is_none() || solo_tile {
                     let is_fullscreen = fullscreen.as_deref() == Some(id.as_str());
@@ -3506,7 +3781,7 @@ impl VoiceStore {
                     });
                 }
             }
-            let id = camera_tile_id(&participant.identity);
+            let id = camera_tile_id(&participant.session_id);
             let solo_tile = solo.as_deref() == Some(id.as_str());
             if solo.is_some() && !solo_tile {
                 continue;
@@ -3624,6 +3899,8 @@ impl VoiceStore {
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
         self.mic_enabled = false;
+        self.hold_to_talk = false;
+        self.ptt_held = false;
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
@@ -3661,6 +3938,8 @@ impl VoiceStore {
         self.last_emoji_at = None;
         self.last_flower_send = None;
         self.last_flower_effect_at = None;
+        self.shown_flowers.clear();
+        self.flower_seq = 0;
         self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;
@@ -3737,13 +4016,16 @@ pub async fn upload_sound_file(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::parse_raise_token;
     use super::{
-        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, RECORDING_AVATAR_MAX_ATTEMPTS,
-        RecordingAvatar, is_duplicate_interactive_launch, redact_interactive_app_url,
-        solo_tile_for, validate_sound_file,
+        FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
+        RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
+        is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
+        solo_tile_for, validate_sound_file, voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
@@ -3987,16 +4269,40 @@ mod tests {
 
     fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {
         VoiceParticipant {
+            session_id: identity.to_string(),
             identity: identity.to_string(),
             name: identity.to_string(),
             is_local: false,
             is_agent: false,
+            is_audience: false,
             speaking: false,
             muted: false,
             camera: None,
             screenshare,
             quality: NetworkQuality::Unknown,
         }
+    }
+
+    #[test]
+    fn focus_tracks_the_device_when_one_account_shares_twice() {
+        let mut first = voice_participant("same-account", Some(11));
+        first.session_id = "device-1".into();
+        let mut second = voice_participant("same-account", Some(22));
+        second.session_id = "device-2".into();
+        let focused = screen_tile_id(&first.session_id);
+        let participants = vec![second.clone(), first];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&focused)),
+            ScreenAutoFocus::Keep
+        );
+        assert_eq!(
+            super::solo_tile_for(Some(22), true, None, &participants),
+            Some(screen_tile_id(&second.session_id))
+        );
+        assert_eq!(
+            screen_auto_focus_transition(&[second.clone()], Some(&focused)),
+            ScreenAutoFocus::Focus(screen_tile_id(&second.session_id))
+        );
     }
 
     #[test]
@@ -4100,12 +4406,79 @@ mod tests {
     }
 
     #[test]
+    fn active_channel_id_only_tracks_connecting_and_connected() {
+        assert_eq!(
+            VoiceConnection::Connecting {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Connected {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Failed {
+                channel_id: "a".into(),
+                message: "boom".into(),
+            }
+            .active_channel_id(),
+            None
+        );
+        assert_eq!(VoiceConnection::Idle.active_channel_id(), None);
+    }
+
+    #[test]
+    fn voice_join_error_maps_typed_api_status_and_generic() {
+        let permission_denied: anyhow::Error = mezon_client::ApiStatusError { code: 7 }.into();
+        assert_eq!(
+            voice_join_error_message(&permission_denied, "en"),
+            mezon_i18n::api_error("en", 7)
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("empty body (code=0)"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("invalid_token"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+    }
+
+    #[test]
     fn parse_raise_token_classifies_prefixes() {
         assert_eq!(parse_raise_token("raising-up:123"), Some(true));
         assert_eq!(parse_raise_token("raising-down:123"), Some(false));
         assert_eq!(parse_raise_token("sound:https://x.mp3"), None);
         assert_eq!(parse_raise_token(":smile:"), None);
         assert_eq!(parse_raise_token(""), None);
+    }
+
+    #[test]
+    fn the_second_copy_of_one_flower_is_dropped_but_a_later_one_is_not() {
+        let mut shown = HashMap::new();
+        let now = Instant::now();
+        let pair = flower_pair_key("10", "20");
+        assert!(!is_duplicate_flower(&mut shown, &pair, now));
+        shown.insert(pair.clone(), now);
+
+        let reaction_arrives = now + Duration::from_millis(30);
+        assert!(is_duplicate_flower(&mut shown, &pair, reaction_arrives));
+        assert!(!is_duplicate_flower(
+            &mut shown,
+            &flower_pair_key("10", "21"),
+            reaction_arrives
+        ));
+
+        let window_passed = now + FLOWER_DEDUP_WINDOW + Duration::from_millis(1);
+        assert!(!is_duplicate_flower(&mut shown, &pair, window_passed));
+        assert!(shown.is_empty());
     }
 
     #[test]

@@ -101,7 +101,10 @@ pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
             tracing::warn!("app-window launch failed, falling back to a browser tab: {error:#}");
             crate::open_url(url)
         }),
-        None => crate::open_url(url),
+        None => {
+            tracing::info!("no Chromium-based default browser, opening a browser tab instead");
+            crate::open_url(url)
+        }
     }
 }
 
@@ -135,11 +138,15 @@ fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
+fn launch_app_window(exec: &[String], url: &str) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let mut command = std::process::Command::new(browser);
-    command.arg(format!("--app={url}"));
+    let argv = exec_with_app_url(exec, url);
+    let Some((program, args)) = argv.split_first() else {
+        anyhow::bail!("browser desktop entry has an empty Exec line");
+    };
+    let mut command = std::process::Command::new(program);
+    command.args(args);
     silenced(&mut command);
     unsafe {
         command.pre_exec(|| {
@@ -156,10 +163,10 @@ fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
     }
     let mut child = command
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))?;
+        .map_err(|e| anyhow::anyhow!("failed to open {program}: {e}"))?;
     child
         .wait()
-        .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))?;
+        .map_err(|e| anyhow::anyhow!("failed to open {program}: {e}"))?;
     Ok(())
 }
 
@@ -285,17 +292,98 @@ mod windows_impl {
     }
 }
 
+/// The `Exec` argv of the default browser's desktop entry when that browser is
+/// Chromium-based, field codes left in place for [`exec_with_app_url`].
+///
+/// Going through the desktop entry rather than `$PATH` is what makes Flatpak
+/// (`com.google.Chrome.desktop` → `flatpak run … com.google.Chrome`) and Snap
+/// (`chromium_chromium.desktop` → `/snap/bin/chromium`) installs launchable at
+/// all: neither has a Chromium-named binary on `$PATH`.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn default_chromium_browser() -> Option<PathBuf> {
-    let output = std::process::Command::new("xdg-settings")
-        .args(["get", "default-web-browser"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn default_chromium_browser() -> Option<Vec<String>> {
+    let desktop_id = default_browser_desktop_id()?;
+    let exec = match find_desktop_entry(&desktop_id) {
+        Some(path) => {
+            let contents = std::fs::read_to_string(&path).ok()?;
+            let exec = desktop_entry_exec(&contents)?;
+            split_exec(&exec)
+        }
+        // No entry on disk (unusual `XDG_DATA_DIRS`): fall back to the binary
+        // the desktop id is named after, which is what a distro package ships.
+        None => {
+            let stem = chromium_desktop_stem(&desktop_id)?;
+            vec![
+                which_binary(stem)?.to_string_lossy().into_owned(),
+                "%U".to_owned(),
+            ]
+        }
+    };
+    if is_chromium_exec(&exec) {
+        Some(exec)
+    } else {
+        tracing::info!("default browser {desktop_id} is not Chromium-based: {exec:?}");
+        None
     }
-    let desktop = String::from_utf8(output.stdout).ok()?;
-    which_binary(chromium_desktop_stem(&desktop)?)
+}
+
+/// `xdg-settings` is what `xdg-open` consults, so prefer its answer; it is a
+/// thin wrapper over `xdg-mime` on every modern desktop, which is the fallback
+/// when the wrapper is missing or cannot recognise the desktop environment.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn default_browser_desktop_id() -> Option<String> {
+    const QUERIES: [&[&str]; 2] = [
+        &["xdg-settings", "get", "default-web-browser"],
+        &["xdg-mime", "query", "default", "x-scheme-handler/http"],
+    ];
+    QUERIES.iter().find_map(|argv| {
+        let output = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        let id = stdout.split(';').next()?.trim();
+        (!id.is_empty()).then(|| id.to_owned())
+    })
+}
+
+/// `<data dir>/applications` for every XDG data dir, plus the Flatpak and Snap
+/// export dirs that a login shell adds to `XDG_DATA_DIRS` but a `.desktop`
+/// launch of this app may not see.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn desktop_entry_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs = Vec::new();
+    match std::env::var_os("XDG_DATA_HOME").filter(|dir| !dir.is_empty()) {
+        Some(dir) => dirs.push(PathBuf::from(dir)),
+        None => dirs.extend(home.as_ref().map(|home| home.join(".local/share"))),
+    }
+    match std::env::var_os("XDG_DATA_DIRS").filter(|dirs| !dirs.is_empty()) {
+        Some(data_dirs) => dirs.extend(std::env::split_paths(&data_dirs)),
+        None => dirs.extend(["/usr/local/share", "/usr/share"].map(PathBuf::from)),
+    }
+    dirs.extend(
+        home.as_ref()
+            .map(|home| home.join(".local/share/flatpak/exports/share")),
+    );
+    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share"));
+    dirs.push(PathBuf::from("/var/lib/snapd/desktop"));
+    dirs.into_iter()
+        .map(|dir| dir.join("applications"))
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn find_desktop_entry(desktop_id: &str) -> Option<PathBuf> {
+    let desktop_id = desktop_id.trim().rsplit('/').next()?;
+    desktop_entry_dirs()
+        .into_iter()
+        .map(|dir| dir.join(desktop_id))
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -310,6 +398,137 @@ fn which_binary(stem: &str) -> Option<PathBuf> {
                 .metadata()
                 .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// The `Exec=` value of the `[Desktop Entry]` group, untouched.
+#[allow(dead_code)]
+fn desktop_entry_exec(contents: &str) -> Option<String> {
+    let mut in_entry = false;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("Exec") else {
+            continue;
+        };
+        if let Some(value) = rest.trim_start().strip_prefix('=') {
+            let value = value.trim();
+            return (!value.is_empty()).then(|| value.to_owned());
+        }
+    }
+    None
+}
+
+/// Split an `Exec=` value into argv per the Desktop Entry spec: the string
+/// escapes (`\s`, `\n`, `\t`, `\r`, `\\`) come off first, then arguments are
+/// separated by unquoted whitespace, with backslash escapes honoured inside
+/// double quotes. Field codes (`%U` …) stay as their own arguments.
+#[allow(dead_code)]
+fn split_exec(exec: &str) -> Vec<String> {
+    let mut unescaped = String::with_capacity(exec.len());
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            unescaped.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => unescaped.push(' '),
+            Some('n') => unescaped.push('\n'),
+            Some('t') => unescaped.push('\t'),
+            Some('r') => unescaped.push('\r'),
+            Some('\\') => unescaped.push('\\'),
+            Some(other) => {
+                unescaped.push('\\');
+                unescaped.push(other);
+            }
+            None => unescaped.push('\\'),
+        }
+    }
+
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quoted = false;
+    let mut chars = unescaped.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_token = true;
+            }
+            '\\' if quoted => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_token {
+                    argv.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_token = true;
+            }
+        }
+    }
+    if in_token {
+        argv.push(current);
+    }
+    argv
+}
+
+#[allow(dead_code)]
+const CHROMIUM_FLATPAK_IDS: &[&str] = &[
+    "com.google.Chrome",
+    "com.google.ChromeDev",
+    "org.chromium.Chromium",
+    "com.microsoft.Edge",
+    "com.microsoft.EdgeDev",
+    "com.brave.Browser",
+    "com.vivaldi.Vivaldi",
+];
+
+/// Whether an `Exec` argv runs a Chromium-based browser, whatever wraps it:
+/// a plain binary, `env VAR=… /snap/bin/chromium`, or
+/// `flatpak run … --command=/app/bin/chrome … com.google.Chrome`.
+#[allow(dead_code)]
+fn is_chromium_exec(argv: &[String]) -> bool {
+    argv.iter().any(|arg| {
+        let arg = arg.strip_prefix("--command=").unwrap_or(arg);
+        CHROMIUM_FLATPAK_IDS.contains(&arg)
+            || executable_stem(Path::new(arg)).is_some_and(|stem| is_chromium_stem(&stem))
+    })
+}
+
+/// Resolve the field codes of an `Exec` argv for an app-window launch: the
+/// first `%f`/`%F`/`%u`/`%U` becomes `--app=<url>` (appended when there is
+/// none), every other field code is dropped, `%%` is a literal percent.
+#[allow(dead_code)]
+fn exec_with_app_url(argv: &[String], url: &str) -> Vec<String> {
+    let app_switch = format!("--app={url}");
+    let mut placed = false;
+    let mut out: Vec<String> = argv
+        .iter()
+        .filter_map(|arg| match arg.as_str() {
+            "%f" | "%F" | "%u" | "%U" => {
+                (!std::mem::replace(&mut placed, true)).then(|| app_switch.clone())
+            }
+            "%i" | "%c" | "%k" | "%d" | "%D" | "%n" | "%N" | "%v" | "%m" => None,
+            other => Some(other.replace("%%", "%")),
+        })
+        .collect();
+    if !placed {
+        out.push(app_switch);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -411,11 +630,114 @@ mod tests {
         assert_eq!(chromium_desktop_stem(""), None);
     }
 
+    #[test]
+    fn reads_exec_from_the_desktop_entry_group_only() {
+        let contents = "[Desktop Action new-window]\nExec=/usr/bin/google-chrome-stable\n\
+                        [Desktop Entry]\nName=Google Chrome\nTryExec=/usr/bin/google-chrome-stable\n\
+                        Exec = /usr/bin/google-chrome-stable %U\n";
+        assert_eq!(
+            desktop_entry_exec(contents).as_deref(),
+            Some("/usr/bin/google-chrome-stable %U")
+        );
+        assert_eq!(desktop_entry_exec("[Desktop Entry]\nName=x\n"), None);
+        assert_eq!(desktop_entry_exec("[Desktop Entry]\nExec=\n"), None);
+    }
+
+    #[test]
+    fn splits_exec_lines_like_the_spec_says() {
+        let flatpak = "/usr/bin/flatpak run --branch=stable --arch=x86_64 \
+                       --command=/app/bin/chrome --file-forwarding com.google.Chrome @@u %U @@";
+        assert_eq!(
+            split_exec(flatpak),
+            [
+                "/usr/bin/flatpak",
+                "run",
+                "--branch=stable",
+                "--arch=x86_64",
+                "--command=/app/bin/chrome",
+                "--file-forwarding",
+                "com.google.Chrome",
+                "@@u",
+                "%U",
+                "@@"
+            ]
+        );
+        assert_eq!(
+            split_exec(r#""/opt/My Browser/browser" --flag="a b" %u"#),
+            ["/opt/My Browser/browser", "--flag=a b", "%u"]
+        );
+        assert_eq!(
+            split_exec(r#""/opt/one\stwo/app" "q\"uote\\\\back" %U"#),
+            ["/opt/one two/app", r#"q"uote\back"#, "%U"]
+        );
+        assert_eq!(split_exec("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn recognises_chromium_exec_lines_behind_wrappers() {
+        let argv = |line: &str| split_exec(line);
+        assert!(is_chromium_exec(&argv("/usr/bin/google-chrome-stable %U")));
+        assert!(is_chromium_exec(&argv(
+            "env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/chromium_chromium.desktop /snap/bin/chromium %U"
+        )));
+        assert!(is_chromium_exec(&argv(
+            "/usr/bin/flatpak run --command=/app/bin/chrome --file-forwarding com.google.Chrome @@u %U @@"
+        )));
+        assert!(is_chromium_exec(&argv(
+            "/usr/bin/flatpak run --command=brave --file-forwarding com.brave.Browser @@u %U @@"
+        )));
+        assert!(!is_chromium_exec(&argv("firefox %u")));
+        assert!(!is_chromium_exec(&argv(
+            "/usr/bin/flatpak run --command=firefox --file-forwarding org.mozilla.firefox @@u %u @@"
+        )));
+        assert!(!is_chromium_exec(&argv("")));
+    }
+
+    #[test]
+    fn substitutes_the_url_field_code_with_the_app_switch() {
+        let url = "https://app.example.com/x?y=1";
+        let argv = |line: &str| split_exec(line);
+        assert_eq!(
+            exec_with_app_url(&argv("/usr/bin/google-chrome-stable %U"), url),
+            [
+                "/usr/bin/google-chrome-stable",
+                "--app=https://app.example.com/x?y=1"
+            ]
+        );
+        assert_eq!(
+            exec_with_app_url(&argv("chromium --icon=x %i %c %k %u %F"), url),
+            [
+                "chromium",
+                "--icon=x",
+                "--app=https://app.example.com/x?y=1"
+            ]
+        );
+        assert_eq!(
+            exec_with_app_url(&argv("chromium --profile=100%%"), url),
+            [
+                "chromium",
+                "--profile=100%",
+                "--app=https://app.example.com/x?y=1"
+            ]
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "environment dependent: reports the default browser of the machine it runs on"]
     fn reports_the_default_browser() {
         println!("default http handler: {:?}", macos::default_http_handler());
+        println!("chromium app mode target: {:?}", default_chromium_browser());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    #[ignore = "environment dependent: reports the default browser of the machine it runs on"]
+    fn reports_the_default_browser() {
+        println!(
+            "default browser desktop id: {:?}",
+            default_browser_desktop_id()
+        );
         println!("chromium app mode target: {:?}", default_chromium_browser());
     }
 

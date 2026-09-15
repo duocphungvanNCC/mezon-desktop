@@ -71,6 +71,8 @@ pub struct ChatLayout {
     displayed_stream_fullscreen: bool,
     stream_fullscreen_focus: FocusHandle,
     stream_fullscreen_focused: bool,
+    voice_focus: FocusHandle,
+    _voice_ptt_activation: Option<Subscription>,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
@@ -279,6 +281,11 @@ impl ChatLayout {
                 };
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
+            if voice.update(cx, |store, _| store.take_muted_by_moderator()) {
+                let locale = this.settings.read(cx).language.clone();
+                let msg = mezon_i18n::t(&locale, "channelVoice.mutedByModerator").to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
             }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
@@ -535,6 +542,8 @@ impl ChatLayout {
             displayed_stream_fullscreen: false,
             stream_fullscreen_focus: cx.focus_handle(),
             stream_fullscreen_focused: false,
+            voice_focus: cx.focus_handle(),
+            _voice_ptt_activation: None,
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
@@ -953,8 +962,11 @@ impl ChatLayout {
         self.message_search_input = Some(input);
     }
 
-    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_member_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dm = self.is_dm_route(cx);
+        if dm && !self.show_member_list {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.show_member_list = !self.show_member_list;
         if dm {
             self.ui_state.show_member_list_dm = self.show_member_list;
@@ -1692,6 +1704,9 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        if self.show_member_list && self.is_dm_route(cx) {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);
@@ -2277,8 +2292,21 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true));
+            let input_for_sub = input.clone();
+            cx.subscribe_in(&input, window, move |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let name = input_for_sub.read(cx).value();
+                    let invalid = !name.trim().is_empty()
+                        && mezon_store::validate_channel_name(name).is_err();
+                    ThreadsStore::global(cx).update(cx, |store, cx| {
+                        store.clear_name_error(cx);
+                        store.set_name_live_invalid(invalid, cx);
+                    });
+                }
+            })
+            .detach();
+            self.thread_name_input = Some(input);
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
@@ -2410,6 +2438,8 @@ impl ChatLayout {
         let mic_enabled = store.mic_enabled();
         let camera_enabled = store.camera_enabled();
         let screen_enabled = store.screen_share_enabled();
+        let is_audience = store.is_audience();
+        let ptt_active = store.push_to_talk_active();
         let link_copied = store.link_copied();
         let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
@@ -2426,6 +2456,8 @@ impl ChatLayout {
             mic_enabled,
             camera_enabled,
             screen_enabled,
+            is_audience,
+            ptt_active,
             link_copied,
             noise_control,
         ))
@@ -2854,11 +2886,8 @@ impl ChatLayout {
                         true,
                         in_voice,
                         Some(dm.id),
-                        is_group,
-                        is_group
-                            && self.show_member_list
-                            && !show_results_panel
-                            && !side_panel_open,
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
                         false,
                         false,
                         false,
@@ -2998,6 +3027,16 @@ impl ChatLayout {
 
             if ch.channel_type == ChannelType::Voice {
                 self.sync_voice_session_defaults(cx);
+                if self._voice_ptt_activation.is_none() {
+                    self._voice_ptt_activation =
+                        Some(cx.observe_window_activation(window, |this, window, cx| {
+                            if !window.is_window_active() {
+                                this.voice_store.update(cx, |store, cx| {
+                                    store.set_push_to_talk(false, cx);
+                                });
+                            }
+                        }));
+                }
                 let channel = ch.clone();
                 let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
@@ -3073,6 +3112,8 @@ impl ChatLayout {
                     .min_w_0()
                     .child(
                         div()
+                            .id("voice-focus-scope")
+                            .track_focus(&self.voice_focus)
                             .relative()
                             .flex()
                             .flex_col()
@@ -3080,6 +3121,10 @@ impl ChatLayout {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
+                            .on_mouse_down(gpui::MouseButton::Left, {
+                                let focus = self.voice_focus.clone();
+                                move |_, window, cx| window.focus(&focus, cx)
+                            })
                             .child(voice_view)
                             .when_some(self.voice_emoji_picker.clone(), |el, picker| {
                                 el.child(deferred(

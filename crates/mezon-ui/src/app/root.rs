@@ -50,7 +50,7 @@ pub struct RootView {
     first_join_prompted: bool,
 }
 
-fn surface_recording_toast(
+fn surface_voice_toast(
     root: &mut RootView,
     _voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
@@ -58,6 +58,16 @@ fn surface_recording_toast(
 ) {
     let locale = root.cached_locale.clone();
     let toast = match event {
+        mezon_store::VoiceStoreEvent::RemovedFromChannel => {
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Info,
+                    mezon_i18n::t(&locale, "channelVoice.removedFromChannel").to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
@@ -127,7 +137,7 @@ impl RootView {
         let shell = Shell::init(cx);
 
         let recording_toasts = mezon_store::VoiceStore::try_global(cx)
-            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
+            .map(|voice| cx.subscribe(&voice, surface_voice_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {
@@ -562,6 +572,21 @@ impl Render for RootView {
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key != "space"
+                    || event.is_held
+                    || event.keystroke.modifiers.modified()
+                {
+                    return;
+                }
+                voice_hold_to_talk(true, window, cx);
+            })
+            .on_key_up(|event, window, cx| {
+                if event.keystroke.key != "space" {
+                    return;
+                }
+                voice_hold_to_talk(false, window, cx);
+            })
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 |_, _, cx| crate::router::go_back(cx),
@@ -581,6 +606,23 @@ impl Render for RootView {
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
     }
+}
+
+fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
+    let typing = active
+        && window.context_stack().iter().any(|context| {
+            context.contains(crate::components::primitives::text_actions::TEXT_INPUT_CONTEXT)
+        });
+    if typing {
+        return;
+    }
+    let Some(voice) = mezon_store::VoiceStore::try_global(cx) else {
+        return;
+    };
+    if voice.read(cx).connection().connected_channel().is_none() {
+        return;
+    }
+    voice.update(cx, |store, cx| store.set_push_to_talk(active, cx));
 }
 
 /// The strip React drops across the top while an owner is previewing their clan the way a new
