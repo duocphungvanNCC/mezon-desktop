@@ -392,6 +392,15 @@ impl InboxStore {
             );
             return false;
         }
+        self.prepend_local_unfiltered(category, notification, cx)
+    }
+
+    fn prepend_local_unfiltered(
+        &mut self,
+        category: InboxCategory,
+        notification: InboxNotification,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.remember_topic_id(&notification);
         let bucket = self.bucket_mut(category);
         let incoming_message_id = notification.effective_message_id();
@@ -450,12 +459,9 @@ impl InboxStore {
         if notification.category != InboxCategory::Mentions {
             return;
         }
-        self.prepend_local(
-            GLOBAL_INBOX_BUCKET_CLAN_ID,
-            InboxCategory::Mentions,
-            notification,
-            cx,
-        );
+        // BadgeService already classified this ChannelMessage. Do not read it
+        // again while its entity update is still active.
+        self.prepend_local_unfiltered(InboxCategory::Mentions, notification, cx);
     }
 
     fn remember_topic_id(&mut self, notification: &InboxNotification) {
@@ -589,11 +595,29 @@ impl InboxStore {
         }
     }
 
-    pub fn has_visible_inbox_badge(&self, clan_id: &str, total_badges: u32) -> bool {
+    pub fn has_visible_inbox_badge(&self, clan_id: &str, total_badges: u32, cx: &App) -> bool {
+        let clan = clan_id.parse::<ClanId>().ok();
+        let channels = ChannelList::global(cx);
+        let channels = channels.read(cx);
         let filtered = self
             .filtered_here_badges
             .get(clan_id)
-            .map(HashMap::len)
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| {
+                        let Some(clan) = clan else { return false };
+                        let Ok(channel_id) = entry.channel_id.parse::<ChannelId>() else {
+                            return false;
+                        };
+                        channels.channel(clan, channel_id).is_some_and(|channel| {
+                            !channel.muted
+                                && channel.badge_count > 0
+                                && i64::from(entry.message_timestamp) > channel.last_seen_timestamp
+                        })
+                    })
+                    .count()
+            })
             .unwrap_or(0) as u32;
         has_visible_inbox_badge(total_badges, filtered)
     }

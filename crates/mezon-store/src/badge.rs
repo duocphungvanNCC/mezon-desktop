@@ -463,7 +463,7 @@ impl BadgeService {
                         InboxStore::global(cx).update(cx, |inbox, cx| {
                             inbox.note_filtered_here_badge(
                                 &m.clan_id.to_string(),
-                                &channel_id.to_string(),
+                                &m.channel_id.to_string(),
                                 &m.message_id.to_string(),
                                 m.create_time_seconds,
                                 cx,

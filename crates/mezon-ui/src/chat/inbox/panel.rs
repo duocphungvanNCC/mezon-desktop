@@ -1126,5 +1126,5 @@ pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
         .unwrap_or(0);
     InboxStore::global(cx)
         .read(cx)
-        .has_visible_inbox_badge(clan_id, total)
+        .has_visible_inbox_badge(clan_id, total, cx)
 }
