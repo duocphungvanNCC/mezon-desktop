@@ -1099,6 +1099,7 @@
   "channelVoice.pushToTalk.holdSpace": "Сөйләр өчен Пробелны тотып торыгыз",
   "channelVoice.pushToTalk.holdingSpace": "Сез сөйлисез — микрофонны сүндерү өчен Пробелны җибәрегез",
   "channelVoice.removedFromChannel": "Сез тавыш каналыннан чыгарылдыгыз.",
+  "channelVoice.disconnectedAlone": "Тавыш каналында артык озак берүзегез булганга, сез аннан аерылдыгыз.",
   "channelVoice.kickMemberFailed": "Катнашучыны бетерә алмады",
   "channelVoice.kickModal.content": "Зинһар, \"{{userName}}\" куып чыгарасыгыз килүен раслагыз?",
   "channelVoice.kickModal.kick": "Куып чыгару",

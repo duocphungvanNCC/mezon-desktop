@@ -1099,6 +1099,7 @@
   "channelVoice.pushToTalk.holdingSpace": "Talking — release Space to mute",
   "channelVoice.pushToTalk.hintBody": "You joined to listen. Hold Space to open your mic while you speak, release to mute again.",
   "channelVoice.removedFromChannel": "You have been removed from the voice channel.",
+  "channelVoice.disconnectedAlone": "You were disconnected from the voice channel because you were alone in it for too long.",
   "channelVoice.kickMemberFailed": "Failed to remove member",
   "channelVoice.kickModal.content": "Please confirm if you would like to kick \"{{userName}}\"?",
   "channelVoice.kickModal.kick": "Kick",

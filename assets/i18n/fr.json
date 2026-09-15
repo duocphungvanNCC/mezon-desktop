@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "Maintenez Espace pour parler",
   "channelVoice.pushToTalk.holdingSpace": "Vous parlez — relâchez Espace pour couper le micro",
   "channelVoice.removedFromChannel": "Vous avez été retiré du salon vocal.",
+  "channelVoice.disconnectedAlone": "Vous avez été déconnecté du salon vocal car vous y êtes resté seul trop longtemps.",
   "channelVoice.kickMemberFailed": "Impossible de supprimer le membre",
   "channelVoice.kickModal.content": "Êtes-vous sûr de vouloir supprimer « {{userName}} » du canal vocal ?",
   "channelVoice.kickModal.kick": "Supprimer",

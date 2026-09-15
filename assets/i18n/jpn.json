@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "スペースキーを押している間だけ話せます",
   "channelVoice.pushToTalk.holdingSpace": "発言中 — スペースキーを離すとミュートします",
   "channelVoice.removedFromChannel": "ボイスチャンネルから退出させられました。",
+  "channelVoice.disconnectedAlone": "ボイスチャンネルに長時間ひとりだったため、切断されました。",
   "channelVoice.kickMemberFailed": "スレッドからのメンバー削除に失敗しました",
   "channelVoice.kickModal.content": "本当に\"{{userName}}\"をボイスチャンネルから削除しますか？",
   "channelVoice.kickModal.kick": "削除",

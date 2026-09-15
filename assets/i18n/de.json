@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "Leertaste gedrückt halten, um zu sprechen",
   "channelVoice.pushToTalk.holdingSpace": "Du sprichst — Leertaste loslassen, um stummzuschalten",
   "channelVoice.removedFromChannel": "Du wurdest aus dem Sprachkanal entfernt.",
+  "channelVoice.disconnectedAlone": "Du wurdest vom Sprachkanal getrennt, weil du zu lange allein darin warst.",
   "channelVoice.kickMemberFailed": "Mitglied konnte nicht aus dem Thread entfernt werden",
   "channelVoice.kickModal.content": "Möchtest du \"{{userName}}\" wirklich aus dem Sprachkanal entfernen?",
   "channelVoice.kickModal.kick": "Entfernen",

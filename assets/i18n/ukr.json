@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "Утримуйте Пробіл, щоб говорити",
   "channelVoice.pushToTalk.holdingSpace": "Ви говорите — відпустіть Пробіл, щоб вимкнути мікрофон",
   "channelVoice.removedFromChannel": "Вас видалено з голосового каналу.",
+  "channelVoice.disconnectedAlone": "Вас відключено від голосового каналу, бо ви занадто довго були в ньому самі.",
   "channelVoice.kickMemberFailed": "Не вдалося видалити учасника",
   "channelVoice.kickModal.content": "Ви впевнені, що хочете викинути \"{{userName}}\" з голосового каналу?",
   "channelVoice.kickModal.kick": "Викинути",
