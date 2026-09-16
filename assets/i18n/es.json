@@ -2730,7 +2730,7 @@
   "eventCreator.fields.eventName.placeholder": "¿De qué es tu evento?",
   "eventCreator.fields.eventName.title": "Tema del evento",
   "eventCreator.fields.startDate.errorMessage": "Por favor, elige una fecha igual o posterior",
-  "eventCreator.fields.startDate.title": "Fecha de inicio",
+  "eventCreator.fields.startDate.title": "Fecha",
   "eventCreator.fields.startTime.errorMessage": "Por favor, elige una fecha igual o posterior",
   "eventCreator.fields.startTime.title": "Hora de inicio",
   "eventCreator.notify.locationBlank": "Se requiere una ubicación",

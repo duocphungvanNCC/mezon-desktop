@@ -2702,7 +2702,7 @@
   "eventCreator.fields.eventName.placeholder": "What's your event?",
   "eventCreator.fields.eventName.title": "Event Topic",
   "eventCreator.fields.startDate.errorMessage": "Please choose a date on or after",
-  "eventCreator.fields.startDate.title": "Start Date",
+  "eventCreator.fields.startDate.title": "Date",
   "eventCreator.fields.startTime.errorMessage": "Please choose a date on or after",
   "eventCreator.fields.startTime.title": "Start Time",
   "eventCreator.notify.locationBlank": "A location is required",

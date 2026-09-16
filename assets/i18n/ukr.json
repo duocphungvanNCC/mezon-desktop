@@ -2704,7 +2704,7 @@
   "eventCreator.fields.eventName.placeholder": "Що ваша подія?",
   "eventCreator.fields.eventName.title": "Тема події",
   "eventCreator.fields.startDate.errorMessage": "Оберіть поточну або майбутню дату",
-  "eventCreator.fields.startDate.title": "Дата початку",
+  "eventCreator.fields.startDate.title": "Дата",
   "eventCreator.fields.startTime.errorMessage": "Оберіть дійсний час початку",
   "eventCreator.fields.startTime.title": "Час початку",
   "eventCreator.notify.locationBlank": "Потрібне місцерозташування",

@@ -86,6 +86,10 @@ fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedStrin
     labels.into_iter().map(Into::into).collect()
 }
 
+fn event_default_end_minutes(start_minutes: u32) -> u32 {
+    (start_minutes + 60).min(23 * 60 + 45)
+}
+
 pub enum EventSelectEvent {
     Change(usize),
 }
@@ -235,7 +239,6 @@ pub struct CreateEventModal {
     end_time: Entity<EventSelect>,
     time_values: Vec<u32>,
     start_date: Entity<DatePicker>,
-    end_date: Entity<DatePicker>,
     address: Entity<InputState>,
     topic: Entity<InputState>,
     topic_dirty: bool,
@@ -351,12 +354,10 @@ impl CreateEventModal {
             .and_then(|value| value.with_second(0))
             .and_then(|value| value.with_nanosecond(0))
             .unwrap_or(start_at);
-        let end_at = start_at + Duration::hours(1);
         let today = now.date_naive();
         let start_day = start_at.date_naive();
-        let end_day = end_at.date_naive();
         let start_minutes = start_at.hour() * 60;
-        let end_minutes = end_at.hour() * 60;
+        let end_minutes = event_default_end_minutes(start_minutes);
         let time_values: Vec<u32> = (0..96).map(|slot| slot * 15 * 60).collect();
         let time_labels: Vec<SharedString> = time_values
             .iter()
@@ -380,20 +381,10 @@ impl CreateEventModal {
             picker.set_locale(locale.clone());
             picker
         });
-        let end_date = cx.new(|cx| {
-            let mut picker = DatePicker::new(cx);
-            picker.set_locale(locale.clone());
-            picker
-        });
         start_date.update(cx, |picker, cx| {
             picker.set_field_height(40.0, cx);
             picker.set_min(Some(today), cx);
             picker.set_selected_silent(Some(start_day), cx);
-        });
-        end_date.update(cx, |picker, cx| {
-            picker.set_field_height(40.0, cx);
-            picker.set_min(Some(start_day), cx);
-            picker.set_selected_silent(Some(end_day), cx);
         });
 
         let address = cx.new(|cx| {
@@ -452,12 +443,6 @@ impl CreateEventModal {
         subscriptions.push(
             cx.subscribe(&start_date, |this, _, event: &DatePickerEvent, cx| {
                 if let DatePickerEvent::Change(Some(date)) = event {
-                    this.end_date.update(cx, |picker, cx| {
-                        picker.set_min(Some(*date), cx);
-                        if picker.selected().is_some_and(|end| end < *date) {
-                            picker.set_selected_silent(Some(*date), cx);
-                        }
-                    });
                     let labels = event_repeat_labels(&this.settings.read(cx).language, *date);
                     this.repeat_select
                         .update(cx, |select, cx| select.set_items(labels, Vec::new(), cx));
@@ -466,10 +451,6 @@ impl CreateEventModal {
                 cx.notify();
             }),
         );
-        subscriptions.push(cx.subscribe(&end_date, |this, _, _: &DatePickerEvent, cx| {
-            this.error = None;
-            cx.notify();
-        }));
         subscriptions.push(cx.observe(&channels_entity, |this, _, cx| {
             this.refresh_channels(cx);
         }));
@@ -488,7 +469,6 @@ impl CreateEventModal {
             end_time,
             time_values,
             start_date,
-            end_date,
             address,
             topic,
             topic_dirty: false,
@@ -568,9 +548,6 @@ impl CreateEventModal {
             .timestamp_opt(event.end_time_seconds as i64, 0)
             .single()
         {
-            modal.end_date.update(cx, |picker, cx| {
-                picker.set_selected_silent(Some(end.date_naive()), cx)
-            });
             modal.end_time.update(cx, |select, cx| {
                 select.set_selected(Some((end.hour() * 4 + end.minute() / 15) as usize), cx)
             });
@@ -679,7 +656,6 @@ impl CreateEventModal {
     }
     fn timestamps(&self, cx: &App) -> Option<(u32, u32)> {
         let start_date = self.start_date.read(cx).selected()?;
-        let end_date = self.end_date.read(cx).selected()?;
         let start_seconds = *self.time_values.get(self.start_time.read(cx).selected()?)?;
         let end_seconds = *self.time_values.get(self.end_time.read(cx).selected()?)?;
         let local_timestamp = |date: chrono::NaiveDate, seconds: u32| {
@@ -691,7 +667,7 @@ impl CreateEventModal {
         };
         Some((
             local_timestamp(start_date, start_seconds)?,
-            local_timestamp(end_date, end_seconds)?,
+            local_timestamp(start_date, end_seconds)?,
         ))
     }
     fn topic_is_valid(&self, cx: &App) -> bool {
@@ -1244,30 +1220,19 @@ impl CreateEventModal {
                         .child(self.tr("eventCreator.errorMessages.invalidTopic", cx)),
                 )
             })
+            .child(div().mt_3().child(self.date_field(
+                "eventCreator.fields.startDate.title",
+                self.start_date.clone(),
+                cx,
+            )))
             .child(
                 div()
                     .flex()
                     .gap_3()
                     .mt_3()
-                    .child(self.date_field(
-                        "eventCreator.fields.startDate.title",
-                        self.start_date.clone(),
-                        cx,
-                    ))
                     .child(self.time_field(
                         "eventCreator.fields.startTime.title",
                         self.start_time.clone(),
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .mt_3()
-                    .child(self.date_field(
-                        "eventCreator.fields.endDate.title",
-                        self.end_date.clone(),
                         cx,
                     ))
                     .child(self.time_field(
@@ -1708,7 +1673,7 @@ pub fn open_edit_event_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::event_repeat_labels;
+    use super::{event_default_end_minutes, event_repeat_labels};
     use chrono::NaiveDate;
 
     #[test]
@@ -1731,5 +1696,11 @@ mod tests {
         assert_eq!(labels[1], "Weekly on Saturday");
         assert_eq!(labels[3], "Monthly on Fifth Saturday");
         assert_eq!(labels.len(), 5);
+    }
+
+    #[test]
+    fn default_end_time_stays_on_the_start_date() {
+        assert_eq!(event_default_end_minutes(10 * 60), 11 * 60);
+        assert_eq!(event_default_end_minutes(23 * 60), 23 * 60 + 45);
     }
 }

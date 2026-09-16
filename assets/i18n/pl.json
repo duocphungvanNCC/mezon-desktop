@@ -2704,7 +2704,7 @@
   "eventCreator.fields.eventName.placeholder": "Co to jest Twoje wydarzenie?",
   "eventCreator.fields.eventName.title": "Temat wydarzenia",
   "eventCreator.fields.startDate.errorMessage": "Proszę wybrać datę obecną lub w przyszłości",
-  "eventCreator.fields.startDate.title": "Data rozpoczęcia",
+  "eventCreator.fields.startDate.title": "Data",
   "eventCreator.fields.startTime.errorMessage": "Proszę wybrać poprawny czas rozpoczęcia",
   "eventCreator.fields.startTime.title": "Czas rozpoczęcia",
   "eventCreator.notify.locationBlank": "Lokalizacja jest wymagana",

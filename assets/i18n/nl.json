@@ -2704,7 +2704,7 @@
   "eventCreator.fields.eventName.placeholder": "Wat is je evenement?",
   "eventCreator.fields.eventName.title": "Evenementsthema",
   "eventCreator.fields.startDate.errorMessage": "Kies een huidige of toekomstige datum",
-  "eventCreator.fields.startDate.title": "Startdatum",
+  "eventCreator.fields.startDate.title": "Datum",
   "eventCreator.fields.startTime.errorMessage": "Kies een geldige starttijd",
   "eventCreator.fields.startTime.title": "Starttijd",
   "eventCreator.notify.locationBlank": "Een locatie is vereist",

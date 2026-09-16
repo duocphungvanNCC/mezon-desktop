@@ -2943,7 +2943,7 @@
   "eventCreator.fields.eventName.placeholder": "Какое у вас событие?",
   "eventCreator.fields.eventName.title": "Тема события",
   "eventCreator.fields.startDate.errorMessage": "Выберите дату не раньше указанной",
-  "eventCreator.fields.startDate.title": "Дата начала",
+  "eventCreator.fields.startDate.title": "Дата",
   "eventCreator.fields.startTime.errorMessage": "Выберите время не раньше указанного",
   "eventCreator.fields.startTime.title": "Время начала",
   "eventCreator.notify.locationBlank": "Укажите место проведения",
