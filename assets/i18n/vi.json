@@ -3326,6 +3326,7 @@
   "message.noSendMessagePermission": "Bạn không có quyền gửi tin nhắn",
   "message.numberReplies": "{{number}} tin nhắn",
   "message.onlyVisibleToRecipient": "Chỉ hiển thị cho người nhận",
+  "message.dismissMessage": "Ẩn tin nhắn",
   "message.pasteImage": "Dán Ảnh",
   "message.pasteOption": "Dán",
   "message.pinMessage": "Ghim tin nhắn",

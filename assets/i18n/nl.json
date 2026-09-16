@@ -3326,6 +3326,7 @@
   "message.noSendMessagePermission": "Je hebt geen toestemming om berichten te sturen",
   "message.numberReplies": "{{number}} berichten",
   "message.onlyVisibleToRecipient": "Alleen zichtbaar voor ontvanger",
+  "message.dismissMessage": "Bericht sluiten",
   "message.pasteImage": "Plak Afbeelding",
   "message.pasteOption": "Plakken",
   "message.pinMessage": "Bericht vastzetten",

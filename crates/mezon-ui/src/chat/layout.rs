@@ -2055,6 +2055,19 @@ impl ChatLayout {
             );
             return;
         }
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
+        {
+            crate::chat::ChatSending::send_to_bots(
+                command.bot_id,
+                content,
+                content_tokens,
+                attachments,
+                &self.auth_state,
+                cx,
+            );
+            return;
+        }
         crate::chat::ChatSending::send_text(
             content,
             content_tokens,

@@ -3327,6 +3327,7 @@
   "message.noSendMessagePermission": "Du har inte rätt att skicka meddelande",
   "message.numberReplies": "{{number}} meddelanden",
   "message.onlyVisibleToRecipient": "Bara mottagaren ser",
+  "message.dismissMessage": "Dölj meddelande",
   "message.pasteImage": "Klistra in Bild",
   "message.pasteOption": "Klistra in",
   "message.pinMessage": "Spika meddelande",

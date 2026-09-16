@@ -3324,6 +3324,7 @@
   "message.noSendMessagePermission": "You don't have permission to send message",
   "message.numberReplies": "{{number}} replies",
   "message.onlyVisibleToRecipient": "Only visible to recipient",
+  "message.dismissMessage": "Dismiss message",
   "message.pasteImage": "Paste Image",
   "message.pasteOption": "Paste",
   "message.pinMessage": "Pin Message",

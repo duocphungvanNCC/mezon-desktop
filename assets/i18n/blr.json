@@ -3326,6 +3326,7 @@
   "message.noSendMessagePermission": "У вас няма права дасылаць паведамленні",
   "message.numberReplies": "{{number}} паведамленняў",
   "message.onlyVisibleToRecipient": "Бачна толькі атрымальніку",
+  "message.dismissMessage": "Схаваць паведамленне",
   "message.pasteImage": "Уставіць выяву",
   "message.pasteOption": "Уставіць",
   "message.pinMessage": "Замацаваць паведамленне",

@@ -24,8 +24,8 @@ use mezon_store::{
     DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
     GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp,
-    first_previewable_url, internal_invite_id, is_clan_invite_url,
+    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview,
+    fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -299,6 +299,21 @@ struct SlashCommandRaw {
     display_lc: String,
     description: SharedString,
     action_msg: Option<SharedString>,
+    bot_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashCommand {
+    pub bot_id: i64,
+    pub menu_name: SharedString,
+    action_msg: SharedString,
+}
+
+impl FlashCommand {
+    fn still_prefixes(&self, content: &str) -> bool {
+        let action = self.action_msg.trim();
+        !action.is_empty() && content.trim_start().starts_with(action)
+    }
 }
 
 #[derive(Clone)]
@@ -465,6 +480,8 @@ pub struct MentionInput {
     session_commands: Vec<Rc<SlashCommandRaw>>,
     ephemeral_mode: bool,
     ephemeral_target: Option<(i64, SharedString)>,
+    flash_command: Option<FlashCommand>,
+    flash_send: Option<FlashCommand>,
     base_placeholder: SharedString,
     popup: Option<Entity<GifStickerEmojiPopup>>,
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -725,6 +742,8 @@ impl MentionInput {
             session_commands: Vec::new(),
             ephemeral_mode: false,
             ephemeral_target: None,
+            flash_command: None,
+            flash_send: None,
             base_placeholder,
             popup: None,
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -846,6 +865,7 @@ impl MentionInput {
         self.clear_suggestions(cx);
         self.clear_ephemeral(cx);
         self.clear_ogp_preview(cx);
+        self.flash_command = None;
         self.overflow_counter = None;
         self.suppress_typing = true;
         self.last_content = SharedString::from(text.clone());
@@ -912,6 +932,7 @@ impl MentionInput {
         let content = outgoing_content_from_committed(&raw, &self.committed);
         let ogp = self.take_outgoing_ogp();
         let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
+        self.flash_send = self.flash_command.take();
         self.committed.clear();
         self.reset_popup();
         self.close_popup(window, cx);
@@ -1536,6 +1557,13 @@ impl MentionInput {
 
     fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
         self.check_trigger(&content, cx);
+        if self
+            .flash_command
+            .as_ref()
+            .is_some_and(|command| !command.still_prefixes(&content))
+        {
+            self.flash_command = None;
+        }
         self.overflow_counter = {
             // Raw UTF-8 length is a lower bound on the payload, so serialize only when the
             // draft can actually be over.
@@ -1659,6 +1687,10 @@ impl MentionInput {
         };
         self.input
             .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    pub fn take_flash_command(&mut self) -> Option<FlashCommand> {
+        self.flash_send.take()
     }
 
     pub fn take_ephemeral_receiver(&mut self, cx: &mut Context<Self>) -> Option<i64> {
@@ -2082,6 +2114,11 @@ impl MentionInput {
             } else if let Some(action_msg) = command.action_msg.as_ref() {
                 self.input.update(cx, |input, cx| {
                     input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
+                });
+                self.flash_command = Some(FlashCommand {
+                    bot_id: command.bot_id,
+                    menu_name: command.display.clone(),
+                    action_msg: action_msg.clone(),
                 });
                 self.reset_popup();
                 self.sync_ranges(cx);
@@ -2894,21 +2931,35 @@ fn slash_command_pool(locale: &str, cx: &App) -> Vec<Rc<SlashCommandRaw>> {
         display_lc: "ephemeral".to_string(),
         description,
         action_msg: None,
+        bot_id: 0,
     })];
     let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
         return commands;
     };
+    let clan_id = MessagesStore::global(cx).read(cx).active_clan_id();
     for item in QuickMenuStore::global(cx)
         .read(cx)
         .items(channel_id, QUICK_MENU_TYPE_FLASH)
     {
         let display = item.menu_name.to_string();
+        let bot_name = (item.bot_id != 0)
+            .then(|| {
+                let clan_id = clan_id?;
+                ClanMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .member(clan_id, UserId(item.bot_id))
+                        .map(|member| SharedString::from(member.name().to_string()))
+                })
+            })
+            .flatten();
         commands.push(Rc::new(SlashCommandRaw {
             id: format!("quick_menu_{}", item.id).into(),
             display: display.clone().into(),
             display_lc: display.to_lowercase(),
-            description: item.action_msg.clone(),
+            description: bot_name.unwrap_or_else(|| item.action_msg.clone()),
             action_msg: Some(item.action_msg.clone()),
+            bot_id: item.bot_id,
         }));
     }
     commands
@@ -3232,6 +3283,37 @@ impl Render for MentionInput {
             .when_some(previews, |this, previews| this.child(previews))
             .child(input_area)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod flash_command_tests {
+    use super::FlashCommand;
+
+    fn command(action: &str) -> FlashCommand {
+        FlashCommand {
+            bot_id: 7,
+            menu_name: "daily".into(),
+            action_msg: action.into(),
+        }
+    }
+
+    #[test]
+    fn command_survives_arguments_but_not_prefix_edits() {
+        let cmd = command("*daily");
+        assert!(cmd.still_prefixes("*daily"));
+        assert!(cmd.still_prefixes("*daily report for today"));
+        assert!(cmd.still_prefixes("  *daily"));
+        assert!(!cmd.still_prefixes("daily"));
+        assert!(!cmd.still_prefixes("hello *daily"));
+        assert!(!cmd.still_prefixes(""));
+    }
+
+    #[test]
+    fn action_msg_whitespace_does_not_matter() {
+        let cmd = command("*daily ");
+        assert!(cmd.still_prefixes("*daily"));
+        assert!(!command("   ").still_prefixes("anything"));
     }
 }
 

@@ -3328,6 +3328,7 @@
   "message.noSendMessagePermission": "メッセージを送信する権限がありません",
   "message.numberReplies": "{{number}} メッセージ",
   "message.onlyVisibleToRecipient": "受信者のみが表示",
+  "message.dismissMessage": "メッセージを閉じる",
   "message.pasteImage": "画像を貼り付け",
   "message.pasteOption": "貼り付け",
   "message.pinMessage": "メッセージをピン留め",
