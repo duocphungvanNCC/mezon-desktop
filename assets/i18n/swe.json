@@ -1757,6 +1757,7 @@
   "common.cannotFetchClans": "Kunde inte ladda clan-lista, vänligen prova igen senare",
   "common.cannotJoinClan": "Kunde inte gå med i clan",
   "common.cannotSendBuzzWithAnonymous": "Det går inte att skicka buzz anonymt.",
+  "common.cannotSendConvertedFileWithAnonymous": "Det går inte att omvandla meddelandet till en fil och skicka det anonymt.",
   "common.cannotSendLocationWithAnonymous": "Kunde inte skicka plats när anonym.",
   "common.canvas.deleteMessage": "Detta canvas kommer att raderas permanent. Den här åtgärden kan inte ångras.",
   "common.canvas.deleteTitle": "Ta bort {{name}}",

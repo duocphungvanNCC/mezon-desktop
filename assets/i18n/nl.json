@@ -1756,6 +1756,7 @@
   "common.cannotFetchClans": "Clanlijst kon niet worden geladen, probeer het later opnieuw",
   "common.cannotJoinClan": "Clan kon niet worden betreden",
   "common.cannotSendBuzzWithAnonymous": "Buzz kan niet anoniem worden verzonden.",
+  "common.cannotSendConvertedFileWithAnonymous": "Bericht kan niet naar een bestand worden omgezet en verzonden in anonieme modus.",
   "common.cannotSendLocationWithAnonymous": "Locatie kan niet worden verzonden tijdens anoniem zijn.",
   "common.canvas.deleteMessage": "Dit canvas wordt permanent verwijderd. Deze actie kan niet ongedaan worden gemaakt.",
   "common.canvas.deleteTitle": "{{name}} verwijderen",

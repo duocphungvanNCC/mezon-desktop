@@ -1757,6 +1757,7 @@
   "common.cannotFetchClans": "Clans konnten nicht geladen werden, bitte versuche es später erneut",
   "common.cannotJoinClan": "Clan kann nicht beigetreten werden",
   "common.cannotSendBuzzWithAnonymous": "Buzz kann nicht im anonymen Modus gesendet werden.",
+  "common.cannotSendConvertedFileWithAnonymous": "Nachricht kann im anonymen Modus nicht in eine Datei umgewandelt und gesendet werden.",
   "common.cannotSendLocationWithAnonymous": "Standort kann nicht im anonymen Modus gesendet werden.",
   "common.canvas.deleteMessage": "Dieses Canvas wird dauerhaft gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.",
   "common.canvas.deleteTitle": "{{name}} löschen",

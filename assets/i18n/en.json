@@ -1755,6 +1755,7 @@
   "common.cannotFetchClans": "Cannot fetch clans, please try again later",
   "common.cannotJoinClan": "Cannot join clan",
   "common.cannotSendBuzzWithAnonymous": "Cannot send buzz using Anonymous.",
+  "common.cannotSendConvertedFileWithAnonymous": "Cannot convert and send a file using Anonymous.",
   "common.cannotSendLocationWithAnonymous": "Cannot send location using Anonymous.",
   "common.canvas.deleteMessage": "This canvas will be permanently deleted. This action cannot be undone.",
   "common.canvas.error": "Error",

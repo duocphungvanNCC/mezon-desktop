@@ -1756,6 +1756,7 @@
   "common.cannotFetchClans": "Не атрымалася загрузіць спіс кланаў, паспрабуйце пазней",
   "common.cannotJoinClan": "Не атрымалася далучыцца да клана",
   "common.cannotSendBuzzWithAnonymous": "Немагчыма адправіць buzz ананімна.",
+  "common.cannotSendConvertedFileWithAnonymous": "Немагчыма пераўтварыць паведамленне ў файл і адправіць яго ў ананімным рэжыме.",
   "common.cannotSendLocationWithAnonymous": "Немагчыма адправіць месцазнаходжанне ў ананімным рэжыме.",
   "common.canvas.deleteMessage": "Гэты канвас будзе выдалены назаўжды. Гэта дзеянне нельга адмяніць.",
   "common.canvas.deleteTitle": "Выдаліць {{name}}",

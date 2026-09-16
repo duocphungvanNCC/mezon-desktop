@@ -1984,6 +1984,7 @@
   "common.cannotFetchClans": "Не удаётся получить кланы, пожалуйста, попробуйте позже",
   "common.cannotJoinClan": "Невозможно присоединиться к клану",
   "common.cannotSendBuzzWithAnonymous": "Нельзя отправить buzz анонимно.",
+  "common.cannotSendConvertedFileWithAnonymous": "Нельзя преобразовать сообщение в файл и отправить его анонимно.",
   "common.cannotSendLocationWithAnonymous": "Нельзя поделиться локацией, находясь под \"анонимкой\".",
   "common.canvas.deleteMessage": "Этот холст будет удалён безвозвратно. Это действие нельзя отменить.",
   "common.canvas.deleteTitle": "Удалить {{name}}",

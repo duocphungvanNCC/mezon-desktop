@@ -1756,6 +1756,7 @@
   "common.cannotFetchClans": "Nie można załadować listy clanów, proszę spróbować ponownie później",
   "common.cannotJoinClan": "Nie można dołączyć do clanu",
   "common.cannotSendBuzzWithAnonymous": "Nie można wysłać buzz anonimowo.",
+  "common.cannotSendConvertedFileWithAnonymous": "Nie można przekonwertować wiadomości na plik i wysłać jej w trybie anonimowym.",
   "common.cannotSendLocationWithAnonymous": "Nie można wysłać lokalizacji w trybie anonimowym.",
   "common.canvas.deleteMessage": "To płótno zostanie trwale usunięte. Tej operacji nie można cofnąć.",
   "common.canvas.deleteTitle": "Usuń {{name}}",
