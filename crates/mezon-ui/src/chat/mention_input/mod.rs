@@ -45,6 +45,7 @@ use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
 use crate::chat::message::ShareLocationModal;
 use crate::chat::role_style::role_fallback_color;
+use crate::components::compositions::channel_row::voice_busy_tag;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -2680,16 +2681,7 @@ impl MentionInput {
                             .text_color(display_color)
                             .child(highlighted_label(display, &query)),
                     )
-                    .when(voice_busy, |row| {
-                        row.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(15.))
-                                .italic()
-                                .text_color(theme.danger_text)
-                                .child("(busy)"),
-                        )
-                    }),
+                    .when(voice_busy, |row| row.child(voice_busy_tag(theme))),
             )
             .when(!secondary.is_empty(), |row| {
                 row.child(
