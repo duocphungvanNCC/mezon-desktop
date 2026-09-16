@@ -3790,18 +3790,6 @@ impl EventEmitter<DismissEvent> for InteractiveAppPopoverPanel {}
 impl Render for InteractiveAppPopoverPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = &cx.theme().tokens;
-        let needs_wide_menu = {
-            let store = self.voice.read(cx);
-            [
-                VoiceInteractiveApp::Quiz,
-                VoiceInteractiveApp::Blackboard,
-                VoiceInteractiveApp::Interactive,
-            ]
-            .into_iter()
-            .any(|app| {
-                store.is_interactive_app_active(app) && !store.is_interactive_app_opened(app)
-            })
-        };
         let mut menu = div()
             .key_context("menu")
             .track_focus(&self.focus_handle)
@@ -3810,7 +3798,7 @@ impl Render for InteractiveAppPopoverPanel {
             .occlude()
             .flex()
             .flex_col()
-            .w(px(if needs_wide_menu { 270. } else { 190. }))
+            .w(px(190.))
             .p(px(6.))
             .rounded_md()
             .border_1()
@@ -3873,8 +3861,6 @@ impl Render for InteractiveAppPopoverPanel {
                 );
             } else if active {
                 let green = cx.theme().status_online;
-                let join_voice = voice.clone();
-                let launch_voice = voice;
                 menu = menu.child(
                     row.border_color(green)
                         .bg(with_alpha(green, 0.08))
@@ -3892,58 +3878,30 @@ impl Render for InteractiveAppPopoverPanel {
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id(("join-interactive-app", app as u32))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_full()
-                                        .bg(with_alpha(green, 0.25))
-                                        .text_color(green)
-                                        .cursor_pointer()
-                                        .hover(move |style| style.bg(with_alpha(green, 0.35)))
-                                        .child(
-                                            mezon_i18n::t(
-                                                &self.locale,
-                                                "channelVoice.interactiveApp.join",
-                                            )
-                                            .to_string(),
+                            div().flex().items_center().gap_2().child(
+                                div()
+                                    .id(("join-interactive-app", app as u32))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(with_alpha(green, 0.25))
+                                    .text_color(green)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(with_alpha(green, 0.35)))
+                                    .child(
+                                        mezon_i18n::t(
+                                            &self.locale,
+                                            "channelVoice.interactiveApp.join",
                                         )
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            join_voice.update(cx, |store, cx| {
-                                                store.join_interactive_app(app, cx)
-                                            });
-                                            cx.emit(DismissEvent);
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .id(("relaunch-interactive-app", app as u32))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_full()
-                                        .bg(darken(tokens.bg_item_hover, 0.05))
-                                        .text_color(tokens.text_theme_message)
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(tokens.bg_item_hover))
-                                        .child(
-                                            mezon_i18n::t(
-                                                &self.locale,
-                                                "channelVoice.interactiveApp.launch",
-                                            )
-                                            .to_string(),
-                                        )
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            launch_voice.update(cx, |store, cx| {
-                                                store.request_interactive_app(app, cx)
-                                            });
-                                            cx.emit(DismissEvent);
-                                        })),
-                                ),
+                                        .to_string(),
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        voice.update(cx, |store, cx| {
+                                            store.join_interactive_app(app, cx)
+                                        });
+                                        cx.emit(DismissEvent);
+                                    })),
+                            ),
                         ),
                 );
             } else {
