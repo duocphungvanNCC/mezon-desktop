@@ -474,6 +474,7 @@ pub struct MentionInput {
     file_menu_open: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
+    converting_to_file: bool,
     last_content: SharedString,
     draft_channel: Option<ChannelId>,
     suppress_typing: bool,
@@ -510,20 +511,21 @@ fn single_edit_region(old: &str, new: &str) -> (usize, usize, usize) {
     )
 }
 
-fn json_string_utf16_len(s: &str) -> usize {
-    serde_json::to_string(s)
-        .map(|j| j.encode_utf16().count())
-        .unwrap_or_else(|_| s.encode_utf16().count() + 2)
-}
-
+/// Byte length of the `{"t": text}` payload the socket carries. The realtime server caps a
+/// frame in bytes, so every convert-to-file gate (paste, counter, Enter) measures this — a
+/// UTF-16 count would let non-ASCII drafts slip past the counter and still convert on send.
 fn content_payload_utf8_len(text: &str) -> usize {
     serde_json::to_string(&serde_json::json!({ "t": text }))
         .map(|j| j.len())
         .unwrap_or(text.len() + CONVERT_PREFIX_LEN)
 }
 
+fn exceeds_convert_threshold(text: &str) -> bool {
+    content_payload_utf8_len(text) > CONVERT_TO_FILE_THRESHOLD
+}
+
 fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
-    current_input.trim().is_empty() && json_string_utf16_len(pasted) > CONVERT_TO_FILE_THRESHOLD
+    current_input.trim().is_empty() && exceeds_convert_threshold(pasted)
 }
 
 fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'a str {
@@ -545,11 +547,13 @@ fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'
     &pasted[..end]
 }
 
+/// The recipient sees this name in chat, so keep it readable; the counter keeps two
+/// conversions in the same millisecond from sharing a temp path.
 fn next_converted_text_filename() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
+    let millis = chrono::Utc::now().timestamp_millis();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("converted-text-{pid}-{n}.txt")
+    format!("message-{millis}-{n}.txt")
 }
 
 fn write_text_as_pending_attachment(text: &str) -> Option<PendingAttachment> {
@@ -718,6 +722,7 @@ impl MentionInput {
             file_menu_open: false,
             overflow_to_file: false,
             overflow_counter: None,
+            converting_to_file: false,
             last_content: SharedString::default(),
             draft_channel: None,
             suppress_typing: false,
@@ -867,10 +872,7 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
-        let (text, content, ogp) = if self.overflow_to_file
-            && !text.is_empty()
-            && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
-        {
+        if self.overflow_to_file && !text.is_empty() && exceeds_convert_threshold(&text) {
             if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
                 self.show_anonymous_convert_blocked(cx);
                 return None;
@@ -879,22 +881,15 @@ impl MentionInput {
                 Self::show_upload_limit(AttachmentLimit::Count, window, cx);
                 return None;
             }
-            let Some(pending) = write_text_as_pending_attachment(&text) else {
-                Self::show_convert_file_failed(cx);
-                return None;
-            };
-            let path = pending.path.clone();
-            if !self.add_pending(vec![pending], window, cx) {
-                let _ = std::fs::remove_file(&path);
-                return None;
+            // The draft stays in the composer until the .txt exists; the conversion re-emits
+            // Submit, so one Enter still sends. A second Enter meanwhile is a no-op.
+            if !self.converting_to_file {
+                self.convert_text_to_file(text, true, window, cx);
             }
-            self.clear_ogp_preview(cx);
-            (String::new(), OutgoingContent::default(), None)
-        } else {
-            let content = outgoing_content_from_committed(&raw, &self.committed);
-            let ogp = self.take_outgoing_ogp();
-            (text, content, ogp)
-        };
+            return None;
+        }
+        let content = outgoing_content_from_committed(&raw, &self.committed);
+        let ogp = self.take_outgoing_ogp();
         let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         self.committed.clear();
         self.reset_popup();
@@ -1116,11 +1111,14 @@ impl MentionInput {
                         input.set_value("", window, cx);
                     });
                 }
-                self.convert_text_to_file(text, window, cx);
+                self.convert_text_to_file(text, false, window, cx);
                 return;
             }
         }
         let pasted = trim_paste_to_utf16_cap(&current, &text, PASTE_SAFETY_CAP_UTF16);
+        if pasted.len() < text.len() {
+            Self::show_paste_truncated(cx);
+        }
         if pasted.is_empty() {
             return;
         }
@@ -1128,19 +1126,48 @@ impl MentionInput {
             .update(cx, |input, cx| input.insert_text(pasted, window, cx));
     }
 
-    fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Writes `text` to a temp `.txt` off the foreground thread and stages it as a pending
+    /// attachment. With `send_when_ready` the draft is cleared and `Submit` re-emitted once the
+    /// file is staged, so the caller's next `take_payload` sends it in the same keypress.
+    fn convert_text_to_file(
+        &mut self,
+        text: String,
+        send_when_ready: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.converting_to_file = send_when_ready;
+        let channel = self.draft_channel;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move { write_text_as_pending_attachment(&text) })
                 .await;
-            this.update_in(cx, |this, window, cx| match pending {
-                Some(pending) => {
-                    let path = pending.path.clone();
-                    if !this.add_pending(vec![pending], window, cx) {
-                        let _ = std::fs::remove_file(&path);
-                    }
+            this.update_in(cx, |this, window, cx| {
+                this.converting_to_file = false;
+                let Some(pending) = pending else {
+                    Self::show_convert_file_failed(cx);
+                    return;
+                };
+                let path = pending.path.clone();
+                // The composer moved to another channel while the file was being written: the
+                // text is still in that channel's draft, so drop the file rather than misfile it.
+                if this.draft_channel != channel || !this.add_pending(vec![pending], window, cx) {
+                    let _ = std::fs::remove_file(&path);
+                    return;
                 }
-                None => Self::show_convert_file_failed(cx),
+                if !send_when_ready {
+                    return;
+                }
+                // Drop the text now so the re-entered take_payload sends only the file.
+                let swallow = this.input.read(cx).pending_send_ime_token();
+                this.committed.clear();
+                this.reset_popup();
+                this.clear_ogp_preview(cx);
+                this.input.update(cx, |input, cx| {
+                    input.set_mention_spans(Vec::new(), cx);
+                    input.clear_after_send(swallow, window, cx);
+                });
+                cx.emit(MentionInputEvent::Submit);
             })
             .ok();
         })
@@ -1279,6 +1306,13 @@ impl MentionInput {
         Shell::global(cx).update(cx, |shell, cx| {
             shell.toast(ToastKind::Error, "Failed to convert message to file", cx)
         });
+    }
+
+    fn show_paste_truncated(cx: &mut Context<Self>) {
+        let message = format!(
+            "Pasted text was cut to fit the {PASTE_SAFETY_CAP_UTF16}-character composer limit"
+        );
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
     }
 
     fn add_pending(
@@ -1471,10 +1505,13 @@ impl MentionInput {
     fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
         self.check_trigger(&content, cx);
         self.overflow_counter = {
+            // Raw UTF-8 length is a lower bound on the payload, so serialize only when the
+            // draft can actually be over.
             let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
             if self.overflow_to_file && content.len() > threshold {
-                let len = content.encode_utf16().count();
-                (len > threshold).then_some(threshold as isize - len as isize)
+                let over = content_payload_utf8_len(&content) as isize
+                    - CONVERT_TO_FILE_THRESHOLD as isize;
+                (over > 0).then_some(-over)
             } else {
                 None
             }
@@ -3154,7 +3191,7 @@ impl Render for MentionInput {
 mod convert_tests {
     use super::{
         CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
-        content_payload_utf8_len, json_string_utf16_len, should_convert_paste_to_file,
+        content_payload_utf8_len, exceeds_convert_threshold, should_convert_paste_to_file,
         trim_paste_to_utf16_cap, write_text_as_pending_attachment,
     };
 
@@ -3165,17 +3202,19 @@ mod convert_tests {
     }
 
     #[test]
-    fn json_utf16_len_counts_quotes_and_escapes_like_js() {
-        assert_eq!(json_string_utf16_len(""), 2);
-        assert_eq!(json_string_utf16_len("ab"), 4);
-        assert_eq!(json_string_utf16_len("\n"), 4);
+    fn payload_counts_utf8_bytes_and_json_escapes() {
+        assert_eq!(content_payload_utf8_len("é"), 10);
+        assert_eq!(content_payload_utf8_len("\n"), 10);
     }
 
     #[test]
-    fn send_measures_utf8_bytes_paste_measures_utf16_units() {
-        let s = "é";
-        assert_eq!(json_string_utf16_len(s), 3);
-        assert_eq!(content_payload_utf8_len(s), 10);
+    fn paste_gate_and_send_gate_agree_on_non_ascii_text() {
+        // Fewer UTF-16 units than the threshold, but more payload bytes: both gates must trip
+        // together, otherwise the draft converts on Enter with no warning beforehand.
+        let text = "ế".repeat(CONVERT_TO_FILE_THRESHOLD / 3 + 1);
+        assert!(text.encode_utf16().count() < CONVERT_TO_FILE_THRESHOLD);
+        assert!(exceeds_convert_threshold(&text));
+        assert!(should_convert_paste_to_file("", &text));
     }
 
     #[test]
@@ -3200,12 +3239,7 @@ mod convert_tests {
     fn write_text_pending_attachment_is_plain_txt() {
         let pending =
             write_text_as_pending_attachment("hello long text").expect("temp txt attachment");
-        let pid = std::process::id();
-        assert!(
-            pending
-                .filename
-                .starts_with(&format!("converted-text-{pid}-"))
-        );
+        assert!(pending.filename.starts_with("message-"));
         assert!(pending.filename.ends_with(".txt"));
         assert_eq!(pending.filetype, "text/plain");
         assert!(!pending.is_image);
@@ -3223,6 +3257,15 @@ mod convert_tests {
         );
         assert!(trimmed.chars().all(|ch| ch == 'b'));
         assert!(!should_convert_paste_to_file(&current, &pasted));
+    }
+
+    #[test]
+    fn converted_filenames_never_collide_within_a_process() {
+        let a = write_text_as_pending_attachment("a").expect("temp txt attachment");
+        let b = write_text_as_pending_attachment("b").expect("temp txt attachment");
+        assert_ne!(a.path, b.path);
+        let _ = std::fs::remove_file(&a.path);
+        let _ = std::fs::remove_file(&b.path);
     }
 
     #[test]

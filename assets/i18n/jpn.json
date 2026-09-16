@@ -1745,6 +1745,7 @@
   "common.cannotFetchClans": "クランリストをロードできません、後で再試行してください",
   "common.cannotJoinClan": "クランに参加できません",
   "common.cannotSendBuzzWithAnonymous": "匿名モードではバズを送信できません。",
+  "common.cannotSendConvertedFileWithAnonymous": "匿名モードではメッセージをファイルに変換して送信できません。",
   "common.cannotSendLocationWithAnonymous": "匿名モードでは位置情報を送信できません。",
   "common.canvas.deleteMessage": "このキャンバスは完全に削除されます。この操作は元に戻せません。",
   "common.canvas.deleteTitle": "{{name}}を削除",

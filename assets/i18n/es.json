@@ -1754,6 +1754,7 @@
   "common.cannotFetchClans": "Incapaz de obtener clanes, por favor, inténtalo más tarde",
   "common.cannotJoinClan": "Incapaz de unirte al clan",
   "common.cannotSendBuzzWithAnonymous": "No se puede enviar buzz de forma anónima.",
+  "common.cannotSendConvertedFileWithAnonymous": "No se puede convertir el mensaje en archivo y enviarlo de forma anónima.",
   "common.cannotSendLocationWithAnonymous": "Incapaz de enviar ubicación usando Anónimo.",
   "common.canvas.deleteMessage": "Este canvas se eliminará permanentemente. Esta acción no se puede deshacer.",
   "common.canvas.deleteTitle": "Eliminar {{name}}",

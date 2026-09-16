@@ -1753,6 +1753,7 @@
   "common.cannotFetchClans": "Кланнарны алып булмый, зинһар, соңрак кабатлап карагыз",
   "common.cannotJoinClan": "Кланга кушылып булмый",
   "common.cannotSendBuzzWithAnonymous": "Аноним рәвештә buzz җибәреп булмый.",
+  "common.cannotSendConvertedFileWithAnonymous": "Аноним рәвештә хәбәрне файлга әйләндереп җибәреп булмый.",
   "common.cannotSendLocationWithAnonymous": "Аноним ярдәмендә урын җибәрә алмый.",
   "common.canvas.deleteMessage": "Бу картиналар мәңгегә бетереләчәк. Бу гамәлне кире кайтарып булмый.",
   "common.canvas.deleteTitle": "Бетерү{{name}}",
