@@ -78,6 +78,18 @@ fn interactive_app_fingerprint(sender_id: i64, clan_id: i64) -> u64 {
     hasher.finish()
 }
 
+fn release_interactive_window(
+    opened: &mut HashMap<VoiceInteractiveApp, u64>,
+    app: VoiceInteractiveApp,
+    window_token: u64,
+) -> bool {
+    if opened.get(&app) != Some(&window_token) {
+        return false;
+    }
+    opened.remove(&app);
+    true
+}
+
 fn is_duplicate_interactive_launch(
     launches: &mut HashMap<(VoiceInteractiveApp, u64), Instant>,
     key: (VoiceInteractiveApp, u64),
@@ -284,7 +296,8 @@ pub struct VoiceStore {
     device_menu: Option<DeviceMenuKind>,
     interactive_launches: HashMap<(VoiceInteractiveApp, u64), Instant>,
     active_interactive_apps: HashMap<VoiceInteractiveApp, (i64, i64)>,
-    opened_interactive_apps: HashSet<VoiceInteractiveApp>,
+    opened_interactive_apps: HashMap<VoiceInteractiveApp, u64>,
+    interactive_window_seq: u64,
     device_submenu: Option<DeviceKind>,
     _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
@@ -652,7 +665,8 @@ impl VoiceStore {
             device_menu: None,
             interactive_launches: HashMap::new(),
             active_interactive_apps: HashMap::new(),
-            opened_interactive_apps: HashSet::new(),
+            opened_interactive_apps: HashMap::new(),
+            interactive_window_seq: 0,
             device_submenu: None,
             _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
@@ -1065,23 +1079,29 @@ impl VoiceStore {
         clan_id: i64,
         cx: &mut Context<Self>,
     ) {
-        if self.opened_interactive_apps.contains(&app) {
+        if self.opened_interactive_apps.contains_key(&app) {
             return;
         }
         let current_user_id = crate::BadgeService::try_global(cx)
             .and_then(|badges| badges.read(cx).current_user_id(cx))
             .map(|user_id| user_id.0);
-        if current_user_id == Some(sender_id) {
-            self.active_interactive_apps
-                .insert(app, (sender_id, clan_id));
-            self.opened_interactive_apps.insert(app);
-            self.open_interactive_app(app, sender_id, clan_id, cx);
-            cx.notify();
-            return;
-        }
-
         self.active_interactive_apps
             .insert(app, (sender_id, clan_id));
+        if current_user_id == Some(sender_id) {
+            self.open_interactive_app(app, sender_id, clan_id, cx);
+        }
+        cx.notify();
+    }
+
+    fn finish_interactive_launch(
+        &mut self,
+        app: VoiceInteractiveApp,
+        launch_key: (VoiceInteractiveApp, u64),
+        window_token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.interactive_launches.remove(&launch_key);
+        release_interactive_window(&mut self.opened_interactive_apps, app, window_token);
         cx.notify();
     }
 
@@ -1099,6 +1119,9 @@ impl VoiceStore {
             return;
         }
         self.interactive_launches.insert(launch_key, now);
+        self.interactive_window_seq += 1;
+        let window_token = self.interactive_window_seq;
+        self.opened_interactive_apps.insert(app, window_token);
         let api = self.api.clone();
         let app_id = app.app_id();
         let config = AppConfig::global(cx);
@@ -1121,18 +1144,14 @@ impl VoiceStore {
                 Ok(_) => {
                     tracing::warn!(app_id, "voice app hash returned empty web_app_data");
                     let _ = this.update(cx, |store, cx| {
-                        store.interactive_launches.remove(&launch_key);
-                        store.opened_interactive_apps.remove(&app);
-                        cx.notify();
+                        store.finish_interactive_launch(app, launch_key, window_token, cx);
                     });
                     return;
                 }
                 Err(error) => {
                     tracing::warn!(app_id, "generate voice app hash failed: {error:#}");
                     let _ = this.update(cx, |store, cx| {
-                        store.interactive_launches.remove(&launch_key);
-                        store.opened_interactive_apps.remove(&app);
-                        cx.notify();
+                        store.finish_interactive_launch(app, launch_key, window_token, cx);
                     });
                     return;
                 }
@@ -1166,24 +1185,30 @@ impl VoiceStore {
             let Some(opener) = opener else {
                 tracing::warn!("managed voice app launch skipped: no opener is registered");
                 let _ = this.update(cx, |store, cx| {
-                    store.interactive_launches.remove(&launch_key);
-                    store.opened_interactive_apps.remove(&app);
-                    cx.notify();
+                    store.finish_interactive_launch(app, launch_key, window_token, cx);
                 });
                 return;
             };
             let window_key = format!("voice-{}", app.app_id());
-            let result = cx
-                .background_executor()
-                .spawn(async move { opener(&url, &window_key) })
-                .await;
+            let (closed_tx, closed_rx) = futures::channel::oneshot::channel();
+            let waiter = std::thread::Builder::new()
+                .name(format!("voice-app-window-{app_id}"))
+                .spawn(move || {
+                    let _ = closed_tx.send(opener(&url, &window_key));
+                });
+            let result = match waiter {
+                Ok(_) => closed_rx.await.unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "voice app window thread ended without a result"
+                    ))
+                }),
+                Err(error) => Err(error.into()),
+            };
             if let Err(error) = result {
                 tracing::warn!("managed voice app window failed: {error:#}");
             }
             let _ = this.update(cx, |store, cx| {
-                store.interactive_launches.remove(&launch_key);
-                store.opened_interactive_apps.remove(&app);
-                cx.notify();
+                store.finish_interactive_launch(app, launch_key, window_token, cx);
             });
         })
         .detach();
@@ -3238,7 +3263,7 @@ impl VoiceStore {
     }
 
     pub fn request_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
-        if self.opened_interactive_apps.contains(&app) {
+        if self.opened_interactive_apps.contains_key(&app) {
             return;
         }
         let Some((voice_channel_id, clan_id)) = self.connection.connected_channel() else {
@@ -3319,11 +3344,11 @@ impl VoiceStore {
     }
 
     pub fn is_interactive_app_opened(&self, app: VoiceInteractiveApp) -> bool {
-        self.opened_interactive_apps.contains(&app)
+        self.opened_interactive_apps.contains_key(&app)
     }
 
     pub fn join_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
-        if self.opened_interactive_apps.contains(&app) {
+        if self.opened_interactive_apps.contains_key(&app) {
             return;
         }
         let Some(&(sender_id, clan_id)) = self.active_interactive_apps.get(&app) else {
@@ -3331,7 +3356,6 @@ impl VoiceStore {
         };
         let fingerprint = interactive_app_fingerprint(sender_id, clan_id);
         self.interactive_launches.remove(&(app, fingerprint));
-        self.opened_interactive_apps.insert(app);
         self.open_interactive_app(app, sender_id, clan_id, cx);
         cx.notify();
     }
@@ -4013,6 +4037,7 @@ impl VoiceStore {
         self.participant_menu = None;
         self.interactive_launches.clear();
         self.active_interactive_apps.clear();
+        self.opened_interactive_apps.clear();
         self.pending_kick = None;
         self.pending_removals.clear();
         self.moderation_error = None;
@@ -4125,11 +4150,26 @@ mod tests {
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
         is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
-        solo_tile_for, validate_sound_file, voice_join_error_message,
+        release_interactive_window, solo_tile_for, validate_sound_file, voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use parking_lot::Mutex;
+
+    #[test]
+    fn a_closed_window_from_an_earlier_launch_does_not_release_the_current_one() {
+        let app = VoiceInteractiveApp::Quiz;
+        let mut opened = HashMap::from([(app, 2u64)]);
+        assert!(!release_interactive_window(&mut opened, app, 1));
+        assert!(
+            opened.contains_key(&app),
+            "after reset() and a relaunch the first window's exit must leave the new window \
+             marked open, or Launch/Join reappear while it is still on screen"
+        );
+        assert!(release_interactive_window(&mut opened, app, 2));
+        assert!(opened.is_empty());
+        assert!(!release_interactive_window(&mut opened, app, 2));
+    }
 
     #[test]
     fn an_open_member_strip_records_everyone() {

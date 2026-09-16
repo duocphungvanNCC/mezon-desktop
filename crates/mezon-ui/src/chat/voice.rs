@@ -3769,7 +3769,7 @@ impl InteractiveAppPopoverPanel {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
-        let voice_subscription = cx.subscribe(&voice, |_, _, _, cx| cx.notify());
+        let voice_subscription = cx.observe(&voice, |_, _, cx| cx.notify());
         Self {
             voice,
             locale,
