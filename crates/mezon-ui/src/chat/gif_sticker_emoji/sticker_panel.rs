@@ -251,9 +251,7 @@ impl StickerPanel {
 }
 
 impl Render for StickerPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.image_cache
-            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();
@@ -261,6 +259,7 @@ impl Render for StickerPanel {
         // Hover restyles a cell (repaint); skip it while the grid is scrolling so the wheel
         // only pays for the scroll, like the sidebars do.
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
+        let scroll_active = self.list_state.is_scroll_hover_active();
 
         let rail = show_rail.then(|| {
             let mut rail = div()
@@ -327,11 +326,24 @@ impl Render for StickerPanel {
                         }
                     }
                     Some(PickerRow::Stickers(cells)) => {
-                        render_sticker_row(&theme, cells, cell_px, suppress_hover, &list_entity)
+                        let resident_only = scroll_active.then(|| this.image_cache.read(cx));
+                        render_sticker_row(
+                            &theme,
+                            cells,
+                            cell_px,
+                            suppress_hover,
+                            resident_only,
+                            &list_entity,
+                        )
                     }
                     None => div().h(px(cell_px + STICKER_GAP_PX)).into_any_element(),
                 };
-                (row, this.sources_ahead(ix), this.image_cache.clone())
+                let ahead = if scroll_active {
+                    Vec::new()
+                } else {
+                    this.sources_ahead(ix)
+                };
+                (row, ahead, this.image_cache.clone())
             };
             warm_sticker_sources(&cache, ahead, window, cx);
             row
@@ -430,6 +442,7 @@ fn render_sticker_row(
     cells: &[StickerCell],
     cell_px: f32,
     suppress_hover: bool,
+    resident_only: Option<&LruImageCache>,
     entity: &Entity<StickerPanel>,
 ) -> AnyElement {
     let hover_bg = theme.bg_hover;
@@ -445,6 +458,8 @@ fn render_sticker_row(
         let ent = entity.clone();
         let url = cell.src.clone();
         let filename = cell.id.clone();
+        let show_image = !cell.src.is_empty()
+            && resident_only.is_none_or(|cache| cache.is_resident(&sticker_resource(&cell.src)));
         row = row.child(
             div()
                 .id(cell.cell_id.clone())
@@ -458,7 +473,7 @@ fn render_sticker_row(
                 .border_color(border)
                 .cursor_pointer()
                 .when(!suppress_hover, |s| s.hover(|s| s.bg(hover_bg)))
-                .when(!cell.src.is_empty(), |s| {
+                .when(show_image, |s| {
                     s.child(
                         img(cell.src.clone())
                             .id(cell.img_id.clone())
@@ -525,7 +540,11 @@ fn warm_sticker_sources(
     }
     cache.update(cx, |cache, cx| {
         for src in sources {
-            cache.prefetch(&gpui::Resource::Uri(src.to_string().into()), window, cx);
+            cache.prefetch(&sticker_resource(&src), window, cx);
         }
     });
+}
+
+fn sticker_resource(src: &SharedString) -> gpui::Resource {
+    gpui::Resource::Uri(src.clone().into())
 }
