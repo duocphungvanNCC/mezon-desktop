@@ -9789,6 +9789,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn subscribing_a_clan_from_the_clan_list_does_not_hold_its_lease(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::clan::ClanList::subscribe_clan_realtime(ClanId(1), cx);
+            assert!(
+                channels.read(cx).joining_clans.contains_key(&ClanId(1)),
+                "the join must start; it reads ClanList on the way, which panics if the \
+                 caller is still inside a ClanList update"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn clan_join_waits_for_the_channel_listing(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
