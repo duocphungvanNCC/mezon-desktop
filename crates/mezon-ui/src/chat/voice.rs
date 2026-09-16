@@ -5,8 +5,8 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
     CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
     FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred,
-    div, img, point, prelude::*, px, relative, rems, svg,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Subscription, Window,
+    canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
@@ -1307,7 +1307,8 @@ fn raised_hands_overlay(
             .absolute()
             .top(px(68.))
             .right(px(8.))
-            .w(px(320.))
+            .min_w(px(100.))
+            .max_w(px(360.))
             .flex()
             .flex_col()
             .gap_1()
@@ -3076,18 +3077,8 @@ fn control_bar(
     let can_record = store.can_record();
     let is_audience = store.is_audience();
     let ptt_active = store.push_to_talk_active();
-    let interactive_app_clan_id = store
-        .connection()
-        .connected_channel()
-        .and_then(|(_, clan)| clan.parse::<i64>().ok())
-        .map(ClanId);
-    let can_open_interactive_app = interactive_app_clan_id.is_some_and(|clan_id| {
-        PermissionStore::try_global(cx).is_some_and(|store| {
-            store
-                .read(cx)
-                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
-        })
-    });
+    let has_active_interactive_apps =
+        store.has_active_interactive_apps() || store.has_opened_interactive_apps();
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -3232,11 +3223,20 @@ fn control_bar(
         div().relative().child(button).children(callout)
     });
 
-    let interactive_app_button = can_open_interactive_app.then(|| {
+    let interactive_app_button = Some({
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if has_active_interactive_apps {
+            (
+                with_alpha(theme.status_online, 0.18),
+                with_alpha(theme.status_online, 0.28),
+                theme.status_online.into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_muted.into())
+        };
         let button = InteractiveAppTrigger::new(
-            neutral_bg.into(),
-            neutral_hover,
-            theme.text_muted.into(),
+            bg,
+            hover,
+            color,
             mezon_i18n::t(locale, "channelVoice.openInteractiveApp"),
         );
         let voice = voice.clone();
@@ -3756,6 +3756,7 @@ struct InteractiveAppPopoverPanel {
     voice: Entity<VoiceStore>,
     locale: String,
     focus_handle: FocusHandle,
+    _voice_subscription: Subscription,
 }
 
 impl InteractiveAppPopoverPanel {
@@ -3768,10 +3769,12 @@ impl InteractiveAppPopoverPanel {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
+        let voice_subscription = cx.observe(&voice, |_, _, cx| cx.notify());
         Self {
             voice,
             locale,
             focus_handle,
+            _voice_subscription: voice_subscription,
         }
     }
 }
@@ -3795,7 +3798,7 @@ impl Render for InteractiveAppPopoverPanel {
             .occlude()
             .flex()
             .flex_col()
-            .w(px(240.))
+            .w(px(190.))
             .p(px(6.))
             .rounded_md()
             .border_1()
@@ -3816,23 +3819,126 @@ impl Render for InteractiveAppPopoverPanel {
                 VoiceInteractiveApp::Interactive,
             ),
         ] {
+            let store = self.voice.read(cx);
+            let active = store.is_interactive_app_active(app);
+            let opened = store.is_interactive_app_opened(app);
             let voice = self.voice.clone();
-            menu = menu.child(
-                div()
-                    .id(key)
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded(px(4.))
-                    .text_sm()
-                    .text_color(tokens.text_theme_message)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(tokens.bg_item_hover))
-                    .child(mezon_i18n::t(&self.locale, key).to_string())
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
-                        cx.emit(DismissEvent);
-                    })),
-            );
+            let row = div()
+                .id(key)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(px(4.))
+                .border_1()
+                .text_sm();
+            if opened {
+                let green = cx.theme().status_online;
+                menu = menu.child(
+                    row.border_color(green)
+                        .bg(with_alpha(green, 0.08))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_color(green)
+                                .child(
+                                    Icon::new(IconName::Joystick)
+                                        .size(px(16.))
+                                        .text_color(green),
+                                )
+                                .child(mezon_i18n::t(&self.locale, key).to_string()),
+                        )
+                        .child(
+                            div().text_color(tokens.text_theme_message).child(
+                                mezon_i18n::t(&self.locale, "channelVoice.interactiveApp.opened")
+                                    .to_string(),
+                            ),
+                        ),
+                );
+            } else if active {
+                let green = cx.theme().status_online;
+                menu = menu.child(
+                    row.border_color(green)
+                        .bg(with_alpha(green, 0.08))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_color(green)
+                                .child(
+                                    Icon::new(IconName::Joystick)
+                                        .size(px(16.))
+                                        .text_color(green),
+                                )
+                                .child(mezon_i18n::t(&self.locale, key).to_string()),
+                        )
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div()
+                                    .id(("join-interactive-app", app as u32))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(with_alpha(green, 0.25))
+                                    .text_color(green)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(with_alpha(green, 0.35)))
+                                    .child(
+                                        mezon_i18n::t(
+                                            &self.locale,
+                                            "channelVoice.interactiveApp.join",
+                                        )
+                                        .to_string(),
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        voice.update(cx, |store, cx| {
+                                            store.join_interactive_app(app, cx)
+                                        });
+                                        cx.emit(DismissEvent);
+                                    })),
+                            ),
+                        ),
+                );
+            } else {
+                let group = SharedString::from(format!("launch-interactive-app-{}", app as u32));
+                menu = menu.child(
+                    row.border_color(gpui::transparent_black())
+                        .group(group.clone())
+                        .text_color(tokens.text_theme_message)
+                        .hover(|style| style.bg(tokens.bg_item_hover))
+                        .child(mezon_i18n::t(&self.locale, key).to_string())
+                        .child(
+                            div()
+                                .id(("launch-interactive-app", app as u32))
+                                .px_2()
+                                .py_1()
+                                .rounded_full()
+                                .bg(darken(tokens.bg_item_hover, 0.05))
+                                .text_color(tokens.text_theme_message)
+                                .opacity(0.)
+                                .group_hover(group, |style| style.opacity(1.))
+                                .cursor_pointer()
+                                .child(
+                                    mezon_i18n::t(
+                                        &self.locale,
+                                        "channelVoice.interactiveApp.launch",
+                                    )
+                                    .to_string(),
+                                )
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    voice.update(cx, |store, cx| {
+                                        store.request_interactive_app(app, cx)
+                                    });
+                                    cx.emit(DismissEvent);
+                                })),
+                        ),
+                );
+            }
         }
         menu
     }
@@ -3841,6 +3947,12 @@ impl Render for InteractiveAppPopoverPanel {
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {
     let mut hsla = color.into();
     hsla.l = (hsla.l - amount).max(0.0);
+    hsla
+}
+
+fn with_alpha(color: impl Into<Hsla>, alpha: f32) -> Hsla {
+    let mut hsla = color.into();
+    hsla.a = alpha;
     hsla
 }
 
