@@ -3327,6 +3327,7 @@
   "message.noSendMessagePermission": "Du hast keine Berechtigung, Nachrichten zu senden",
   "message.numberReplies": "{{number}} Nachrichten",
   "message.onlyVisibleToRecipient": "Nur für den Empfänger sichtbar",
+  "message.dismissMessage": "Nachricht ausblenden",
   "message.pasteImage": "Bild einfügen",
   "message.pasteOption": "Einfügen",
   "message.pinMessage": "Nachricht anpinnen",

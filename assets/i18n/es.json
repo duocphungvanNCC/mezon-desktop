@@ -3360,6 +3360,7 @@
   "message.noSendMessagePermission": "No tienes permiso para enviar mensajes",
   "message.numberReplies": "{{number}} respuestas",
   "message.onlyVisibleToRecipient": "Solo visible para el destinatario",
+  "message.dismissMessage": "Descartar mensaje",
   "message.pasteImage": "Pegar imagen",
   "message.pasteOption": "Pegar",
   "message.pinMessage": "Fijar mensaje",

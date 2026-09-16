@@ -287,6 +287,7 @@ struct SettingsSaver {
     dirty: bool,
     entity_id: Option<gpui::EntityId>,
 }
+
 impl gpui::Global for SettingsSaver {}
 
 /// `UserClanRemoved` / `UserChannelRemoved` / `UserChannelAdded` are broadcast to

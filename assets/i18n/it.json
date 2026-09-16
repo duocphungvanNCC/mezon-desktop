@@ -3327,6 +3327,7 @@
   "message.noSendMessagePermission": "Non hai il permesso di inviare messaggi",
   "message.numberReplies": "{{number}} messaggi",
   "message.onlyVisibleToRecipient": "Visibile solo al destinatario",
+  "message.dismissMessage": "Ignora messaggio",
   "message.pasteImage": "Incolla immagine",
   "message.pasteOption": "Incolla",
   "message.pinMessage": "Fissa messaggio",

@@ -13,7 +13,7 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, LOCATION_CODE, MESSAGE_BUZZ_CODE,
+    ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
     OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
@@ -4902,6 +4902,201 @@ impl MessagesStore {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_message_to_bots(
+        &mut self,
+        bot_id: i64,
+        content: String,
+        sender_id: String,
+        sender_name: String,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let is_public = self.is_public;
+        let mode = self.mode;
+        let reply = self.take_reply_target();
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
+
+        let OutgoingContent {
+            mentions,
+            hashtags,
+            emojis,
+        } = content_tokens;
+        let transport_mentions: Vec<TransportMention> = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        let transport_hashtags: Vec<TransportHashtag> = hashtags
+            .into_iter()
+            .map(OutgoingHashtag::into_transport)
+            .collect();
+        let transport_emojis: Vec<TransportEmoji> = emojis
+            .into_iter()
+            .map(OutgoingEmoji::into_transport)
+            .collect();
+        let sent = build_send_content(
+            &content,
+            &transport_mentions,
+            &transport_hashtags,
+            &transport_emojis,
+        );
+        let reply_ref = reply.map(|draft| {
+            let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                draft.sender_id,
+                (
+                    "",
+                    &draft.sender_name,
+                    &draft.sender_name,
+                    &draft.sender_avatar,
+                ),
+                reply_clan_id,
+                cx,
+            );
+            OutgoingReply {
+                message_ref_id: draft.message_ref_id.get(),
+                content: draft.content_raw,
+                has_attachment: draft.has_attachment,
+                message_sender_id: draft.sender_id.get(),
+                message_sender_username: username,
+                message_sender_avatar: avatar,
+                message_sender_clan_nick: clan_nick,
+                message_sender_display_name: display_name,
+            }
+        });
+        let (display_name, avatar_url, _) =
+            outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let bot_ids: Vec<i64> = (bot_id != 0).then_some(bot_id).into_iter().collect();
+
+        let api = self.api.clone();
+        let clan_num = clan_id.get();
+        let channel_num = channel_id.get();
+        cx.spawn(async move |this, cx| {
+            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+                Ok(attachments) => attachments,
+                Err(e) => {
+                    tracing::error!("send_message_to_bots attachments failed: {e}");
+                    this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
+                        .ok();
+                    return;
+                }
+            };
+            let sent_attachments: Vec<mezon_client::transport::ApiAttachment> = proto_attachments
+                .iter()
+                .map(|att| mezon_client::transport::ApiAttachment {
+                    url: att.url.clone(),
+                    filename: att.filename.clone(),
+                    filetype: att.filetype.clone(),
+                    width: att.width,
+                    height: att.height,
+                    thumbnail: att.thumbnail.clone(),
+                    duration: att.duration,
+                    size: att.size,
+                })
+                .collect();
+            tracing::info!(
+                "send_message_to_bots: channel={channel_num} bots={bot_ids:?} (empty = every bot in the channel)"
+            );
+            let ack = match api
+                .send_ephemeral_message_to_bots(
+                    bot_ids,
+                    clan_num,
+                    channel_num,
+                    &content,
+                    is_public,
+                    mode,
+                    transport_mentions,
+                    transport_hashtags,
+                    transport_emojis,
+                    proto_attachments,
+                    reply_ref,
+                    0,
+                )
+                .await
+            {
+                Ok(ack) => ack,
+                Err(e) => {
+                    tracing::error!("send_message_to_bots failed: {e}");
+                    this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
+                        .ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                let content_tokens: ApiMessageContent =
+                    serde_json::from_str(&sent.json).unwrap_or_default();
+                let local = ApiMessage {
+                    message_id: ack.message_id,
+                    content: sent.text.clone(),
+                    content_tokens,
+                    content_raw: sent.json.clone(),
+                    code: EPHEMERAL_MESSAGE_CODE,
+                    sender_id: sender_id.parse().unwrap_or(0),
+                    sender_name: display_name,
+                    avatar: avatar_url,
+                    create_time: unix_now_seconds(),
+                    update_time: 0,
+                    hide_editted: true,
+                    attachments: sent_attachments,
+                    references: Vec::new(),
+                    reactions: Vec::new(),
+                    entity_mentions: Vec::new(),
+                    topic_id: 0,
+                };
+                let cfg = AppConfig::try_global(cx);
+                let viewer_id = viewer_user_id(cx);
+                let message = message_from_api(local, cfg, viewer_id);
+                this.apply_incoming_message(channel_id, message, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn dismiss_local_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let storage_id = self.reaction_storage_channel(message_id);
+        let is_local = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id))
+            .is_some_and(|msg| msg.code == MessageCode::Ephemeral);
+        if !is_local {
+            return;
+        }
+        self.remove_local_row(storage_id, message_id, cx);
+    }
+
+    fn remove_local_row(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.retreat_last_message(storage_id, message_id);
+        let is_active = self.active_channel_id == Some(storage_id);
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            return;
+        };
+        if let Some(index) = channel.messages.remove_id(message_id) {
+            if is_active {
+                cx.emit(MessagesEvent::RemovedAt { index, message_id });
+            }
+            cx.notify();
+        }
+    }
+
     pub fn send_message(
         &mut self,
         content: String,
@@ -8253,6 +8448,7 @@ fn apply_presign_gate_at(
             a.presign_pending = presign::presign_pending(&a.url, Some(keys), base_img);
         }
     }
+
     #[cfg(debug_assertions)]
     for a in attachments
         .iter()
@@ -13810,6 +14006,41 @@ mod tests {
         assert_eq!(msg.create_time, 1_700_000_000);
         assert!(!msg.day_label.is_empty());
         assert!(!msg.time_hhmm.is_empty());
+    }
+
+    #[gpui::test]
+    fn dismissing_an_ephemeral_row_removes_it_locally(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                store.active_channel_id = Some(channel);
+                store.cache.insert(
+                    channel,
+                    ChannelMessages {
+                        messages: MessageList::from_messages(channel, Vec::new()),
+                        has_more: false,
+                        gap_bottom: false,
+                    },
+                    None,
+                );
+                let mut row = Message::new(MessageId(100), "*ping now", "1", "me", 100);
+                row.code = MessageCode::Ephemeral;
+                store.apply_incoming_message(channel, row, cx);
+                let plain = Message::new(MessageId(101), "hello", "2", "you", 101);
+                store.apply_incoming_message(channel, plain, cx);
+
+                store.dismiss_local_message(MessageId(101), cx);
+                store.dismiss_local_message(MessageId(100), cx);
+
+                let left: Vec<i64> = store
+                    .cache
+                    .get(&channel)
+                    .map(|c| c.messages.items.iter().map(|m| m.id.0).collect())
+                    .unwrap_or_default();
+                assert_eq!(left, vec![101]);
+            });
+        });
     }
 
     fn test_store(cx: &mut App) -> Entity<MessagesStore> {

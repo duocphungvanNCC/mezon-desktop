@@ -3327,6 +3327,7 @@
   "message.noSendMessagePermission": "메시지 보내기 권한 없음",
   "message.numberReplies": "{{number}}개 메시지",
   "message.onlyVisibleToRecipient": "수신자만 보임",
+  "message.dismissMessage": "메시지 닫기",
   "message.pasteImage": "이미지 붙여넣기",
   "message.pasteOption": "붙여넣기",
   "message.pinMessage": "메시지 고정",

@@ -3565,6 +3565,7 @@
   "message.noSendMessagePermission": "У Вас нет разрешения на отправку сообщения.",
   "message.numberReplies": "{{number}} ответы",
   "message.onlyVisibleToRecipient": "Видно только получателю",
+  "message.dismissMessage": "Скрыть сообщение",
   "message.pasteImage": "Вставить изображение",
   "message.pasteOption": "Вставить",
   "message.pinMessage": "Закрепить сообщение",
