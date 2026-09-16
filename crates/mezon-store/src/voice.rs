@@ -1310,6 +1310,7 @@ impl VoiceStore {
     }
 
     fn play_join_sound(&mut self, cx: &mut Context<Self>) {
+        tracing::info!(cached = self.join_voice_player.is_some(), "join sound requested");
         if let Some(player) = &self.join_voice_player {
             player.play();
             return;
@@ -2687,11 +2688,12 @@ impl VoiceStore {
                 if this.reconnect_token_fetches >= MEET_TOKEN_RETRY_LIMIT {
                     tracing::warn!(
                         fetches = this.reconnect_token_fetches,
-                        "voice reconnect token retry limit reached"
+                        "voice reconnect token retry limit reached; ending the call"
                     );
+                    this.teardown(None, cx);
+                    cx.notify();
                     return None;
                 }
-                this._reconnect_watch_task = None;
                 let snapshot = this.reconnect_snapshot(cx)?;
                 this.reconnect_token_fetches += 1;
                 Some(snapshot)
@@ -2876,6 +2878,10 @@ impl VoiceStore {
                 }
                 self.call_status = VoiceCallStatus::Stable;
             }
+            VoiceEvent::RoomSnapshot => {
+                self.awaiting_room_snapshot = false;
+                self.join_sound_baseline_set = true;
+            }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
                 self.awaiting_room_snapshot = true;
@@ -2937,16 +2943,22 @@ impl VoiceStore {
                 if settling {
                     self.awaiting_room_snapshot = !list.iter().any(|p| !p.is_local);
                 }
-                let remote_joined = !settling
-                    && self.join_sound_baseline_set
-                    && list.iter().any(|p| {
-                        !p.is_local
-                            && !p.is_agent
-                            && !self
-                                .participants
-                                .iter()
-                                .any(|old| old.identity == p.identity)
-                    });
+                let remote_arrived = list.iter().any(|p| {
+                    !p.is_local
+                        && !p.is_agent
+                        && !self
+                            .participants
+                            .iter()
+                            .any(|old| old.identity == p.identity)
+                });
+                let remote_joined = !settling && self.join_sound_baseline_set && remote_arrived;
+                if remote_arrived && !remote_joined {
+                    tracing::info!(
+                        settling,
+                        baseline = self.join_sound_baseline_set,
+                        "remote participant arrived; join sound suppressed"
+                    );
+                }
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;

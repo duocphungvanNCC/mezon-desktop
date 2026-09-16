@@ -5917,6 +5917,8 @@ dependencies = [
  "mezon-record",
  "nokhwa",
  "objc",
+ "objc2-core-audio",
+ "objc2-core-foundation",
  "parking_lot",
  "percent-encoding",
  "pipewire",
