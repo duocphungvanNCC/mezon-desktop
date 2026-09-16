@@ -2233,9 +2233,9 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
     }
 }
 
-struct HashtagChip {
-    label: SharedString,
-    icon: IconName,
+pub(super) struct HashtagChip {
+    pub(super) label: SharedString,
+    pub(super) icon: IconName,
     italic: bool,
     channel_id: Option<ChannelId>,
 }
@@ -2245,7 +2245,12 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_chip(display: &str, channel_id: Option<&str>, locale: &str, cx: &App) -> HashtagChip {
+pub(super) fn hashtag_chip(
+    display: &str,
+    channel_id: Option<&str>,
+    locale: &str,
+    cx: &App,
+) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
     let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
     hashtag_chip_for(display, parsed_channel, resolved, locale)
