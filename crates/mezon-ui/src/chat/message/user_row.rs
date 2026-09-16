@@ -309,7 +309,7 @@ pub fn render_user_message(
             )
         })
         .when(has_reply && !ephemeral, |d| {
-            d.child(render_reply(&msg.references[0], ctx))
+            d.child(render_reply(msg, &msg.references[0], ctx))
         })
         .child(body)
         .when(interactive && hover_actions_visible(msg, ctx), |d| {

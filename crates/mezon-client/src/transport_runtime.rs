@@ -2103,6 +2103,7 @@ impl TransportClient {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2121,6 +2122,7 @@ impl TransportClient {
                         emojis,
                         attachments,
                         reply,
+                        topic_id,
                     )
                     .await
             })

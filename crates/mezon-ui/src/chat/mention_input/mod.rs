@@ -101,7 +101,7 @@ pub fn init(cx: &mut App) {
         };
         cx.defer(move |cx| {
             let _ = cx.update_window(window_handle, |_, window, cx| {
-                open_message_buzz(window, cx);
+                open_message_buzz(false, window, cx);
             });
         });
     });
@@ -125,7 +125,7 @@ fn toggle_anonymous_shortcut(cx: &mut App) {
     MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
 }
 
-fn open_message_buzz(window: &mut Window, cx: &mut App) {
+fn open_message_buzz(for_topic: bool, window: &mut Window, cx: &mut App) {
     if MessagesStore::global(cx)
         .read(cx)
         .active_channel_id()
@@ -136,13 +136,21 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
-    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+    let anonymous = {
+        let store = MessagesStore::global(cx).read(cx);
+        if for_topic {
+            store.topic_anonymous_mode()
+        } else {
+            store.is_anonymous_mode()
+        }
+    };
+    if anonymous {
         let message =
             SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
         Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
         return;
     }
-    MessageBuzzModal::open(locale, window, cx);
+    MessageBuzzModal::open(locale, for_topic, window, cx);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -469,6 +477,7 @@ pub struct MentionInput {
     encoding_recording: bool,
     _record_task: Option<RecordTask>,
     compact: bool,
+    for_topic: bool,
     file_menu_open: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
@@ -576,6 +585,17 @@ impl MentionInput {
         this
     }
 
+    pub fn new_for_topic(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(placeholder, settings, window, cx);
+        this.for_topic = true;
+        this
+    }
+
     pub fn new_compact(
         placeholder: impl Into<SharedString>,
         settings: Entity<Settings>,
@@ -673,6 +693,7 @@ impl MentionInput {
             encoding_recording: false,
             _record_task: None,
             compact,
+            for_topic: false,
             file_menu_open: false,
             overflow_to_file: false,
             overflow_counter: None,
@@ -867,9 +888,18 @@ impl MentionInput {
         cx.notify();
     }
 
+    fn composer_anonymous(&self, cx: &App) -> bool {
+        let store = MessagesStore::global(cx).read(cx);
+        if self.for_topic {
+            store.topic_anonymous_mode()
+        } else {
+            store.is_anonymous_mode()
+        }
+    }
+
     fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_menu_open = false;
-        if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        if self.composer_anonymous(cx) {
             let locale = self.settings.read(cx).language.clone();
             let message = SharedString::from(mezon_i18n::t(
                 &locale,
@@ -880,8 +910,9 @@ impl MentionInput {
             return;
         }
         let locale = SharedString::from(self.settings.read(cx).language.clone());
+        let for_topic = self.for_topic;
         window.defer(cx, move |window, cx| {
-            ShareLocationModal::open(locale, window, cx);
+            ShareLocationModal::open(locale, for_topic, window, cx);
         });
         cx.notify();
     }
@@ -889,8 +920,9 @@ impl MentionInput {
     fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let locale = SharedString::from(self.settings.read(cx).language.clone());
-        let show_poll = MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
-        let show_location = !MessagesStore::global(cx).read(cx).is_anonymous_mode();
+        let show_poll =
+            !self.for_topic && MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
+        let show_location = !self.composer_anonymous(cx);
         let text_color = theme.text_muted;
         let text_hover = theme.text_primary;
         let bg_hover = theme.bg_hover;
@@ -2307,6 +2339,14 @@ impl MentionInput {
         }
     }
 
+    fn on_open_buzz(&mut self, _: &OpenMessageBuzz, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.for_topic {
+            cx.propagate();
+            return;
+        }
+        open_message_buzz(true, window, cx);
+    }
+
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.accept(self.selected, window, cx);
@@ -2926,6 +2966,7 @@ impl Render for MentionInput {
             .w_full()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
+            .on_action(cx.listener(Self::on_open_buzz))
             .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(

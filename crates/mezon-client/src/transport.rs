@@ -5513,7 +5513,7 @@ impl MezonTransport {
             content: sent.text.clone(),
             content_raw: String::new(),
             content_tokens,
-            code: 0,
+            code: flags.message_code,
             sender_id: 0,
             sender_name: ack.username,
             avatar: String::new(),
@@ -8207,6 +8207,7 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
@@ -8242,6 +8243,7 @@ impl MezonTransport {
             is_public,
             mention_everyone,
             code: EPHEMERAL_MESSAGE_CODE,
+            topic_id,
             ..Default::default()
         };
         let envelope = realtime::Envelope {

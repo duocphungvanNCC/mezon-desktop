@@ -1112,6 +1112,7 @@ impl AppApi {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         self.transport
             .write_ephemeral_message(
@@ -1126,6 +1127,7 @@ impl AppApi {
                 emojis,
                 attachments,
                 reply,
+                topic_id,
             )
             .await
     }
