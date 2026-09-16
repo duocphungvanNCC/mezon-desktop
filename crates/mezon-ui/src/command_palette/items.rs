@@ -693,10 +693,19 @@ pub fn render_palette_row(
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .child(leading)
-            .child(label)
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(leading)
+                    .child(label),
+            )
             .children(subtext)
             .into_any_element(),
     };
@@ -780,13 +789,12 @@ fn render_palette_label(
         .items_center()
         .gap_1()
         .min_w_0()
-        .overflow_hidden()
-        .child(label)
+        .child(div().min_w_0().overflow_hidden().child(label))
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(15.))
-                .italic()
+                .font_weight(FontWeight::NORMAL)
                 .text_color(theme.danger_text)
                 .child("(busy)"),
         )
