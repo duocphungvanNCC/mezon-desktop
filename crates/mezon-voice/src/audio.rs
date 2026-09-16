@@ -493,6 +493,8 @@ impl AudioIo {
                 let mut capture_started = false;
                 let mut input_active = false;
                 let mut input_bluetooth = false;
+                let mut input_running = false;
+                let mut bluetooth_release_at: Option<Instant> = None;
                 let mut output_healthy = true;
                 let mut input_healthy = true;
                 let mut last_rebuild: Option<Instant> = None;
@@ -508,9 +510,28 @@ impl AudioIo {
                     None
                 };
                 loop {
-                    let cmd = match ctrl_rx.recv_timeout(AUDIO_HEALTH_CHECK_INTERVAL) {
+                    let wait = bluetooth_release_at
+                        .filter(|_| !input_active)
+                        .map(|release_at| release_at.saturating_duration_since(Instant::now()))
+                        .map_or(AUDIO_HEALTH_CHECK_INTERVAL, |remaining| {
+                            remaining.min(AUDIO_HEALTH_CHECK_INTERVAL)
+                        });
+                    let cmd = match ctrl_rx.recv_timeout(wait) {
                         Ok(cmd) => cmd,
                         Err(flume::RecvTimeoutError::Timeout) => {
+                            if !input_active
+                                && let Some(release_at) = bluetooth_release_at
+                                && Instant::now() >= release_at
+                            {
+                                bluetooth_release_at = None;
+                                if let Some(stream) = &in_stream
+                                    && let Err(e) = stream.pause()
+                                {
+                                    tracing::warn!("voice mic stream pause failed: {e}");
+                                }
+                                input_running = false;
+                                tracing::info!("bluetooth mic released after the mute grace period");
+                            }
                             match output_stall_recovery.poll(&output_heartbeat) {
                                 Some(StallAction::Recover(attempt)) => {
                                     tracing::warn!(
@@ -527,7 +548,7 @@ impl AudioIo {
                                 ),
                                 None => {}
                             }
-                            if capture_started && (input_active || input_bluetooth) {
+                            if capture_started && input_running {
                                 match input_stall_recovery.poll(&input_heartbeat) {
                                     Some(StallAction::Recover(attempt)) => {
                                         tracing::warn!(
@@ -575,14 +596,20 @@ impl AudioIo {
                             input_active = active;
                             input_stall_recovery.reset(&input_heartbeat);
                             if !active {
-                                if !input_bluetooth
-                                    && let Some(stream) = &in_stream
+                                if input_bluetooth && in_stream.is_some() {
+                                    bluetooth_release_at =
+                                        Some(Instant::now() + BLUETOOTH_MIC_RELEASE_GRACE);
+                                    continue;
+                                }
+                                if let Some(stream) = &in_stream
                                     && let Err(e) = stream.pause()
                                 {
                                     tracing::warn!("voice mic stream pause failed: {e}");
                                 }
+                                input_running = false;
                                 continue;
                             }
+                            bluetooth_release_at = None;
                             capture_started = true;
                             if in_stream.is_none() {
                                 request_macos_microphone_permission();
@@ -625,6 +652,7 @@ impl AudioIo {
                             {
                                 tracing::warn!("voice mic stream play failed: {e}");
                             }
+                            input_running = in_stream.is_some();
                         }
                         AudioCmd::SetInputDevice(device_id) => {
                             if input_healthy
@@ -660,9 +688,8 @@ impl AudioIo {
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
-                                    if (input_active || input_bluetooth)
-                                        && let Err(e) = stream.play()
-                                    {
+                                    input_running = input_active || bluetooth_release_at.is_some();
+                                    if input_running && let Err(e) = stream.play() {
                                         tracing::warn!("voice mic stream play failed: {e}");
                                     }
                                     in_stream = Some(stream);
@@ -778,9 +805,8 @@ impl AudioIo {
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
-                                    if (input_active || input_bluetooth)
-                                        && let Err(e) = stream.play()
-                                    {
+                                    input_running = input_active || bluetooth_release_at.is_some();
+                                    if input_running && let Err(e) = stream.play() {
                                         tracing::warn!("voice mic stream play failed: {e}");
                                     }
                                     in_stream = Some(stream);
@@ -979,6 +1005,7 @@ fn input_err_fn(hook: InputErrorHook) -> impl FnMut(cpal::StreamError) + Send + 
 }
 
 const STREAM_REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const BLUETOOTH_MIC_RELEASE_GRACE: Duration = Duration::from_secs(3);
 const STREAM_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const AUDIO_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const AUDIO_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1299,39 +1326,8 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         }
         return Err(anyhow!("audio input device is unavailable: {id}"));
     }
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("no audio input device available"))?;
-    Ok(prefer_built_in_over_bluetooth(host, device))
-}
-
-#[cfg(target_os = "macos")]
-fn prefer_built_in_over_bluetooth(host: &cpal::Host, device: cpal::Device) -> cpal::Device {
-    if !input_is_bluetooth(&device) {
-        return device;
-    }
-    let Some(built_in) = built_in_input(host) else {
-        return device;
-    };
-    let headset = device
-        .description()
-        .map(|description| description.to_string())
-        .unwrap_or_default();
-    let microphone = built_in
-        .description()
-        .map(|description| description.to_string())
-        .unwrap_or_default();
-    tracing::info!(
-        headset = %headset,
-        microphone = %microphone,
-        "system default mic is a Bluetooth headset; using the built-in microphone so the headset keeps its playback profile"
-    );
-    built_in
-}
-
-#[cfg(not(target_os = "macos"))]
-fn prefer_built_in_over_bluetooth(_host: &cpal::Host, device: cpal::Device) -> cpal::Device {
-    device
+    host.default_input_device()
+        .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
 fn default_output_id(host: &cpal::Host) -> Option<String> {
@@ -1514,15 +1510,6 @@ fn input_is_bluetooth(device: &cpal::Device) -> bool {
         transport == kAudioDeviceTransportTypeBluetooth
             || transport == kAudioDeviceTransportTypeBluetoothLE
     })
-}
-
-#[cfg(target_os = "macos")]
-fn built_in_input(host: &cpal::Host) -> Option<cpal::Device> {
-    use objc2_core_audio::kAudioDeviceTransportTypeBuiltIn;
-
-    host.input_devices()
-        .ok()?
-        .find(|device| transport_type(device) == Some(kAudioDeviceTransportTypeBuiltIn))
 }
 
 #[cfg(target_os = "macos")]

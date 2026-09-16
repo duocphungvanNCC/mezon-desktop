@@ -1009,7 +1009,23 @@ impl VoiceStore {
                 &entity,
                 |this, event, cx| this.handle_voice_interactive(event, cx),
             );
+            dispatch.on(RealtimeKind::AiAgentEnabled, &entity, |this, event, cx| {
+                this.handle_agent_enabled(event, cx)
+            });
         });
+    }
+
+    fn handle_agent_enabled(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::AiAgentEnabled(event) = event else {
+            return;
+        };
+        let channel_key = event.channel_id.to_string();
+        if event.enabled {
+            self.agent_channels.insert(channel_key);
+        } else {
+            self.agent_channels.remove(&channel_key);
+        }
+        cx.notify();
     }
 
     fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -2238,9 +2254,11 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        self.connection
-            .connected_channel()
-            .is_some_and(|(channel_id, _)| self.agent_channels.contains(channel_id))
+        let Some((channel_id, _)) = self.connection.connected_channel() else {
+            return false;
+        };
+        self.agent_channels.contains(channel_id)
+            || self.participants.iter().any(|p| p.is_agent && !p.is_local)
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
@@ -2926,6 +2944,11 @@ impl VoiceStore {
                 cx.notify();
             }
             VoiceEvent::Participants(mut list) => {
+                if let Some(config) = AppConfig::try_global(cx) {
+                    for participant in &mut list {
+                        participant.is_agent = config.is_voice_agent(&participant.identity);
+                    }
+                }
                 let refresh_scene = self.recording == RecordingState::Recording;
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();
@@ -3942,6 +3965,7 @@ impl VoiceStore {
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
+        self.agent_channels.clear();
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
