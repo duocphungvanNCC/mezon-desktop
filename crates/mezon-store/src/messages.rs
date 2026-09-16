@@ -2470,7 +2470,7 @@ impl MessagesStore {
         content_tokens: OutgoingContent,
         cx: &mut Context<Self>,
     ) {
-        if self.active_channel_id.is_none() {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
         let storage_id = self.reaction_storage_channel(message_id);
@@ -2517,7 +2517,7 @@ impl MessagesStore {
         let message_num = message_id.get();
         let (api_channel_id, api_topic_id, is_update_msg_topic) =
             if self.active_topic_id == Some(storage_id) {
-                (storage_id.get(), storage_id.get(), true)
+                (parent_channel_id.get(), storage_id.get(), true)
             } else {
                 (storage_id.get(), 0, false)
             };
@@ -2554,9 +2554,9 @@ impl MessagesStore {
     /// React `DeleteOgpButton`: drop it locally and re-send the message content
     /// without the `lk_ogp` token so it is gone for everyone.
     pub fn remove_message_ogp(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        if self.active_channel_id.is_none() {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
-        }
+        };
         let storage_id = self.reaction_storage_channel(message_id);
         let mode = self.mode;
         let is_public = self.is_public;
@@ -2597,7 +2597,7 @@ impl MessagesStore {
         let message_num = message_id.get();
         let (api_channel_id, api_topic_id, is_update_msg_topic) =
             if self.active_topic_id == Some(storage_id) {
-                (storage_id.get(), storage_id.get(), true)
+                (parent_channel_id.get(), storage_id.get(), true)
             } else {
                 (storage_id.get(), 0, false)
             };
@@ -4464,9 +4464,9 @@ impl MessagesStore {
         attachment_index: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.active_channel_id.is_none() {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
-        }
+        };
         let storage_id = self.reaction_storage_channel(message_id);
         let is_topic = self.active_topic_id == Some(storage_id);
         let mode = self.mode;
@@ -4503,7 +4503,7 @@ impl MessagesStore {
 
         let api = self.api.clone();
         let (api_channel_id, api_topic_id) = if is_topic {
-            (storage_id.get(), storage_id.get())
+            (parent_channel_id.get(), storage_id.get())
         } else {
             (storage_id.get(), 0)
         };
