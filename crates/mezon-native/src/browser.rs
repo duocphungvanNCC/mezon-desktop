@@ -108,6 +108,38 @@ pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Opens a Chromium app in an isolated process and blocks until that app window closes.
+pub fn open_url_managed_app_window(url: &str, key: &str) -> anyhow::Result<()> {
+    crate::ensure_http_url(url)?;
+    if app_sandbox_strips_launch_arguments() {
+        anyhow::bail!("managed app windows are unavailable in the macOS app sandbox");
+    }
+    let safe_key: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let profile = std::env::temp_dir()
+        .join("mezon-managed-apps")
+        .join(format!("{}-{safe_key}", std::process::id()));
+    std::fs::create_dir_all(&profile)?;
+    let result = match default_chromium_browser() {
+        Some(browser) => launch_managed_app_window(&browser, url, &profile),
+        None => Err(anyhow::anyhow!(
+            "a Chromium-based default browser is required"
+        )),
+    };
+    if let Err(error) = std::fs::remove_dir_all(&profile) {
+        tracing::debug!(path = %profile.display(), "managed browser profile cleanup failed: {error}");
+    }
+    result
+}
+
 fn app_sandbox_strips_launch_arguments() -> bool {
     cfg!(target_os = "macos") && std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
 }
@@ -117,6 +149,58 @@ fn silenced(command: &mut std::process::Command) -> &mut std::process::Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+}
+
+fn managed_switches(url: &str, profile: &Path) -> [String; 5] {
+    [
+        format!("--app={url}"),
+        format!("--user-data-dir={}", profile.display()),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-background-mode".into(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn launch_managed_app_window(browser: &Path, url: &str, profile: &Path) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new(browser);
+    command
+        .args(managed_switches(url, profile))
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    let status = silenced(&mut command).status()?;
+    anyhow::ensure!(status.success(), "managed browser exited with {status}");
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_managed_app_window(exec: &[String], url: &str, profile: &Path) -> anyhow::Result<()> {
+    let argv = exec_with_app_url(exec, url);
+    let Some((program, args)) = argv.split_first() else {
+        anyhow::bail!("browser desktop entry has an empty Exec line");
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .args(managed_switches(url, profile).into_iter().skip(1));
+    let status = silenced(&mut command).status()?;
+    anyhow::ensure!(status.success(), "managed browser exited with {status}");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_managed_app_window(browser: &Path, url: &str, profile: &Path) -> anyhow::Result<()> {
+    let name = browser
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("invalid browser bundle"))?;
+    let executable = browser.join("Contents").join("MacOS").join(name);
+    let mut command = std::process::Command::new(&executable);
+    command.args(managed_switches(url, profile));
+    let status = silenced(&mut command).status()?;
+    anyhow::ensure!(status.success(), "managed browser exited with {status}");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
