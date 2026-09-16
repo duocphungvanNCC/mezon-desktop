@@ -218,6 +218,7 @@ pub enum RealtimeEvent {
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
     ScreenShare(realtime::ScreenShareEvent),
+    AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -280,6 +281,7 @@ impl RealtimeEvent {
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
             Self::ScreenShare(_) => "ScreenShare",
+            Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -344,6 +346,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
+            realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))

@@ -333,6 +333,7 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
 /// and the snapshot is taken at write time so the latest state always wins.
 pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::App) {
+    mezon_audio::set_output_device(settings.read(cx).output_device_id.clone());
     let saver = cx.default_global::<SettingsSaver>();
     debug_assert!(
         saver.entity_id.is_none_or(|id| id == settings.entity_id()),
@@ -582,6 +583,7 @@ impl Settings {
     }
 
     pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
+        mezon_audio::set_output_device(entity.read(cx).output_device_id.clone());
         cx.set_global(GlobalSettings(entity.clone()));
     }
 

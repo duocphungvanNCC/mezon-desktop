@@ -85,6 +85,7 @@ pub struct AppConfig {
     pub webrtc_ice_servers_url: String,
     pub webrtc_ice_servers_username: String,
     pub webrtc_ice_servers_credential: String,
+    pub voice_agent_ids: Vec<String>,
 
     // ── Firebase / FCM ────────────────────────────────────────────────────────
     pub fcm_api_key: String,
@@ -166,6 +167,7 @@ impl AppConfig {
             webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
             webrtc_ice_servers_credential: String::new(),
+            voice_agent_ids: vec!["2037383744142184448".into()],
 
             fcm_api_key: String::new(),
             fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
@@ -314,6 +316,7 @@ impl AppConfig {
                 baked_env::NX_WEBRTC_ICESERVERS_CREDENTIAL,
                 &defaults.webrtc_ice_servers_credential,
             ),
+            voice_agent_ids: opt_list(baked_env::NX_VOICE_AGENT_ID, &defaults.voice_agent_ids),
 
             fcm_api_key: opt_str(baked_env::NX_CHAT_APP_FCM_API_KEY, &defaults.fcm_api_key),
             fcm_auth_domain: opt_str(
@@ -454,6 +457,10 @@ impl AppConfig {
         let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
+    }
+
+    pub fn is_voice_agent(&self, user_id: &str) -> bool {
+        self.voice_agent_ids.iter().any(|id| id == user_id)
     }
 
     pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
@@ -753,6 +760,18 @@ fn opt_str(value: Option<&'static str>, default: &str) -> String {
         .unwrap_or_else(|| default.to_owned())
 }
 
+fn opt_list(value: Option<&'static str>, default: &[String]) -> Vec<String> {
+    match normalize(value) {
+        Some(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => default.to_vec(),
+    }
+}
+
 fn opt_u16(value: Option<&'static str>, default: u16) -> u16 {
     normalize(value)
         .and_then(|v| v.parse().ok())
@@ -1048,6 +1067,26 @@ mod tests {
     fn imgproxy_url_empty_returns_empty() {
         let cfg = AppConfig::dev_defaults();
         assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
+    }
+
+    #[test]
+    fn voice_agent_ids_match_only_the_configured_ids() {
+        let cfg = AppConfig {
+            voice_agent_ids: vec!["1".into(), "2".into()],
+            ..AppConfig::dev_defaults()
+        };
+        assert!(cfg.is_voice_agent("1"));
+        assert!(cfg.is_voice_agent("2"));
+        assert!(!cfg.is_voice_agent("3"));
+        assert!(!cfg.is_voice_agent(""));
+        assert_eq!(AppConfig::dev_defaults().voice_agent_ids, ["2037383744142184448"]);
+    }
+
+    #[test]
+    fn opt_list_splits_comma_separated_ids_and_falls_back_to_defaults() {
+        assert_eq!(opt_list(Some(" 1, 2 ,,3 "), &[]), ["1", "2", "3"]);
+        assert_eq!(opt_list(Some("   "), &["9".to_string()]), ["9"]);
+        assert_eq!(opt_list(None, &["9".to_string()]), ["9"]);
     }
 
     #[test]

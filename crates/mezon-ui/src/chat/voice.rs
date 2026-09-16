@@ -1206,8 +1206,6 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     updated
 }
 
-const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
-
 fn resolve_cell_identity(
     cx: &App,
     clan_id: ClanId,
@@ -1217,10 +1215,11 @@ fn resolve_cell_identity(
     let (name, avatar_url, avatar_raw) =
         resolve_voice_identity(cx, clan_id, voice_members, &p.identity, &p.name);
     if p.is_agent {
+        let avatar = crate::util::voice_member::VOICE_AGENT_AVATAR_URL;
         (
             name,
-            crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL),
-            AGENT_AVATAR_URL.to_string(),
+            crate::util::imgproxy::avatar_url(cx, avatar),
+            avatar.to_string(),
         )
     } else {
         (name, avatar_url, avatar_raw)

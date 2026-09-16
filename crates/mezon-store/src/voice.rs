@@ -1033,7 +1033,23 @@ impl VoiceStore {
                 &entity,
                 |this, event, cx| this.handle_voice_interactive(event, cx),
             );
+            dispatch.on(RealtimeKind::AiAgentEnabled, &entity, |this, event, cx| {
+                this.handle_agent_enabled(event, cx)
+            });
         });
+    }
+
+    fn handle_agent_enabled(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::AiAgentEnabled(event) = event else {
+            return;
+        };
+        let channel_key = event.channel_id.to_string();
+        if event.enabled {
+            self.agent_channels.insert(channel_key);
+        } else {
+            self.agent_channels.remove(&channel_key);
+        }
+        cx.notify();
     }
 
     fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -1399,6 +1415,7 @@ impl VoiceStore {
     }
 
     fn play_join_sound(&mut self, cx: &mut Context<Self>) {
+        tracing::info!(cached = self.join_voice_player.is_some(), "join sound requested");
         if let Some(player) = &self.join_voice_player {
             player.play();
             return;
@@ -2326,9 +2343,11 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        self.connection
-            .connected_channel()
-            .is_some_and(|(channel_id, _)| self.agent_channels.contains(channel_id))
+        let Some((channel_id, _)) = self.connection.connected_channel() else {
+            return false;
+        };
+        self.agent_channels.contains(channel_id)
+            || self.participants.iter().any(|p| p.is_agent && !p.is_local)
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
@@ -2776,11 +2795,12 @@ impl VoiceStore {
                 if this.reconnect_token_fetches >= MEET_TOKEN_RETRY_LIMIT {
                     tracing::warn!(
                         fetches = this.reconnect_token_fetches,
-                        "voice reconnect token retry limit reached"
+                        "voice reconnect token retry limit reached; ending the call"
                     );
+                    this.teardown(None, cx);
+                    cx.notify();
                     return None;
                 }
-                this._reconnect_watch_task = None;
                 let snapshot = this.reconnect_snapshot(cx)?;
                 this.reconnect_token_fetches += 1;
                 Some(snapshot)
@@ -2965,6 +2985,10 @@ impl VoiceStore {
                 }
                 self.call_status = VoiceCallStatus::Stable;
             }
+            VoiceEvent::RoomSnapshot => {
+                self.awaiting_room_snapshot = false;
+                self.join_sound_baseline_set = true;
+            }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
                 self.awaiting_room_snapshot = true;
@@ -3009,6 +3033,11 @@ impl VoiceStore {
                 cx.notify();
             }
             VoiceEvent::Participants(mut list) => {
+                if let Some(config) = AppConfig::try_global(cx) {
+                    for participant in &mut list {
+                        participant.is_agent = config.is_voice_agent(&participant.identity);
+                    }
+                }
                 let refresh_scene = self.recording == RecordingState::Recording;
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();
@@ -3026,16 +3055,22 @@ impl VoiceStore {
                 if settling {
                     self.awaiting_room_snapshot = !list.iter().any(|p| !p.is_local);
                 }
-                let remote_joined = !settling
-                    && self.join_sound_baseline_set
-                    && list.iter().any(|p| {
-                        !p.is_local
-                            && !p.is_agent
-                            && !self
-                                .participants
-                                .iter()
-                                .any(|old| old.identity == p.identity)
-                    });
+                let remote_arrived = list.iter().any(|p| {
+                    !p.is_local
+                        && !p.is_agent
+                        && !self
+                            .participants
+                            .iter()
+                            .any(|old| old.identity == p.identity)
+                });
+                let remote_joined = !settling && self.join_sound_baseline_set && remote_arrived;
+                if remote_arrived && !remote_joined {
+                    tracing::info!(
+                        settling,
+                        baseline = self.join_sound_baseline_set,
+                        "remote participant arrived; join sound suppressed"
+                    );
+                }
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
@@ -4055,6 +4090,7 @@ impl VoiceStore {
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
+        self.agent_channels.clear();
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();

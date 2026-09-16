@@ -147,6 +147,7 @@ pub struct VoiceParticipant {
 #[derive(Clone, Debug)]
 pub enum VoiceEvent {
     Connected { room_name: String },
+    RoomSnapshot,
     Reconnecting,
     Reconnected,
     NetworkWeak,
@@ -525,6 +526,9 @@ async fn session_main(
                     SfuEvent::Peers(next) => {
                         peers = next;
                         emit!();
+                    }
+                    SfuEvent::RoomSnapshot => {
+                        let _ = evt_tx.send(VoiceEvent::RoomSnapshot);
                     }
                     SfuEvent::RemoteAudio { key, track } => {
                         remote_audio.insert(key, track.clone());
