@@ -6,6 +6,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
@@ -68,6 +69,7 @@ const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const PASTE_SAFETY_CAP_UTF16: usize = 100_000;
 const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 40.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * MAX_SUGGESTIONS as f32;
@@ -524,8 +526,34 @@ fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
     current_input.trim().is_empty() && json_string_utf16_len(pasted) > CONVERT_TO_FILE_THRESHOLD
 }
 
+fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'a str {
+    let current_len = current.encode_utf16().count();
+    if current_len >= cap {
+        return "";
+    }
+    let remaining = cap - current_len;
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in pasted.char_indices() {
+        let units = ch.len_utf16();
+        if used + units > remaining {
+            break;
+        }
+        used += units;
+        end = i + ch.len_utf8();
+    }
+    &pasted[..end]
+}
+
+fn next_converted_text_filename() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("converted-text-{pid}-{n}.txt")
+}
+
 fn write_text_as_pending_attachment(text: &str) -> Option<PendingAttachment> {
-    let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+    let filename = next_converted_text_filename();
     let path = std::env::temp_dir().join(&filename);
     if let Err(err) = std::fs::write(&path, text.as_bytes()) {
         tracing::warn!("failed to write converted text attachment: {err}");
@@ -843,16 +871,20 @@ impl MentionInput {
             && !text.is_empty()
             && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
         {
+            if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+                self.show_anonymous_convert_blocked(cx);
+                return None;
+            }
+            if self.pending_attachments.len() + 1 > MAX_FILE_ATTACHMENTS {
+                Self::show_upload_limit(AttachmentLimit::Count, window, cx);
+                return None;
+            }
             let Some(pending) = write_text_as_pending_attachment(&text) else {
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.toast(ToastKind::Error, "Failed to convert message to file", cx)
-                });
+                Self::show_convert_file_failed(cx);
                 return None;
             };
             let path = pending.path.clone();
-            let before = self.pending_attachments.len();
-            self.add_pending(vec![pending], window, cx);
-            if self.pending_attachments.len() == before {
+            if !self.add_pending(vec![pending], window, cx) {
                 let _ = std::fs::remove_file(&path);
                 return None;
             }
@@ -1071,9 +1103,11 @@ impl MentionInput {
         if text.is_empty() {
             return;
         }
-        if self.overflow_to_file {
-            let current = self.input.read(cx).value().to_string();
-            if should_convert_paste_to_file(&current, &text) {
+        let current = self.input.read(cx).value().to_string();
+        if self.overflow_to_file && should_convert_paste_to_file(&current, &text) {
+            if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+                self.show_anonymous_convert_blocked(cx);
+            } else {
                 if !current.is_empty() {
                     self.committed.clear();
                     self.reset_popup();
@@ -1086,8 +1120,12 @@ impl MentionInput {
                 return;
             }
         }
+        let pasted = trim_paste_to_utf16_cap(&current, &text, PASTE_SAFETY_CAP_UTF16);
+        if pasted.is_empty() {
+            return;
+        }
         self.input
-            .update(cx, |input, cx| input.insert_text(&text, window, cx));
+            .update(cx, |input, cx| input.insert_text(pasted, window, cx));
     }
 
     fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1095,12 +1133,16 @@ impl MentionInput {
             let pending = cx
                 .background_spawn(async move { write_text_as_pending_attachment(&text) })
                 .await;
-            if let Some(pending) = pending {
-                this.update_in(cx, |this, window, cx| {
-                    this.add_pending(vec![pending], window, cx)
-                })
-                .ok();
-            }
+            this.update_in(cx, |this, window, cx| match pending {
+                Some(pending) => {
+                    let path = pending.path.clone();
+                    if !this.add_pending(vec![pending], window, cx) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                None => Self::show_convert_file_failed(cx),
+            })
+            .ok();
         })
         .detach();
     }
@@ -1191,7 +1233,9 @@ impl MentionInput {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.encoding_recording = false;
                 match built {
-                    Ok(attachment) => this.add_pending(vec![attachment], window, cx),
+                    Ok(attachment) => {
+                        this.add_pending(vec![attachment], window, cx);
+                    }
                     Err(err) => tracing::warn!("voice recording failed: {err}"),
                 }
                 cx.notify();
@@ -1222,21 +1266,40 @@ impl MentionInput {
         });
     }
 
+    fn show_anonymous_convert_blocked(&self, cx: &mut Context<Self>) {
+        let locale = self.settings.read(cx).language.clone();
+        let message = SharedString::from(mezon_i18n::t(
+            &locale,
+            "common.cannotSendConvertedFileWithAnonymous",
+        ));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+    }
+
+    fn show_convert_file_failed(cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.toast(ToastKind::Error, "Failed to convert message to file", cx)
+        });
+    }
+
     fn add_pending(
         &mut self,
         candidates: Vec<PendingAttachment>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if candidates.is_empty() {
-            return;
+            return false;
         }
         match validate_batch(self.pending_attachments.len(), &candidates) {
             Ok(()) => {
                 self.pending_attachments.extend(candidates);
                 cx.notify();
+                true
             }
-            Err(limit) => Self::show_upload_limit(limit, window, cx),
+            Err(limit) => {
+                Self::show_upload_limit(limit, window, cx);
+                false
+            }
         }
     }
 
@@ -3090,8 +3153,9 @@ impl Render for MentionInput {
 #[cfg(test)]
 mod convert_tests {
     use super::{
-        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, content_payload_utf8_len,
-        json_string_utf16_len, should_convert_paste_to_file, write_text_as_pending_attachment,
+        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
+        content_payload_utf8_len, json_string_utf16_len, should_convert_paste_to_file,
+        trim_paste_to_utf16_cap, write_text_as_pending_attachment,
     };
 
     #[test]
@@ -3136,10 +3200,39 @@ mod convert_tests {
     fn write_text_pending_attachment_is_plain_txt() {
         let pending =
             write_text_as_pending_attachment("hello long text").expect("temp txt attachment");
+        let pid = std::process::id();
+        assert!(
+            pending
+                .filename
+                .starts_with(&format!("converted-text-{pid}-"))
+        );
         assert!(pending.filename.ends_with(".txt"));
         assert_eq!(pending.filetype, "text/plain");
         assert!(!pending.is_image);
         let _ = std::fs::remove_file(&pending.path);
+    }
+
+    #[test]
+    fn paste_into_draft_trims_to_safety_cap() {
+        let current = "a".repeat(10);
+        let pasted = "b".repeat(PASTE_SAFETY_CAP_UTF16);
+        let trimmed = trim_paste_to_utf16_cap(&current, &pasted, PASTE_SAFETY_CAP_UTF16);
+        assert_eq!(
+            current.encode_utf16().count() + trimmed.encode_utf16().count(),
+            PASTE_SAFETY_CAP_UTF16
+        );
+        assert!(trimmed.chars().all(|ch| ch == 'b'));
+        assert!(!should_convert_paste_to_file(&current, &pasted));
+    }
+
+    #[test]
+    fn paste_trim_keeps_full_chunk_under_cap() {
+        let current = "draft";
+        let pasted = "hello";
+        assert_eq!(
+            trim_paste_to_utf16_cap(current, pasted, PASTE_SAFETY_CAP_UTF16),
+            pasted
+        );
     }
 }
 
