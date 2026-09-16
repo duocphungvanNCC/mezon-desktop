@@ -58,11 +58,15 @@ fn surface_voice_toast(
 ) {
     let locale = root.cached_locale.clone();
     let toast = match event {
-        mezon_store::VoiceStoreEvent::RemovedFromChannel => {
+        mezon_store::VoiceStoreEvent::RemovedFromChannel(cause) => {
+            let key = match cause {
+                mezon_store::RemovalCause::Kicked => "channelVoice.removedFromChannel",
+                mezon_store::RemovalCause::AloneTimeout => "channelVoice.disconnectedAlone",
+            };
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
                     crate::components::primitives::ToastKind::Info,
-                    mezon_i18n::t(&locale, "channelVoice.removedFromChannel").to_string(),
+                    mezon_i18n::t(&locale, key).to_string(),
                     cx,
                 )
             });

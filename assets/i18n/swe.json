@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "Håll ned Mellanslag för att prata",
   "channelVoice.pushToTalk.holdingSpace": "Du pratar — släpp Mellanslag för att stänga av micken",
   "channelVoice.removedFromChannel": "Du har tagits bort från röstkanalen.",
+  "channelVoice.disconnectedAlone": "Du kopplades bort från röstkanalen eftersom du var ensam i den för länge.",
   "channelVoice.kickMemberFailed": "Kunde inte ta bort medlem från tråd",
   "channelVoice.kickModal.content": "Är du säker på att du vill ta bort \"{{userName}}\" från röstkanal?",
   "channelVoice.kickModal.kick": "Ta bort",

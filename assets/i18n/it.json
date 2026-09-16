@@ -1090,6 +1090,7 @@
   "channelVoice.pushToTalk.holdSpace": "Tieni premuto Spazio per parlare",
   "channelVoice.pushToTalk.holdingSpace": "Stai parlando — rilascia Spazio per silenziare",
   "channelVoice.removedFromChannel": "Sei stato rimosso dal canale vocale.",
+  "channelVoice.disconnectedAlone": "Sei stato disconnesso dal canale vocale perché sei rimasto da solo troppo a lungo.",
   "channelVoice.kickMemberFailed": "Impossibile rimuovere il membro",
   "channelVoice.kickModal.content": "Sei sicuro di voler rimuovere \"{{userName}}\" dal canale vocale?",
   "channelVoice.kickModal.kick": "Rimuovi",

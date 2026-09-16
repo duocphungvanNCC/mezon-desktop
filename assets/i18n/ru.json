@@ -1099,6 +1099,7 @@
   "channelVoice.pushToTalk.holdSpace": "Удерживайте Пробел, чтобы говорить",
   "channelVoice.pushToTalk.holdingSpace": "Вы говорите — отпустите Пробел, чтобы выключить микрофон",
   "channelVoice.removedFromChannel": "Вас удалили из голосового канала.",
+  "channelVoice.disconnectedAlone": "Вы были отключены от голосового канала, потому что слишком долго находились в нём одни.",
   "channelVoice.kickMemberFailed": "Не удалось удалить участника",
   "channelVoice.kickModal.content": "Пожалуйста, подтвердите, если Вы хотите выгнать \"{{userName}}\"?",
   "channelVoice.kickModal.kick": "Выгнать",
