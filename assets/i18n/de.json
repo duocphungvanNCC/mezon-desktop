@@ -4104,6 +4104,7 @@
   "setting.logOut": "Abmelden",
   "setting.logOutPopup.description": "Möchtest du dich wirklich abmelden?",
   "setting.logOutPopup.noConfirm": "Nein",
+  "setting.logOutPopup.title": "Abmelden",
   "setting.logOutPopup.yesConfirm": "Ja",
   "setting.notifications.hideContent": "Benachrichtigungsinhalt ausblenden",
   "setting.notifications.hideContentDesc": "Wenn aktiviert, wird der Nachrichteninhalt in Benachrichtigungs-Pop-ups und auf dem Sperrbildschirm ausgeblendet.",

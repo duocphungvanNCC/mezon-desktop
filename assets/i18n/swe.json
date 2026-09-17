@@ -4104,6 +4104,7 @@
   "setting.logOut": "Logga ut",
   "setting.logOutPopup.description": "Är du säker på att du vill logga ut?",
   "setting.logOutPopup.noConfirm": "Nej",
+  "setting.logOutPopup.title": "Logga ut",
   "setting.logOutPopup.yesConfirm": "Ja",
   "setting.notifications.hideContent": "Dölj aviseringsinnehåll",
   "setting.notifications.hideContentDesc": "När det är aktiverat döljs meddelandeinnehållet i aviseringspopuppar och på låsskärmen.",

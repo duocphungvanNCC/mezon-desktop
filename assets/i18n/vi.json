@@ -4104,6 +4104,7 @@
   "setting.logOut": "Đăng xuất",
   "setting.logOutPopup.description": "Bạn có chắc chắn muốn đăng xuất không?",
   "setting.logOutPopup.noConfirm": "Không",
+  "setting.logOutPopup.title": "Đăng xuất",
   "setting.logOutPopup.yesConfirm": "Có",
   "setting.notifications.hideContent": "Ẩn nội dung thông báo",
   "setting.notifications.hideContentDesc": "Khi bật, nội dung tin nhắn sẽ bị ẩn khỏi popup thông báo và màn hình khóa.",

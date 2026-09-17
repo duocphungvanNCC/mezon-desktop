@@ -4104,6 +4104,7 @@
   "setting.logOut": "로그아웃",
   "setting.logOutPopup.description": "로그아웃하시겠습니까?",
   "setting.logOutPopup.noConfirm": "아니요",
+  "setting.logOutPopup.title": "로그아웃",
   "setting.logOutPopup.yesConfirm": "네",
   "setting.notifications.hideContent": "알림 내용 숨기기",
   "setting.notifications.hideContentDesc": "켜면 알림 팝업과 잠금 화면에서 메시지 내용이 숨겨집니다.",

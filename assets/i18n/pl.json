@@ -4103,6 +4103,7 @@
   "setting.logOut": "Wyloguj",
   "setting.logOutPopup.description": "Czy na pewno chcesz się wylogować?",
   "setting.logOutPopup.noConfirm": "Nie",
+  "setting.logOutPopup.title": "Wyloguj",
   "setting.logOutPopup.yesConfirm": "Tak",
   "setting.notifications.hideContent": "Ukryj treść powiadomień",
   "setting.notifications.hideContentDesc": "Po włączeniu treść wiadomości będzie ukryta w powiadomieniach i na ekranie blokady.",

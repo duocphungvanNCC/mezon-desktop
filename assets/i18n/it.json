@@ -4104,6 +4104,7 @@
   "setting.logOut": "Esci",
   "setting.logOutPopup.description": "Sei sicuro di voler uscire?",
   "setting.logOutPopup.noConfirm": "No",
+  "setting.logOutPopup.title": "Disconnetti",
   "setting.logOutPopup.yesConfirm": "Sì",
   "setting.notifications.hideContent": "Nascondi contenuto delle notifiche",
   "setting.notifications.hideContentDesc": "Se attivo, il contenuto dei messaggi viene nascosto nei popup di notifica e nella schermata di blocco.",

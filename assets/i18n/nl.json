@@ -4103,6 +4103,7 @@
   "setting.logOut": "Uitloggen",
   "setting.logOutPopup.description": "Weet je zeker dat je wilt uitloggen?",
   "setting.logOutPopup.noConfirm": "Nee",
+  "setting.logOutPopup.title": "Uitloggen",
   "setting.logOutPopup.yesConfirm": "Ja",
   "setting.notifications.hideContent": "Meldingsinhoud verbergen",
   "setting.notifications.hideContentDesc": "Indien ingeschakeld wordt de berichtinhoud verborgen in meldingen en op het vergrendelscherm.",
