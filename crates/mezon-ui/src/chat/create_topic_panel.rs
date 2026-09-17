@@ -17,6 +17,12 @@ use crate::theme::ActiveTheme;
 
 const PANEL_WIDTH: f32 = 510.;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ComposerTarget {
+    topic_id: Option<i64>,
+    origin_id: Option<MessageId>,
+}
+
 pub struct TopicPanel {
     settings: Entity<Settings>,
     mention_input: Entity<MentionInput>,
@@ -24,6 +30,7 @@ pub struct TopicPanel {
     typing: Entity<ChannelTyping>,
     topic_timeline: Entity<ChannelMessages>,
     reply_target_id: Option<MessageId>,
+    composer_target: Option<ComposerTarget>,
     _subs: Vec<Subscription>,
 }
 
@@ -59,18 +66,19 @@ impl TopicPanel {
         subs.push(cx.subscribe_in(
             &TopicsStore::global(cx),
             window,
-            |this, store, event: &TopicsEvent, window, cx| {
-                if !matches!(event, TopicsEvent::ReplyTargetChanged) {
-                    return;
+            |this, store, event: &TopicsEvent, window, cx| match event {
+                TopicsEvent::Closed => this.sync_composer_target(window, cx),
+                TopicsEvent::ReplyTargetChanged => {
+                    let reply_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
+                    if reply_id.is_some() && reply_id != this.reply_target_id {
+                        let input = this.mention_input.clone();
+                        window.defer(cx, move |window, cx| {
+                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                        });
+                    }
+                    this.reply_target_id = reply_id;
                 }
-                let reply_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
-                if reply_id.is_some() && reply_id != this.reply_target_id {
-                    let input = this.mention_input.clone();
-                    window.defer(cx, move |window, cx| {
-                        input.update(cx, |input, cx| input.focus_input(window, cx));
-                    });
-                }
-                this.reply_target_id = reply_id;
+                TopicsEvent::Opened | TopicsEvent::Updated | TopicsEvent::ReplySent => {}
             },
         ));
         subs.push(cx.subscribe_in(
@@ -117,8 +125,35 @@ impl TopicPanel {
             typing,
             topic_timeline,
             reply_target_id: None,
+            composer_target: None,
             _subs: subs,
         }
+    }
+
+    fn sync_composer_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = {
+            let topics = TopicsStore::global(cx).read(cx);
+            ComposerTarget {
+                topic_id: topics.active_topic_id(),
+                origin_id: topics.origin_message().map(|origin| origin.id),
+            }
+        };
+        let previous = self.composer_target.replace(next);
+        if previous == Some(next) {
+            return;
+        }
+        let created_under_composer = previous.is_some_and(|previous| {
+            previous.topic_id.is_none()
+                && previous.origin_id.is_some()
+                && previous.origin_id == next.origin_id
+        });
+        self.mention_input
+            .update(cx, |input, cx| match next.topic_id {
+                Some(topic_id) if created_under_composer => {
+                    input.adopt_channel(ChannelId(topic_id))
+                }
+                topic_id => input.bind_channel(topic_id.map(ChannelId), window, cx),
+            });
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -178,7 +213,7 @@ impl TopicPanel {
 }
 
 impl Render for TopicPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (topic_id, error) = {
             let topics = TopicsStore::global(cx).read(cx);
             (
@@ -187,6 +222,7 @@ impl Render for TopicPanel {
             )
         };
 
+        self.sync_composer_target(window, cx);
         self.typing.update(cx, |typing, cx| {
             typing.sync(topic_id.map(ChannelId), cx);
         });

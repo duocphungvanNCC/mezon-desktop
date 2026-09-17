@@ -642,8 +642,9 @@ Parameters: none.",
 Report what the open topic panel holds.
 
 Returns panel_open, topic_id, origin_message_id, loaded_count, has_more_top,
-loading_more and the panel list's item_count / first_visible_index / at_bottom.
-has_more_top drives topic paging the way get_scroll_state does for a channel.
+loading_more, the panel list's item_count / first_visible_index / at_bottom, and the
+topic composer's text / attachments. has_more_top drives topic paging the way
+get_scroll_state does for a channel.
 
 Parameters: none.",
         write: false,

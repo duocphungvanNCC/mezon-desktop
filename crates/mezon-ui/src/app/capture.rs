@@ -457,8 +457,14 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
     let (item_count, first_visible, at_bottom) = topic_panel(cx)
         .map(|(_, timeline)| timeline.read(cx).viewport_state())
         .unwrap_or((0, 0, false));
-    let attachments = topic_panel(cx)
-        .map(|(composer, _)| composer.read(cx).probe_attachments())
+    let (text, attachments) = topic_panel(cx)
+        .map(|(composer, _)| {
+            let composer = composer.read(cx);
+            (
+                composer.probe_text(cx).to_string(),
+                composer.probe_attachments(),
+            )
+        })
         .unwrap_or_default();
     Ok(json!({
         // The store's flag and the mounted view are two different things: an
@@ -479,6 +485,7 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         "at_bottom": at_bottom,
         // Same reason as composer_state: topic_drop_paths returns before the file
         // is read, so this is what says the next topic_submit will carry it.
+        "text": text,
         "attachments": attachments,
     }))
 }

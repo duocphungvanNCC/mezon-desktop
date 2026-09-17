@@ -802,7 +802,7 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.draft_channel == channel_id {
+        if channel_id.is_some() && self.draft_channel == channel_id {
             return;
         }
         let Some(store) = ComposeStore::try_global(cx) else {
@@ -833,6 +833,10 @@ impl MentionInput {
         });
         self.draft_channel = channel_id;
         self.apply_draft(incoming.unwrap_or_default(), window, cx);
+    }
+
+    pub fn adopt_channel(&mut self, channel_id: ChannelId) {
+        self.draft_channel = Some(channel_id);
     }
 
     fn take_draft(&mut self, cx: &mut Context<Self>) -> Option<ComposeDraft> {
