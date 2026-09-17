@@ -31,7 +31,7 @@ impl ChatSending {
         });
     }
 
-    pub fn send_to_bots(
+    pub fn send_to_bot(
         content: impl Into<String>,
         content_tokens: OutgoingContent,
         attachments: Vec<OutgoingAttachment>,
@@ -44,7 +44,7 @@ impl ChatSending {
         }
         let (uid, uname) = Self::current_user(auth_state, cx);
         MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_message_to_bots(content, uid, uname, content_tokens, attachments, cx);
+            store.send_message_to_bot(content, uid, uname, content_tokens, attachments, cx);
         });
     }
 

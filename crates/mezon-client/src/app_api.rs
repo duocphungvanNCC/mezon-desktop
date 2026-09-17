@@ -1134,7 +1134,7 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn send_ephemeral_message_to_bots(
+    pub async fn send_ephemeral_message_to_bot(
         &self,
         clan_id: i64,
         channel_id: i64,
@@ -1149,7 +1149,7 @@ impl AppApi {
         topic_id: i64,
     ) -> Result<mezon_proto::realtime::ChannelMessageAck> {
         self.transport
-            .send_ephemeral_message_to_bots(
+            .send_ephemeral_message_to_bot(
                 clan_id,
                 channel_id,
                 content,

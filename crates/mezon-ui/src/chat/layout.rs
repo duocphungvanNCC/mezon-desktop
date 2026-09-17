@@ -2059,7 +2059,7 @@ impl ChatLayout {
             .update(cx, |mention_input, _| mention_input.take_flash_command())
             .is_some()
         {
-            crate::chat::ChatSending::send_to_bots(
+            crate::chat::ChatSending::send_to_bot(
                 content,
                 content_tokens,
                 attachments,

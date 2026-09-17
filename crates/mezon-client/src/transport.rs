@@ -8296,7 +8296,7 @@ impl MezonTransport {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn send_ephemeral_message_to_bots(
+    pub async fn send_ephemeral_message_to_bot(
         &self,
         clan_id: i64,
         channel_id: i64,
@@ -8329,7 +8329,7 @@ impl MezonTransport {
         }
         .encode_to_vec();
         let response = self
-            .send_api_request_over_http("SendEphemeralMessageToBots", body)
+            .send_api_request_over_http("SendEphemeralMessageToBot", body)
             .await?;
         Ok(realtime::ChannelMessageAck::decode(response.as_slice())?)
     }
