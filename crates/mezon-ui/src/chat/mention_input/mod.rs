@@ -18,14 +18,14 @@ use gpui::{
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
-    AccountEvent, AccountStore, AppConfig, AudioStore, BadgeService, Channel, ChannelEvent,
-    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList,
-    ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind,
-    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
-    GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
-    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview,
-    fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
+    AccountEvent, AccountStore, AppConfig, AudioStore, AuthState, BadgeService, Channel,
+    ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
+    ClanList, ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken,
+    ComposeTokenKind, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
+    GroupMembersEvent, GroupMembersStore, LoginStore, MENTION_HERE_USER_ID, MessageSpan,
+    MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId,
+    fetch_invite_preview, fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -504,6 +504,7 @@ pub struct MentionInput {
     converting_to_file: bool,
     last_content: SharedString,
     draft_channel: Option<ChannelId>,
+    bind_generation: u64,
     suppress_typing: bool,
     ogp_preview: Option<OgpResult>,
     ogp_url: Option<String>,
@@ -713,7 +714,17 @@ impl MentionInput {
                 }
             },
         );
-        let store_subs = Self::subscribe_pool_sources(cx);
+        let mut store_subs = Self::subscribe_pool_sources(cx);
+        if let Some(login) = LoginStore::try_global(cx) {
+            let auth_state = login.read(cx).auth_state();
+            store_subs.push(
+                cx.observe_in(&auth_state, window, |this, auth_state, window, cx| {
+                    if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                        this.forget_draft(window, cx);
+                    }
+                }),
+            );
+        }
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
@@ -766,6 +777,7 @@ impl MentionInput {
             converting_to_file: false,
             last_content: SharedString::default(),
             draft_channel: None,
+            bind_generation: 0,
             suppress_typing: false,
             ogp_preview: None,
             ogp_url: None,
@@ -802,9 +814,10 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.draft_channel == channel_id {
+        if channel_id.is_some() && self.draft_channel == channel_id {
             return;
         }
+        self.bind_generation = self.bind_generation.wrapping_add(1);
         let Some(store) = ComposeStore::try_global(cx) else {
             self.draft_channel = channel_id;
             self.apply_draft(ComposeDraft::default(), window, cx);
@@ -835,12 +848,42 @@ impl MentionInput {
         self.apply_draft(incoming.unwrap_or_default(), window, cx);
     }
 
+    pub fn adopt_channel(
+        &mut self,
+        channel_id: ChannelId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.draft_channel = Some(channel_id);
+        if self.has_content(cx) {
+            return;
+        }
+        let stored = ComposeStore::try_global(cx)
+            .and_then(|store| store.update(cx, |store, _| store.take_draft(channel_id)));
+        if let Some(draft) = stored {
+            self.apply_draft(draft, window, cx);
+        }
+    }
+
+    fn forget_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.draft_channel.is_none() && !self.has_content(cx) {
+            return;
+        }
+        self.draft_channel = None;
+        self.bind_generation = self.bind_generation.wrapping_add(1);
+        self.apply_draft(ComposeDraft::default(), window, cx);
+    }
+
+    fn has_content(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().trim().is_empty() || !self.pending_attachments.is_empty()
+    }
+
     fn take_draft(&mut self, cx: &mut Context<Self>) -> Option<ComposeDraft> {
-        let text = self.input.read(cx).value().to_string();
-        let attachments = std::mem::take(&mut self.pending_attachments);
-        if text.trim().is_empty() && attachments.is_empty() {
+        if !self.has_content(cx) {
             return None;
         }
+        let text = self.input.read(cx).value().to_string();
+        let attachments = std::mem::take(&mut self.pending_attachments);
         let tokens = self
             .committed
             .iter()
@@ -1191,7 +1234,7 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) {
         self.converting_to_file = send_when_ready;
-        let channel = self.draft_channel;
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move { write_text_as_pending_attachment(&text) })
@@ -1205,7 +1248,9 @@ impl MentionInput {
                 let path = pending.path.clone();
                 // The composer moved to another channel while the file was being written: the
                 // text is still in that channel's draft, so drop the file rather than misfile it.
-                if this.draft_channel != channel || !this.add_pending(vec![pending], window, cx) {
+                if this.bind_generation != generation
+                    || !this.add_pending(vec![pending], window, cx)
+                {
                     let _ = std::fs::remove_file(&path);
                     return;
                 }
