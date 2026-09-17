@@ -86,8 +86,43 @@ fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedStrin
     labels.into_iter().map(Into::into).collect()
 }
 
-fn event_default_end_minutes(start_minutes: u32) -> u32 {
-    (start_minutes + 60).min(23 * 60 + 45)
+fn event_default_end_seconds(start_seconds: u32, time_values: &[u32]) -> Option<u32> {
+    let last = *time_values.last()?;
+    (start_seconds < last).then(|| (start_seconds + 3600).min(last))
+}
+
+fn event_selection_changed<T: PartialEq>(previous: &mut T, selected: T) -> bool {
+    std::mem::replace(previous, selected) != *previous
+}
+
+fn event_date_selection_changed(
+    previous: &mut Option<chrono::NaiveDate>,
+    event: &DatePickerEvent,
+) -> bool {
+    match event {
+        DatePickerEvent::Change(date) => event_selection_changed(previous, *date),
+        DatePickerEvent::Opened => false,
+    }
+}
+
+fn event_schedule_timestamps(
+    original: Option<(u32, u32)>,
+    schedule_dirty: bool,
+    date: chrono::NaiveDate,
+    start_seconds: u32,
+    end_seconds: u32,
+) -> Option<(u32, u32)> {
+    if !schedule_dirty && let Some(original) = original {
+        return Some(original);
+    }
+    let timestamp = |seconds| {
+        let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, 0)?;
+        Local
+            .from_local_datetime(&date.and_time(time))
+            .single()
+            .map(|dt| dt.timestamp().max(0) as u32)
+    };
+    Some((timestamp(start_seconds)?, timestamp(end_seconds)?))
 }
 
 pub enum EventSelectEvent {
@@ -109,6 +144,7 @@ struct EventSelect {
     placeholder: SharedString,
     no_results: SharedString,
     placement: EventSelectPlacement,
+    selectable_range: Option<std::ops::Range<usize>>,
 }
 
 impl EventEmitter<EventSelectEvent> for EventSelect {}
@@ -124,6 +160,7 @@ impl EventSelect {
             placeholder: SharedString::default(),
             no_results: SharedString::default(),
             placement: EventSelectPlacement::Down,
+            selectable_range: None,
         }
     }
 
@@ -149,6 +186,16 @@ impl EventSelect {
 
     fn selected(&self) -> Option<usize> {
         self.selected
+    }
+
+    fn selectable_indices(&self) -> Vec<usize> {
+        (0..self.items.len())
+            .filter(|index| {
+                self.selectable_range
+                    .as_ref()
+                    .is_none_or(|range| range.contains(index))
+            })
+            .collect()
     }
 
     fn value(&self) -> Option<&SharedString> {
@@ -182,12 +229,38 @@ impl Render for EventSelect {
         let close_entity = cx.weak_entity();
         let select_entity = cx.weak_entity();
         let next_open = !self.open;
+        let indices = self.selectable_indices();
+        let selected = self
+            .selected
+            .and_then(|index| indices.iter().position(|value| *value == index));
+        let placeholder = self
+            .value()
+            .cloned()
+            .unwrap_or_else(|| self.placeholder.clone());
+        let (items, icons) = if self.selectable_range.is_some() {
+            (
+                Rc::new(
+                    indices
+                        .iter()
+                        .map(|index| self.items[*index].clone())
+                        .collect(),
+                ),
+                Rc::new(
+                    indices
+                        .iter()
+                        .map(|index| self.icons.get(*index).copied().flatten())
+                        .collect(),
+                ),
+            )
+        } else {
+            (self.items.clone(), self.icons.clone())
+        };
         Dropdown::new(self.id.clone())
-            .shared_items(self.items.clone())
-            .shared_icons(self.icons.clone())
-            .selected(self.selected)
+            .shared_items(items)
+            .shared_icons(icons)
+            .selected(selected)
             .open(self.open)
-            .placeholder(self.placeholder.clone())
+            .placeholder(placeholder)
             .no_results(self.no_results.clone())
             .placement(match self.placement {
                 EventSelectPlacement::Up => DropdownPlacement::Up,
@@ -213,6 +286,7 @@ impl Render for EventSelect {
                     .ok();
             })
             .on_select(move |index, _, cx| {
+                let index = indices[index];
                 select_entity
                     .update(cx, |select, cx| {
                         select.selected = Some(index);
@@ -252,6 +326,10 @@ pub struct CreateEventModal {
     _create_task: Option<Task<()>>,
     _cover_task: Option<Task<()>>,
     original_event: Option<ClanEventItem>,
+    schedule_dirty: bool,
+    last_schedule_date: Option<chrono::NaiveDate>,
+    last_start_slot: Option<usize>,
+    last_end_slot: Option<usize>,
 }
 
 impl Focusable for CreateEventModal {
@@ -357,8 +435,9 @@ impl CreateEventModal {
         let today = now.date_naive();
         let start_day = start_at.date_naive();
         let start_minutes = start_at.hour() * 60;
-        let end_minutes = event_default_end_minutes(start_minutes);
         let time_values: Vec<u32> = (0..96).map(|slot| slot * 15 * 60).collect();
+        let end_seconds = event_default_end_seconds(start_minutes * 60, &time_values)
+            .expect("rounded start time has a later same-day slot");
         let time_labels: Vec<SharedString> = time_values
             .iter()
             .map(|seconds| format!("{:02}:{:02}", seconds / 3600, seconds % 3600 / 60).into())
@@ -371,10 +450,15 @@ impl CreateEventModal {
             EventSelect::new("event-end-time", time_labels).placement(EventSelectPlacement::Down)
         });
         start_time.update(cx, |select, cx| {
+            select.selectable_range = Some(0..time_values.len() - 1);
             select.set_selected(Some((start_minutes / 15) as usize), cx)
         });
         end_time.update(cx, |select, cx| {
-            select.set_selected(Some((end_minutes / 15) as usize), cx)
+            select.selectable_range = Some((start_minutes / 15) as usize + 1..time_values.len());
+            select.set_selected(
+                time_values.iter().position(|value| *value == end_seconds),
+                cx,
+            )
         });
         let start_date = cx.new(|cx| {
             let mut picker = DatePicker::new(cx);
@@ -429,19 +513,32 @@ impl CreateEventModal {
             }),
         );
         subscriptions.push(
-            cx.subscribe(&start_time, |this, _, _: &EventSelectEvent, cx| {
+            cx.subscribe(&start_time, |this, _, event: &EventSelectEvent, cx| {
+                let EventSelectEvent::Change(index) = event;
+                if event_selection_changed(&mut this.last_start_slot, Some(*index)) {
+                    this.schedule_dirty = true;
+                    this.refresh_end_time_options(true, cx);
+                    this.last_end_slot = this.end_time.read(cx).selected();
+                }
                 this.error = None;
                 cx.notify();
             }),
         );
         subscriptions.push(
-            cx.subscribe(&end_time, |this, _, _: &EventSelectEvent, cx| {
+            cx.subscribe(&end_time, |this, _, event: &EventSelectEvent, cx| {
+                let EventSelectEvent::Change(index) = event;
+                this.schedule_dirty |=
+                    event_selection_changed(&mut this.last_end_slot, Some(*index));
                 this.error = None;
                 cx.notify();
             }),
         );
         subscriptions.push(
             cx.subscribe(&start_date, |this, _, event: &DatePickerEvent, cx| {
+                if !event_date_selection_changed(&mut this.last_schedule_date, event) {
+                    return;
+                }
+                this.schedule_dirty = true;
                 if let DatePickerEvent::Change(Some(date)) = event {
                     let labels = event_repeat_labels(&this.settings.read(cx).language, *date);
                     this.repeat_select
@@ -454,6 +551,8 @@ impl CreateEventModal {
         subscriptions.push(cx.observe(&channels_entity, |this, _, cx| {
             this.refresh_channels(cx);
         }));
+
+        let last_end_slot = end_time.read(cx).selected();
 
         Self {
             clan_id,
@@ -482,6 +581,10 @@ impl CreateEventModal {
             _create_task: None,
             _cover_task: None,
             original_event: None,
+            schedule_dirty: false,
+            last_schedule_date: Some(start_day),
+            last_start_slot: Some((start_minutes / 15) as usize),
+            last_end_slot,
         }
     }
 
@@ -563,7 +666,28 @@ impl CreateEventModal {
             .update(cx, |input, cx| input.set_value(&event.description, cx));
         modal.cover_url = (!event.logo.is_empty()).then(|| event.logo.clone().into());
         modal.original_event = Some(event);
+        modal.refresh_end_time_options(false, cx);
+        modal.last_schedule_date = modal.start_date.read(cx).selected();
+        modal.last_start_slot = modal.start_time.read(cx).selected();
+        modal.last_end_slot = modal.end_time.read(cx).selected();
         modal
+    }
+
+    fn refresh_end_time_options(&mut self, adjust_selection: bool, cx: &mut Context<Self>) {
+        let Some(start_index) = self.start_time.read(cx).selected() else {
+            return;
+        };
+        let default_end =
+            event_default_end_seconds(self.time_values[start_index], &self.time_values)
+                .and_then(|seconds| self.time_values.iter().position(|value| *value == seconds));
+        let len = self.time_values.len();
+        self.end_time.update(cx, |select, cx| {
+            select.selectable_range = Some(start_index + 1..len);
+            if adjust_selection && select.selected.is_none_or(|end| end <= start_index) {
+                select.set_selected(default_end, cx);
+            }
+            cx.notify();
+        });
     }
 
     fn tr(&self, key: &'static str, cx: &App) -> String {
@@ -658,17 +782,15 @@ impl CreateEventModal {
         let start_date = self.start_date.read(cx).selected()?;
         let start_seconds = *self.time_values.get(self.start_time.read(cx).selected()?)?;
         let end_seconds = *self.time_values.get(self.end_time.read(cx).selected()?)?;
-        let local_timestamp = |date: chrono::NaiveDate, seconds: u32| {
-            let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, 0)?;
-            Local
-                .from_local_datetime(&date.and_time(time))
-                .single()
-                .map(|dt| dt.timestamp().max(0) as u32)
-        };
-        Some((
-            local_timestamp(start_date, start_seconds)?,
-            local_timestamp(start_date, end_seconds)?,
-        ))
+        event_schedule_timestamps(
+            self.original_event
+                .as_ref()
+                .map(|event| (event.start_time_seconds, event.end_time_seconds)),
+            self.schedule_dirty,
+            start_date,
+            start_seconds,
+            end_seconds,
+        )
     }
     fn topic_is_valid(&self, cx: &App) -> bool {
         let topic = self.topic.read(cx).value().trim();
@@ -1221,7 +1343,7 @@ impl CreateEventModal {
                 )
             })
             .child(div().mt_3().child(self.date_field(
-                "eventCreator.fields.startDate.title",
+                "eventCreator.fields.date.title",
                 self.start_date.clone(),
                 cx,
             )))
@@ -1240,6 +1362,38 @@ impl CreateEventModal {
                         self.end_time.clone(),
                         cx,
                     )),
+            )
+            .when_some(
+                self.original_event.as_ref().filter(|event| {
+                    let start = Local
+                        .timestamp_opt(event.start_time_seconds as i64, 0)
+                        .single();
+                    let end = Local
+                        .timestamp_opt(event.end_time_seconds as i64, 0)
+                        .single();
+                    !self.schedule_dirty
+                        && start
+                            .zip(end)
+                            .is_some_and(|(start, end)| start.date_naive() != end.date_naive())
+                }),
+                |d, event| {
+                    let end = Local
+                        .timestamp_opt(event.end_time_seconds as i64, 0)
+                        .single()
+                        .map(|end| end.format("%d/%m/%Y %H:%M").to_string())
+                        .unwrap_or_default();
+                    d.child(
+                        div()
+                            .mt_1()
+                            .text_size(px(12.))
+                            .text_color(theme.text_secondary)
+                            .child(format!(
+                                "{}: {}",
+                                self.tr("eventCreator.fields.endDate.title", cx),
+                                end
+                            )),
+                    )
+                },
             )
             .child(
                 div()
@@ -1673,8 +1827,12 @@ pub fn open_edit_event_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::{event_default_end_minutes, event_repeat_labels};
-    use chrono::NaiveDate;
+    use super::{
+        EventSelect, event_date_selection_changed, event_default_end_seconds, event_repeat_labels,
+        event_schedule_timestamps, event_selection_changed,
+    };
+    use crate::components::primitives::DatePickerEvent;
+    use chrono::{Local, NaiveDate, TimeZone};
 
     #[test]
     fn repeat_labels_match_the_selected_weekday_and_occurrence() {
@@ -1700,7 +1858,124 @@ mod tests {
 
     #[test]
     fn default_end_time_stays_on_the_start_date() {
-        assert_eq!(event_default_end_minutes(10 * 60), 11 * 60);
-        assert_eq!(event_default_end_minutes(23 * 60), 23 * 60 + 45);
+        let grid: Vec<u32> = (0..96).map(|slot| slot * 900).collect();
+        assert_eq!(event_default_end_seconds(10 * 3600, &grid), Some(11 * 3600));
+        assert_eq!(
+            event_default_end_seconds(23 * 3600, &grid),
+            grid.last().copied()
+        );
+        assert_eq!(
+            event_default_end_seconds(23 * 3600 + 1800, &grid),
+            grid.last().copied()
+        );
+        assert_eq!(
+            event_default_end_seconds(*grid.last().unwrap(), &grid),
+            None
+        );
+        assert_eq!(event_default_end_seconds(0, &[]), None);
+        assert_eq!(
+            event_default_end_seconds(3600, &[0, 3600, 7200]),
+            Some(7200)
+        );
+    }
+
+    #[test]
+    fn time_dropdowns_only_offer_valid_same_day_slots() {
+        let labels = (0..96).map(|slot| slot.to_string().into()).collect();
+        let mut select = EventSelect::new("test-time", labels);
+        select.selectable_range = Some(0..95);
+        assert_eq!(select.selectable_indices().last(), Some(&94));
+        select.selectable_range = Some(95..96);
+        assert_eq!(select.selectable_indices(), vec![95]);
+        select.selectable_range = Some(96..96);
+        assert!(select.selectable_indices().is_empty());
+        select.selectable_range = Some(41..96);
+        assert_eq!(select.selectable_indices().first(), Some(&41));
+    }
+
+    #[test]
+    fn content_only_edits_preserve_original_schedule_exactly() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        let (start, end) =
+            event_schedule_timestamps(None, true, date, 10 * 3600 + 123, 11 * 3600 + 456).unwrap();
+        // Multi-day and overnight schedules, including seconds outside the 15-minute grid.
+        for original in [(start, end + 86400), (start + 13 * 3600, end + 14 * 3600)] {
+            assert_eq!(
+                event_schedule_timestamps(Some(original), false, date, 23 * 3600, 3600),
+                Some(original)
+            );
+        }
+    }
+
+    #[test]
+    fn opening_date_picker_and_reselecting_values_preserves_legacy_schedule() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        let mut selected_date = Some(date);
+        let mut start_slot = Some(92);
+        let mut end_slot = Some(4);
+        let mut dirty = false;
+        dirty |= event_date_selection_changed(&mut selected_date, &DatePickerEvent::Opened);
+        dirty |=
+            event_date_selection_changed(&mut selected_date, &DatePickerEvent::Change(Some(date)));
+        dirty |= event_selection_changed(&mut start_slot, Some(92));
+        dirty |= event_selection_changed(&mut end_slot, Some(4));
+        assert!(!dirty);
+        let (start, end) =
+            event_schedule_timestamps(None, true, date, 10 * 3600 + 123, 11 * 3600 + 456).unwrap();
+        for original in [(start, end + 86400), (start + 13 * 3600, end + 14 * 3600)] {
+            assert_eq!(
+                event_schedule_timestamps(Some(original), dirty, date, 23 * 3600, 3600),
+                Some(original)
+            );
+        }
+    }
+
+    #[test]
+    fn real_date_and_time_changes_are_detected() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        let mut selected_date = Some(date);
+        assert!(event_date_selection_changed(
+            &mut selected_date,
+            &DatePickerEvent::Change(date.succ_opt())
+        ));
+        assert!(!event_date_selection_changed(
+            &mut selected_date,
+            &DatePickerEvent::Opened
+        ));
+        assert!(event_date_selection_changed(
+            &mut selected_date,
+            &DatePickerEvent::Change(None)
+        ));
+        let mut slot = Some(92);
+        assert!(event_selection_changed(&mut slot, Some(93)));
+        assert!(!event_selection_changed(&mut slot, Some(93)));
+    }
+
+    #[test]
+    fn new_and_edited_schedules_use_the_selected_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        for original in [None, Some((1_790_000_123, 1_790_090_456))] {
+            let (start, end) =
+                event_schedule_timestamps(original, true, date, 23 * 3600, 23 * 3600 + 2700)
+                    .unwrap();
+            assert!(end > start);
+            assert_eq!(
+                Local.timestamp_opt(start as i64, 0).unwrap().date_naive(),
+                date
+            );
+            assert_eq!(
+                Local.timestamp_opt(end as i64, 0).unwrap().date_naive(),
+                date
+            );
+            for end_seconds in [23 * 3600, 3600] {
+                let (start, end) =
+                    event_schedule_timestamps(original, true, date, 23 * 3600, end_seconds)
+                        .unwrap();
+                assert!(
+                    end <= start,
+                    "equal or earlier end must fail end > start validation"
+                );
+            }
+        }
     }
 }
