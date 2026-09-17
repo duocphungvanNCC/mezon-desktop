@@ -352,8 +352,9 @@ impl McpRuntime {
                         let _ = reply.send(result);
                     }
                     McpCommand::OpenTopic { message_id, reply } => {
-                        let result =
-                            cx.update(|cx| mezon_ui::app::capture::open_topic(cx, message_id));
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::open_topic(cx, message_id))
+                            .and_then(|_| cx.update(|cx| mezon_ui::app::capture::topic_state(cx)));
                         let _ = reply.send(result);
                     }
                     McpCommand::CloseTopic { reply } => {
