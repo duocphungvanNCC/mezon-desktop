@@ -793,6 +793,7 @@ fn recipient_row(
             "send-token-user-{}",
             candidate.id
         )))
+        .w_full()
         .h(px(RECIPIENT_ROW_PX))
         .flex()
         .flex_row()
