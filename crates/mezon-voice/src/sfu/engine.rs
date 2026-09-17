@@ -29,18 +29,90 @@ use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMembe
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
 use super::sdp;
 
-const CAMERA_MAX_BITRATE: u64 = 1_000_000;
-const CAMERA_MAX_FRAMERATE: f64 = 30.0;
+struct CameraTier {
+    max_cameras: usize,
+    scale_down: f64,
+    max_bitrate: u64,
+    max_framerate: f64,
+    limits: sdp::BitrateLimits,
+}
+
+static CAMERA_TIERS: [CameraTier; 4] = [
+    CameraTier {
+        max_cameras: 2,
+        scale_down: 1.0,
+        max_bitrate: 1_000_000,
+        max_framerate: 30.0,
+        limits: sdp::BitrateLimits { min_kbps: 250, start_kbps: 500, max_kbps: 1_000 },
+    },
+    CameraTier {
+        max_cameras: 4,
+        scale_down: 1.333,
+        max_bitrate: 500_000,
+        max_framerate: 24.0,
+        limits: sdp::BitrateLimits { min_kbps: 125, start_kbps: 250, max_kbps: 500 },
+    },
+    CameraTier {
+        max_cameras: 8,
+        scale_down: 2.0,
+        max_bitrate: 300_000,
+        max_framerate: 20.0,
+        limits: sdp::BitrateLimits { min_kbps: 75, start_kbps: 150, max_kbps: 300 },
+    },
+    CameraTier {
+        max_cameras: usize::MAX,
+        scale_down: 2.0,
+        max_bitrate: 200_000,
+        max_framerate: 15.0,
+        limits: sdp::BitrateLimits { min_kbps: 50, start_kbps: 100, max_kbps: 200 },
+    },
+];
+
+const CAMERA_TIER_DOWNGRADE: Duration = Duration::from_millis(1500);
+const CAMERA_TIER_UPGRADE: Duration = Duration::from_millis(6000);
+
+fn camera_tier_at(index: usize) -> &'static CameraTier {
+    CAMERA_TIERS.get(index).unwrap_or(&CAMERA_TIERS[0])
+}
+
+fn camera_tier_index_for(cameras: usize, margin: usize) -> usize {
+    CAMERA_TIERS
+        .iter()
+        .position(|tier| cameras <= tier.max_cameras.saturating_sub(margin))
+        .unwrap_or(CAMERA_TIERS.len() - 1)
+}
+
+fn resolve_camera_tier(cameras: usize, current: usize) -> usize {
+    let target = camera_tier_index_for(cameras, 0);
+    if target >= current {
+        target
+    } else {
+        current.min(camera_tier_index_for(cameras, 1))
+    }
+}
+
+fn schedule_camera_tier(
+    membership: &Membership,
+    local: &LocalTracks,
+    current: usize,
+    pending: Option<(usize, tokio::time::Instant)>,
+) -> Option<(usize, tokio::time::Instant)> {
+    let cameras = membership.active_cameras() + usize::from(local.camera.is_some());
+    let next = resolve_camera_tier(cameras, current);
+    if next == current {
+        return None;
+    }
+    if matches!(pending, Some((tier, _)) if tier == next) {
+        return pending;
+    }
+    let delay = if next > current { CAMERA_TIER_DOWNGRADE } else { CAMERA_TIER_UPGRADE };
+    Some((next, tokio::time::Instant::now() + delay))
+}
 const SCREEN_MAX_BITRATE: u64 = 3_500_000;
 const SCREEN_MAX_FRAMERATE: f64 = crate::screen::CAPTURE_FPS as f64;
 const SCREEN_SCALABILITY_MODE: &str = "L1T1";
 const SCREEN_CODEC: &str = "vp9";
 const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
-const CAMERA_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
-    min_kbps: 250,
-    start_kbps: 500,
-    max_kbps: 1_000,
-};
 const SCREEN_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
     min_kbps: 1_000,
     start_kbps: 2_500,
@@ -53,13 +125,14 @@ const LINK_DOWN_TICKS: u32 = 2;
 const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 const ROUTE_PROBE_TARGETS: [&str; 2] = ["203.0.113.9:9", "[2001:db8::9]:9"];
 const MEDIA_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
-const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
+const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(6);
 const CONNECT_POLL: Duration = Duration::from_millis(250);
 const RENEGOTIATION_SETTLE: Duration = Duration::from_millis(50);
 const RECONNECT_DELAY_FAST: Duration = Duration::from_millis(400);
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-const RECONNECT_FAST_ATTEMPTS: u32 = 2;
+const RECONNECT_FAST_ATTEMPTS: u32 = 5;
 const MAX_RECONNECT_ATTEMPTS: u32 = 40;
+const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 8;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
@@ -336,6 +409,13 @@ impl Membership {
         peers.sort_by(|a, b| a.user_id.cmp(&b.user_id).then(a.peer_id.cmp(&b.peer_id)));
         peers
     }
+
+    fn active_cameras(&self) -> usize {
+        self.by_peer
+            .values()
+            .filter(|m| m.peer_id != self.self_peer_id && m.camera_active && m.mid_video != 0)
+            .count()
+    }
 }
 
 fn member_mids(member: &SnapshotMember) -> Vec<(String, RemoteKind)> {
@@ -501,6 +581,7 @@ async fn engine_main(
     let mut attempts: u32 = 0;
     let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
+    let mut ever_connected = false;
     let mut retiring = RetiredPeerConnection(None);
     let mut first_session = true;
 
@@ -516,6 +597,7 @@ async fn engine_main(
             &cmd_rx,
             evt_tx,
             ever_joined,
+            &mut ever_connected,
             &mut attempts,
             &mut retiring.0,
         )
@@ -577,7 +659,7 @@ async fn engine_main(
             }
         }
         attempts += 1;
-        if attempts > MAX_RECONNECT_ATTEMPTS {
+        if attempts > attempt_cap(ever_connected) {
             let _ = evt_tx.send(SfuEvent::Disconnected {
                 reason: "reconnect attempts exhausted".into(),
             });
@@ -721,6 +803,24 @@ async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> b
     }
 }
 
+fn attempt_cap(ever_connected: bool) -> u32 {
+    if ever_connected {
+        MAX_RECONNECT_ATTEMPTS
+    } else {
+        MAX_INITIAL_CONNECT_ATTEMPTS
+    }
+}
+
+fn connection_announcement(ever_connected: &mut bool, room: &str) -> SfuEvent {
+    if std::mem::replace(ever_connected, true) {
+        SfuEvent::Reconnected
+    } else {
+        SfuEvent::Connected {
+            room: room.to_owned(),
+        }
+    }
+}
+
 enum SessionOutcome {
     Closed,
     Fatal(String),
@@ -747,12 +847,22 @@ async fn run_session(
     cmd_rx: &flume::Receiver<EngineCommand>,
     evt_tx: &flume::Sender<SfuEvent>,
     resuming: bool,
+    ever_connected: &mut bool,
     attempts: &mut u32,
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
     let mut pc: Option<PeerConnection> = None;
     let outcome = session_loop(
-        config, factory, local, cmd_rx, evt_tx, resuming, attempts, &mut pc, retiring,
+        config,
+        factory,
+        local,
+        cmd_rx,
+        evt_tx,
+        resuming,
+        ever_connected,
+        attempts,
+        &mut pc,
+        retiring,
     )
     .await;
     let retryable = matches!(
@@ -790,6 +900,7 @@ async fn session_loop(
     cmd_rx: &flume::Receiver<EngineCommand>,
     evt_tx: &flume::Sender<SfuEvent>,
     resuming: bool,
+    ever_connected: &mut bool,
     attempts: &mut u32,
     pc: &mut Option<PeerConnection>,
     retiring: &mut Option<PeerConnection>,
@@ -828,6 +939,8 @@ async fn session_loop(
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
     let mut forced_mute_deadline: Option<tokio::time::Instant> = None;
+    let mut camera_tier: usize = 0;
+    let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
     let mut media_wait_started: Option<Instant> = None;
     let mut ice_up_since: Option<Instant> = None;
     let mut transport_connected = false;
@@ -850,13 +963,7 @@ async fn session_loop(
     loop {
         if joined && transport_connected && !announced_connection {
             announced_connection = true;
-            if resuming {
-                let _ = evt_tx.send(SfuEvent::Reconnected);
-            } else {
-                let _ = evt_tx.send(SfuEvent::Connected {
-                    room: joined_room.clone(),
-                });
-            }
+            let _ = evt_tx.send(connection_announcement(ever_connected, &joined_room));
         }
         tokio::select! {
             biased;
@@ -915,14 +1022,15 @@ async fn session_loop(
                         joined_room = room;
                         match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
                             Ok(created) => {
+                                let attempt = *attempts;
                                 let state_tx = transport_state_tx.clone();
                                 created.on_connection_state_change(Some(Box::new(move |state| {
-                                    tracing::info!(?state, "sfu transport state");
+                                    tracing::info!(attempt, ?state, "sfu transport state");
                                     let _ = state_tx.send(state);
                                 })));
                                 let ice_tx = ice_state_tx.clone();
                                 created.on_ice_connection_state_change(Some(Box::new(move |state| {
-                                    tracing::info!(?state, "sfu ice state");
+                                    tracing::info!(attempt, ?state, "sfu ice state");
                                     let _ = ice_tx.send(state);
                                 })));
                                 created.on_ice_gathering_state_change(Some(Box::new(|state| {
@@ -966,12 +1074,14 @@ async fn session_loop(
                             }
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                         let _ = evt_tx.send(SfuEvent::RoomSnapshot);
                     }
                     ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                         }
                     }
                     ServerMessage::PeerUpdated { peer } => {
@@ -987,6 +1097,7 @@ async fn session_loop(
                             }
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                         }
                     }
                     ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen } => {
@@ -997,6 +1108,7 @@ async fn session_loop(
                             }
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                     }
                     ServerMessage::PushToTalkChanged { active } => {
                         tracing::info!(active, "sfu push-to-talk grant changed");
@@ -1074,15 +1186,16 @@ async fn session_loop(
                     EngineCommand::SetLocalCamera(track) => {
                         local.camera = track;
                         attach_local_tracks(pc.as_ref(), local, config.role);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                         if let Some(peer_connection) = &*pc {
-                            tune_uplinks(peer_connection, local);
+                            tune_uplinks(peer_connection, local, camera_tier);
                         }
                     }
                     EngineCommand::SetLocalScreen(track) => {
                         local.screen = track;
                         attach_local_tracks(pc.as_ref(), local, config.role);
                         if let Some(peer_connection) = &*pc {
-                            tune_uplinks(peer_connection, local);
+                            tune_uplinks(peer_connection, local, camera_tier);
                         }
                     }
                     EngineCommand::SetMute(muted) => {
@@ -1285,6 +1398,14 @@ async fn session_loop(
                     offline_ticks = 0;
                 }
             }
+            () = tokio::time::sleep_until(camera_tier_pending.map_or_else(tokio::time::Instant::now, |(_, at)| at)), if camera_tier_pending.is_some() => {
+                if let Some((next, _)) = camera_tier_pending.take() {
+                    camera_tier = next;
+                    if let Some(peer_connection) = &*pc {
+                        tune_uplinks(peer_connection, local, camera_tier);
+                    }
+                }
+            }
             () = tokio::time::sleep_until(offer_reissue_deadline.unwrap_or_else(tokio::time::Instant::now)), if offer_reissue_deadline.is_some() => {
                 return SessionOutcome::Dropped {
                     joined,
@@ -1314,6 +1435,7 @@ async fn session_loop(
                     &offer_sdp,
                     local,
                     config.role,
+                    camera_tier,
                     &mut ws_tx,
                 )
                 .await
@@ -1327,6 +1449,7 @@ async fn session_loop(
                             previous.close();
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, camera_tier, camera_tier_pending);
                     }
                     Err(e) => {
                         return SessionOutcome::Dropped {
@@ -1536,10 +1659,11 @@ async fn log_media_stats(pc: &PeerConnection) {
                 out.outbound.frames_encoded,
             )),
             RtcStats::InboundRtp(inb) if inb.stream.kind == "audio" => lines.push(format!(
-                "in mid={} audio {} pkts={} disc={} played={:.1}s conceal={} depth={:.0}ms lvl={:.3}",
+                "in mid={} audio {} pkts={} lost={} disc={} played={:.1}s conceal={} depth={:.0}ms lvl={:.3}",
                 inb.inbound.mid,
                 codec_of(&inb.stream.codec_id),
                 inb.received.packets_received,
+                inb.received.packets_lost,
                 inb.inbound.packets_discarded,
                 inb.inbound.total_samples_duration,
                 inb.inbound.concealed_samples,
@@ -1547,15 +1671,21 @@ async fn log_media_stats(pc: &PeerConnection) {
                 inb.inbound.audio_level,
             )),
             RtcStats::InboundRtp(inb) => lines.push(format!(
-                "in mid={} {} {} pkts={} {}x{} dec={} key={} pli={} nack={} disc={}",
+                "in mid={} {} {} pkts={} lost={} rtx={} {}x{} dec={} key={} dropped={} freeze={}/{:.0}ms depth={:.0}ms pli={} nack={} disc={}",
                 inb.inbound.mid,
                 inb.stream.kind,
                 codec_of(&inb.stream.codec_id),
                 inb.received.packets_received,
+                inb.received.packets_lost,
+                inb.inbound.retransmitted_packets_received,
                 inb.inbound.frame_width,
                 inb.inbound.frame_height,
                 inb.inbound.frames_decoded,
                 inb.inbound.key_frames_decoded,
+                inb.inbound.frames_dropped,
+                inb.inbound.freeze_count,
+                inb.inbound.total_freeze_duration * 1000.0,
+                jitter_depth_ms(&inb.inbound),
                 inb.inbound.pli_count,
                 inb.inbound.nack_count,
                 inb.inbound.packets_discarded,
@@ -1661,6 +1791,7 @@ async fn negotiate(
     offer_sdp: &str,
     local: &LocalTracks,
     role: SfuRole,
+    camera_tier: usize,
     ws_tx: &mut WsSink,
 ) -> Result<()> {
     let previous = pc.current_remote_description().map(|d| d.to_string());
@@ -1698,7 +1829,7 @@ async fn negotiate(
     let derived = answer.to_string();
     let opened = sdp::munge_uplink_bitrates(
         &sdp::force_uplink_sendonly(&derived, &stabilized),
-        CAMERA_BITRATE_LIMITS,
+        camera_tier_at(camera_tier).limits,
         SCREEN_BITRATE_LIMITS,
     );
     tracing::debug!(
@@ -1714,7 +1845,7 @@ async fn negotiate(
         .await
         .context("set local description")?;
 
-    tune_uplinks(pc, local);
+    tune_uplinks(pc, local, camera_tier);
     local.apply_audio_gate(Some(pc), role);
 
     tracing::debug!(
@@ -1754,21 +1885,24 @@ fn screen_scale_down(width: u32) -> f64 {
     (f64::from(width) / SCREEN_MAX_ENCODE_WIDTH).max(1.0)
 }
 
-fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks) {
+fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, camera_tier: usize) {
     for transceiver in pc.transceivers() {
         let Some(mid) = transceiver.mid() else {
             continue;
         };
         let (max_bitrate, max_framerate, scalability, degradation, scale_down, priority) =
             match mid.as_str() {
-                MID_CAMERA => (
-                    CAMERA_MAX_BITRATE,
-                    CAMERA_MAX_FRAMERATE,
-                    None,
-                    DegradationPreference::MaintainFramerate,
-                    1.0,
-                    Priority::High,
-                ),
+                MID_CAMERA => {
+                    let tier = camera_tier_at(camera_tier);
+                    (
+                        tier.max_bitrate,
+                        tier.max_framerate,
+                        None,
+                        DegradationPreference::MaintainFramerate,
+                        tier.scale_down,
+                        Priority::High,
+                    )
+                }
                 MID_SCREEN => (
                     SCREEN_MAX_BITRATE,
                     SCREEN_MAX_FRAMERATE,
@@ -1966,6 +2100,20 @@ fn sync_remote_media(
 mod tests {
     use super::*;
 
+    #[test]
+    fn first_media_transport_is_connected_and_later_ones_reconnected() {
+        let mut ever_connected = false;
+        assert!(matches!(
+            connection_announcement(&mut ever_connected, "room"),
+            SfuEvent::Connected { room } if room == "room"
+        ));
+        assert!(ever_connected);
+        assert!(matches!(
+            connection_announcement(&mut ever_connected, "room"),
+            SfuEvent::Reconnected
+        ));
+    }
+
     async fn reconnect_controls_wait_for_membership(held: bool) {
         use serde_json::json;
         use tokio::time::timeout;
@@ -1993,6 +2141,7 @@ mod tests {
             local.ptt_requested = true;
             let factory = PeerConnectionFactory::default();
             let mut attempts = 0;
+            let mut ever_connected = true;
             let mut retiring = None;
             run_session(
                 &config,
@@ -2001,6 +2150,7 @@ mod tests {
                 &cmd_rx,
                 &evt_tx,
                 true,
+                &mut ever_connected,
                 &mut attempts,
                 &mut retiring,
             )
