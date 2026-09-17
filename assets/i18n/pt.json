@@ -4104,6 +4104,7 @@
   "setting.logOut": "Sair",
   "setting.logOutPopup.description": "Tem certeza de que deseja sair?",
   "setting.logOutPopup.noConfirm": "Não",
+  "setting.logOutPopup.title": "Sair",
   "setting.logOutPopup.yesConfirm": "Sim",
   "setting.notifications.hideContent": "Ocultar conteúdo da notificação",
   "setting.notifications.hideContentDesc": "Quando ativado, o conteúdo das mensagens fica oculto nos pop-ups de notificação e na tela de bloqueio.",

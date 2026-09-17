@@ -4101,6 +4101,7 @@
   "setting.logOut": "Logout",
   "setting.logOutPopup.description": "Please confirm if you would like to log out?",
   "setting.logOutPopup.noConfirm": "No",
+  "setting.logOutPopup.title": "Log Out",
   "setting.logOutPopup.yesConfirm": "Yes",
   "setting.notifications.hideContent": "Hide Notification Content",
   "setting.notifications.hideContentDesc": "When enabled, message content will be hidden from notification popups and the lock screen.",

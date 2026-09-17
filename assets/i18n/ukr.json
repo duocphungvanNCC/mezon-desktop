@@ -4103,6 +4103,7 @@
   "setting.logOut": "Вийти",
   "setting.logOutPopup.description": "Ви впевнені, що хочете вийти?",
   "setting.logOutPopup.noConfirm": "Ні",
+  "setting.logOutPopup.title": "Вийти",
   "setting.logOutPopup.yesConfirm": "Так",
   "setting.notifications.hideContent": "Приховувати вміст сповіщень",
   "setting.notifications.hideContentDesc": "Якщо ввімкнено, вміст повідомлень буде приховано у спливаючих сповіщеннях і на екрані блокування.",

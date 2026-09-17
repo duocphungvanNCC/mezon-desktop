@@ -4106,6 +4106,7 @@
   "setting.logOut": "ログアウト",
   "setting.logOutPopup.description": "本当にログアウトしますか?",
   "setting.logOutPopup.noConfirm": "なし",
+  "setting.logOutPopup.title": "ログアウト",
   "setting.logOutPopup.yesConfirm": "はい",
   "setting.notifications.hideContent": "通知の内容を非表示",
   "setting.notifications.hideContentDesc": "有効にすると、メッセージの内容が通知ポップアップやロック画面で非表示になります。",

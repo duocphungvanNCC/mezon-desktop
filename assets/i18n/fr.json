@@ -4103,6 +4103,7 @@
   "setting.logOut": "Déconnexion",
   "setting.logOutPopup.description": "Êtes-vous sûr de vouloir vous déconnecter ?",
   "setting.logOutPopup.noConfirm": "Non",
+  "setting.logOutPopup.title": "Déconnexion",
   "setting.logOutPopup.yesConfirm": "Oui",
   "setting.notifications.hideContent": "Masquer le contenu des notifications",
   "setting.notifications.hideContentDesc": "Une fois activé, le contenu des messages sera masqué dans les notifications et sur l'écran de verrouillage.",

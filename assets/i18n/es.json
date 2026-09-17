@@ -4140,6 +4140,7 @@
   "setting.logOut": "Cerrar sesión",
   "setting.logOutPopup.description": "¿Confirmas que quieres cerrar sesión?",
   "setting.logOutPopup.noConfirm": "No",
+  "setting.logOutPopup.title": "Cerrar sesión",
   "setting.logOutPopup.yesConfirm": "Sí",
   "setting.notifications.hideContent": "Ocultar contenido de las notificaciones",
   "setting.notifications.hideContentDesc": "Cuando está activado, el contenido de los mensajes se oculta en los avisos de notificación y en la pantalla de bloqueo.",

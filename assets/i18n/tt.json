@@ -4116,6 +4116,7 @@
   "setting.logOut": "Чыгу",
   "setting.logOutPopup.description": "Зинһар, чыгарга теләвегезне раслагыз?",
   "setting.logOutPopup.noConfirm": "Юк",
+  "setting.logOutPopup.title": "Чыгыгыз",
   "setting.logOutPopup.yesConfirm": "Әйе",
   "setting.notifications.hideContent": "Хәбәр эчтәлеген яшерү",
   "setting.notifications.hideContentDesc": "Кабызылганда, хәбәр эчтәлеге хәбәр тәрәзәләрендә һәм бикләү экранында яшерелә.",
