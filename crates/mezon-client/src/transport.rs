@@ -8298,7 +8298,6 @@ impl MezonTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_ephemeral_message_to_bots(
         &self,
-        receiver_ids: Vec<i64>,
         clan_id: i64,
         channel_id: i64,
         content: &str,
@@ -8326,7 +8325,7 @@ impl MezonTransport {
         );
         let body = realtime::EphemeralMessageSend {
             message: Some(message),
-            receiver_ids,
+            receiver_ids: Vec::new(),
         }
         .encode_to_vec();
         let response = self

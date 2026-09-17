@@ -2134,7 +2134,6 @@ impl TransportClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_ephemeral_message_to_bots(
         &self,
-        receiver_ids: Vec<i64>,
         clan_id: i64,
         channel_id: i64,
         content: &str,
@@ -2153,7 +2152,6 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .send_ephemeral_message_to_bots(
-                        receiver_ids,
                         clan_id,
                         channel_id,
                         &content,
