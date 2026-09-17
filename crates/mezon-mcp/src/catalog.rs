@@ -156,6 +156,17 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "search_users",
+        description: "\
+Search users the way the send-token recipient box and Ctrl+K do: the server matches
+username, display name and clan nickname (ILIKE, max 50) among friends and members of
+the caller's clans, bots included.
+
+Parameters:
+- query (required): search text",
+        write: false,
+    },
+    ToolSpec {
         name: "get_current_context",
         description: "\
 Return the UI route and parsed context for the active screen.
@@ -642,8 +653,9 @@ Parameters: none.",
 Report what the open topic panel holds.
 
 Returns panel_open, topic_id, origin_message_id, loaded_count, has_more_top,
-loading_more and the panel list's item_count / first_visible_index / at_bottom.
-has_more_top drives topic paging the way get_scroll_state does for a channel.
+loading_more, the panel list's item_count / first_visible_index / at_bottom, and the
+topic composer's text / attachments. has_more_top drives topic paging the way
+get_scroll_state does for a channel.
 
 Parameters: none.",
         write: false,
@@ -908,8 +920,8 @@ Parameters: none.",
 Debug builds only. Fill the current call with synthetic participants so a crowded
 room can be driven on one machine. They are drawn from the connected clan's member
 list, so names and avatars resolve exactly like real participants; the first one is
-marked speaking and every third is muted. They persist across LiveKit updates until
-cleared.
+marked speaking and every third is muted. They persist across SFU participant updates
+until cleared.
 
 Parameters: count (integer) - how many to add; 0 clears them.
 Optional: screenshare (bool) - the first one also publishes a screen share;

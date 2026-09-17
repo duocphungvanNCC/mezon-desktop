@@ -81,10 +81,9 @@ fn chromium_desktop_stem(xdg_settings_output: &str) -> Option<&str> {
 /// do (the wry/WebKitGTK dependency was removed on purpose).
 ///
 /// The window runs in the user's own browser profile, so it outlives the app the
-/// same way a normal browser tab does. Placing it over the app window would mean
-/// a dedicated profile — Chromium drops `--window-position`/`--window-size` when
-/// it hands the command line to a running instance — and a dedicated profile
-/// leaves instances behind that the app cannot reliably find and close again.
+/// same way a normal browser tab does and nothing reports when it closes.
+/// [`open_url_managed_app_window`] is the variant for callers that need that
+/// report: it runs a dedicated profile so the window is its own process.
 ///
 /// Probing the default browser blocks (a LaunchServices round-trip on macOS, an
 /// `xdg-settings` subprocess on Linux), so callers must run this off the UI
@@ -108,6 +107,55 @@ pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Opens a Chromium app in a dedicated profile and blocks until that window
+/// closes. Without a Chromium default browser (or inside the macOS app sandbox)
+/// it opens a normal browser tab instead and returns at once.
+pub fn open_url_managed_app_window(url: &str, key: &str) -> anyhow::Result<()> {
+    crate::ensure_http_url(url)?;
+    if app_sandbox_strips_launch_arguments() {
+        tracing::info!("app sandbox drops browser switches, opening a browser tab instead");
+        return crate::open_url(url);
+    }
+    let Some(browser) = default_chromium_browser() else {
+        tracing::info!("no Chromium-based default browser, opening a browser tab instead");
+        return crate::open_url(url);
+    };
+    let profile = managed_profile_dir(key);
+    let spawned = std::fs::create_dir_all(&profile)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| spawn_managed_app_window(&browser, url, &profile));
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(
+                "managed app-window launch failed, falling back to a browser tab: {error:#}"
+            );
+            return crate::open_url(url);
+        }
+    };
+    let closed = wait_for_managed_app_window(&mut child);
+    if let Err(error) = std::fs::remove_dir_all(&profile) {
+        tracing::debug!(path = %profile.display(), "managed browser profile cleanup failed: {error}");
+    }
+    closed
+}
+
+fn managed_profile_dir(key: &str) -> PathBuf {
+    let safe_key: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir()
+        .join("mezon-managed-apps")
+        .join(safe_key)
+}
+
 fn app_sandbox_strips_launch_arguments() -> bool {
     cfg!(target_os = "macos") && std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
 }
@@ -117,6 +165,139 @@ fn silenced(command: &mut std::process::Command) -> &mut std::process::Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+}
+
+fn managed_switches(url: &str, profile: &Path) -> [String; 5] {
+    [
+        format!("--app={url}"),
+        format!("--user-data-dir={}", profile.display()),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-background-mode".into(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_managed_app_window(
+    browser: &Path,
+    url: &str,
+    profile: &Path,
+) -> anyhow::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new(browser);
+    command
+        .args(managed_switches(url, profile))
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    Ok(silenced(&mut command).spawn()?)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_managed_app_window(
+    exec: &[String],
+    url: &str,
+    profile: &Path,
+) -> anyhow::Result<std::process::Child> {
+    let argv = exec_with_app_url(exec, url);
+    let Some((program, args)) = argv.split_first() else {
+        anyhow::bail!("browser desktop entry has an empty Exec line");
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .args(managed_switches(url, profile).into_iter().skip(1));
+    Ok(silenced(&mut command).spawn()?)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_managed_app_window(
+    browser: &Path,
+    url: &str,
+    profile: &Path,
+) -> anyhow::Result<std::process::Child> {
+    let name = browser
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("invalid browser bundle"))?;
+    let executable = browser.join("Contents").join("MacOS").join(name);
+    let mut command = std::process::Command::new(&executable);
+    command.args(managed_switches(url, profile));
+    Ok(silenced(&mut command).spawn()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wait_for_managed_app_window(child: &mut std::process::Child) -> anyhow::Result<()> {
+    let status = child.wait()?;
+    if !status.success() {
+        tracing::warn!("managed browser exited with {status}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_managed_app_window(child: &mut std::process::Child) -> anyhow::Result<()> {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+    let pid = child.id();
+    let mut watch = ManagedWindowWatch::new(std::time::Instant::now());
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let windows = macos::app_window_count(pid);
+        if watch.observe(windows, std::time::Instant::now()) == WindowWatch::Quit {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    macos::request_quit(pid);
+    let quit_requested = std::time::Instant::now();
+    while child.try_wait()?.is_none() {
+        if quit_requested.elapsed() >= QUIT_GRACE {
+            child.kill()?;
+            child.wait()?;
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum WindowWatch {
+    Keep,
+    Quit,
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct ManagedWindowWatch {
+    started: std::time::Instant,
+    window_seen: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ManagedWindowWatch {
+    const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn new(started: std::time::Instant) -> Self {
+        Self {
+            started,
+            window_seen: false,
+        }
+    }
+
+    fn observe(&mut self, windows: usize, now: std::time::Instant) -> WindowWatch {
+        if windows > 0 {
+            self.window_seen = true;
+            return WindowWatch::Keep;
+        }
+        if self.window_seen || now.duration_since(self.started) >= Self::STARTUP_GRACE {
+            WindowWatch::Quit
+        } else {
+            WindowWatch::Keep
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -194,10 +375,14 @@ fn default_chromium_browser() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::ffi::c_void;
     use std::path::PathBuf;
 
+    use core_foundation::array::{CFArray, CFArrayGetValueAtIndex};
     use core_foundation::base::TCFType;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
     use core_foundation::error::{CFError, CFErrorRef};
+    use core_foundation::number::{CFNumber, CFNumberRef};
     use core_foundation::string::CFString;
     use core_foundation::url::{CFURL, CFURLCreateWithString, CFURLRef};
 
@@ -210,6 +395,79 @@ mod macos {
             in_role_mask: u32,
             out_error: *mut CFErrorRef,
         ) -> CFURLRef;
+    }
+
+    const CG_WINDOW_LIST_OPTION_ALL: u32 = 0;
+    const CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+    const CG_NULL_WINDOW_ID: u32 = 0;
+    const APP_WINDOW_MIN_SIDE: f64 = 64.;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *const c_void;
+        fn CGRectMakeWithDictionaryRepresentation(dict: CFDictionaryRef, rect: *mut CGRect)
+        -> bool;
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CGRect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    pub(super) fn app_window_count(pid: u32) -> usize {
+        let raw = unsafe {
+            CGWindowListCopyWindowInfo(
+                CG_WINDOW_LIST_OPTION_ALL | CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
+                CG_NULL_WINDOW_ID,
+            )
+        };
+        if raw.is_null() {
+            return 0;
+        }
+        let list: CFArray = unsafe { TCFType::wrap_under_create_rule(raw as _) };
+        (0..list.len())
+            .filter(|&index| {
+                let entry = unsafe { CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), index) };
+                if entry.is_null() {
+                    return false;
+                }
+                let dict: CFDictionary = unsafe { TCFType::wrap_under_get_rule(entry as _) };
+                is_app_window_of(&dict, pid)
+            })
+            .count()
+    }
+
+    fn is_app_window_of(dict: &CFDictionary, pid: u32) -> bool {
+        number_value(dict, "kCGWindowOwnerPID") == Some(i64::from(pid))
+            && number_value(dict, "kCGWindowLayer") == Some(0)
+            && window_bounds(dict).is_some_and(|rect| {
+                rect.width >= APP_WINDOW_MIN_SIDE && rect.height >= APP_WINDOW_MIN_SIDE
+            })
+    }
+
+    fn number_value(dict: &CFDictionary, key: &str) -> Option<i64> {
+        let key = CFString::new(key);
+        let value = dict.find(key.as_concrete_TypeRef() as *const c_void)?;
+        let number = unsafe { CFNumber::wrap_under_get_rule(*value as CFNumberRef) };
+        number.to_i64()
+    }
+
+    fn window_bounds(dict: &CFDictionary) -> Option<CGRect> {
+        let key = CFString::new("kCGWindowBounds");
+        let value = dict.find(key.as_concrete_TypeRef() as *const c_void)?;
+        let mut rect = CGRect::default();
+        unsafe { CGRectMakeWithDictionaryRepresentation(*value as CFDictionaryRef, &mut rect) }
+            .then_some(rect)
+    }
+
+    pub(super) fn request_quit(pid: u32) {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
     }
 
     pub(super) fn default_http_handler() -> Option<PathBuf> {
@@ -534,6 +792,51 @@ fn exec_with_app_url(argv: &[String], url: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_window_watch_quits_once_a_seen_window_is_gone() {
+        let start = std::time::Instant::now();
+        let mut watch = ManagedWindowWatch::new(start);
+        assert_eq!(watch.observe(0, start), WindowWatch::Keep);
+        assert_eq!(
+            watch.observe(0, start + std::time::Duration::from_secs(5)),
+            WindowWatch::Keep
+        );
+        assert_eq!(
+            watch.observe(1, start + std::time::Duration::from_secs(6)),
+            WindowWatch::Keep
+        );
+        assert_eq!(
+            watch.observe(0, start + std::time::Duration::from_secs(7)),
+            WindowWatch::Quit
+        );
+    }
+
+    #[test]
+    fn managed_window_watch_gives_up_when_no_window_ever_appears() {
+        let start = std::time::Instant::now();
+        let mut watch = ManagedWindowWatch::new(start);
+        assert_eq!(
+            watch.observe(0, start + ManagedWindowWatch::STARTUP_GRACE / 2),
+            WindowWatch::Keep
+        );
+        assert_eq!(
+            watch.observe(0, start + ManagedWindowWatch::STARTUP_GRACE),
+            WindowWatch::Quit
+        );
+    }
+
+    #[test]
+    fn managed_profile_dir_is_stable_per_key_and_filesystem_safe() {
+        let first = managed_profile_dir("voice-app/1 x");
+        let second = managed_profile_dir("voice-app/1 x");
+        assert_eq!(first, second);
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("voice-app_1_x")
+        );
+        assert_ne!(first, managed_profile_dir("voice-app-2"));
+    }
 
     #[test]
     fn recognises_chromium_executables() {

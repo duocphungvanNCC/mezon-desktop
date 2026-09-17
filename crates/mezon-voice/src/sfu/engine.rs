@@ -111,9 +111,16 @@ pub struct ScreenTrack {
     pub width: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalCause {
+    Kicked,
+    AloneTimeout,
+}
+
 pub enum SfuEvent {
     Connected { room: String },
     Peers(Vec<SfuPeer>),
+    RoomSnapshot,
     RemoteAudio { key: u64, track: RtcAudioTrack },
     RemoteVideo { key: u64, track: RtcVideoTrack },
     RemoteGone { key: u64 },
@@ -121,7 +128,7 @@ pub enum SfuEvent {
     Reconnecting,
     Reconnected,
     Disconnected { reason: String },
-    Removed { reason: String },
+    Removed { cause: RemovalCause, reason: String },
     MutedByModerator,
     Error(String),
 }
@@ -524,8 +531,9 @@ async fn engine_main(
                 let _ = evt_tx.send(SfuEvent::Disconnected { reason });
                 return Ok(());
             }
-            SessionOutcome::Removed(reason) => {
+            SessionOutcome::Removed { cause, reason } => {
                 let _ = evt_tx.send(SfuEvent::Removed {
+                    cause,
                     reason: reason.clone(),
                 });
                 let _ = evt_tx.send(SfuEvent::Disconnected { reason });
@@ -649,12 +657,8 @@ fn apply_offline_command(
     local.apply_audio_gate(None, role);
 }
 
-fn claim_token_refresh(refreshes: &mut u32) -> bool {
-    if *refreshes >= MEET_TOKEN_RETRY_LIMIT {
-        return false;
-    }
-    *refreshes += 1;
-    true
+fn token_refresh_budget_spent(refreshes: u32) -> bool {
+    refreshes >= MEET_TOKEN_RETRY_LIMIT
 }
 
 async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32) {
@@ -665,11 +669,12 @@ async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32) {
     if remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
         return;
     }
-    if !claim_token_refresh(refreshes) {
+    if token_refresh_budget_spent(*refreshes) {
         return;
     }
     match refresher.mint().await {
         Some(fresh) if fresh != config.token => {
+            *refreshes += 1;
             tracing::info!(?remaining, "sfu join token refreshed before reconnecting");
             config.token = fresh;
         }
@@ -698,7 +703,7 @@ async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> b
     let Some(refresher) = config.refresh_token.clone() else {
         return false;
     };
-    if !claim_token_refresh(refreshes) {
+    if token_refresh_budget_spent(*refreshes) {
         tracing::warn!(
             refreshes = *refreshes,
             "sfu join token rejected again; refresh limit reached"
@@ -707,6 +712,7 @@ async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> b
     }
     match refresher.mint().await {
         Some(fresh) if fresh != config.token => {
+            *refreshes += 1;
             tracing::info!("sfu join token refreshed after the server rejected it");
             config.token = fresh;
             true
@@ -718,7 +724,7 @@ async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> b
 enum SessionOutcome {
     Closed,
     Fatal(String),
-    Removed(String),
+    Removed { cause: RemovalCause, reason: String },
     Dropped { joined: bool, reason: String },
     DroppedStaleToken { joined: bool, reason: String },
 }
@@ -866,18 +872,22 @@ async fn session_loop(
                     }
                     Ok(Message::Close(frame)) => {
                         let code = frame.as_ref().map(|f| f.code);
-                        let reason = frame
-                            .as_ref()
-                            .map(|f| f.reason.to_string())
-                            .filter(|r| !r.is_empty())
-                            .unwrap_or_else(|| "server closed link".to_owned());
-                        tracing::info!(?code, %reason, "sfu closed the link");
-                        return match classify_close(code) {
+                        let frame_reason = frame.as_ref().map(|f| f.reason.to_string());
+                        let reason = close_reason(code, frame_reason.as_deref());
+                        let verdict = classify_close(code);
+                        tracing::info!(
+                            code = code.map(u16::from),
+                            ?frame_reason,
+                            %reason,
+                            ?verdict,
+                            "sfu closed the link"
+                        );
+                        return match verdict {
                             CloseVerdict::Retry => SessionOutcome::Dropped { joined, reason },
                             CloseVerdict::RetryWithNewToken => {
                                 SessionOutcome::DroppedStaleToken { joined, reason }
                             }
-                            CloseVerdict::Kicked => SessionOutcome::Removed(reason),
+                            CloseVerdict::Removed(cause) => SessionOutcome::Removed { cause, reason },
                         };
                     }
                     Ok(_) => continue,
@@ -956,6 +966,7 @@ async fn session_loop(
                             }
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        let _ = evt_tx.send(SfuEvent::RoomSnapshot);
                     }
                     ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
@@ -1442,7 +1453,7 @@ fn create_peer_connection(
 enum CloseVerdict {
     Retry,
     RetryWithNewToken,
-    Kicked,
+    Removed(RemovalCause),
 }
 
 fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
@@ -1451,9 +1462,40 @@ fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
     };
     match u16::from(code) {
         4004 | 4005 => CloseVerdict::RetryWithNewToken,
-        4006 => CloseVerdict::Kicked,
+        4006 => CloseVerdict::Removed(RemovalCause::Kicked),
+        4011 => CloseVerdict::Removed(RemovalCause::AloneTimeout),
         _ => CloseVerdict::Retry,
     }
+}
+
+fn describe_close_code(code: CloseCode) -> Option<&'static str> {
+    Some(match u16::from(code) {
+        1000 => "normal closure",
+        1001 => "server going away",
+        1002 => "protocol error",
+        1008 => "policy violation",
+        1011 => "server internal error",
+        4001 => "client idle timeout",
+        4002 => "server failed to send ping",
+        4003 => "server auth not configured",
+        4004 => "missing token",
+        4005 => "invalid token",
+        4006 => "kicked by moderator",
+        4007 => "websocket handshake failed",
+        4008 => "websocket receive error",
+        4009 => "poll start failed",
+        4010 => "transport error",
+        4011 => "alone participant timeout",
+        _ => return None,
+    })
+}
+
+fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
+    frame_reason
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .or_else(|| code.and_then(describe_close_code).map(str::to_owned))
+        .unwrap_or_else(|| "server closed link".to_owned())
 }
 
 async fn log_media_stats(pc: &PeerConnection) {
@@ -2029,6 +2071,13 @@ mod tests {
             evt_rx.recv_async().await.unwrap(),
             SfuEvent::Peers(_)
         ));
+        assert!(
+            matches!(
+                evt_rx.recv_async().await.unwrap(),
+                SfuEvent::RoomSnapshot
+            ),
+            "the room snapshot must be announced right after its peer list"
+        );
         if !held {
             server
                 .send(Message::Text(
@@ -2448,7 +2497,7 @@ mod tests {
     fn a_kick_is_not_retried() {
         assert_eq!(
             classify_close(Some(CloseCode::Library(4006))),
-            CloseVerdict::Kicked
+            CloseVerdict::Removed(RemovalCause::Kicked)
         );
     }
 
@@ -2527,14 +2576,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refreshing_before_a_reconnect_spends_the_same_retry_limit() {
+    async fn a_failed_refresh_before_a_reconnect_does_not_spend_the_budget() {
         let (refresher, calls) = counting_refresher(false);
         let mut config = config_with_refresher("not-a-jwt", refresher);
         let mut refreshes = 0;
         for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
             ensure_fresh_token(&mut config, &mut refreshes).await;
         }
-        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
+        assert_eq!(refreshes, 0);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT + 2);
+    }
+
+    #[tokio::test]
+    async fn refreshing_before_a_reconnect_caps_successful_mints() {
+        let (refresher, calls) = counting_refresher(true);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 5, false), refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
+            ensure_fresh_token(&mut config, &mut refreshes).await;
+        }
+        assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
         assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
     }
 }

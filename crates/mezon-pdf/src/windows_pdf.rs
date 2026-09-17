@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use windows::Data::Pdf::{PdfDocument as WinPdfDocument, PdfPageRenderOptions};
 use windows::Storage::Streams::{DataReader, DataWriter, InMemoryRandomAccessStream};
 
+const POINTS_PER_DIP: f32 = 72.0 / 96.0;
+
 /// `Windows.Data.Pdf` ships with the desktop SKUs, but Server Core and the trimmed
 /// images leave the class unregistered, and activating it there fails with
 /// `REGDB_E_CLASSNOTREG`. Probe once so a machine that genuinely cannot render says
@@ -61,7 +63,7 @@ impl Document {
     pub fn page_size(&self, index: usize) -> anyhow::Result<(f32, f32)> {
         let page = self.document.GetPage(index as u32)?;
         let size = page.Size()?;
-        Ok((size.Width, size.Height))
+        Ok((size.Width * POINTS_PER_DIP, size.Height * POINTS_PER_DIP))
     }
 
     pub fn render_page(&self, index: usize, width: u32, height: u32) -> anyhow::Result<Vec<u8>> {

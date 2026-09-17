@@ -49,7 +49,7 @@ pub use mezon_record::{RecordError, RecordStats};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
-pub use sfu::SfuRole;
+pub use sfu::{RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -147,6 +147,7 @@ pub struct VoiceParticipant {
 #[derive(Clone, Debug)]
 pub enum VoiceEvent {
     Connected { room_name: String },
+    RoomSnapshot,
     Reconnecting,
     Reconnected,
     NetworkWeak,
@@ -155,7 +156,7 @@ pub enum VoiceEvent {
     Disconnected { reason: String },
     Participants(Vec<VoiceParticipant>),
     PushToTalkActive(bool),
-    RemovedFromChannel { reason: String },
+    RemovedFromChannel { cause: RemovalCause, reason: String },
     MutedByModerator,
     Error(String),
 }
@@ -526,6 +527,9 @@ async fn session_main(
                         peers = next;
                         emit!();
                     }
+                    SfuEvent::RoomSnapshot => {
+                        let _ = evt_tx.send(VoiceEvent::RoomSnapshot);
+                    }
                     SfuEvent::RemoteAudio { key, track } => {
                         remote_audio.insert(key, track.clone());
                         if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
@@ -589,8 +593,8 @@ async fn session_main(
                     SfuEvent::Reconnected => {
                         let _ = evt_tx.send(VoiceEvent::Reconnected);
                     }
-                    SfuEvent::Removed { reason } => {
-                        let _ = evt_tx.send(VoiceEvent::RemovedFromChannel { reason });
+                    SfuEvent::Removed { cause, reason } => {
+                        let _ = evt_tx.send(VoiceEvent::RemovedFromChannel { cause, reason });
                     }
                     SfuEvent::MutedByModerator => {
                         mic_on = false;
