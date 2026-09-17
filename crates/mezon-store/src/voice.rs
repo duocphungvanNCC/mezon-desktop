@@ -236,6 +236,23 @@ impl VoiceConnection {
             _ => None,
         }
     }
+
+    fn mark_connected(&mut self) -> bool {
+        let VoiceConnection::Connecting {
+            channel_id,
+            clan_id,
+        } = self
+        else {
+            return false;
+        };
+        let channel_id = std::mem::take(channel_id);
+        let clan_id = std::mem::take(clan_id);
+        *self = VoiceConnection::Connected {
+            channel_id,
+            clan_id,
+        };
+        true
+    }
 }
 
 pub struct VoiceStore {
@@ -2972,15 +2989,7 @@ impl VoiceStore {
             VoiceEvent::Connected { room_name } => {
                 self.room_name = room_name;
                 self.cancel_reconnect_watchdog();
-                if let VoiceConnection::Connecting {
-                    channel_id,
-                    clan_id,
-                } = &self.connection
-                {
-                    self.connection = VoiceConnection::Connected {
-                        channel_id: channel_id.clone(),
-                        clan_id: clan_id.clone(),
-                    };
+                if self.connection.mark_connected() {
                     self.play_join_sound(cx);
                 }
                 self.call_status = VoiceCallStatus::Stable;
@@ -2997,6 +3006,9 @@ impl VoiceStore {
             VoiceEvent::Reconnected => {
                 self.call_status = VoiceCallStatus::Stable;
                 self.cancel_reconnect_watchdog();
+                if self.connection.mark_connected() {
+                    self.play_join_sound(cx);
+                }
             }
             VoiceEvent::NetworkWeak => {
                 if !matches!(self.call_status, VoiceCallStatus::Reconnecting) {
@@ -4621,6 +4633,35 @@ mod tests {
             None
         );
         assert_eq!(VoiceConnection::Idle.active_channel_id(), None);
+    }
+
+    #[test]
+    fn mark_connected_only_promotes_a_pending_connection() {
+        let mut connection = VoiceConnection::Connecting {
+            channel_id: "a".into(),
+            clan_id: "1".into(),
+        };
+        assert!(connection.mark_connected());
+        assert_eq!(
+            connection,
+            VoiceConnection::Connected {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+        );
+        assert!(!connection.mark_connected());
+        assert_eq!(connection.connected_channel(), Some(("a", "1")));
+
+        let mut idle = VoiceConnection::Idle;
+        assert!(!idle.mark_connected());
+        assert_eq!(idle, VoiceConnection::Idle);
+
+        let mut failed = VoiceConnection::Failed {
+            channel_id: "a".into(),
+            message: "boom".into(),
+        };
+        assert!(!failed.mark_connected());
+        assert_eq!(failed.active_channel_id(), None);
     }
 
     #[test]

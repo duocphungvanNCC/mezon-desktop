@@ -77,6 +77,7 @@ pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera
 use crate::screen::ScreenStopper;
 use crate::video::local_screen_key;
 
+const FRAME_PATH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
@@ -486,6 +487,8 @@ async fn session_main(
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
     let mut speaking_tick = tokio::time::interval(SPEAKING_POLL_INTERVAL);
     speaking_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame_path_tick = tokio::time::interval(FRAME_PATH_LOG_INTERVAL);
+    frame_path_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     macro_rules! emit {
         () => {
@@ -833,6 +836,9 @@ async fn session_main(
             }
             _ = speaking_tick.tick() => {
                 emit!();
+            }
+            _ = frame_path_tick.tick() => {
+                frame_store.log_frame_path();
             }
             reset = recv_device_reset(&device_reset_rx) => {
                 if let Some(kind) = reset {
@@ -1254,6 +1260,7 @@ fn spawn_video(
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
+    let received_store = frame_store.clone();
     let convert_store = frame_store;
     if let Err(e) = std::thread::Builder::new()
         .name("mezon-video-convert".into())
@@ -1309,6 +1316,7 @@ fn spawn_video(
     let task = runtime::runtime().spawn(async move {
         let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
+            received_store.note_received(key);
             let mut buffer = frame.buffer.to_i420();
             let (width, height) = bounded_dimensions(
                 buffer.width(),
