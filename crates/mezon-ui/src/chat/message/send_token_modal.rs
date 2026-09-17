@@ -28,7 +28,6 @@ const RECIPIENT_MENU_MAX_PX: f32 = RECIPIENT_ROW_PX * 5.;
 struct Candidate {
     id: String,
     username: SharedString,
-    label: SharedString,
     avatar: SharedString,
     filter_key: String,
 }
@@ -275,15 +274,9 @@ impl SendTokenModal {
         } else {
             SharedString::from(crate::util::imgproxy::avatar_url(cx, avatar_url))
         };
-        let label = if display_name.trim().is_empty() {
-            username
-        } else {
-            display_name
-        };
         out.push(Candidate {
             id,
             username: SharedString::from(username.to_string()),
-            label: SharedString::from(label.to_string()),
             avatar,
             filter_key: format!("{username} {display_name}").to_lowercase(),
         });
@@ -792,7 +785,6 @@ fn recipient_row(
 ) -> AnyElement {
     let id = candidate.id.clone();
     let username = candidate.username.clone();
-    let secondary = (candidate.username != candidate.label).then(|| candidate.username.clone());
     div()
         .id(SharedString::from(format!(
             "send-token-user-{}",
@@ -816,29 +808,15 @@ fn recipient_row(
         })
         .child(
             Avatar::new()
-                .name(candidate.label.clone())
+                .name(candidate.username.clone())
                 .src(candidate.avatar.clone())
                 .size_px(px(28.)),
         )
         .child(
             div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.tokens.text_secondary)
-                        .child(candidate.label.clone()),
-                )
-                .when_some(secondary, |this, username| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.tokens.text_theme_primary)
-                            .child(username),
-                    )
-                }),
+                .text_sm()
+                .text_color(theme.tokens.text_secondary)
+                .child(candidate.username.clone()),
         )
         .into_any_element()
 }
@@ -1008,7 +986,6 @@ mod tests {
         Candidate {
             id: id.into(),
             username: username.into(),
-            label: display_name.into(),
             avatar: SharedString::default(),
             filter_key: format!("{username} {display_name}").to_lowercase(),
         }
