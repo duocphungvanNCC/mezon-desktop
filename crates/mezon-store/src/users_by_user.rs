@@ -13,6 +13,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 #[derive(Debug, Clone)]
 pub enum UsersByUserEvent {
     Changed,
+    SearchSettled,
 }
 
 pub struct UsersByUserStore {
@@ -134,13 +135,16 @@ impl UsersByUserStore {
     pub fn search(&mut self, query: &str, cx: &mut Context<Self>) {
         let query = query.trim().to_string();
         self.search_generation = self.search_generation.wrapping_add(1);
+        self._search_task = Task::ready(());
         if query.is_empty() {
-            self._search_task = Task::ready(());
             if !self.search_hits.is_empty() || !self.search_query.is_empty() {
                 self.search_hits.clear();
                 self.search_query.clear();
-                cx.emit(UsersByUserEvent::Changed);
+                cx.emit(UsersByUserEvent::SearchSettled);
             }
+            return;
+        }
+        if query == self.search_query {
             return;
         }
         let generation = self.search_generation;
@@ -151,24 +155,34 @@ impl UsersByUserStore {
                 .search_ctrl_k(&query, CtrlKSearchType::Users.as_raw())
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.search_generation != generation {
-                    tracing::debug!(query, generation, "user search result ignored");
-                    return;
-                }
-                match result {
-                    Ok(response) => {
-                        tracing::debug!(
-                            query,
-                            generation,
-                            hits = response.users.len(),
-                            "user search result applied"
-                        );
-                        this.merge_users(query, response.users, cx)
-                    }
-                    Err(e) => tracing::warn!("SearchCtrlK for users failed: {e}"),
-                }
+                this.apply_search_result(generation, query, result, cx)
             });
         });
+    }
+
+    fn apply_search_result(
+        &mut self,
+        generation: u64,
+        query: String,
+        result: anyhow::Result<mezon_proto::api::SearchCtrlKResponse>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_generation != generation {
+            tracing::debug!(query, generation, "user search result ignored");
+            return;
+        }
+        match result {
+            Ok(response) => {
+                tracing::debug!(
+                    query,
+                    generation,
+                    hits = response.users.len(),
+                    "user search result applied"
+                );
+                self.merge_users(query, response.users, cx)
+            }
+            Err(e) => tracing::warn!("SearchCtrlK for users failed: {e}"),
+        }
     }
 
     fn merge_users(
@@ -209,10 +223,11 @@ impl UsersByUserStore {
         }
         tracing::debug!(users_changed, hits_changed, "user search merged");
         if users_changed {
+            cx.emit(UsersByUserEvent::Changed);
             cx.notify();
         }
-        if users_changed || hits_changed {
-            cx.emit(UsersByUserEvent::Changed);
+        if hits_changed {
+            cx.emit(UsersByUserEvent::SearchSettled);
         }
     }
 
@@ -369,6 +384,33 @@ mod tests {
                 assert_eq!(user.avatar_url, "token-bot.png");
                 assert_eq!(user.about_me, "bio");
                 assert_eq!(user.create_time_seconds, 42);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_result_for_a_superseded_query_is_ignored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.search("bot", cx);
+                let stale_generation = store.search_generation;
+                store.search("bot-r", cx);
+                let response = mezon_proto::api::SearchCtrlKResponse {
+                    users: vec![hit(7, "bot-hrm", "HRM")],
+                    ..Default::default()
+                };
+                store.apply_search_result(stale_generation, "bot".into(), Ok(response), cx);
+                assert_eq!(store.search_hits(), ("", &[][..]));
+                assert_eq!(store.count(), 0);
+
+                let response = mezon_proto::api::SearchCtrlKResponse {
+                    users: vec![hit(9, "bot-reward", "Reward")],
+                    ..Default::default()
+                };
+                let current = store.search_generation;
+                store.apply_search_result(current, "bot-r".into(), Ok(response), cx);
+                assert_eq!(store.search_hits(), ("bot-r", &[UserId(9)][..]));
             });
         });
     }

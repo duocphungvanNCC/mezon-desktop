@@ -322,6 +322,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["query"],
         )),
+        "search_users" => Arc::new(object(
+            json!({
+                "query": string("Search text."),
+            }),
+            &["query"],
+        )),
         "get_sticker" => Arc::new(object(
             json!({
                 "id": id("Sticker id."),

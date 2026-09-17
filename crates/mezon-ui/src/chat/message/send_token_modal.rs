@@ -4,7 +4,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
     ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window, deferred,
-    div, prelude::*, px, relative, uniform_list,
+    div, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
     AccountStore, BadgeService, DirectMessageStore, FriendStore, UserId, UsersByUserEvent,
@@ -18,7 +18,6 @@ use crate::components::primitives::{
 use crate::theme::ActiveTheme;
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
-const MAX_CANDIDATES_SHOWN: usize = 50;
 const MAX_AMOUNT_DIGITS: usize = 15;
 const SEARCH_DEBOUNCE_MS: u64 = 300;
 const RECIPIENT_ROW_PX: f32 = 48.;
@@ -32,7 +31,6 @@ struct Candidate {
     filter_key: String,
 }
 
-#[derive(Default)]
 struct Candidates {
     friends: Vec<Candidate>,
     known_users: Vec<Candidate>,
@@ -113,6 +111,7 @@ impl SendTokenModal {
                         } else {
                             this.selected = None;
                             this.dropdown_open = true;
+                            this.recipient_scroll.scroll_to_item(0, ScrollStrategy::Top);
                             this.schedule_user_search(cx);
                         }
                         this.recompute_visible(cx);
@@ -157,8 +156,12 @@ impl SendTokenModal {
                 cx.subscribe(
                     &store,
                     |this: &mut Self, _, event: &UsersByUserEvent, cx| {
-                        let UsersByUserEvent::Changed = event;
-                        this.candidates = Self::build_candidates(cx);
+                        match event {
+                            UsersByUserEvent::Changed => {
+                                this.candidates = Self::build_candidates(cx);
+                            }
+                            UsersByUserEvent::SearchSettled => {}
+                        }
                         this.recompute_visible(cx);
                         cx.notify();
                     },
@@ -283,15 +286,21 @@ impl SendTokenModal {
     }
 
     fn schedule_user_search(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = UsersByUserStore::try_global(cx) else {
+            return;
+        };
+        if self.search.read(cx).value().trim().is_empty() {
+            self._search_task = Task::ready(());
+            store.update(cx, |store, cx| store.search("", cx));
+            return;
+        }
         self._search_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let query = this.search.read(cx).value().to_string();
-                if let Some(store) = UsersByUserStore::try_global(cx) {
-                    store.update(cx, |store, cx| store.search(&query, cx));
-                }
+                store.update(cx, |store, cx| store.search(&query, cx));
             });
         });
     }
@@ -307,6 +316,7 @@ impl SendTokenModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self._search_task = Task::ready(());
         self.suppress_search_change = true;
         self.search.update(cx, |input, cx| {
             input.set_value(username.clone(), window, cx)
@@ -318,22 +328,14 @@ impl SendTokenModal {
 
     fn recompute_visible(&mut self, cx: &App) {
         let needle = self.search.read(cx).value().trim().to_lowercase();
-        let fresh_hits: Vec<String> = if needle.is_empty() {
-            Vec::new()
-        } else {
-            UsersByUserStore::try_global(cx)
-                .map(|store| {
-                    let store = store.read(cx);
-                    let (query, hits) = store.search_hits();
-                    if query.trim().to_lowercase() != needle {
-                        return Vec::new();
-                    }
-                    hits.iter().map(|id| id.0.to_string()).collect()
-                })
-                .unwrap_or_default()
-        };
-        self.visible = order_visible(&self.candidates, &needle, &fresh_hits);
-        self.recipient_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        let hits = UsersByUserStore::try_global(cx)
+            .map(|store| {
+                let store = store.read(cx);
+                let (query, hits) = store.search_hits();
+                fresh_hits(&needle, query, hits)
+            })
+            .unwrap_or_default();
+        self.visible = order_visible(&self.candidates, &needle, &hits);
     }
 
     fn amount_value(&self, cx: &App) -> i64 {
@@ -577,6 +579,7 @@ impl Render for SendTokenModal {
                             })
                             .collect::<Vec<_>>()
                     })
+                    .with_item_size(size(px(1.), px(RECIPIENT_ROW_PX)))
                     .track_scroll(&self.recipient_scroll)
                     .h(px(list_h))
                     .w_full();
@@ -821,23 +824,22 @@ fn recipient_row(
         .into_any_element()
 }
 
-fn order_visible(candidates: &Candidates, needle: &str, fresh_hits: &[String]) -> Vec<Candidate> {
-    let matches =
-        |candidate: &Candidate| needle.is_empty() || candidate.filter_key.contains(needle);
-    let hit = |candidate: &Candidate| fresh_hits.contains(&candidate.id);
-    let mut listed: HashSet<&str> = HashSet::new();
+fn fresh_hits(needle: &str, settled_query: &str, hits: &[UserId]) -> HashSet<String> {
+    if needle.is_empty() || settled_query.trim().to_lowercase() != needle {
+        return HashSet::new();
+    }
+    hits.iter().map(|id| id.0.to_string()).collect()
+}
+
+fn order_visible(candidates: &Candidates, needle: &str, hits: &HashSet<String>) -> Vec<Candidate> {
+    let listed = |candidate: &Candidate| {
+        needle.is_empty() || candidate.filter_key.contains(needle) || hits.contains(&candidate.id)
+    };
     candidates
         .friends
         .iter()
-        .filter(|candidate| matches(candidate))
-        .chain(
-            candidates
-                .known_users
-                .iter()
-                .filter(|candidate| matches(candidate) || hit(candidate)),
-        )
-        .filter(|candidate| listed.insert(candidate.id.as_str()))
-        .take(MAX_CANDIDATES_SHOWN)
+        .chain(candidates.known_users.iter())
+        .filter(|candidate| listed(candidate))
         .cloned()
         .collect()
 }
@@ -845,9 +847,9 @@ fn order_visible(candidates: &Candidates, needle: &str, fresh_hits: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Candidates, DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, SharedString,
+        Candidate, Candidates, DECIMAL_FACTOR, HashSet, MAX_AMOUNT_DIGITS, SharedString, UserId,
         amount_exceeds_balance, amount_reformat_target, digit_count, format_amount_input,
-        format_thousands, order_visible, parse_whole_token_amount,
+        format_thousands, fresh_hits, order_visible, parse_whole_token_amount,
     };
 
     #[test]
@@ -1000,6 +1002,10 @@ mod tests {
         visible.iter().map(|c| c.id.as_str()).collect()
     }
 
+    fn hits(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
     #[test]
     fn server_hits_never_reorder_rows_that_were_already_listed() {
         let candidates = Candidates {
@@ -1010,9 +1016,8 @@ mod tests {
                 candidate("4", "Bot Interview English#9942", "Bot Interview English"),
             ]),
         };
-        let before = order_visible(&candidates, "bot", &[]);
-        let server_order = ["4".to_string(), "2".to_string(), "3".to_string()];
-        let after = order_visible(&candidates, "bot", &server_order);
+        let before = order_visible(&candidates, "bot", &hits(&[]));
+        let after = order_visible(&candidates, "bot", &hits(&["4", "2", "3"]));
         assert_eq!(ids(&before), ids(&after));
         assert_eq!(ids(&after), ["1", "4", "3", "2"]);
     }
@@ -1020,19 +1025,37 @@ mod tests {
     #[test]
     fn a_hit_that_only_matches_by_nickname_is_listed_in_its_sorted_place() {
         let candidates = Candidates {
-            friends: Vec::new(),
+            friends: vec![candidate("1", "alice", "Alice")],
             known_users: sorted(vec![
                 candidate("2", "bot-reward", "Reward"),
-                candidate("3", "alice", "Alice"),
+                candidate("3", "carol", "Carol"),
                 candidate("4", "zeta", "Zeta"),
             ]),
         };
-        let visible = order_visible(&candidates, "bot", &["4".to_string()]);
-        assert_eq!(ids(&visible), ["2", "4"]);
+        let visible = order_visible(&candidates, "bot", &hits(&["1", "4"]));
+        assert_eq!(ids(&visible), ["1", "2", "4"]);
     }
 
     #[test]
-    fn stale_hits_are_not_forced_into_the_list() {
+    fn an_empty_query_lists_friends_before_the_user_cache() {
+        let candidates = Candidates {
+            friends: vec![candidate("2", "zoe", "Zoe")],
+            known_users: sorted(vec![candidate("3", "bot-hrm", "HRM")]),
+        };
+        let visible = order_visible(&candidates, "", &hits(&[]));
+        assert_eq!(ids(&visible), ["2", "3"]);
+    }
+
+    #[test]
+    fn hits_settled_for_another_query_are_not_fresh() {
+        let settled = [UserId(7), UserId(9)];
+        assert!(fresh_hits("bot-r", "bot", &settled).is_empty());
+        assert!(fresh_hits("", "bot", &settled).is_empty());
+        assert_eq!(fresh_hits("bot", " Bot ", &settled), hits(&["7", "9"]));
+    }
+
+    #[test]
+    fn a_stale_hit_that_no_longer_matches_locally_disappears() {
         let candidates = Candidates {
             friends: Vec::new(),
             known_users: sorted(vec![
@@ -1040,20 +1063,7 @@ mod tests {
                 candidate("3", "alice", "Alice"),
             ]),
         };
-        let visible = order_visible(&candidates, "bot-r", &[]);
-        assert_eq!(ids(&visible), ["2"]);
-    }
-
-    #[test]
-    fn friends_come_first_and_are_not_repeated_from_the_user_cache() {
-        let candidates = Candidates {
-            friends: vec![candidate("2", "bot-reward", "Reward")],
-            known_users: sorted(vec![
-                candidate("2", "bot-reward", "Reward"),
-                candidate("3", "bot-hrm", "HRM"),
-            ]),
-        };
-        let visible = order_visible(&candidates, "", &[]);
-        assert_eq!(ids(&visible), ["2", "3"]);
+        let stale = fresh_hits("bot-r", "bot", &[UserId(2), UserId(3)]);
+        assert_eq!(ids(&order_visible(&candidates, "bot-r", &stale)), ["2"]);
     }
 }
