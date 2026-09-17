@@ -156,6 +156,17 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "search_users",
+        description: "\
+Search users the way the send-token recipient box and Ctrl+K do: the server matches
+username, display name and clan nickname (ILIKE, max 50) among friends and members of
+the caller's clans, bots included.
+
+Parameters:
+- query (required): search text",
+        write: false,
+    },
+    ToolSpec {
         name: "get_current_context",
         description: "\
 Return the UI route and parsed context for the active screen.

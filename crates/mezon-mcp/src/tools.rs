@@ -97,6 +97,14 @@ impl McpBackend {
                 let size = arguments.get("size").and_then(Value::as_i64).unwrap_or(20) as i32;
                 self.search_messages(&query, size).await
             }
+            "search_users" => {
+                let query = arguments
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.search_users(&query).await
+            }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
             "tour_state" => {
@@ -1080,6 +1088,23 @@ impl McpBackend {
             "total": response.total,
             "messages": messages,
         }))
+    }
+
+    async fn search_users(&self, query: &str) -> anyhow::Result<Value> {
+        let response = self.api.search_ctrl_k(query, 1).await?;
+        let users: Vec<Value> = response
+            .users
+            .iter()
+            .map(|user| {
+                serde_json::json!({
+                    "id": user.id.to_string(),
+                    "username": user.username,
+                    "display_name": user.display_name,
+                    "nicknames": user.list_nick_names,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "total": users.len(), "users": users }))
     }
 
     async fn get_current_context(&self) -> anyhow::Result<Value> {
