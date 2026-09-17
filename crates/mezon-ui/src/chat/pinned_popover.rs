@@ -91,6 +91,16 @@ impl PinCardVm {
         let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
         let text_spans = prepare_pin_text_spans(msg);
         let selectable_text = pin_canonical_text(msg, &text_spans);
+        let mut pin = msg.clone();
+        if let Some(channel_id) = channel_id
+            && let Ok(message_id) = msg.message_id.parse::<MessageId>()
+            && let Some(message) = MessagesStore::global(cx)
+                .read(cx)
+                .message_in_channel(channel_id, message_id)
+            && !message.attachments.is_empty()
+        {
+            pin.attachments = message.attachments.clone();
+        }
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -99,7 +109,7 @@ impl PinCardVm {
             is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
-            pin: Arc::new(msg.clone()),
+            pin: Arc::new(pin),
             text_spans,
             selectable_text,
             poll,
@@ -214,6 +224,10 @@ impl PinnedPopoverPanel {
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
+                this.pin_cards = this.compute_pin_cards(cx);
+                cx.notify();
+            }),
+            cx.observe(&MessagesStore::global(cx), |this, _, cx| {
                 this.pin_cards = this.compute_pin_cards(cx);
                 cx.notify();
             }),
