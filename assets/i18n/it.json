@@ -2710,6 +2710,7 @@
   "eventCreator.fields.eventName.title": "Titolo dell'evento",
   "eventCreator.fields.startDate.errorMessage": "Seleziona una data odierna o futura",
   "eventCreator.fields.startDate.title": "Data di inizio",
+  "eventCreator.fields.date.title": "Data",
   "eventCreator.fields.startTime.errorMessage": "Inserisci un'ora di inizio valida",
   "eventCreator.fields.startTime.title": "Ora di inizio",
   "eventCreator.notify.locationBlank": "È necessario inserire un luogo",

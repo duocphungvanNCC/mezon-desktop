@@ -2948,6 +2948,7 @@
   "eventCreator.fields.eventName.title": "Тема события",
   "eventCreator.fields.startDate.errorMessage": "Выберите дату не раньше указанной",
   "eventCreator.fields.startDate.title": "Дата начала",
+  "eventCreator.fields.date.title": "Дата",
   "eventCreator.fields.startTime.errorMessage": "Выберите время не раньше указанного",
   "eventCreator.fields.startTime.title": "Время начала",
   "eventCreator.notify.locationBlank": "Укажите место проведения",

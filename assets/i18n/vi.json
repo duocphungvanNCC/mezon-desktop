@@ -2709,6 +2709,7 @@
   "eventCreator.fields.eventName.title": "Chủ đề sự kiện",
   "eventCreator.fields.startDate.errorMessage": "Vui lòng chọn ngày hiện tại hoặc ngày trong tương lai",
   "eventCreator.fields.startDate.title": "Ngày bắt đầu",
+  "eventCreator.fields.date.title": "Ngày",
   "eventCreator.fields.startTime.errorMessage": "Vui lòng chọn giờ bắt đầu hợp lệ",
   "eventCreator.fields.startTime.title": "Giờ bắt đầu",
   "eventCreator.notify.locationBlank": "Cần có một địa điểm",

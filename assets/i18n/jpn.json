@@ -2710,6 +2710,7 @@
   "eventCreator.fields.eventName.title": "イベントのトピック",
   "eventCreator.fields.startDate.errorMessage": "現在の日付または未来の日付を選択してください",
   "eventCreator.fields.startDate.title": "開始日",
+  "eventCreator.fields.date.title": "日付",
   "eventCreator.fields.startTime.errorMessage": "有効な開始時間を選択してください",
   "eventCreator.fields.startTime.title": "開始時間",
   "eventCreator.notify.locationBlank": "場所が必要です",

@@ -2710,6 +2710,7 @@
   "eventCreator.fields.eventName.title": "Händelse ämne",
   "eventCreator.fields.startDate.errorMessage": "Vänligen välj dag eller framtid",
   "eventCreator.fields.startDate.title": "Startdatum",
+  "eventCreator.fields.date.title": "Datum",
   "eventCreator.fields.startTime.errorMessage": "Vänligen välj giltig starttid",
   "eventCreator.fields.startTime.title": "Starttid",
   "eventCreator.notify.locationBlank": "Plats krävs",

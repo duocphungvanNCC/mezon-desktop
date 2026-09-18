@@ -2709,6 +2709,7 @@
   "eventCreator.fields.eventName.title": "Sujet de l'événement",
   "eventCreator.fields.startDate.errorMessage": "Veuillez sélectionner la date actuelle ou une date ultérieure",
   "eventCreator.fields.startDate.title": "Date de début",
+  "eventCreator.fields.date.title": "Date",
   "eventCreator.fields.startTime.errorMessage": "Veuillez sélectionner une heure de début valide",
   "eventCreator.fields.startTime.title": "Heure de début",
   "eventCreator.notify.locationBlank": "Un emplacement est requis",
