@@ -1845,6 +1845,72 @@ pub fn is_mention_or_reply(
         .any(|reference| reference.message_sender_id == user_id)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageTargetClassification {
+    pub has_here: bool,
+    pub direct_user: bool,
+    pub matching_role: bool,
+    pub reply_to_user: bool,
+}
+
+impl MessageTargetClassification {
+    pub fn is_badge_mention(self) -> bool {
+        self.has_here || self.is_inbox_mention()
+    }
+
+    pub fn is_inbox_mention(self) -> bool {
+        self.direct_user || self.matching_role || self.reply_to_user
+    }
+
+    pub fn is_here_only(self) -> bool {
+        self.has_here && !self.is_inbox_mention()
+    }
+}
+
+pub fn classify_message_targets(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> MessageTargetClassification {
+    let mut classification = MessageTargetClassification::default();
+    for mention in parse_message_mentions(mention_bytes) {
+        classification.has_here |= is_here_user_id(&mention.user_id.to_string());
+        classification.direct_user |= mention.user_id != 0 && mention.user_id == user_id;
+        classification.matching_role |= mention.role_id != 0 && role_ids.contains(&mention.role_id);
+    }
+    if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content) {
+        for token in parsed.mentions {
+            if let Some(id) = token.user_id.as_deref() {
+                classification.has_here |= is_here_user_id(id);
+                classification.direct_user |=
+                    !is_here_user_id(id) && id.parse::<i64>() == Ok(user_id);
+            }
+            classification.matching_role |= token
+                .role_id
+                .as_deref()
+                .and_then(|id| id.parse::<i64>().ok())
+                .is_some_and(|id| role_ids.contains(&id));
+        }
+    }
+    classification.reply_to_user = parse_message_references(references)
+        .iter()
+        .any(|reference| reference.message_sender_id == user_id);
+    classification
+}
+
+pub fn is_inbox_mention_or_reply(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> bool {
+    classify_message_targets(content, references, mention_bytes, user_id, role_ids)
+        .is_inbox_mention()
+}
+
 fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
     if let Some(uid) = token.user_id.as_deref()
         && (is_here_user_id(uid) || uid.parse::<i64>().is_ok_and(|id| id == user_id))
@@ -11181,6 +11247,47 @@ mod tests {
         .encode_to_vec();
         let content = build_message_content_json("@here", &[], &[], &[], &[]);
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+        assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn target_classification_keeps_direct_mentions_mixed_with_here() {
+        let here_user_id = MENTION_HERE_USER_ID.parse::<i64>().unwrap();
+        let bytes = api::MessageMentionList {
+            mentions: vec![
+                api::MessageMention {
+                    user_id: here_user_id,
+                    username: "@here".into(),
+                    ..Default::default()
+                },
+                api::MessageMention {
+                    user_id: 7,
+                    username: "@alice".into(),
+                    ..Default::default()
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        let targets = classify_message_targets("", &[], &bytes, 7, &[]);
+        assert!(targets.has_here);
+        assert!(targets.direct_user);
+        assert!(targets.is_inbox_mention());
+        assert!(!targets.is_here_only());
+    }
+
+    #[test]
+    fn inbox_mention_or_reply_keeps_replies() {
+        let refs = api::MessageRefList {
+            refs: vec![api::MessageRef {
+                message_sender_id: 42,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content = build_message_content_json("reply", &[], &[], &[], &[]);
+
+        assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]
