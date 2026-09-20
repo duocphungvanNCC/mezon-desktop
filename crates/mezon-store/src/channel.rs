@@ -3577,20 +3577,24 @@ impl ChannelList {
                 if changed {
                     cx.notify();
                 }
-                // The event goes to the whole clan, but a channel that just
-                // turned private only names the users and roles it was
-                // granted to. Unless we are one of those (or the one who
-                // flipped it) only the server knows whether a role still
-                // lets us in, so refetch and let the listing decide — the
-                // refetch drops the channel and `AccessLost` follows.
+                // The event goes to the whole clan, and a channel that just
+                // turned private carries the complete access list it was
+                // given — the server clears the member set when a channel
+                // goes public and fills it from this request on the way
+                // back. So the decision is local: we keep the channel if we
+                // are named, flipped it, or hold one of the roles; otherwise
+                // it is gone for us right now. Only when our own roles are
+                // not loaded for this clan do we ask the server, since a
+                // clan-wide refetch from every client at once is the one
+                // thing this must not turn into.
                 if was_private == Some(false) && e.channel_private {
-                    let me = BadgeService::try_global(cx)
-                        .and_then(|badges| badges.read(cx).current_user_id(cx));
-                    let named = me.is_some_and(|me| {
-                        e.creator_id == me.get() || e.user_ids.contains(&me.get())
-                    });
-                    if !named {
-                        self.refresh_clan(clan_id, cx);
+                    match self.private_flip_keeps_us(clan_id, e, cx) {
+                        Some(true) => {}
+                        Some(false) => {
+                            self.apply_self_removed_from_channel(id, cx);
+                            cx.emit(ChannelEvent::AccessLost(id));
+                        }
+                        None => self.refresh_clan(clan_id, cx),
                     }
                 }
             }
@@ -4694,6 +4698,29 @@ impl ChannelList {
         }
         self.sync_clan_after_read(clan_id, 0, cx);
         cx.notify();
+    }
+
+    /// Whether a public→private flip announced by `event` still lets us in:
+    /// `Some(true)` when we are the one who flipped it, are granted by user
+    /// id, or hold one of the granted roles; `Some(false)` when we are not;
+    /// `None` when our roles in this clan are not loaded, so nothing local
+    /// can answer.
+    fn private_flip_keeps_us(
+        &self,
+        clan_id: ClanId,
+        event: &mezon_proto::realtime::ChannelUpdatedEvent,
+        cx: &App,
+    ) -> Option<bool> {
+        let me = BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))?
+            .get();
+        if event.creator_id == me || event.user_ids.contains(&me) {
+            return Some(true);
+        }
+        let members = crate::clan_members::ClanMembersStore::try_global(cx)?;
+        let members = members.read(cx);
+        let roles = members.self_role_ids(clan_id)?;
+        Some(roles.iter().any(|role| event.role_ids.contains(role)))
     }
 
     pub fn apply_self_removed_from_channel(
@@ -9479,6 +9506,15 @@ mod tests {
     }
 
     fn private_flip_event(channel_id: i64, user_ids: Vec<i64>, creator_id: i64) -> RealtimeEvent {
+        private_flip_event_with_roles(channel_id, user_ids, vec![], creator_id)
+    }
+
+    fn private_flip_event_with_roles(
+        channel_id: i64,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
+        creator_id: i64,
+    ) -> RealtimeEvent {
         RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
             clan_id: 1,
             channel_id,
@@ -9487,15 +9523,16 @@ mod tests {
             channel_private: true,
             creator_id,
             user_ids,
+            role_ids,
             status: 1,
             ..Default::default()
         })
     }
 
-    /// The clan-wide event only names the users the private flip granted;
-    /// anyone else has to ask the server whether a role still lets them in.
+    /// Without our roles for the clan nothing local can tell whether a role
+    /// still lets us in, so the listing is asked again.
     #[gpui::test]
-    fn a_private_flip_that_does_not_name_us_refetches_the_clan(cx: &mut gpui::TestAppContext) {
+    fn a_private_flip_with_unknown_roles_refetches_the_clan(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
@@ -9515,6 +9552,57 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// With our roles known the flip is settled locally: no refetch, and a
+    /// channel we lost is dropped right away so the voice store can hang up.
+    #[gpui::test]
+    fn a_private_flip_is_settled_locally_when_our_roles_are_known(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            let members = crate::clan_members::ClanMembersStore::init(api, cx);
+            members.update(cx, |members, _| {
+                members.seed_self_roles_for_test(ClanId(1), vec![40, 41]);
+            });
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&private_flip_event_with_roles(1, vec![], vec![41], 9), cx);
+                assert!(
+                    channels.channel_in_clan(ClanId(1), ChannelId(1)),
+                    "granted by role"
+                );
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "settled without the server"
+                );
+
+                channels.handle_event(&private_flip_event_with_roles(2, vec![5], vec![42], 9), cx);
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(2)),
+                    "neither named nor holding a granted role: gone now, not after a refetch"
+                );
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+            });
+            channels
+        });
+        assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+        drop(channels);
     }
 
     #[gpui::test]
