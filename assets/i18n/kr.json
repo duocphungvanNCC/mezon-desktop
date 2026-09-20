@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "비공개 채널인가요?",
   "createChannel.labels.placeholder": "채널 이름 입력",
   "createChannel.privacy.description": "선택된 멤버와 역할만 이 채널을 볼 수 있습니다.",
+  "createChannel.privacy.descriptionVoice": "선택된 멤버와 역할만 이 채널을 보고 참여할 수 있습니다.",
   "createChannel.privacy.private": "비공개 채널",
   "createChannel.validation.duplicateName": "카테고리에 이미 채널 이름이 있습니다. 다른 이름을 입력하세요.",
   "createChannel.validation.invalidName": "채널 이름을 입력하세요 (최대 64 자, 문자, 숫자, _ 또는 - 만 포함).",

@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "プライベートチャンネル?",
   "createChannel.labels.placeholder": "チャンネル名を入力",
   "createChannel.privacy.description": "選択されたメンバーとロールのみがこのチャンネルを表示できます。",
+  "createChannel.privacy.descriptionVoice": "選択されたメンバーとロールのみがこのチャンネルを表示して参加できます。",
   "createChannel.privacy.private": "プライベートチャンネル",
   "createChannel.validation.duplicateName": "このカテゴリに同じチャンネル名があります。別の名前を入力してください。",
   "createChannel.validation.invalidName": "有効なチャンネル名を入力してください（最大64文字、文字、数字、_または-のみ）。",

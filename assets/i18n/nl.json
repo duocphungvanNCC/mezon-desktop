@@ -2348,6 +2348,7 @@
   "createChannel.labels.isPrivate": "Privékanaal?",
   "createChannel.labels.placeholder": "Voer kanaalnaam in",
   "createChannel.privacy.description": "Alleen geselecteerde leden en rollen kunnen dit kanaal zien.",
+  "createChannel.privacy.descriptionVoice": "Alleen geselecteerde leden en rollen kunnen dit kanaal zien en eraan deelnemen.",
   "createChannel.privacy.private": "Privékanaal",
   "createChannel.validation.duplicateName": "Kanaalnaam bestaat al in de categorie. Voer een andere naam in.",
   "createChannel.validation.invalidName": "Voer een geldige kanaalnaam in (maximaal 64 tekens, alleen woorden, cijfers, _ of -).",
