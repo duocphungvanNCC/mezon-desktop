@@ -116,9 +116,11 @@ impl ChannelSettingsTab {
         match self {
             Self::Overview => true,
             Self::Category => !ctx.is_thread,
+            // Voice gets the tab too: a private voice room is gated by the same
+            // member/role lists as a private text channel (the server hands a
+            // meet token to `chlu:` members only). Stream and app stay public.
             Self::Permissions => {
                 !ctx.is_thread
-                    && !is_voice
                     && !is_stream
                     && !is_app
                     && !ctx.is_welcome_channel
@@ -781,8 +783,24 @@ mod tests {
     }
 
     #[test]
-    fn permissions_tab_hidden_for_thread_voice_stream_app_and_welcome() {
-        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+    fn permissions_tab_shown_for_voice_with_manage_channel() {
+        assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn permissions_tab_hidden_for_thread_stream_app_and_welcome() {
+        for channel_type in [ChannelType::Stream, ChannelType::App] {
             assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
                 channel_type,
                 false,

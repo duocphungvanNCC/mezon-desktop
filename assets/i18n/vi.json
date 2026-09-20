@@ -2348,6 +2348,7 @@
   "createChannel.labels.isPrivate": "Kênh riêng tư?",
   "createChannel.labels.placeholder": "Nhập tên kênh",
   "createChannel.privacy.description": "Chỉ những thành viên và vai trò được chọn mới có thể xem kênh này.",
+  "createChannel.privacy.descriptionVoice": "Chỉ những thành viên và vai trò được chọn mới có thể xem và tham gia kênh này.",
   "createChannel.privacy.private": "Kênh riêng tư",
   "createChannel.validation.duplicateName": "Tên kênh đã tồn tại trong danh mục. Vui lòng nhập tên khác.",
   "createChannel.validation.invalidName": "Vui lòng nhập tên kênh (tối đa 64 ký tự, chỉ từ, số, _ hoặc -).",

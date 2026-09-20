@@ -1899,7 +1899,7 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
-                    ChannelEvent::ArchivedByAdministrator { .. } => {}
+                    ChannelEvent::ArchivedByAdministrator { .. } | ChannelEvent::AccessLost(_) => {}
                 },
             ),
             cx.subscribe(

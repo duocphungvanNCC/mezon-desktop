@@ -196,6 +196,14 @@ impl Channel {
     }
 }
 
+/// Which channel types may be private. The server accepts `channel_private`
+/// on anything but an app channel; the product exposes it for text and voice
+/// — a private voice room is listed for, and hands a meet token to, its
+/// members and roles only. Stream stays public.
+pub fn channel_supports_private(channel_type: ChannelType) -> bool {
+    matches!(channel_type, ChannelType::Text | ChannelType::Voice)
+}
+
 pub fn archive_menu_hidden(channel_type: ChannelType, is_welcome_channel: bool) -> bool {
     matches!(
         channel_type,
@@ -469,7 +477,14 @@ pub enum ChannelEvent {
     InVoiceChanged,
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
-    ArchivedByAdministrator { is_thread: bool },
+    ArchivedByAdministrator {
+        is_thread: bool,
+    },
+    /// A channel the store used to hold is no longer listed for this user:
+    /// a refetch of the clan dropped it (removed from a private channel, the
+    /// channel turned private without us, or it was deleted while we were
+    /// away). The voice store leaves a call running in that channel.
+    AccessLost(ChannelId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1652,7 +1667,11 @@ impl ChannelList {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
         self.sync_user_channels_from_clan_structure(&categories, cx);
+        let lost = channels_dropped_by_refetch(self.categories_for_clan(clan_id), &categories);
         self.cache.insert(clan_id, categories, None);
+        for channel_id in lost {
+            cx.emit(ChannelEvent::AccessLost(channel_id));
+        }
         if favorites_missing {
             self.cache.mark_stale(&clan_id);
         }
@@ -3033,7 +3052,7 @@ impl ChannelList {
         if self.channel_name_exists_in_category(clan_id, &category_id, &label) {
             return Task::ready(Err(CreateChannelError::DuplicateName));
         }
-        let channel_private = if private && channel_type == ChannelType::Text {
+        let channel_private = if private && channel_supports_private(channel_type) {
             1
         } else {
             0
@@ -3535,10 +3554,12 @@ impl ChannelList {
             }
             RealtimeEvent::ChannelUpdated(e) => {
                 let id = ChannelId(e.channel_id);
+                let clan_id = ClanId(e.clan_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
                 let carries_full_channel_state = e.channel_type != 0;
                 let age_restricted = carries_full_channel_state.then_some(e.age_restricted);
+                let was_private = self.channel(clan_id, id).map(|channel| channel.private);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3555,6 +3576,22 @@ impl ChannelList {
                 }
                 if changed {
                     cx.notify();
+                }
+                // The event goes to the whole clan, but a channel that just
+                // turned private only names the users and roles it was
+                // granted to. Unless we are one of those (or the one who
+                // flipped it) only the server knows whether a role still
+                // lets us in, so refetch and let the listing decide — the
+                // refetch drops the channel and `AccessLost` follows.
+                if was_private == Some(false) && e.channel_private {
+                    let me = BadgeService::try_global(cx)
+                        .and_then(|badges| badges.read(cx).current_user_id(cx));
+                    let named = me.is_some_and(|me| {
+                        e.creator_id == me.get() || e.user_ids.contains(&me.get())
+                    });
+                    if !named {
+                        self.refresh_clan(clan_id, cx);
+                    }
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
@@ -6078,6 +6115,21 @@ fn clan_in_voice_snapshot(
         .iter()
         .filter(|(_, info)| info.clan_id == clan_id)
         .map(|(user, info)| (*user, *info))
+        .collect()
+}
+
+/// Channel ids the previous listing had that the fresh one does not — what
+/// the server stopped showing us between two fetches.
+fn channels_dropped_by_refetch(previous: &[Category], next: &[Category]) -> Vec<ChannelId> {
+    let next_ids: HashSet<ChannelId> = next
+        .iter()
+        .flat_map(|cat| cat.channels.iter().map(|ch| ch.id))
+        .collect();
+    let mut seen = HashSet::new();
+    previous
+        .iter()
+        .flat_map(|cat| cat.channels.iter().map(|ch| ch.id))
+        .filter(|id| !next_ids.contains(id) && seen.insert(*id))
         .collect()
 }
 
@@ -9377,6 +9429,122 @@ mod tests {
         assert!(!seen.get());
     }
 
+    fn structure_with_one_channel() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![{
+            let mut ch = make_channel(1, "normal", "1");
+            ch.clan_id = ClanId(1);
+            ch
+        }];
+        build_categories(api_cats, &mut channels)
+    }
+
+    /// A refetch that no longer lists a channel is the server telling us we
+    /// lost it — the voice store hangs up on that, so it must be announced.
+    #[gpui::test]
+    fn a_refetch_that_drops_a_channel_announces_access_lost(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        // Events flush after the outermost update, so the entity has to
+        // outlive the closure or its subscribers go with it.
+        let channels = cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+            });
+            channels
+        });
+        assert!(lost.borrow().is_empty(), "the first listing loses nothing");
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_one_channel(), None, cx);
+            });
+        });
+        assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+        drop(channels);
+    }
+
+    fn private_flip_event(channel_id: i64, user_ids: Vec<i64>, creator_id: i64) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            channel_type: 10,
+            channel_private: true,
+            creator_id,
+            user_ids,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    /// The clan-wide event only names the users the private flip granted;
+    /// anyone else has to ask the server whether a role still lets them in.
+    #[gpui::test]
+    fn a_private_flip_that_does_not_name_us_refetches_the_clan(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+
+                channels.handle_event(&private_flip_event(1, vec![5, 6], 9), cx);
+                assert!(
+                    channels.loading.contains_key(&ClanId(1)),
+                    "a flip to private that leaves us out must go back to the server"
+                );
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .is_some_and(|channel| channel.private),
+                    "and the flag is applied meanwhile"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_private_flip_that_names_us_keeps_the_listing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&private_flip_event(1, vec![REMOVED_SELF], 9), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "granted by user id"
+                );
+
+                channels.handle_event(&private_flip_event(2, vec![], REMOVED_SELF), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "the one who flipped it keeps it"
+                );
+
+                channels.handle_event(&private_flip_event(2, vec![], 9), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "a repeat of an already-private channel is not a flip"
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn archive_socket_cascade_removes_child_threads(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -11548,6 +11716,24 @@ mod tests {
         assert!(archive_menu_hidden(ChannelType::Voice, false));
         assert!(archive_menu_hidden(ChannelType::Text, true));
         assert!(!archive_menu_hidden(ChannelType::Text, false));
+    }
+
+    /// Text and voice may be private; stream, app and the rest stay public
+    /// no matter what the modal or a tool asks for.
+    #[test]
+    fn private_is_offered_for_text_and_voice_only() {
+        assert!(channel_supports_private(ChannelType::Text));
+        assert!(channel_supports_private(ChannelType::Voice));
+        for channel_type in [
+            ChannelType::Stream,
+            ChannelType::App,
+            ChannelType::Thread,
+            ChannelType::Forum,
+            ChannelType::Announcement,
+            ChannelType::Unknown(42),
+        ] {
+            assert!(!channel_supports_private(channel_type), "{channel_type:?}");
+        }
     }
 
     #[gpui::test]
