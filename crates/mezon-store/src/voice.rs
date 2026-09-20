@@ -1072,7 +1072,30 @@ impl VoiceStore {
             dispatch.on(RealtimeKind::ChannelDeleted, &entity, |this, event, cx| {
                 this.handle_access_lost(event, cx)
             });
+            dispatch.on(RealtimeKind::UserClanRemoved, &entity, |this, event, cx| {
+                this.handle_clan_access_lost(event, cx)
+            });
         });
+    }
+
+    /// Kicked out of (or having left) the clan the call runs in ends the
+    /// call too — the room went with the clan.
+    fn handle_clan_access_lost(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::UserClanRemoved(e) = event else {
+            return;
+        };
+        let me = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx));
+        if !crate::event_targets_user(&e.user_ids, me) {
+            return;
+        }
+        let Some((channel_id, clan_id)) = self.active_connection_ids() else {
+            return;
+        };
+        if clan_id != e.clan_id.to_string() {
+            return;
+        }
+        self.leave_lost_channel(&channel_id, cx);
     }
 
     /// Drop the call when the channel it runs in stops being ours: an admin
@@ -4384,6 +4407,23 @@ mod tests {
 
                 voice.leave_lost_channel("5", cx);
                 assert_eq!(voice.connection, VoiceConnection::Idle, "idle stays idle");
+
+                let kicked = |clan_id: i64, user_ids: Vec<i64>| {
+                    mezon_client::RealtimeEvent::UserClanRemoved(
+                        mezon_proto::realtime::UserClanRemoved { clan_id, user_ids },
+                    )
+                };
+                voice.connection = connected("5");
+                voice.handle_clan_access_lost(&kicked(2, vec![ME]), cx);
+                assert_eq!(voice.connection, connected("5"), "kicked from another clan");
+                voice.handle_clan_access_lost(&kicked(1, vec![8]), cx);
+                assert_eq!(voice.connection, connected("5"), "someone else was kicked");
+                voice.handle_clan_access_lost(&kicked(1, vec![ME]), cx);
+                assert_eq!(
+                    voice.connection,
+                    VoiceConnection::Idle,
+                    "kicked from our clan"
+                );
             });
         });
     }

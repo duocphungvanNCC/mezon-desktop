@@ -205,10 +205,12 @@ impl PermissionsTab {
     /// permission (send message, manage threads, …) and would only invite
     /// toggles that do nothing in a voice room.
     fn shows_overrides(&self, cx: &App) -> bool {
+        // Unknown yet means wait: the channel-list observer calls
+        // `sync_overrides` again once the channel arrives.
         ChannelList::global(cx)
             .read(cx)
             .channel(self.clan_id, self.channel_id)
-            .is_none_or(|channel| channel.channel_type != ChannelType::Voice)
+            .is_some_and(|channel| channel.channel_type != ChannelType::Voice)
     }
 
     fn sync_overrides(&mut self, cx: &mut Context<Self>) {

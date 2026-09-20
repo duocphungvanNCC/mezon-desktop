@@ -1667,7 +1667,14 @@ impl ChannelList {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
         self.sync_user_channels_from_clan_structure(&categories, cx);
-        let lost = channels_dropped_by_refetch(self.categories_for_clan(clan_id), &categories);
+        // An empty listing for a clan we are in is a glitch, not a clan
+        // with no channels (the welcome channel cannot be deleted), so it
+        // must not read as every channel being lost.
+        let lost = if categories.iter().all(|cat| cat.channels.is_empty()) {
+            Vec::new()
+        } else {
+            channels_dropped_by_refetch(self.categories_for_clan(clan_id), &categories)
+        };
         self.cache.insert(clan_id, categories, None);
         for channel_id in lost {
             cx.emit(ChannelEvent::AccessLost(channel_id));
@@ -9502,6 +9509,18 @@ mod tests {
             });
         });
         assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+
+        // A listing that comes back empty is a glitch, not a wipe.
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), Vec::new(), None, cx);
+            });
+        });
+        assert_eq!(
+            *lost.borrow(),
+            vec![ChannelId(2)],
+            "an empty listing announces nothing"
+        );
         drop(channels);
     }
 
