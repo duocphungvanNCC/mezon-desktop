@@ -468,6 +468,19 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "sidebar_channels",
+        description: "\
+List the channels the app currently holds for a clan — the store behind the sidebar, not a
+fresh API call (list_channels asks the server). Use it to see what realtime events did to
+the client.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+
+Returns [{ id, label, channel_type, private, category_id, category_name, voice_member_ids }].",
+        write: false,
+    },
+    ToolSpec {
         name: "create_channel",
         description: "\
 Create a channel in a clan through the same store path the Create Channel modal uses.

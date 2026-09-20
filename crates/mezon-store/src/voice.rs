@@ -4428,6 +4428,56 @@ mod tests {
         });
     }
 
+    /// The channel list announcing a lost channel must reach the voice store
+    /// through its subscription, not only through the realtime handlers.
+    #[gpui::test]
+    fn a_channel_dropped_by_a_refetch_hangs_up_through_the_subscription(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let (voice, channels) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| {
+                crate::AuthState::Authenticated(mezon_client::Session {
+                    user_id: ME.to_string(),
+                    ..Default::default()
+                })
+            });
+            crate::badge::BadgeService::init(auth_state, cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            let channels = crate::ChannelList::init(api.clone(), cx);
+            let voice = super::VoiceStore::init(api, cx);
+            voice.update(cx, |voice, _| voice.connection = connected("2"));
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    crate::ids::ClanId(1),
+                    crate::channel::test_support::two_channels(),
+                    None,
+                    cx,
+                );
+                channels.apply_clan_structure(
+                    crate::ids::ClanId(1),
+                    crate::channel::test_support::one_channel(),
+                    None,
+                    cx,
+                );
+            });
+            (voice, channels)
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                voice.read(cx).connection,
+                VoiceConnection::Idle,
+                "channel 2 vanished from the listing while we were in it"
+            );
+        });
+        drop(channels);
+    }
+
     #[test]
     fn a_closed_member_strip_records_only_the_focused_tile() {
         let people = [

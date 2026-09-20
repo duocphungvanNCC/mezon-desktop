@@ -1628,7 +1628,7 @@ impl ChannelList {
         self.invalidate_channel_index(clan_id);
     }
 
-    fn apply_clan_structure(
+    pub(crate) fn apply_clan_structure(
         &mut self,
         clan_id: ClanId,
         mut categories: Vec<Category>,
@@ -3520,43 +3520,16 @@ impl ChannelList {
                     return;
                 }
                 if self.cache.contains(&clan_id) {
-                    let channel = Channel {
-                        id: ChannelId(e.channel_id),
-                        name: e.channel_label.clone(),
-                        channel_type: ChannelType::from_raw(e.channel_type as u32),
-                        private: e.channel_private != 0,
+                    let channel = channel_from_realtime(
                         clan_id,
-                        clan_name: String::new(),
-                        category_name: String::new(),
-                        category_id: Some(e.category_id.to_string())
-                            .filter(|s| !s.is_empty() && s != "0"),
-                        member_count: 0,
-                        badge_count: 0,
-                        muted: false,
-                        parent_id: None,
-                        last_seen_message_id: MessageId(0),
-                        last_seen_timestamp: 0,
-                        last_sent_message_id: MessageId(0),
-                        last_sent_timestamp: 0,
-                        voice_members: Vec::new(),
-                        is_favorite: false,
-                        creator_id: UserId(e.creator_id),
-                        active: CHANNEL_ACTIVE_JOINED,
-                        avatar_url: String::new(),
-                        topic: String::new(),
-                        age_restricted: 0,
-                        e2ee: 0,
-                        app_id: 0,
-                    };
-                    let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
-                        insert_channel(cats, channel)
-                    } else {
-                        false
-                    };
-                    if inserted {
-                        self.invalidate_channel_index(clan_id);
-                        cx.notify();
-                    }
+                        e.channel_id,
+                        &e.channel_label,
+                        e.channel_type,
+                        e.channel_private != 0,
+                        e.category_id,
+                        e.creator_id,
+                    );
+                    self.insert_channel_locally(clan_id, channel, cx);
                 }
             }
             RealtimeEvent::ChannelUpdated(e) => {
@@ -3594,15 +3567,48 @@ impl ChannelList {
                 // not loaded for this clan do we ask the server, since a
                 // clan-wide refetch from every client at once is the one
                 // thing this must not turn into.
-                if was_private == Some(false) && e.channel_private {
-                    match self.private_flip_keeps_us(clan_id, e, cx) {
+                match (was_private, e.channel_private) {
+                    (Some(false), true) => match self.private_flip_keeps_us(clan_id, e, cx) {
                         Some(true) => {}
                         Some(false) => {
                             self.apply_self_removed_from_channel(id, cx);
                             cx.emit(ChannelEvent::AccessLost(id));
                         }
                         None => self.refresh_clan(clan_id, cx),
+                    },
+                    // A channel we do not hold. Turned public (or we were
+                    // granted a private one): it is ours now, and the event
+                    // carries enough to show it without a refetch, like
+                    // `ChannelCreated` does. Turned private without us: we
+                    // may still be sitting in its voice room.
+                    (None, _)
+                        if carries_full_channel_state
+                            && e.parent_id == 0
+                            && self.cache.contains(&clan_id) =>
+                    {
+                        let granted = if e.channel_private {
+                            self.private_flip_keeps_us(clan_id, e, cx)
+                        } else {
+                            Some(true)
+                        };
+                        match granted {
+                            Some(true) => {
+                                let channel = channel_from_realtime(
+                                    clan_id,
+                                    e.channel_id,
+                                    &e.channel_label,
+                                    e.channel_type,
+                                    e.channel_private,
+                                    e.category_id,
+                                    e.creator_id,
+                                );
+                                self.insert_channel_locally(clan_id, channel, cx);
+                            }
+                            Some(false) => cx.emit(ChannelEvent::AccessLost(id)),
+                            None => {}
+                        }
                     }
+                    _ => {}
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
@@ -4705,6 +4711,23 @@ impl ChannelList {
         }
         self.sync_clan_after_read(clan_id, 0, cx);
         cx.notify();
+    }
+
+    fn insert_channel_locally(
+        &mut self,
+        clan_id: ClanId,
+        channel: Channel,
+        cx: &mut Context<Self>,
+    ) {
+        let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
+            insert_channel(cats, channel)
+        } else {
+            false
+        };
+        if inserted {
+            self.invalidate_channel_index(clan_id);
+            cx.notify();
+        }
     }
 
     /// Whether a public→private flip announced by `event` still lets us in:
@@ -6152,6 +6175,46 @@ fn clan_in_voice_snapshot(
         .collect()
 }
 
+/// A channel as a realtime event describes it: enough for a sidebar row
+/// until the next full listing fills in the rest.
+fn channel_from_realtime(
+    clan_id: ClanId,
+    channel_id: i64,
+    label: &str,
+    channel_type: i32,
+    private: bool,
+    category_id: i64,
+    creator_id: i64,
+) -> Channel {
+    Channel {
+        id: ChannelId(channel_id),
+        name: label.to_owned(),
+        channel_type: ChannelType::from_raw(channel_type as u32),
+        private,
+        clan_id,
+        clan_name: String::new(),
+        category_name: String::new(),
+        category_id: Some(category_id.to_string()).filter(|s| !s.is_empty() && s != "0"),
+        member_count: 0,
+        badge_count: 0,
+        muted: false,
+        parent_id: None,
+        last_seen_message_id: MessageId(0),
+        last_seen_timestamp: 0,
+        last_sent_message_id: MessageId(0),
+        last_sent_timestamp: 0,
+        voice_members: Vec::new(),
+        is_favorite: false,
+        creator_id: UserId(creator_id),
+        active: CHANNEL_ACTIVE_JOINED,
+        avatar_url: String::new(),
+        topic: String::new(),
+        age_restricted: 0,
+        e2ee: 0,
+        app_id: 0,
+    }
+}
+
 /// Channel ids the previous listing had that the fresh one does not — what
 /// the server stopped showing us between two fetches.
 fn channels_dropped_by_refetch(previous: &[Category], next: &[Category]) -> Vec<ChannelId> {
@@ -6619,6 +6682,36 @@ fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    fn cats() -> Vec<ApiCategoryDesc> {
+        vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }]
+    }
+
+    fn channel(id: i64, name: &str) -> Channel {
+        let mut ch = tests::make_channel(id, name, "1");
+        ch.clan_id = ClanId(1);
+        ch
+    }
+
+    pub(crate) fn two_channels() -> Vec<Category> {
+        let mut channels = vec![channel(1, "normal"), channel(2, "fav-ch")];
+        build_categories(cats(), &mut channels)
+    }
+
+    pub(crate) fn one_channel() -> Vec<Category> {
+        let mut channels = vec![channel(1, "normal")];
+        build_categories(cats(), &mut channels)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -6687,7 +6780,7 @@ mod tests {
         assert!(!is_collapsed("clan1", "cat1"));
     }
 
-    fn make_channel(id: i64, name: &str, cat_id: &str) -> Channel {
+    pub(crate) fn make_channel(id: i64, name: &str, cat_id: &str) -> Channel {
         Channel {
             id: ChannelId(id),
             name: name.into(),
@@ -9650,6 +9743,89 @@ mod tests {
                 );
             });
         });
+    }
+
+    fn flip_event(channel_id: i64, private: bool, user_ids: Vec<i64>) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "late".into(),
+            channel_type: 10,
+            channel_private: private,
+            creator_id: 9,
+            user_ids,
+            category_id: 1,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    /// A channel the client never held: turning public makes it ours and the
+    /// event carries enough to show it; turning private without us only
+    /// matters to a voice session that may be inside it.
+    #[gpui::test]
+    fn an_update_for_a_channel_we_do_not_hold_is_settled_from_the_event(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            let members = crate::clan_members::ClanMembersStore::init(api, cx);
+            members.update(cx, |members, _| {
+                members.seed_self_roles_for_test(ClanId(1), vec![40]);
+            });
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&flip_event(30, false, vec![]), cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(30))
+                        .is_some_and(|ch| !ch.private && ch.name == "late"),
+                    "a channel turned public shows up from the event itself"
+                );
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "and needs no refetch"
+                );
+
+                channels.handle_event(&flip_event(31, true, vec![REMOVED_SELF]), cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(31))
+                        .is_some_and(|ch| ch.private),
+                    "a private channel we are granted by user id shows up too"
+                );
+
+                channels.handle_event(&flip_event(32, true, vec![5]), cx);
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(32)),
+                    "one we are not granted stays out"
+                );
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+            });
+            channels
+        });
+        assert_eq!(
+            *lost.borrow(),
+            vec![ChannelId(32)],
+            "and only that one is announced lost"
+        );
+        drop(channels);
     }
 
     #[gpui::test]

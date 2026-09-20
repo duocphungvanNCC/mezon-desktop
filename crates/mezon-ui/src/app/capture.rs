@@ -983,6 +983,31 @@ pub fn create_category_task(
     })
 }
 
+pub fn sidebar_channels(cx: &App, clan_id: mezon_store::ClanId) -> anyhow::Result<Value> {
+    let channels = mezon_store::ChannelList::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("channel store unavailable"))?;
+    let channels = channels.read(cx);
+    let mut seen = std::collections::HashSet::new();
+    let items: Vec<Value> = channels
+        .categories_for_clan(clan_id)
+        .iter()
+        .flat_map(|category| category.channels.iter().map(move |ch| (category, ch)))
+        .filter(|(_, ch)| seen.insert(ch.id))
+        .map(|(category, ch)| {
+            json!({
+                "id": ch.id.to_string(),
+                "label": ch.name,
+                "channel_type": format!("{:?}", ch.channel_type),
+                "private": ch.private,
+                "category_id": category.id,
+                "category_name": category.name,
+                "voice_member_ids": ch.voice_members.iter().map(|m| m.user_id.to_string()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Value::Array(items))
+}
+
 pub fn create_channel_task(
     cx: &mut App,
     clan_id: mezon_store::ClanId,

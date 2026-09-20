@@ -154,6 +154,10 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "name"],
         )),
+        "sidebar_channels" => Arc::new(object(
+            json!({ "clan_id": id("Clan snowflake id from list_clans.") }),
+            &["clan_id"],
+        )),
         "create_channel" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id from list_clans."),

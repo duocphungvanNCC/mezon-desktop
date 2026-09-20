@@ -320,6 +320,7 @@ impl McpBackend {
             "list_categories" => self.list_categories(&arguments).await,
             "create_category" => self.create_category(&arguments).await,
             "create_channel" => self.create_channel(&arguments).await,
+            "sidebar_channels" => self.sidebar_channels(&arguments).await,
             "mute_channel" => {
                 self.require_write_mode("mute_channel")?;
                 self.mute_channel(&arguments).await
@@ -1474,6 +1475,13 @@ impl McpBackend {
             reply,
         })
         .await
+    }
+
+    async fn sidebar_channels(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("sidebar_channels requires field clan_id"))?;
+        self.send_ui_result(|reply| McpCommand::SidebarChannels { clan_id, reply })
+            .await
     }
 
     async fn create_channel(&self, arguments: &Value) -> anyhow::Result<Value> {

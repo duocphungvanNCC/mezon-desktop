@@ -613,6 +613,15 @@ impl McpRuntime {
                         });
                         let _ = reply.send(task.await);
                     }
+                    McpCommand::SidebarChannels { clan_id, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::sidebar_channels(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::CreateChannel {
                         clan_id,
                         category_id,
