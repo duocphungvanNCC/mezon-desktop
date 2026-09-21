@@ -60,6 +60,7 @@ impl Friend {
 pub enum FriendEvent {
     Changed,
     AddSucceeded,
+    AddAlreadySent,
     AcceptSucceeded,
     /// A friend request could not be sent (server rejected the username or the RPC failed).
     AddFailed,
@@ -449,14 +450,15 @@ impl FriendStore {
         avatar_url: String,
         cx: &mut Context<Self>,
     ) {
-        if username.is_empty() || self.adding {
+        if let Some(friend) = self.friends.iter().find(|f| f.id == user_id)
+            && friend.state != FriendState::Blocked
+        {
+            if friend.state == FriendState::InviteSent {
+                cx.emit(FriendEvent::AddAlreadySent);
+            }
             return;
         }
-        if self
-            .friends
-            .iter()
-            .any(|f| f.id == user_id && f.state != FriendState::Blocked)
-        {
+        if username.is_empty() || self.adding {
             return;
         }
         self.adding = true;

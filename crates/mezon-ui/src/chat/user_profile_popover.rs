@@ -1137,13 +1137,27 @@ fn render_banner_actions(
             );
         }
         Some(FriendState::InviteSent) => {
+            let user_id = this.user_id;
+            let username = resolve_user_profile(user_id, this.context, cx)
+                .map(|profile| profile.username)
+                .unwrap_or_default();
             buttons.push(
                 banner_icon_button(
                     "profile-pending",
                     IconName::PendingFriend,
                     true,
                     false,
-                    |_: &ClickEvent, _, _| {},
+                    move |_: &ClickEvent, _, cx| {
+                        FriendStore::global(cx).update(cx, |store, cx| {
+                            store.add_friend(
+                                user_id,
+                                username.clone(),
+                                String::new(),
+                                String::new(),
+                                cx,
+                            );
+                        });
+                    },
                 )
                 .into_any_element(),
             );

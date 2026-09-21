@@ -398,6 +398,19 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if matches!(
+                    next_route,
+                    Route::Chat
+                        | Route::Channel { .. }
+                        | Route::Thread { .. }
+                        | Route::Canvas { .. }
+                        | Route::ClanMembers { .. }
+                        | Route::ClanChannels { .. }
+                        | Route::ClanGuide { .. }
+                ) && this.ui_state.close_dm_profile_for_clan()
+                {
+                    this.persist_ui_state(cx);
+                }
                 if matches!(this.last_route, Route::Thread { .. }) {
                     this.focused_channel_id = None;
                 }
@@ -969,7 +982,11 @@ impl ChatLayout {
         }
         self.show_member_list = !self.show_member_list;
         if dm {
-            self.ui_state.show_member_list_dm = self.show_member_list;
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm = self.show_member_list;
+            } else {
+                self.ui_state.show_profile_dm = self.show_member_list;
+            }
         } else {
             self.ui_state.show_member_list = self.show_member_list;
         }
@@ -998,7 +1015,11 @@ impl ChatLayout {
 
     fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
         self.show_member_list = if self.is_dm_route(cx) {
-            self.ui_state.show_member_list_dm
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm
+            } else {
+                self.ui_state.show_profile_dm
+            }
         } else {
             self.ui_state.show_member_list
         };
@@ -2434,6 +2455,16 @@ impl ChatLayout {
         matches!(
             Router::global(cx).read(cx).route(),
             Route::Direct | Route::Friends | Route::DirectMessage { .. }
+        )
+    }
+
+    fn is_group_dm_route(&self, cx: &Context<Self>) -> bool {
+        let Route::DirectMessage { message_type, .. } = Router::global(cx).read(cx).route() else {
+            return false;
+        };
+        self.current_dm(cx).map_or_else(
+            || message_type.parse::<i32>().ok() == Some(DirectKind::Group.channel_type()),
+            |dm| dm.kind == DirectKind::Group,
         )
     }
 
