@@ -3175,6 +3175,7 @@
   "media.video.error.title": "Video inte tillgänglig",
   "memberPage.addedBy": "Lades till av {{name}}",
   "memberPage.inVoice": "I röstkanal",
+  "memberPage.shareScreen": "Delar skärm",
   "memberPage.membersOf": "Totalt {{count}} medlemmar",
   "memberPage.noSearchResults": "Inga medlemmar matchar dessa sökresultat.",
   "memberPage.offlineCount": "Offline - {{count}}",

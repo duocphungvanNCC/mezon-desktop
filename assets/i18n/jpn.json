@@ -3175,6 +3175,7 @@
   "media.video.error.title": "ビデオが利用できません",
   "memberPage.addedBy": "{{name}}によって追加",
   "memberPage.inVoice": "ボイスチャンネル内",
+  "memberPage.shareScreen": "画面共有中",
   "memberPage.membersOf": "総メンバー {{count}}",
   "memberPage.noSearchResults": "これらの検索結果に一致するメンバーはいません。",
   "memberPage.offlineCount": "オフライン - {{count}}",

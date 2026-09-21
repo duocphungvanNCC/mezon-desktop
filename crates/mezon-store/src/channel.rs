@@ -100,6 +100,7 @@ pub struct VoiceMember {
 pub struct InVoiceInfo {
     pub clan_id: ClanId,
     pub channel_id: ChannelId,
+    pub sharing_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3604,6 +3605,7 @@ impl ChannelList {
                     InVoiceInfo {
                         clan_id,
                         channel_id,
+                        sharing_screen: false,
                     },
                 );
                 notify_in_voice_change(changed, in_voice_changed, cx);
@@ -3663,17 +3665,25 @@ impl ChannelList {
                         }
                     }
                 }
+                let in_voice_changed = self.in_voice.get_mut(&user_id).is_some_and(|info| {
+                    info.clan_id == clan_id
+                        && info.channel_id == channel_id
+                        && info.sharing_screen != is_sharing
+                        && {
+                            info.sharing_screen = is_sharing;
+                            true
+                        }
+                });
                 tracing::debug!(
                     %clan_id,
                     %channel_id,
                     %user_id,
                     is_sharing,
                     updated = changed,
+                    in_voice_changed,
                     "realtime ScreenShare"
                 );
-                if changed {
-                    cx.notify();
-                }
+                notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
@@ -6062,6 +6072,7 @@ fn seed_in_voice_from_categories(
                 InVoiceInfo {
                     clan_id,
                     channel_id: channel.id,
+                    sharing_screen: member.sharing_screen,
                 },
             );
         }
@@ -8265,6 +8276,14 @@ mod tests {
                 };
 
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8276,6 +8295,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(true));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: true,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8287,6 +8314,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
             });
         });
     }
@@ -11126,6 +11161,7 @@ mod tests {
         InVoiceInfo {
             clan_id: ClanId(clan),
             channel_id: ChannelId(channel),
+            sharing_screen: false,
         }
     }
 

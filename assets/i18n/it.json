@@ -3175,6 +3175,7 @@
   "media.video.error.title": "Video non disponibile",
   "memberPage.addedBy": "Aggiunto da {{name}}",
   "memberPage.inVoice": "Nel canale vocale",
+  "memberPage.shareScreen": "Condivisione dello schermo",
   "memberPage.membersOf": "Totale membri {{count}}",
   "memberPage.noSearchResults": "Nessun membro corrisponde a questi risultati di ricerca.",
   "memberPage.offlineCount": "Offline - {{count}}",

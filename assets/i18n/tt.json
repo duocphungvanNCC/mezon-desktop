@@ -3183,6 +3183,7 @@
   "media.video.error.title": "Видео доступлы түгел",
   "memberPage.addedBy": "{{name}} өстәде",
   "memberPage.inVoice": "Шалтыратуда",
+  "memberPage.shareScreen": "Экран белән бүлешә",
   "memberPage.membersOf": "{{count}} катнашучы",
   "memberPage.noSearchResults": "Бу эзләү нәтиҗәләренә туры килгән әгъзалар юк.",
   "memberPage.offlineCount": "Оффлайн - {{count}}",

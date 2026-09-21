@@ -3174,6 +3174,7 @@
   "media.video.error.title": "Відео недоступне",
   "memberPage.addedBy": "Додано {{name}}",
   "memberPage.inVoice": "У голосовому каналі",
+  "memberPage.shareScreen": "Ділиться екраном",
   "memberPage.membersOf": "Всього учасників {{count}}",
   "memberPage.noSearchResults": "Жоден учасник не відповідає запиту",
   "memberPage.offlineCount": "Офлайн - {{count}}",

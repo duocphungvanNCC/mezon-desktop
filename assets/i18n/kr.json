@@ -3175,6 +3175,7 @@
   "media.video.error.title": "비디오 사용 가능",
   "memberPage.addedBy": "{{name}} 님이 추가",
   "memberPage.inVoice": "음성 채널에서",
+  "memberPage.shareScreen": "화면 공유 중",
   "memberPage.membersOf": "총 {{count}} 명",
   "memberPage.noSearchResults": "이 검색 결과와 일치하는 회원이 없습니다.",
   "memberPage.offlineCount": "오프라인 - {{count}}",
