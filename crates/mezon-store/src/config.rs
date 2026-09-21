@@ -36,7 +36,6 @@ pub struct AppConfig {
 
     // ── WebSocket / streaming ─────────────────────────────────────────────────
     pub tcp_port: Option<u16>,
-    pub stream_ws_url: String,
     pub meet_ws_url: String,
     pub sfu_ws_url: String,
     pub notification_ws_url: String,
@@ -123,7 +122,6 @@ impl AppConfig {
             api_gw_port: 8088,
 
             tcp_port: Some(7349),
-            stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
             sfu_ws_url: "wss://test-sfu.nccsoft.vn/ws".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
@@ -207,10 +205,6 @@ impl AppConfig {
             api_gw_port: opt_u16(baked_env::NX_CHAT_APP_API_GW_PORT, defaults.api_gw_port),
 
             tcp_port: opt_tcp_port(baked_env::NX_CHAT_APP_TCP_PORT, defaults.tcp_port),
-            stream_ws_url: opt_str(
-                baked_env::NX_CHAT_APP_STREAM_WS_URL,
-                &defaults.stream_ws_url,
-            ),
             meet_ws_url: opt_str(baked_env::NX_CHAT_APP_MEET_WS_URL, &defaults.meet_ws_url),
             sfu_ws_url: opt_str(baked_env::NX_CHAT_APP_SFU_WS_URL, &defaults.sfu_ws_url),
             notification_ws_url: opt_str(

@@ -5,9 +5,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
+
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_stream::{STREAM_FRAME_KEY, StreamEvent, StreamSession, StreamSessionConfig};
+use mezon_stream::{
+    STREAM_FRAME_KEY, StreamEvent, StreamSession, StreamSessionConfig, StreamTokenProvider,
+};
 use mezon_voice::VideoFrameStore;
 use parking_lot::Mutex;
 
@@ -67,11 +71,13 @@ pub struct StreamStore {
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_work: AtomicBool,
     session: Option<StreamSession>,
+    session_generation: u64,
     session_channel_label: String,
     session_clan_name: String,
     session_user_id: Option<UserId>,
     join_started: Option<Instant>,
     _fetch_task: Option<Task<()>>,
+    _token_task: Option<Task<()>>,
     _session_task: Option<Task<()>>,
     _join_timeout: Option<Task<()>>,
     _controls_hide_task: Option<Task<()>>,
@@ -119,11 +125,13 @@ impl StreamStore {
             pending_texture_replaces: Mutex::new(Vec::new()),
             pending_texture_work: AtomicBool::new(false),
             session: None,
+            session_generation: 0,
             session_channel_label: String::new(),
             session_clan_name: String::new(),
             session_user_id: None,
             join_started: None,
             _fetch_task: None,
+            _token_task: None,
             _session_task: None,
             _join_timeout: None,
             _controls_hide_task: None,
@@ -503,13 +511,16 @@ impl StreamStore {
             cx.notify();
             return;
         };
-        if config.stream_ws_url.is_empty() {
-            self.phase = StreamPhase::Error("Stream server not configured".into());
-            self.error_message = Some("Stream server not configured".into());
+        if config.sfu_ws_url.is_empty() {
+            self.phase = StreamPhase::Error("SFU server not configured".into());
+            self.error_message = Some("SFU server not configured".into());
             cx.notify();
             return;
         }
+
         self.disconnect_session();
+        self.session_generation = self.session_generation.wrapping_add(1);
+        let session_generation = self.session_generation;
         self.session_channel_label = channel_label.to_string();
         self.session_clan_name = clan_name.to_string();
         self.phase = StreamPhase::Joining {
@@ -520,49 +531,84 @@ impl StreamStore {
         self.error_message = None;
         self.remote_video = false;
         self.playback_blocked = false;
+        self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
         cx.notify();
 
-        let session_config = StreamSessionConfig {
-            ws_base_url: config.stream_ws_url.clone(),
-            username: session.username.clone(),
-            token: session.ws_credential().to_string(),
-            clan_id: clan_id.to_string(),
-            channel_id: channel_id.to_string(),
-            user_id: session.user_id.clone(),
-            stream_id: channel_id.to_string(),
-        };
-        let frame_store = self.frame_store.clone();
-        let session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
-        self.session_user_id = session_user_id;
-
-        let stream_session = StreamSession::start(
-            session_config,
-            frame_store,
-            output_device_id,
-            self.volume,
-            self.muted,
-        );
-        let events = stream_session.events().clone();
-        self.session = Some(stream_session);
-
-        self._session_task = Some(cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv_async().await {
-                let stop = this
-                    .update(cx, |this, cx| {
-                        this.handle_stream_event(clan_id, channel_id, event, cx);
-                        !this.is_joined() && !this.is_joining()
-                    })
-                    .unwrap_or(true);
-                if stop {
-                    break;
+        let api = self.api.clone();
+        let room = channel_id.to_string();
+        let ws_url = config.sfu_ws_url.clone();
+        let provider_api = api.clone();
+        let provider_room = room.clone();
+        let provider: StreamTokenProvider = Arc::new(move || {
+            let api = provider_api.clone();
+            let room = provider_room.clone();
+            Box::pin(async move {
+                api.generate_meet_token(&room, "")
+                    .await
+                    .map_err(|error| anyhow!("{error:#}"))
+            })
+        });
+        let volume = self.volume;
+        let muted = self.muted;
+        let session_user_id = self.session_user_id;
+        let token_task = cx.spawn(async move |this, cx| {
+            let token = api.generate_meet_token(&room, "").await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_generation != session_generation
+                    || !this.is_session_channel(channel_id)
+                    || !this.is_joining()
+                {
+                    return;
                 }
-            }
-        }));
+                let token = match token {
+                    Ok(token) if !token.is_empty() => token,
+                    Ok(_) => {
+                        this.fail_stream("SFU returned an empty meet token".into(), cx);
+                        return;
+                    }
+                    Err(error) => {
+                        this.fail_stream(format!("Unable to obtain SFU meet token: {error:#}"), cx);
+                        return;
+                    }
+                };
+                let session_config = StreamSessionConfig {
+                    ws_url,
+                    token,
+                    room,
+                    token_provider: provider,
+                };
+                let stream_session =
+                    StreamSession::start(session_config, output_device_id, volume, muted);
+                let events = stream_session.events().clone();
+                this.session = Some(stream_session);
+                this.session_user_id = session_user_id;
+                this._session_task = Some(cx.spawn(async move |this, cx| {
+                    while let Ok(event) = events.recv_async().await {
+                        let stop = this
+                            .update(cx, |this, cx| {
+                                this.handle_stream_event(
+                                    session_generation,
+                                    clan_id,
+                                    channel_id,
+                                    event,
+                                    cx,
+                                );
+                                !this.is_joined() && !this.is_joining()
+                            })
+                            .unwrap_or(true);
+                        if stop {
+                            break;
+                        }
+                    }
+                }));
+            });
+        });
+        self._token_task = Some(token_task);
 
         self._join_timeout = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(JOIN_TIMEOUT).await;
             this.update(cx, |this, cx| {
-                if this.is_joining() {
+                if this.session_generation == session_generation && this.is_joining() {
                     this.disconnect_session();
                     this.phase = StreamPhase::Error("Join timed out".into());
                     this.error_message = Some("Join timed out".into());
@@ -574,6 +620,10 @@ impl StreamStore {
     }
 
     pub fn leave_stream(&mut self, cx: &mut Context<Self>) {
+        self.leave_stream_internal(false, cx);
+    }
+
+    fn leave_stream_internal(&mut self, clear_channel_members: bool, cx: &mut Context<Self>) {
         let channel_id = self.session_channel_id();
         let user_id = self.session_user_id;
         self.disconnect_session();
@@ -587,13 +637,20 @@ impl StreamStore {
         self.session_channel_label.clear();
         self.session_clan_name.clear();
         self.session_user_id = None;
-        if let (Some(channel_id), Some(user_id)) = (channel_id, user_id) {
+        if clear_channel_members {
+            if let Some(channel_id) = channel_id {
+                self.members
+                    .retain(|(member_channel_id, _), _| *member_channel_id != channel_id);
+            }
+        } else if let (Some(channel_id), Some(user_id)) = (channel_id, user_id) {
             self.members.remove(&(channel_id, user_id));
         }
         cx.notify();
     }
 
     fn disconnect_session(&mut self) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self._token_task = None;
         if let Some(session) = self.session.take() {
             session.disconnect();
         }
@@ -618,11 +675,15 @@ impl StreamStore {
 
     fn handle_stream_event(
         &mut self,
+        session_generation: u64,
         clan_id: ClanId,
         channel_id: ChannelId,
         event: StreamEvent,
         cx: &mut Context<Self>,
     ) {
+        if self.session_generation != session_generation {
+            return;
+        }
         match event {
             StreamEvent::Live => {
                 self._join_timeout = None;
@@ -643,12 +704,6 @@ impl StreamStore {
                 self.remote_video = false;
                 self.bump_controls_visible(cx);
             }
-            StreamEvent::RemoteVideo(active) => {
-                self.remote_video = active;
-                if let StreamPhase::Joined { is_live, .. } = &mut self.phase {
-                    *is_live = active;
-                }
-            }
             StreamEvent::RemoteAudio(_) => {}
             StreamEvent::PlaybackBlocked => {
                 self.playback_blocked = true;
@@ -659,8 +714,8 @@ impl StreamStore {
             }
             StreamEvent::Disconnected => {
                 if self.is_joined() || self.is_joining() {
-                    self.disconnect_session();
-                    self.phase = StreamPhase::Idle;
+                    self.leave_stream_internal(true, cx);
+                    return;
                 }
             }
         }
@@ -698,8 +753,22 @@ impl StreamStore {
             return;
         };
         let channel_id = ChannelId(channel_id);
-        if let Ok(user_id) = e.streaming_user_id.parse::<i64>() {
-            self.members.remove(&(channel_id, UserId(user_id)));
+        let Ok(user_id) = e.streaming_user_id.parse::<i64>() else {
+            return;
+        };
+        let user_id = UserId(user_id);
+        self.members.remove(&(channel_id, user_id));
+
+        // A speaker leave resets every active audience member on the server. The
+        // server emits one leave event per affected user; when this event is for
+        // the local audience session, reset the whole local stream state instead
+        // of waiting for every individual event to arrive.
+        let local_session_left = self.is_session_channel(channel_id)
+            && (self.is_joined() || self.is_joining())
+            && self.session_user_id == Some(user_id);
+        if local_session_left {
+            self.leave_stream_internal(true, cx);
+            return;
         }
         cx.notify();
     }
@@ -720,7 +789,6 @@ impl StreamStore {
             && *active == channel_id
         {
             *is_live = e.is_streaming;
-            self.remote_video = e.is_streaming;
             cx.notify();
         }
     }
@@ -837,5 +905,135 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].user_id, UserId(10));
+    }
+
+    #[gpui::test]
+    fn local_stream_leave_resets_session_and_all_channel_members(cx: &mut gpui::TestAppContext) {
+        let channel_id = ChannelId(1);
+        let other_channel_id = ChannelId(2);
+        let local_user_id = UserId(10);
+        let other_user_id = UserId(20);
+        let store = init_store(cx);
+        let event = RealtimeEvent::StreamingLeaved(mezon_proto::realtime::StreamingLeavedEvent {
+            streaming_channel_id: channel_id.to_string(),
+            streaming_user_id: local_user_id.to_string(),
+            ..Default::default()
+        });
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joined {
+                    channel_id,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.session_user_id = Some(local_user_id);
+                store.show_chat = true;
+                store.members.insert(
+                    (channel_id, local_user_id),
+                    sample_member(channel_id, local_user_id, "local"),
+                );
+                store.members.insert(
+                    (channel_id, other_user_id),
+                    sample_member(channel_id, other_user_id, "other"),
+                );
+                store.members.insert(
+                    (other_channel_id, other_user_id),
+                    sample_member(other_channel_id, other_user_id, "other channel"),
+                );
+
+                store.handle_streaming_leaved(&event, cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(store.phase(), &StreamPhase::Idle);
+            assert_eq!(store.session_channel_id(), None);
+            assert!(!store.show_chat());
+            assert!(store.members_for_channel(channel_id).is_empty());
+            assert_eq!(store.members_for_channel(other_channel_id).len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn another_user_stream_leave_only_removes_that_member(cx: &mut gpui::TestAppContext) {
+        let channel_id = ChannelId(1);
+        let local_user_id = UserId(10);
+        let other_user_id = UserId(20);
+        let store = init_store(cx);
+        let event = RealtimeEvent::StreamingLeaved(mezon_proto::realtime::StreamingLeavedEvent {
+            streaming_channel_id: channel_id.to_string(),
+            streaming_user_id: other_user_id.to_string(),
+            ..Default::default()
+        });
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joined {
+                    channel_id,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.session_user_id = Some(local_user_id);
+                store.members.insert(
+                    (channel_id, local_user_id),
+                    sample_member(channel_id, local_user_id, "local"),
+                );
+                store.members.insert(
+                    (channel_id, other_user_id),
+                    sample_member(channel_id, other_user_id, "other"),
+                );
+
+                store.handle_streaming_leaved(&event, cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert!(store.is_joined());
+            assert_eq!(store.session_channel_id(), Some(channel_id));
+            assert_eq!(store.members_for_channel(channel_id).len(), 1);
+            assert_eq!(
+                store.members_for_channel(channel_id)[0].user_id,
+                local_user_id
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_session_disconnect_resets_the_current_stream_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let channel_id = ChannelId(1);
+        let other_channel_id = ChannelId(2);
+        let store = init_store(cx);
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joined {
+                    channel_id,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.members.insert(
+                    (channel_id, UserId(10)),
+                    sample_member(channel_id, UserId(10), "current"),
+                );
+                store.members.insert(
+                    (other_channel_id, UserId(20)),
+                    sample_member(other_channel_id, UserId(20), "other channel"),
+                );
+
+                store.handle_stream_event(0, ClanId(9), channel_id, StreamEvent::Disconnected, cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(store.phase(), &StreamPhase::Idle);
+            assert!(store.members_for_channel(channel_id).is_empty());
+            assert_eq!(store.members_for_channel(other_channel_id).len(), 1);
+        });
     }
 }
