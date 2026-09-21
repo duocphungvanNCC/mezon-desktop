@@ -280,21 +280,7 @@ impl ChannelHeader {
             .as_ref()
             .is_some_and(|info| !info.is_group && info.blocked_by_me);
         let actions: Vec<(&str, IconName)> = if self.dm {
-            let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
-            if dm_one_to_one && !dm_one_to_one_blocked {
-                items.push(("hdr-call", IconName::IconPhoneDM));
-                items.push(("hdr-video-call", IconName::IconMeetDM));
-                items.push(("hdr-pin", IconName::PinRight));
-                items.push(("hdr-add-members", IconName::IconAddFriendDM));
-                items.push(("hdr-members", IconName::IconUserProfileDM));
-            } else if !dm_one_to_one_blocked {
-                items.push(("hdr-add-members", IconName::IconAddFriendDM));
-                items.push(("hdr-members", IconName::MemberList));
-                items.push(("hdr-pin", IconName::PinRight));
-            } else {
-                items.push(("hdr-pin", IconName::PinRight));
-            }
-            items
+            dm_header_actions(dm_one_to_one, dm_one_to_one_blocked)
         } else {
             channel_only_actions.to_vec()
         };
@@ -1042,6 +1028,25 @@ impl ChannelHeader {
             ))
             .into_any_element()
     }
+}
+
+fn dm_header_actions(one_to_one: bool, blocked_by_me: bool) -> Vec<(&'static str, IconName)> {
+    let mut items = Vec::with_capacity(6);
+    if one_to_one && !blocked_by_me {
+        items.push(("hdr-call", IconName::IconPhoneDM));
+        items.push(("hdr-video-call", IconName::IconMeetDM));
+        items.push(("hdr-pin", IconName::PinRight));
+        items.push(("hdr-add-members", IconName::IconAddFriendDM));
+        items.push(("hdr-members", IconName::IconUserProfileDM));
+    } else if !blocked_by_me {
+        items.push(("hdr-add-members", IconName::IconAddFriendDM));
+        items.push(("hdr-members", IconName::MemberList));
+        items.push(("hdr-pin", IconName::PinRight));
+    } else {
+        items.push(("hdr-pin", IconName::PinRight));
+    }
+    items.push(("hdr-gallery", IconName::ImageThumbnail));
+    items
 }
 
 /// The DM peer's badge, matching the sidebar row: the live presence, with the
