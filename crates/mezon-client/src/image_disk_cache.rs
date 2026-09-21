@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use base64::Engine as _;
 use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     PsyncIoEngineConfig,
@@ -24,35 +23,21 @@ const STATS_LOG_INTERVAL: u64 = 256;
 type ImageHybridCache = HybridCache<u64, Vec<u8>>;
 
 fn inline_image_response(uri: &str) -> anyhow::Result<Response<AsyncBody>> {
-    let data = uri
-        .strip_prefix("data:")
-        .ok_or_else(|| anyhow::anyhow!("invalid image data URI"))?;
-    let (metadata, payload) = data
-        .split_once(',')
-        .ok_or_else(|| anyhow::anyhow!("missing image data payload"))?;
-    let mut parameters = metadata.split(';');
-    let mime = parameters.next().unwrap_or_default();
-    anyhow::ensure!(mime.starts_with("image/"), "data URI must contain an image");
-    anyhow::ensure!(
-        payload.len() <= MAX_ENTRY_BYTES * 3,
-        "inline image exceeds size limit"
-    );
-    let encoded = percent_encoding::percent_decode_str(payload).collect::<Vec<u8>>();
-    let bytes = if parameters.any(|parameter| parameter.eq_ignore_ascii_case("base64")) {
-        base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|_| anyhow::anyhow!("invalid inline image base64"))?
-    } else {
-        encoded
-    };
-    anyhow::ensure!(
-        !bytes.is_empty() && bytes.len() <= MAX_ENTRY_BYTES,
-        "invalid inline image size"
-    );
+    let bytes = crate::data_image::decode_data_image(uri)?;
     Ok(Response::builder()
         .status(200)
-        .header(http::header::CONTENT_TYPE, mime)
         .body(AsyncBody::from(bytes))?)
+}
+
+fn is_data_uri(uri: &str) -> bool {
+    crate::data_image::is_data_image_uri(uri)
+}
+
+fn invalid_inline_image_response() -> Response<AsyncBody> {
+    Response::builder()
+        .status(http::StatusCode::BAD_REQUEST)
+        .body(AsyncBody::from("invalid inline image"))
+        .expect("static inline image error response is valid")
 }
 
 pub struct DiskImageCacheClient {
@@ -251,9 +236,10 @@ impl HttpClient for DiskImageCacheClient {
         body: AsyncBody,
         follow_redirects: bool,
     ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
-        if uri.starts_with("data:") {
-            let result = inline_image_response(uri);
-            return Box::pin(async move { result });
+        if is_data_uri(uri) {
+            let response =
+                inline_image_response(uri).unwrap_or_else(|_| invalid_inline_image_response());
+            return Box::pin(async move { Ok(response) });
         }
         use http_client::{HttpRequestExt, RedirectPolicy};
         match Request::builder()
@@ -295,9 +281,6 @@ impl HttpClient for DiskImageCacheClient {
             }
         }
         let uri = req.uri().to_string();
-        if *req.method() == Method::GET && uri.starts_with("data:") {
-            return Box::pin(async move { inline_image_response(&uri) });
-        }
         if *req.method() != Method::GET || !is_cacheable_image_url(&uri, &self.media_origins) {
             return self.inner.send(req);
         }
@@ -595,7 +578,6 @@ mod tests {
     fn inline_png_is_resolved_without_a_network_request() {
         let response = inline_image_response("data:image/png;base64,iVBORw0KGgo=").unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(response.headers()[http::header::CONTENT_TYPE], "image/png");
         let mut body = response.into_body();
         let mut bytes = Vec::new();
         futures::executor::block_on(body.read_to_end(&mut bytes)).unwrap();
@@ -620,11 +602,38 @@ mod tests {
     }
 
     #[test]
-    fn inline_svg_supports_percent_encoded_bytes() {
-        let response = inline_image_response("data:image/svg+xml,%3Csvg%3E%3C/svg%3E").unwrap();
-        let mut bytes = Vec::new();
-        futures::executor::block_on(response.into_body().read_to_end(&mut bytes)).unwrap();
-        assert_eq!(bytes, b"<svg></svg>");
+    fn inline_images_reject_svg() {
+        assert!(inline_image_response("data:image/svg+xml,%3Csvg%3E%3C/svg%3E").is_err());
+    }
+
+    #[test]
+    fn inline_base64_accepts_browser_compatible_variants() {
+        for uri in [
+            "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo",
+            "data:image/png; base64,iVBO\r\nRw0K Ggo=#ignored",
+        ] {
+            let mut bytes = Vec::new();
+            let response = inline_image_response(uri).unwrap();
+            futures::executor::block_on(response.into_body().read_to_end(&mut bytes)).unwrap();
+            assert_eq!(bytes, b"\x89PNG\r\n\x1a\n");
+        }
+    }
+
+    #[test]
+    fn malformed_inline_image_get_returns_permanent_client_error() {
+        let client = DiskImageCacheClient::new(
+            crate::transport_runtime::new_http_client(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+        );
+        let response = futures::executor::block_on(client.get(
+            "data:image/png;base64,@@",
+            AsyncBody::default(),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
