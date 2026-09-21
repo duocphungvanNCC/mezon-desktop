@@ -12,7 +12,8 @@ use mezon_store::{ChannelList, ClanId, ClanList, NotificationSettingStore};
 use super::{ClanMenuArgs, ClanSidebar};
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    ContextMenu, SubmenuOption, avatar_color, mention_count_badge, name_initials,
+    ContextMenu, SubmenuOption, avatar_color, avatar_text_color, clipped_initials_tile,
+    initials_tile, initials_tile_identified, mention_count_badge, name_initials,
 };
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
@@ -21,29 +22,35 @@ pub(super) const CLAN_ROW_HEIGHT: f32 = 56.;
 
 const CLAN_DRAG_INDICATOR_COLOR: u32 = 0x3b82f6;
 const CLAN_AVATAR_PX: f32 = 40.;
-const CLAN_FALLBACK_TEXT_COLOR: u32 = 0xffffff;
+const CLAN_AVATAR_RADIUS: f32 = 8.;
 
-fn render_clan_fallback_avatar(
+fn render_clan_initials_avatar(
     name: &str,
     avatar_id: SharedString,
     suppress_hover: bool,
+    muted: bool,
+    hover_bg: Hsla,
 ) -> AnyElement {
-    let bg = avatar_color(name);
-    let initials = name_initials(name);
-    let text_color = Hsla::from(gpui::rgb(CLAN_FALLBACK_TEXT_COLOR));
-    div()
-        .id(avatar_id)
-        .size(px(CLAN_AVATAR_PX))
-        .rounded(px(12.))
-        .bg(bg)
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(text_color)
-        .text_size(px(CLAN_AVATAR_PX * 0.4))
-        .when(!suppress_hover, |el| el.hover(|s| s.opacity(0.85)))
-        .child(SharedString::from(initials))
-        .into_any_element()
+    if name.is_empty() {
+        return div().size(px(CLAN_AVATAR_PX)).into_any_element();
+    }
+    let size = px(CLAN_AVATAR_PX);
+    let radius = px(CLAN_AVATAR_RADIUS);
+    let mut bg = avatar_color(name);
+    if muted {
+        bg = bg.grayscale();
+    }
+    let text_color = avatar_text_color(bg);
+    let hover = (!suppress_hover).then_some(hover_bg);
+    initials_tile_identified(
+        size,
+        Some(radius),
+        bg,
+        text_color,
+        name_initials(name),
+        avatar_id,
+        hover,
+    )
 }
 
 #[derive(Clone)]
@@ -51,34 +58,45 @@ pub(super) struct ClanReorderDrag {
     pub(super) index: usize,
     pub(super) name: SharedString,
     pub(super) avatar: Option<SharedString>,
+    pub(super) muted: bool,
 }
 
 pub(super) struct ClanDragPreview {
     name: SharedString,
     avatar: Option<SharedString>,
+    muted: bool,
 }
 
 impl Render for ClanDragPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let mut preview = div()
-            .size(px(CLAN_AVATAR_PX))
-            .rounded(px(8.))
-            .overflow_hidden();
+        let size = px(CLAN_AVATAR_PX);
+        let radius = px(CLAN_AVATAR_RADIUS);
         if let Some(avatar) = self.avatar.clone() {
-            preview = preview.child(
-                img(avatar)
-                    .size(px(CLAN_AVATAR_PX))
-                    .rounded(px(8.))
-                    .object_fit(gpui::ObjectFit::Cover),
-            );
+            img(avatar)
+                .size(size)
+                .rounded(radius)
+                .object_fit(gpui::ObjectFit::Cover)
+                .grayscale(self.muted)
+                .opacity(0.8)
+                .into_any_element()
+        } else if self.name.is_empty() {
+            div().size(size).opacity(0.8).into_any_element()
         } else {
-            preview = preview.child(render_clan_fallback_avatar(
-                self.name.as_ref(),
-                SharedString::from("clan-drag-fallback"),
-                true,
-            ));
+            let mut bg = avatar_color(self.name.as_ref());
+            if self.muted {
+                bg = bg.grayscale();
+            }
+            div()
+                .opacity(0.8)
+                .child(initials_tile(
+                    size,
+                    Some(radius),
+                    bg,
+                    avatar_text_color(bg),
+                    name_initials(self.name.as_ref()),
+                ))
+                .into_any_element()
         }
-        preview.opacity(0.8)
     }
 }
 
@@ -276,20 +294,29 @@ pub(super) fn render_clan_row(
     let muted = clan.muted;
     let pill_color = theme.tokens.text_theme_primary;
 
-    let avatar: AnyElement = if let Some(ref proxied) = clan.proxied_avatar_url {
-        let mut el = img(proxied.clone())
-            .size(px(40.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .object_fit(gpui::ObjectFit::Cover);
-        if muted {
-            el = el.grayscale(true);
+    let hover_bg = theme.tokens.bg_button_add_friend;
+    let element_bg = Hsla::from(theme.bg_tertiary);
+    let avatar: AnyElement = if !clan.name.is_empty() {
+        if let Some(ref proxied) = clan.proxied_avatar_url {
+            clipped_initials_tile(
+                px(CLAN_AVATAR_PX),
+                px(CLAN_AVATAR_RADIUS),
+                proxied.clone(),
+                muted,
+                element_bg,
+                clan.name.as_ref(),
+            )
+        } else {
+            render_clan_initials_avatar(
+                clan.name.as_ref(),
+                clan.avatar_id.clone(),
+                suppress_hover,
+                muted,
+                Hsla::from(hover_bg),
+            )
         }
-        el.into_any_element()
-    } else if !clan.name.is_empty() {
-        render_clan_fallback_avatar(clan.name.as_ref(), clan.avatar_id.clone(), suppress_hover)
     } else {
-        div().size(px(40.)).into_any_element()
+        div().size(px(CLAN_AVATAR_PX)).into_any_element()
     };
 
     let avatar_with_badge = div().relative().child(avatar).when(show_badge, |el| {
@@ -337,12 +364,18 @@ pub(super) fn render_clan_row(
                 index: ix,
                 name: clan.name.clone(),
                 avatar: clan.proxied_avatar_url.clone(),
+                muted,
             },
             |drag, _, _, cx| {
                 cx.stop_propagation();
                 let name = drag.name.clone();
                 let avatar = drag.avatar.clone();
-                cx.new(|_| ClanDragPreview { name, avatar })
+                let muted = drag.muted;
+                cx.new(|_| ClanDragPreview {
+                    name,
+                    avatar,
+                    muted,
+                })
             },
         )
         .drag_over::<ClanReorderDrag>(move |style, drag, _, _| {
