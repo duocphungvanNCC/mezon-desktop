@@ -9,11 +9,11 @@ use mezon_store::{
     UserPresence, WalletStore, current_user_status,
 };
 
-use crate::app::shell::Shell;
+use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
-use crate::router::{Route, navigate};
+use crate::router::Router;
 use crate::theme::ActiveTheme;
 use crate::util::user_status::{status_color, status_glyph, status_label_key};
 
@@ -278,7 +278,8 @@ impl FooterProfilePopup {
         let label = self.display_name.to_string();
         let avatar = self.avatar_raw.to_string();
         let username = self.username.to_string();
-        let locale = self.locale.clone();
+        let origin = Router::global(cx).read(cx).route();
+        let error_message = mezon_i18n::t(&self.locale, "message.toast.sendFailed");
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
             store.create_dm_and_send_text(
                 user_id,
@@ -296,13 +297,7 @@ impl FooterProfilePopup {
                     cx.emit(DismissEvent);
                 });
                 cx.update(|cx| {
-                    navigate(
-                        cx,
-                        Route::DirectMessage {
-                            direct_id: channel_id,
-                            message_type: channel_type.to_string(),
-                        },
-                    );
+                    open_created_dm_if_route_unchanged(channel_id, channel_type, &origin, cx);
                 });
             }
             Err(err) => {
@@ -310,10 +305,9 @@ impl FooterProfilePopup {
                 let _ = this.update(cx, |this, cx| {
                     this.sending_message = false;
                     cx.notify();
-                    if let Some(shell) = Shell::try_global(cx) {
-                        let message = mezon_i18n::t(&locale, "shareContact.card.messageError");
-                        shell.update(cx, |shell, cx| shell.error(message, cx));
-                    }
+                });
+                cx.update(|cx| {
+                    toast_send_failed(error_message, cx);
                 });
             }
         })
@@ -372,11 +366,6 @@ impl Render for FooterProfilePopup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let message_placeholder = mezon_i18n::t(&locale, "userProfile.placeholders.messageUser")
-            .replace("{{username}}", self.display_name.as_ref());
-        self.message_input.update(cx, |input, cx| {
-            input.set_placeholder(message_placeholder, cx);
-        });
         let (
             bg_banner,
             bg_card,
@@ -870,20 +859,6 @@ impl Render for FooterProfilePopup {
                                                 .w_full()
                                                 .text_color(text_primary),
                                         ),
-                                )
-                            })
-                            .when(self.username.is_empty(), |card| {
-                                card.child(
-                                    div()
-                                        .mt_2()
-                                        .p_2()
-                                        .rounded(px(5.))
-                                        .text_center()
-                                        .text_sm()
-                                        .italic()
-                                        .bg(bg_box)
-                                        .text_color(text_primary)
-                                        .child(tk("userProfile.labels.userNotFound")),
                                 )
                             }),
                     ),
