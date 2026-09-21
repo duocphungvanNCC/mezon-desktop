@@ -530,6 +530,7 @@ pub enum UpdateChannelOverviewError {
 }
 
 pub const MAX_CHANNEL_TOPIC_CHARS: usize = 1024;
+pub const MAX_STREAM_THUMBNAIL_BYTES: u64 = 10 * 1024 * 1024;
 
 pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
     validate_category_name(name).map_err(|err| match err {
@@ -3134,6 +3135,93 @@ impl ChannelList {
         })
     }
 
+    pub fn update_stream_thumbnail(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        avatar: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(channel) = self.channel(clan_id, channel_id) else {
+            return Task::ready(Err("Channel not found".into()));
+        };
+        if channel.channel_type != ChannelType::Stream
+            || !self.can_manage_channel_for(clan_id, channel_id, cx)
+        {
+            return Task::ready(Err("Cannot manage stream thumbnail".into()));
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let current = api
+                .list_channel_detail(channel_id.get())
+                .await
+                .map_err(|error| error.to_string())?;
+            if current.clan_id != clan_id.get()
+                || ChannelType::from_raw(current.channel_type) != ChannelType::Stream
+            {
+                return Err("Channel is no longer a stream".into());
+            }
+            api.update_channel_desc(
+                clan_id.get(),
+                channel_id.get(),
+                mezon_client::UpdateChannelDescParams {
+                    channel_label: None,
+                    category_id: current.category_id,
+                    topic: current.topic,
+                    age_restricted: current.age_restricted,
+                    e2ee: current.e2ee,
+                    app_id: current.app_id,
+                    channel_avatar: Some(avatar.clone()),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            this.update(cx, |this, cx| {
+                this.apply_channel_avatar(clan_id, channel_id, &avatar, cx);
+            })
+            .map_err(|_| "Store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    fn apply_channel_avatar(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        avatar: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for channel in categories
+                .iter_mut()
+                .flat_map(|category| category.channels.iter_mut())
+                .filter(|channel| channel.id == channel_id)
+            {
+                changed |= channel.avatar_url != avatar;
+                channel.avatar_url = avatar.to_string();
+            }
+        }
+        if let Some(channel) = self
+            .detached_channel_details
+            .get_mut(&(clan_id, channel_id))
+        {
+            changed |= channel.avatar_url != avatar;
+            channel.avatar_url = avatar.to_string();
+        }
+        if let Some(channel) = self
+            .user_channels
+            .get_mut(&channel_id)
+            .filter(|channel| channel.clan_id == clan_id)
+        {
+            changed |= channel.avatar_url != avatar;
+            channel.avatar_url = avatar.to_string();
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn update_channel_overview(
         &mut self,
         clan_id: ClanId,
@@ -3555,6 +3643,40 @@ impl ChannelList {
                 }
                 if changed {
                     cx.notify();
+                }
+                if !e.channel_avatar.is_empty() {
+                    self.apply_channel_avatar(ClanId(e.clan_id), id, &e.channel_avatar, cx);
+                } else {
+                    let api = self.api.clone();
+                    let clan_id = ClanId(e.clan_id);
+                    let previous_avatar = self
+                        .channel(clan_id, id)
+                        .filter(|channel| {
+                            channel.channel_type == ChannelType::Stream
+                                && !channel.avatar_url.is_empty()
+                        })
+                        .map(|channel| channel.avatar_url.clone());
+                    if let Some(previous_avatar) = previous_avatar {
+                        cx.spawn(async move |this, cx| {
+                            if let Ok(detail) = api.list_channel_detail(id.get()).await
+                                && detail.clan_id == clan_id.get()
+                            {
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.channel(clan_id, id).is_some_and(|channel| {
+                                        channel.avatar_url == previous_avatar
+                                    }) {
+                                        this.apply_channel_avatar(
+                                            clan_id,
+                                            id,
+                                            &detail.channel_avatar,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            }
+                        })
+                        .detach();
+                    }
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
@@ -7341,6 +7463,77 @@ mod tests {
         })
     }
 
+    #[gpui::test]
+    fn stream_thumbnail_remote_changes_and_partial_events(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                for (avatar, channel_type, expected) in [
+                    ("thumbnail.png", 6, "thumbnail.png"),
+                    ("", 0, "thumbnail.png"),
+                    ("replacement.webp", 6, "replacement.webp"),
+                    ("", 6, "replacement.webp"),
+                ] {
+                    channels.handle_event(
+                        &RealtimeEvent::ChannelUpdated(
+                            mezon_proto::realtime::ChannelUpdatedEvent {
+                                clan_id: 1,
+                                channel_id: 1,
+                                channel_type,
+                                channel_avatar: avatar.into(),
+                                ..Default::default()
+                            },
+                        ),
+                        cx,
+                    );
+                    assert_eq!(
+                        channels
+                            .channel(ClanId(1), ChannelId(1))
+                            .unwrap()
+                            .avatar_url,
+                        expected
+                    );
+                }
+                channels.apply_channel_avatar(ClanId(1), ChannelId(1), "", cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .avatar_url
+                        .is_empty()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn stream_thumbnail_save_does_not_reborrow_channel_list(cx: &mut gpui::TestAppContext) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            cx.set_global(GlobalChannelList(channels.clone()));
+            channels
+        });
+        for creator_id in [REMOVED_SELF + 1, REMOVED_SELF] {
+            channels.update(cx, |channels, cx| {
+                let mut structure = structure_with_two_channels();
+                let channel = &mut structure[0].channels[0];
+                channel.channel_type = ChannelType::Stream;
+                channel.creator_id = UserId(creator_id);
+                channels.apply_clan_structure(ClanId(1), structure, None, cx);
+            });
+            for avatar in ["thumbnail.png", ""] {
+                let task = channels.update(cx, |channels, cx| {
+                    channels.update_stream_thumbnail(ClanId(1), ChannelId(1), avatar.into(), cx)
+                });
+                if creator_id != REMOVED_SELF {
+                    assert_eq!(task.await, Err("Cannot manage stream thumbnail".into()));
+                } else {
+                    drop(task);
+                }
+            }
+        }
+    }
     fn voice_creation_channel_updated_event(channel_id: i64) -> RealtimeEvent {
         RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
             clan_id: 1,
