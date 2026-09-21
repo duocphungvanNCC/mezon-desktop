@@ -3799,6 +3799,8 @@ impl ChannelList {
                     e2ee: desc.e2ee,
                     app_id: desc.app_id,
                 };
+                let mut channel = channel;
+                let voice_room = self.seed_voice_occupancy(&mut channel);
                 let inserted = self
                     .cache
                     .get_mut(&clan_id)
@@ -3810,6 +3812,9 @@ impl ChannelList {
                 );
                 if inserted {
                     self.invalidate_channel_index(clan_id);
+                    if voice_room {
+                        self.refresh_extras(clan_id, cx);
+                    }
                 }
                 if inserted || listed {
                     cx.notify();
@@ -4716,9 +4721,10 @@ impl ChannelList {
     fn insert_channel_locally(
         &mut self,
         clan_id: ClanId,
-        channel: Channel,
+        mut channel: Channel,
         cx: &mut Context<Self>,
     ) {
+        let voice_room = self.seed_voice_occupancy(&mut channel);
         let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
             insert_channel(cats, channel)
         } else {
@@ -4726,8 +4732,52 @@ impl ChannelList {
         };
         if inserted {
             self.invalidate_channel_index(clan_id);
+            if voice_room {
+                self.refresh_extras(clan_id, cx);
+            }
             cx.notify();
         }
+    }
+
+    /// A voice room that enters the listing through a realtime grant (we were
+    /// added to a private room, or a flip let us in) arrives with no
+    /// occupancy: the `VoiceJoined` events for it were dropped while we did
+    /// not hold the channel, and the listing only learns who sits in a room
+    /// from `ListChannelVoiceUsers` at clan load. Seed it from `in_voice`,
+    /// which kept those events, so the row and the pre-join screen are right
+    /// on the next frame. Returns whether this is a voice room at all, in
+    /// which case the caller also refreshes the clan's occupancy from the
+    /// server — the seed cannot know about joins that happened while we were
+    /// away or before the room was visible to us.
+    fn seed_voice_occupancy(&self, channel: &mut Channel) -> bool {
+        if !matches!(
+            channel.channel_type,
+            ChannelType::Voice | ChannelType::Stream
+        ) {
+            return false;
+        }
+        let mut members: Vec<VoiceMember> = self
+            .in_voice
+            .iter()
+            .filter(|(_, info)| info.channel_id == channel.id)
+            .map(|(user_id, _)| VoiceMember {
+                user_id: *user_id,
+                display_name: user_id.to_string(),
+                avatar_url: String::new(),
+                sharing_screen: false,
+            })
+            .collect();
+        members.sort_by_key(|m| m.user_id);
+        channel.voice_members = members;
+        true
+    }
+
+    /// Re-read the clan's voice occupancy and app channels; both are served
+    /// from the socket's cache, so this is cheap and only runs on a realtime
+    /// grant of a room that already has people in it.
+    fn refresh_extras(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.extras_loaded.remove(&clan_id);
+        self.ensure_extras(clan_id, cx);
     }
 
     /// Whether a public→private flip announced by `event` still lets us in:
@@ -8945,6 +8995,77 @@ mod tests {
                 .collect(),
             ..Default::default()
         })
+    }
+
+    fn added_to_voice_room(channel_id: i64, category_id: i64, user_ids: &[i64]) -> RealtimeEvent {
+        RealtimeEvent::UserChannelAdded(mezon_proto::realtime::UserChannelAdded {
+            channel_desc: Some(mezon_proto::api::ChannelDescription {
+                channel_id,
+                clan_id: 1,
+                category_id,
+                channel_label: "room".into(),
+                r#type: 10,
+                channel_private: 1,
+                ..Default::default()
+            }),
+            clan_id: 1,
+            users: user_ids
+                .iter()
+                .map(|id| mezon_proto::realtime::UserProfileRedis {
+                    user_id: *id,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Being added to a private voice room somebody already sits in must show
+    /// that occupant at once: the `VoiceJoined` that announced them arrived
+    /// while we did not hold the room, so the grant has to pick it up from
+    /// `in_voice` instead of listing an empty room until the next clan load.
+    #[gpui::test]
+    fn a_room_granted_while_occupied_lists_its_occupants(cx: &mut gpui::TestAppContext) {
+        const ROOM: i64 = 555;
+        const OCCUPANT: i64 = 4242;
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(
+                    &RealtimeEvent::VoiceJoined(mezon_proto::realtime::VoiceJoinedEvent {
+                        clan_id: 1,
+                        user_id: OCCUPANT,
+                        voice_channel_id: ROOM,
+                        participant: "someone".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(ROOM)),
+                    "the room is not listed before the grant"
+                );
+
+                channels.handle_event(&added_to_voice_room(ROOM, 1, &[REMOVED_SELF]), cx);
+
+                let room = channels
+                    .categories_for_clan(ClanId(1))
+                    .iter()
+                    .flat_map(|category| category.channels.iter())
+                    .find(|ch| ch.id == ChannelId(ROOM))
+                    .cloned()
+                    .expect("the grant lists the room");
+                assert_eq!(
+                    room.voice_members
+                        .iter()
+                        .map(|m| m.user_id)
+                        .collect::<Vec<_>>(),
+                    vec![UserId(OCCUPANT)],
+                    "the occupant announced before the grant is listed"
+                );
+            });
+        });
     }
 
     #[gpui::test]
