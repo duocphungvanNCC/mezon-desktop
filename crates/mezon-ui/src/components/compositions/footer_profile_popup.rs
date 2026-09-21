@@ -9,6 +9,7 @@ use mezon_store::{
     UserPresence, WalletStore, current_user_status,
 };
 
+use crate::app::shell::Shell;
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
@@ -128,6 +129,7 @@ impl FooterProfilePopup {
             .unwrap_or_else(|| "0".to_string());
         let account_sub = AccountStore::try_global(cx).map(|store| {
             cx.observe(&store, |this, _, cx| {
+                this.sync_identity(cx);
                 this.sync_status(cx);
                 this.sync_avatar(cx);
             })
@@ -169,6 +171,35 @@ impl FooterProfilePopup {
             _account_sub: account_sub,
             _input_sub: input_sub,
         }
+    }
+
+    fn sync_identity(&mut self, cx: &mut Context<Self>) {
+        let account = AccountStore::try_global(cx).and_then(|a| a.read(cx).account.clone());
+        let username = account
+            .as_ref()
+            .map(|a| a.username.clone())
+            .unwrap_or_default();
+        let display_name = account
+            .as_ref()
+            .map(|a| {
+                if a.display_name.is_empty() {
+                    a.username.clone()
+                } else {
+                    a.display_name.clone()
+                }
+            })
+            .unwrap_or_default();
+        if self.username == username && self.display_name == display_name {
+            return;
+        }
+        let message_ph = mezon_i18n::t(&self.locale, "userProfile.placeholders.messageUser")
+            .replace("{{username}}", &display_name);
+        self.message_input.update(cx, |input, cx| {
+            input.set_placeholder(message_ph, cx);
+        });
+        self.username = SharedString::from(username);
+        self.display_name = SharedString::from(display_name);
+        cx.notify();
     }
 
     fn sync_avatar(&mut self, cx: &mut Context<Self>) {
@@ -247,6 +278,7 @@ impl FooterProfilePopup {
         let label = self.display_name.to_string();
         let avatar = self.avatar_raw.to_string();
         let username = self.username.to_string();
+        let locale = self.locale.clone();
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
             store.create_dm_and_send_text(
                 user_id,
@@ -278,6 +310,10 @@ impl FooterProfilePopup {
                 let _ = this.update(cx, |this, cx| {
                     this.sending_message = false;
                     cx.notify();
+                    if let Some(shell) = Shell::try_global(cx) {
+                        let message = mezon_i18n::t(&locale, "shareContact.card.messageError");
+                        shell.update(cx, |shell, cx| shell.error(message, cx));
+                    }
                 });
             }
         })

@@ -667,8 +667,12 @@ impl DirectMessageStore {
                 cx.notify();
             })?;
 
-            api.join_chat(0, channel_id.get(), channel_type, false)
-                .await?;
+            if let Err(e) = api
+                .join_chat(0, channel_id.get(), channel_type, false)
+                .await
+            {
+                tracing::warn!("join_chat before dm send failed: {e}");
+            }
 
             let content_json = body.into_content_json();
             let sent = api
