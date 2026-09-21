@@ -2710,6 +2710,7 @@
   "eventCreator.fields.eventName.title": "Event-Thema",
   "eventCreator.fields.startDate.errorMessage": "Bitte wähle ein heutiges oder zukünftiges Datum",
   "eventCreator.fields.startDate.title": "Startdatum",
+  "eventCreator.fields.date.title": "Datum",
   "eventCreator.fields.startTime.errorMessage": "Bitte wähle eine gültige Startzeit",
   "eventCreator.fields.startTime.title": "Startzeit",
   "eventCreator.notify.locationBlank": "Ein Ort ist erforderlich",
