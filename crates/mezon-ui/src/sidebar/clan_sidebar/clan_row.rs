@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, MouseButton, MouseDownEvent,
-    Rgba, SharedString, WeakEntity, Window, div, img, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, Hsla, MouseButton,
+    MouseDownEvent, Rgba, SharedString, WeakEntity, Window, div, img, prelude::*, px,
 };
 use mezon_store::notification_setting::{
     NOTIFICATION_ALL_MESSAGE, NOTIFICATION_MENTION_MESSAGE, NOTIFICATION_NOTHING_MESSAGE,
@@ -11,7 +11,9 @@ use mezon_store::{ChannelList, ClanId, ClanList, NotificationSettingStore};
 
 use super::{ClanMenuArgs, ClanSidebar};
 use crate::app::shell::Shell;
-use crate::components::primitives::{ContextMenu, SubmenuOption, mention_count_badge};
+use crate::components::primitives::{
+    ContextMenu, SubmenuOption, avatar_color, mention_count_badge, name_initials,
+};
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
@@ -19,6 +21,30 @@ pub(super) const CLAN_ROW_HEIGHT: f32 = 56.;
 
 const CLAN_DRAG_INDICATOR_COLOR: u32 = 0x3b82f6;
 const CLAN_AVATAR_PX: f32 = 40.;
+const CLAN_FALLBACK_TEXT_COLOR: u32 = 0xffffff;
+
+fn render_clan_fallback_avatar(
+    name: &str,
+    avatar_id: SharedString,
+    suppress_hover: bool,
+) -> AnyElement {
+    let bg = avatar_color(name);
+    let initials = name_initials(name);
+    let text_color = Hsla::from(gpui::rgb(CLAN_FALLBACK_TEXT_COLOR));
+    div()
+        .id(avatar_id)
+        .size(px(CLAN_AVATAR_PX))
+        .rounded(px(12.))
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(text_color)
+        .text_size(px(CLAN_AVATAR_PX * 0.4))
+        .when(!suppress_hover, |el| el.hover(|s| s.opacity(0.85)))
+        .child(SharedString::from(initials))
+        .into_any_element()
+}
 
 #[derive(Clone)]
 pub(super) struct ClanReorderDrag {
@@ -33,8 +59,7 @@ pub(super) struct ClanDragPreview {
 }
 
 impl Render for ClanDragPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let mut preview = div()
             .size(px(CLAN_AVATAR_PX))
             .rounded(px(8.))
@@ -47,20 +72,11 @@ impl Render for ClanDragPreview {
                     .object_fit(gpui::ObjectFit::Cover),
             );
         } else {
-            let initial = self
-                .name
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_default();
-            preview = preview
-                .bg(theme.tokens.theme_base_color)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme.tokens.text_theme_primary)
-                .text_size(px(20.))
-                .child(SharedString::from(initial));
+            preview = preview.child(render_clan_fallback_avatar(
+                self.name.as_ref(),
+                SharedString::from("clan-drag-fallback"),
+                true,
+            ));
         }
         preview.opacity(0.8)
     }
@@ -271,30 +287,7 @@ pub(super) fn render_clan_row(
         }
         el.into_any_element()
     } else if !clan.name.is_empty() {
-        let first = clan
-            .name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_default();
-        div()
-            .id(clan.avatar_id.clone())
-            .size(px(40.))
-            .rounded(px(12.))
-            .bg(theme.tokens.theme_base_color)
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme.tokens.text_theme_primary)
-            .text_size(px(20.))
-            .when(!suppress_hover, |avatar| {
-                avatar.hover(|s| {
-                    s.bg(theme.tokens.bg_button_add_friend)
-                        .text_color(gpui::white())
-                })
-            })
-            .child(SharedString::from(first))
-            .into_any_element()
+        render_clan_fallback_avatar(clan.name.as_ref(), clan.avatar_id.clone(), suppress_hover)
     } else {
         div().size(px(40.)).into_any_element()
     };
