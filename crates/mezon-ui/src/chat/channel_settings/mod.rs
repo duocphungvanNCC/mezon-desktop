@@ -379,15 +379,12 @@ impl ChannelSettingScreen {
                 self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.quick_actions_tab = Some(tab);
             }
-            ChannelSettingsTab::StreamThumbnail => {
-                if self.stream_thumbnail_tab.is_none() {
-                    let clan_id = self.clan_id;
-                    let channel_id = self.channel_id;
-                    let settings = self.settings.clone();
-                    self.stream_thumbnail_tab = Some(
-                        cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)),
-                    );
-                }
+            ChannelSettingsTab::StreamThumbnail if self.stream_thumbnail_tab.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                self.stream_thumbnail_tab =
+                    Some(cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)));
             }
             _ => {}
         }

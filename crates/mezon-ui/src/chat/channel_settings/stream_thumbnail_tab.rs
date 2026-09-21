@@ -1,16 +1,18 @@
 use crate::{
-    app::shell::Shell,
+    app::{main_window::handle as main_window_handle, shell::Shell},
     components::primitives::{Button, ButtonVariants, Icon, IconName, Sizable, h_flex, v_flex},
+    image_cache::{MAX_DECODE_PIXELS, MAX_DECODER_ALLOC_BYTES, MAX_IMAGE_DECODE_DIMENSION},
     theme::ActiveTheme,
+    util::{file_dialog::resolve as resolve_file_dialog, imgproxy::stream_cover_url},
 };
 use gpui::{
-    App, Context, Entity, ExternalPaths, FontWeight, ImageSource, ObjectFit, PathPromptOptions,
-    SharedString, Subscription, WeakEntity, Window, div, img, linear_color_stop, linear_gradient,
-    prelude::*, px,
+    App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, ImageSource,
+    ObjectFit, PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
-use mezon_store::channel::MAX_STREAM_THUMBNAIL_BYTES as MAX_BYTES;
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, Settings, can_manage_channel, validate_clan_image_file,
+    ChannelId, ChannelList, ClanId, ClanList, Settings, can_manage_channel,
+    channel::MAX_STREAM_THUMBNAIL_BYTES as MAX_BYTES, validate_clan_image_file,
 };
 use std::path::PathBuf;
 
@@ -19,7 +21,7 @@ const THUMBNAIL_CONTENT_WIDTH: f32 = 650.;
 const UPLOAD_MODAL_WIDTH: f32 = 672.;
 const REMOVE_MODAL_WIDTH: f32 = 448.;
 
-fn thumbnail_frame(source: impl Into<ImageSource>) -> gpui::Div {
+fn thumbnail_frame(image_id: &'static str, source: impl Into<ImageSource>) -> gpui::Div {
     div()
         .relative()
         .w_full()
@@ -30,6 +32,7 @@ fn thumbnail_frame(source: impl Into<ImageSource>) -> gpui::Div {
         .overflow_hidden()
         .child(
             img(source)
+                .id(image_id)
                 .absolute()
                 .inset_0()
                 .size_full()
@@ -43,8 +46,26 @@ pub struct StreamThumbnailTab {
     clan_id: ClanId,
     channel_id: ChannelId,
     settings: Entity<Settings>,
-    busy: bool,
+    phase: ThumbnailPhase,
+    _picker_task: Option<Task<()>>,
+    _operation_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThumbnailPhase {
+    Idle,
+    Picking,
+    Validating,
+    Uploading,
+    Removing,
+}
+
+enum ThumbnailFileError {
+    TooLarge,
+    Empty,
+    Invalid,
+    Other(String),
 }
 
 impl StreamThumbnailTab {
@@ -62,16 +83,20 @@ impl StreamThumbnailTab {
             clan_id,
             channel_id,
             settings,
-            busy: false,
+            phase: ThumbnailPhase::Idle,
+            _picker_task: None,
+            _operation_task: None,
             _subs: subs,
         }
     }
 
     fn choose(&mut self, cx: &mut Context<Self>) {
-        if self.busy || !can_manage_channel(self.clan_id, self.channel_id, cx) {
+        if self.phase != ThumbnailPhase::Idle
+            || !can_manage_channel(self.clan_id, self.channel_id, cx)
+        {
             return;
         }
-        self.busy = true;
+        self.phase = ThumbnailPhase::Picking;
         cx.notify();
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -79,42 +104,81 @@ impl StreamThumbnailTab {
             multiple: false,
             prompt: Some(self.t("streamThumbnail.buttons.selectFile", cx)),
         });
-        cx.spawn(async move |this, cx| {
-            let paths = crate::util::file_dialog::resolve(rx, cx).await;
+        self._picker_task = Some(cx.spawn(async move |this, cx| {
+            let paths = resolve_file_dialog(rx, cx).await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = false;
+                this.phase = ThumbnailPhase::Idle;
                 if let Some(path) = paths.and_then(|paths| paths.into_iter().next()) {
                     this.prepare(path, cx);
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn prepare(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.busy || !can_manage_channel(self.clan_id, self.channel_id, cx) {
+        if self.phase != ThumbnailPhase::Idle
+            || !can_manage_channel(self.clan_id, self.channel_id, cx)
+        {
             return;
         }
-        self.busy = true;
+        self.phase = ThumbnailPhase::Validating;
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        self._operation_task = Some(cx.spawn(async move |this, cx| {
             let validated = cx
                 .background_spawn(async move {
-                    validate_clan_image_file(&path, MAX_BYTES)?;
-                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                    image::load_from_memory(&bytes)
-                        .map_err(|_| "Unsupported image file type".to_string())?;
-                    Ok::<_, String>(path)
+                    let len = std::fs::metadata(&path)
+                        .map_err(|error| ThumbnailFileError::Other(error.to_string()))?
+                        .len();
+                    if len > MAX_BYTES {
+                        return Err(ThumbnailFileError::TooLarge);
+                    }
+                    if len == 0 {
+                        return Err(ThumbnailFileError::Empty);
+                    }
+                    if validate_clan_image_file(&path, MAX_BYTES).is_err() {
+                        return Err(ThumbnailFileError::Invalid);
+                    }
+                    let reader = image::ImageReader::open(&path)
+                        .map_err(|error| ThumbnailFileError::Other(error.to_string()))?
+                        .with_guessed_format()
+                        .map_err(|error| ThumbnailFileError::Other(error.to_string()))?;
+                    let (width, height) = reader
+                        .into_dimensions()
+                        .map_err(|_| ThumbnailFileError::Invalid)?;
+                    if width == 0
+                        || height == 0
+                        || width > MAX_IMAGE_DECODE_DIMENSION
+                        || height > MAX_IMAGE_DECODE_DIMENSION
+                        || u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS
+                        || u64::from(width) * u64::from(height) * 4 > MAX_DECODER_ALLOC_BYTES
+                    {
+                        return Err(ThumbnailFileError::Invalid);
+                    }
+                    Ok(path)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = false;
+                this.phase = ThumbnailPhase::Idle;
                 match validated {
                     Ok(path) => this.confirm(Some(path), cx),
                     Err(error) => {
                         let locale = this.settings.read(cx).language.clone();
-                        let oversized = error.contains("byte limit");
+                        if matches!(
+                            error,
+                            ThumbnailFileError::Empty | ThumbnailFileError::Other(_)
+                        ) {
+                            if let ThumbnailFileError::Other(message) = &error {
+                                tracing::warn!("Stream thumbnail validation failed: {message}");
+                            }
+                            let message =
+                                mezon_i18n::t(&locale, "streamThumbnail.errors.uploadFailed")
+                                    .to_string();
+                            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                            cx.notify();
+                            return;
+                        }
+                        let oversized = matches!(error, ThumbnailFileError::TooLarge);
                         let title = mezon_i18n::t(
                             &locale,
                             if oversized {
@@ -132,7 +196,7 @@ impl StreamThumbnailTab {
                             mezon_i18n::t(&locale, "streamThumbnail.requirements.format.value")
                                 .to_string()
                         };
-                        if let Some(handle) = crate::app::main_window::handle(cx) {
+                        if let Some(handle) = main_window_handle(cx) {
                             let _ = cx.update_window(handle, |_, window, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| {
                                     shell.show_upload_limit(title, content, window, cx)
@@ -143,8 +207,7 @@ impl StreamThumbnailTab {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn t(&self, key: &'static str, cx: &App) -> SharedString {
@@ -154,34 +217,45 @@ impl StreamThumbnailTab {
     }
 
     fn confirm(&self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.phase != ThumbnailPhase::Idle {
             return;
         }
         let tab = cx.entity().downgrade();
-        let modal = cx.new(|_| ThumbnailConfirmation {
+        let modal = cx.new(|cx| ThumbnailConfirmation {
             tab,
             path,
             settings: self.settings.clone(),
+            focus_handle: cx.focus_handle(),
         });
+        if let Some(handle) = main_window_handle(cx) {
+            let focus_handle = modal.read(cx).focus_handle.clone();
+            let _ = cx.update_window(handle, |_, window, cx| window.focus(&focus_handle, cx));
+        }
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
     }
 
     fn save(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.busy || !can_manage_channel(self.clan_id, self.channel_id, cx) {
+        if self.phase != ThumbnailPhase::Idle
+            || !can_manage_channel(self.clan_id, self.channel_id, cx)
+        {
             return;
         }
-        self.busy = true;
+        self.phase = if path.is_some() {
+            ThumbnailPhase::Uploading
+        } else {
+            ThumbnailPhase::Removing
+        };
         cx.notify();
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         let removing = path.is_none();
         let upload = path.map(|path| {
-            ChannelList::global(cx).update(cx, |store, cx| {
-                store.upload_stream_thumbnail_image(&path, MAX_BYTES, cx)
+            ClanList::global(cx).update(cx, |store, cx| {
+                store.upload_clan_image(&path, MAX_BYTES, cx)
             })
         });
         let store = ChannelList::global(cx);
-        cx.spawn(async move |this, cx| {
+        self._operation_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
                 let avatar = match upload {
                     Some(upload) => upload.await?,
@@ -194,7 +268,7 @@ impl StreamThumbnailTab {
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = false;
+                this.phase = ThumbnailPhase::Idle;
                 if let Err(error) = result {
                     tracing::error!("Stream thumbnail save failed: {error}");
                     let message = this
@@ -211,8 +285,7 @@ impl StreamThumbnailTab {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 }
 
@@ -225,7 +298,8 @@ impl Render for StreamThumbnailTab {
             .channel(self.clan_id, self.channel_id)
             .map(|channel| channel.avatar_url.clone())
             .filter(|url| !url.trim().is_empty() && url != "0");
-        let disabled = self.busy || !can_manage_channel(self.clan_id, self.channel_id, cx);
+        let disabled = self.phase != ThumbnailPhase::Idle
+            || !can_manage_channel(self.clan_id, self.channel_id, cx);
         let mut content = v_flex()
             .w_full()
             .min_w_0()
@@ -233,9 +307,10 @@ impl Render for StreamThumbnailTab {
             .gap_3();
         if let Some(avatar) = avatar {
             content = content.child(
-                thumbnail_frame(SharedString::from(crate::util::imgproxy::stream_cover_url(
-                    cx, &avatar,
-                )))
+                thumbnail_frame(
+                    "stream-thumbnail-settings-image",
+                    SharedString::from(stream_cover_url(cx, &avatar)),
+                )
                 .id("stream-thumbnail-preview")
                 .group("thumbnail-preview")
                 .child(
@@ -331,19 +406,16 @@ impl Render for StreamThumbnailTab {
                         .child(
                             Button::new("thumbnail-select")
                                 .large()
-                                .label(self.t(
-                                    if self.busy {
-                                        "streamThumbnail.buttons.uploading"
-                                    } else {
-                                        "streamThumbnail.buttons.selectFile"
-                                    },
-                                    cx,
-                                ))
+                                .label(self.t("streamThumbnail.buttons.selectFile", cx))
                                 .icon(
                                     Icon::new(IconName::UploadImage).text_color(theme.text_primary),
                                 )
                                 .primary()
-                                .disabled(disabled),
+                                .disabled(disabled)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.choose(cx);
+                                })),
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.choose(cx)))
                         .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -353,14 +425,22 @@ impl Render for StreamThumbnailTab {
                         })),
                 );
         }
-        content = content.when(self.busy, |content| {
-            content.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .child(self.t("streamThumbnail.buttons.uploading", cx)),
-            )
-        });
+        content = content.when(
+            matches!(
+                self.phase,
+                ThumbnailPhase::Uploading | ThumbnailPhase::Removing
+            ),
+            |content| {
+                content.child(div().text_sm().text_color(theme.text_muted).child(self.t(
+                    if self.phase == ThumbnailPhase::Removing {
+                        "streamThumbnail.buttons.removing"
+                    } else {
+                        "streamThumbnail.buttons.uploading"
+                    },
+                    cx,
+                )))
+            },
+        );
         content = content.child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -443,6 +523,22 @@ struct ThumbnailConfirmation {
     tab: WeakEntity<StreamThumbnailTab>,
     path: Option<PathBuf>,
     settings: Entity<Settings>,
+    focus_handle: FocusHandle,
+}
+
+impl Focusable for ThumbnailConfirmation {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ThumbnailConfirmation {
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tab.clone();
+        let path = self.path.clone();
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        let _ = tab.update(cx, |tab, cx| tab.save(path, cx));
+    }
 }
 
 impl Render for ThumbnailConfirmation {
@@ -469,7 +565,10 @@ impl Render for ThumbnailConfirmation {
             .text_sm()
             .bg(theme.tokens.theme_setting_primary);
         if let Some(path) = &self.path {
-            body = body.child(thumbnail_frame(path.clone()));
+            body = body.child(thumbnail_frame(
+                "stream-thumbnail-confirm-image",
+                path.clone(),
+            ));
         }
         body = body.child(t(if upload {
             "streamThumbnail.confirmModal.uploadMessage"
@@ -487,8 +586,6 @@ impl Render for ThumbnailConfirmation {
                     .child(t("streamThumbnail.confirmModal.removeWarning")),
             );
         }
-        let tab = self.tab.clone();
-        let path = self.path.clone();
         let confirm = Button::new("thumbnail-confirm")
             .large()
             .label(t(if upload {
@@ -499,11 +596,14 @@ impl Render for ThumbnailConfirmation {
             .when(!upload, |button| {
                 button.icon(Icon::new(IconName::TrashIcon).text_color(theme.text_primary))
             })
-            .on_click(move |_, _, cx| {
-                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
-                let _ = tab.update(cx, |tab, cx| tab.save(path.clone(), cx));
-            });
+            .on_click(cx.listener(|this, _, _, cx| this.submit(cx)));
         v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| {
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+            }))
+            .on_action(cx.listener(|this, _: &::menu::Confirm, _, cx| this.submit(cx)))
             .w(px(modal_width))
             .max_h(px((f32::from(window.viewport_size().height) - 48.).max(0.)))
             .max_w_full()

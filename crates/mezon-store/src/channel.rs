@@ -3135,24 +3135,6 @@ impl ChannelList {
         })
     }
 
-    pub fn upload_stream_thumbnail_image(
-        &self,
-        path: &std::path::Path,
-        max_bytes: u64,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<String, String>> {
-        let api = self.api.clone();
-        let path = path.to_path_buf();
-        let base_img_url = crate::AppConfig::global(cx).base_img_url.clone();
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .spawn(async move {
-                    crate::clan::upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
-                })
-                .await
-        })
-    }
-
     pub fn update_stream_thumbnail(
         &mut self,
         clan_id: ClanId,
@@ -3160,7 +3142,7 @@ impl ChannelList {
         avatar: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
-        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
+        let Some(channel) = self.channel(clan_id, channel_id) else {
             return Task::ready(Err("Channel not found".into()));
         };
         if channel.channel_type != ChannelType::Stream
@@ -3170,20 +3152,25 @@ impl ChannelList {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            let current = api
+                .list_channel_detail(channel_id.get())
+                .await
+                .map_err(|error| error.to_string())?;
+            if current.clan_id != clan_id.get()
+                || ChannelType::from_raw(current.channel_type) != ChannelType::Stream
+            {
+                return Err("Channel is no longer a stream".into());
+            }
             api.update_channel_desc(
                 clan_id.get(),
                 channel_id.get(),
                 mezon_client::UpdateChannelDescParams {
                     channel_label: None,
-                    category_id: channel
-                        .category_id
-                        .as_deref()
-                        .and_then(|id| id.parse().ok())
-                        .unwrap_or(0),
-                    topic: channel.topic,
-                    age_restricted: channel.age_restricted,
-                    e2ee: channel.e2ee,
-                    app_id: channel.app_id,
+                    category_id: current.category_id,
+                    topic: current.topic,
+                    age_restricted: current.age_restricted,
+                    e2ee: current.e2ee,
+                    app_id: current.app_id,
                     channel_avatar: Some(avatar.clone()),
                 },
             )
@@ -3231,7 +3218,6 @@ impl ChannelList {
             channel.avatar_url = avatar.to_string();
         }
         if changed {
-            self.invalidate_channel_index(clan_id);
             cx.notify();
         }
     }
@@ -3636,9 +3622,6 @@ impl ChannelList {
                 }
             }
             RealtimeEvent::ChannelUpdated(e) => {
-                if e.is_error {
-                    return;
-                }
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
@@ -3661,8 +3644,39 @@ impl ChannelList {
                 if changed {
                     cx.notify();
                 }
-                if carries_full_channel_state || !e.channel_avatar.is_empty() {
+                if !e.channel_avatar.is_empty() {
                     self.apply_channel_avatar(ClanId(e.clan_id), id, &e.channel_avatar, cx);
+                } else {
+                    let api = self.api.clone();
+                    let clan_id = ClanId(e.clan_id);
+                    let previous_avatar = self
+                        .channel(clan_id, id)
+                        .filter(|channel| {
+                            channel.channel_type == ChannelType::Stream
+                                && !channel.avatar_url.is_empty()
+                        })
+                        .map(|channel| channel.avatar_url.clone());
+                    if let Some(previous_avatar) = previous_avatar {
+                        cx.spawn(async move |this, cx| {
+                            if let Ok(detail) = api.list_channel_detail(id.get()).await
+                                && detail.clan_id == clan_id.get()
+                            {
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.channel(clan_id, id).is_some_and(|channel| {
+                                        channel.avatar_url == previous_avatar
+                                    }) {
+                                        this.apply_channel_avatar(
+                                            clan_id,
+                                            id,
+                                            &detail.channel_avatar,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            }
+                        })
+                        .detach();
+                    }
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
@@ -7455,12 +7469,11 @@ mod tests {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
-                for (avatar, channel_type, is_error, expected) in [
-                    ("thumbnail.png", 6, false, "thumbnail.png"),
-                    ("", 0, false, "thumbnail.png"), // Partial update preserves the image.
-                    ("replacement.webp", 6, false, "replacement.webp"),
-                    ("", 6, true, "replacement.webp"), // Failed removal preserves the image.
-                    ("", 6, false, ""),
+                for (avatar, channel_type, expected) in [
+                    ("thumbnail.png", 6, "thumbnail.png"),
+                    ("", 0, "thumbnail.png"),
+                    ("replacement.webp", 6, "replacement.webp"),
+                    ("", 6, "replacement.webp"),
                 ] {
                     channels.handle_event(
                         &RealtimeEvent::ChannelUpdated(
@@ -7469,7 +7482,6 @@ mod tests {
                                 channel_id: 1,
                                 channel_type,
                                 channel_avatar: avatar.into(),
-                                is_error,
                                 ..Default::default()
                             },
                         ),
@@ -7483,6 +7495,14 @@ mod tests {
                         expected
                     );
                 }
+                channels.apply_channel_avatar(ClanId(1), ChannelId(1), "", cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .avatar_url
+                        .is_empty()
+                );
             });
         });
     }
