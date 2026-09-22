@@ -781,6 +781,17 @@ impl MezonTransport {
         Ok(result)
     }
 
+    async fn send_realtime_control(
+        &self,
+        cid: u16,
+        action: &'static str,
+        envelope: realtime::Envelope,
+    ) -> Result<Vec<u8>> {
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        complete_realtime_control_request(action, code, &response)?;
+        Ok(response)
+    }
+
     /// Check if the adapter is connected.
     pub async fn is_open(&self) -> bool {
         self.adapter.is_open()
@@ -4946,11 +4957,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
@@ -4967,11 +4976,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_voice_reaction error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_voice_reaction", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn forward_webrtc_signaling(
@@ -4996,11 +5003,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("forward_webrtc_signaling error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "forward_webrtc_signaling", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_interactive_event(
@@ -5039,16 +5044,14 @@ impl MezonTransport {
             event_type,
             "sending VoiceInteractiveEvent"
         );
-        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        let response = self
+            .send_realtime_control(cid, "write_voice_interactive_event", envelope)
+            .await?;
         tracing::info!(
             target: "socket",
             cid = i32::from(cid),
-            code,
             "received VoiceInteractiveEvent CID response"
         );
-        if code != 0 {
-            anyhow::bail!("write_voice_interactive_event error: code={code}");
-        }
         decode_voice_interactive_response(&response)
     }
 
@@ -5072,11 +5075,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("make_call_push error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "make_call_push", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
@@ -5108,11 +5109,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_seen_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_seen_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5159,11 +5158,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_pin_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_pin_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
@@ -5176,11 +5173,9 @@ impl MezonTransport {
                 is_last_field: false,
             })),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_clan_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_clan_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8354,11 +8349,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_ephemeral_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8424,11 +8417,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_message_typing", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8480,11 +8471,9 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::QuickMenuEvent(event)),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_quick_menu_event", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Dropdown box selected.
@@ -10219,6 +10208,20 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
         }
         _ => None,
     }
+}
+
+fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
+    if let Some(error) = realtime_error_from_body(response) {
+        anyhow::bail!(
+            "{action} error: code={} {}",
+            error.code,
+            error.message.trim()
+        );
+    }
+    if code != 0 {
+        anyhow::bail!("{action} error: code={code}");
+    }
+    Ok(())
 }
 
 fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
@@ -12175,6 +12178,40 @@ mod tests {
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+    }
+
+    #[test]
+    fn realtime_control_accepts_a_successful_ack() {
+        complete_realtime_control_request("join_clan_chat", 0, &[]).unwrap();
+    }
+
+    #[test]
+    fn realtime_control_rejects_a_nonzero_frame_code() {
+        let err = complete_realtime_control_request("join_clan_chat", 13, &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=13"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn realtime_control_rejects_an_error_envelope_when_frame_code_is_zero() {
+        let body = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Not allowed".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let err = complete_realtime_control_request("join_clan_chat", 0, &body).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=403 Not allowed"),
+            "{message}"
+        );
     }
 
     #[test]
