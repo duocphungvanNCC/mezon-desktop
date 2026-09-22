@@ -26,7 +26,8 @@ use parking_lot::Mutex;
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
-    ScreenShareListError, ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData,
+    ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
+    VideoFrameData,
     VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
     peek_screen_share_options, system_screen_share_pick,
 };
@@ -59,6 +60,7 @@ pub enum DeviceKind {
 pub enum DeviceMenuKind {
     Microphone,
     Camera,
+    ScreenShare,
 }
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
@@ -332,6 +334,7 @@ pub struct VoiceStore {
     join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
+    screen_share_mode: ScreenShareMode,
     link_copied: bool,
     recording: RecordingState,
     recording_elapsed: Duration,
@@ -692,6 +695,7 @@ impl VoiceStore {
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
+            screen_share_mode: ScreenShareMode::default(),
             interactive_launches: HashMap::new(),
             active_interactive_apps: HashMap::new(),
             opened_interactive_apps: HashMap::new(),
@@ -830,6 +834,22 @@ impl VoiceStore {
 
     pub fn camera_enabled(&self) -> bool {
         self.camera_enabled
+    }
+
+    pub fn screen_share_mode(&self) -> ScreenShareMode {
+        self.screen_share_mode
+    }
+
+    pub fn set_screen_share_mode(&mut self, mode: ScreenShareMode, cx: &mut Context<Self>) {
+        self.device_menu = None;
+        self.device_submenu = None;
+        if self.screen_share_mode != mode {
+            self.screen_share_mode = mode;
+            if let Some(session) = &self.session {
+                session.set_screen_share_mode(mode);
+            }
+        }
+        cx.notify();
     }
 
     pub fn screen_share_enabled(&self) -> bool {
@@ -2627,6 +2647,7 @@ impl VoiceStore {
                 ws_url,
                 token,
                 channel_id,
+                false,
                 input_device_id,
                 output_device_id,
                 camera_device_id,
@@ -2647,6 +2668,7 @@ impl VoiceStore {
                         ws_url,
                         token,
                         channel_id,
+                        false,
                         input_device_id,
                         output_device_id,
                         camera_device_id,
@@ -2670,11 +2692,13 @@ impl VoiceStore {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_session(
         &mut self,
         ws_url: String,
         token: String,
         channel_id: String,
+        mic_enabled: bool,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
@@ -2712,6 +2736,7 @@ impl VoiceStore {
             room: channel_id.clone(),
             role: self.role,
             local_user_id,
+            mic_enabled,
             input_device_id,
             output_device_id,
             camera_device_id,
@@ -2991,6 +3016,7 @@ impl VoiceStore {
             snapshot.ws_url,
             token,
             snapshot.channel_id.clone(),
+            mic_enabled,
             snapshot.input_device_id,
             snapshot.output_device_id,
             snapshot.camera_device_id,
@@ -3029,7 +3055,7 @@ impl VoiceStore {
             session.set_mic_enabled(mic_enabled);
             session.set_camera_enabled(camera_enabled);
             if let Some((pick, share_audio)) = screen_share {
-                session.start_screen_share(pick, share_audio);
+                session.start_screen_share(pick, share_audio, self.screen_share_mode);
             }
         }
     }
@@ -3512,7 +3538,9 @@ impl VoiceStore {
         } else {
             self.device_menu = Some(kind);
             self.device_submenu = None;
-            self.refresh_devices(cx);
+            if kind != DeviceMenuKind::ScreenShare {
+                self.refresh_devices(cx);
+            }
         }
         cx.notify();
     }
@@ -3563,7 +3591,7 @@ impl VoiceStore {
         }
         self.last_screen_share = Some((pick.clone(), share_audio));
         if let Some(session) = &self.session {
-            session.start_screen_share(pick, share_audio);
+            session.start_screen_share(pick, share_audio, self.screen_share_mode);
         }
         cx.notify();
     }

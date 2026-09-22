@@ -4731,5 +4731,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Đã xóa thành viên khỏi nhóm",
   "userProfile.userInfoDM.mezonMemberSince": "Thành viên Mezon từ",
   "userProfile.voiceInfo.inVoice": "Trong kênh thoại",
-  "userProfile.voiceInfo.joinVoice": "Tham gia thoại"
+  "userProfile.voiceInfo.joinVoice": "Tham gia thoại",
+  "screenShare.modeText": "Văn bản",
+  "screenShare.modeTextDescription": "Văn bản và slide rõ nét, ít tốn tài nguyên hơn.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Video mượt hơn; có thể giảm độ nét khi mạng chậm."
 }
