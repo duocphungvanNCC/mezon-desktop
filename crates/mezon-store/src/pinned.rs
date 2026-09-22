@@ -44,6 +44,7 @@ pub struct PinnedMessage {
 #[derive(Debug, Clone)]
 pub enum PinnedEvent {
     OpenPopoverRequested,
+    Updated,
 }
 
 pub struct PinnedMessagesStore {
@@ -52,6 +53,7 @@ pub struct PinnedMessagesStore {
     messages: Vec<PinnedMessage>,
     loaded_channel: Option<String>,
     loading: bool,
+    fetch_generation: u64,
     pin_badges: HashSet<String>,
     api: Arc<AppApi>,
     _messages_sub: Subscription,
@@ -85,7 +87,9 @@ impl PinnedMessagesStore {
         self.messages.clear();
         self.loaded_channel = None;
         self.loading = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.pin_badges.clear();
+        cx.emit(PinnedEvent::Updated);
         cx.notify();
     }
 
@@ -104,6 +108,7 @@ impl PinnedMessagesStore {
             messages: Vec::new(),
             loaded_channel: None,
             loading: false,
+            fetch_generation: 0,
             pin_badges: HashSet::new(),
             api,
             _messages_sub: messages_sub,
@@ -184,6 +189,10 @@ impl PinnedMessagesStore {
         self.clan_id = clan_id;
         self.messages.clear();
         self.loaded_channel = None;
+        // A request for the previous channel must neither block nor overwrite the new one.
+        self.loading = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        cx.emit(PinnedEvent::Updated);
         cx.notify();
     }
 
@@ -218,17 +227,22 @@ impl PinnedMessagesStore {
             return;
         }
         self.loading = true;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        let generation = self.fetch_generation;
+        cx.emit(PinnedEvent::Updated);
         cx.notify();
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.get_pin_messages_list(&channel_id, &clan_id).await;
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
-                if this.channel_id.as_deref() != Some(channel_id.as_str()) {
-                    cx.notify();
+                if this.fetch_generation != generation
+                    || this.channel_id.as_deref() != Some(channel_id.as_str())
+                    || this.clan_id.as_deref() != Some(clan_id.as_str())
+                {
                     return;
                 }
+                this.loading = false;
                 match result {
                     Ok(list) => {
                         let cfg = AppConfig::try_global(cx);
@@ -237,6 +251,7 @@ impl PinnedMessagesStore {
                     }
                     Err(e) => tracing::error!("get_pin_messages_list failed: {e}"),
                 }
+                cx.emit(PinnedEvent::Updated);
                 cx.notify();
             });
         })
@@ -293,6 +308,7 @@ impl PinnedMessagesStore {
         let cfg = AppConfig::try_global(cx);
         self.messages
             .insert(0, pinned_from_last_pin_event(pin, cfg));
+        cx.emit(PinnedEvent::Updated);
         cx.notify();
     }
 
@@ -313,6 +329,7 @@ impl PinnedMessagesStore {
         self.messages
             .retain(|m| m.message_id != message_id && m.id != pin_id && m.id != message_id);
         if self.messages.len() != before {
+            cx.emit(PinnedEvent::Updated);
             cx.notify();
         }
     }
@@ -454,6 +471,7 @@ impl PinnedMessagesStore {
                 create_time,
             },
         );
+        cx.emit(PinnedEvent::Updated);
         self.set_pin_badge(&channel_id_str, cx);
         cx.notify();
 
@@ -499,6 +517,7 @@ impl PinnedMessagesStore {
             return;
         };
         self.messages.retain(|m| m.id != pin_id);
+        cx.emit(PinnedEvent::Updated);
         cx.notify();
 
         let api = self.api.clone();

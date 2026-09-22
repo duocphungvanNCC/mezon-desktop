@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
-    Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
+    AnyView, App, Context, Entity, ExternalPaths, FontWeight, ObjectFit, SharedString,
+    StyleRefinement, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
     BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
-    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo,
-    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
+    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessageId,
+    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore,
+    ProfileContext, Settings, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UserId,
+    resolve_user_profile,
 };
 use ui::PopoverMenuHandle;
 
@@ -28,7 +30,7 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
-use crate::components::primitives::{Icon, IconName, InputState};
+use crate::components::primitives::{Avatar, Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
@@ -59,6 +61,8 @@ pub struct ChatArea {
     _send_permission_channel_sub: Subscription,
     _send_permission_direct_sub: Subscription,
     _send_permission_friend_sub: Subscription,
+    _topic_activity_sub: Subscription,
+    _pinned_activity_sub: Subscription,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
@@ -218,6 +222,443 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
     )
 }
 
+/// Compact activity rail owned by the message column (never the member/topic sidebars).
+fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
+    let topics_store = TopicsStore::global(cx);
+    let messages_store = MessagesStore::global(cx);
+    let topics = topics_store.read(cx);
+    let messages = messages_store.read(cx);
+    let topic_syncing = topics.is_loading();
+
+    // The list endpoint is the richest source. While it is still loading (or when an older topic
+    // only exists in the current channel buffer), synthesize the same row from the origin message
+    // and its realtime topic metadata so an existing topic never renders as "empty".
+    let latest_topic = (!topic_syncing)
+        .then(|| {
+            topics
+                .topics_for(clan_id)
+                .iter()
+                .max_by_key(|topic| topic.last_message_timestamp)
+                .cloned()
+                .or_else(|| {
+                    let clan_id = messages.active_clan_id()?;
+                    let channel_id = messages.active_channel_id()?;
+                    messages
+                        .messages()
+                        .iter()
+                        .filter_map(|origin| {
+                            let topic_id = origin.topic_id?;
+                            let meta = topics.topic_meta_for_topic(topic_id)?;
+                            Some((meta.lsnt, origin, topic_id))
+                        })
+                        .max_by_key(|(timestamp, _, _)| *timestamp)
+                        .map(|(timestamp, origin, topic_id)| TopicDiscussion {
+                            id: topic_id.to_string(),
+                            message_id: origin.id.to_string(),
+                            clan_id: clan_id.to_string(),
+                            channel_id: channel_id.to_string(),
+                            creator_id: origin.sender_id.clone(),
+                            last_sender_id: origin.sender_id.clone(),
+                            content: origin.content.clone(),
+                            last_message_content: messages
+                                .messages_in_channel(topic_id)
+                                .last()
+                                .map(|message| message.content.clone())
+                                .unwrap_or_default(),
+                            last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX)) as u32,
+                        })
+                })
+        })
+        .flatten();
+    let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
+        mezon_client::TopicReplyPreview::Text(text) => Some(text),
+        _ => None,
+    };
+    let topic_title = latest_topic
+        .as_ref()
+        .and_then(|topic| {
+            let message_id = topic.message_id.parse::<MessageId>().ok()?;
+            messages
+                .messages()
+                .iter()
+                .find(|message| message.id == message_id)
+                .and_then(|message| plain_topic_content(&message.content))
+        })
+        .or_else(|| {
+            latest_topic
+                .as_ref()
+                .and_then(|topic| plain_topic_content(&topic.content))
+        });
+    let topic_preview = latest_topic
+        .as_ref()
+        .map(TopicDiscussion::reply_preview_text)
+        .filter(|text| !text.trim().is_empty());
+    let pinned_store = PinnedMessagesStore::global(cx);
+    let pinned = pinned_store.read(cx);
+    let pin_syncing = pinned.is_loading();
+    let active_clan_id = clan_id.parse::<ClanId>().ok();
+    let latest_pin = (pinned.clan_id() == active_clan_id)
+        .then(|| {
+            pinned
+                .pinned()
+                .iter()
+                .max_by_key(|pin| pin.create_time)
+                .cloned()
+        })
+        .flatten();
+
+    let theme = cx.theme();
+    let hover = theme.bg_hover;
+    let topic_label: SharedString = mezon_i18n::t(locale, "notifications.tabs.topics").into();
+    let pin_label: SharedString = "Pinned message".into();
+    let topic_title: SharedString = if topic_syncing {
+        "".into()
+    } else {
+        topic_title
+            .map(SharedString::from)
+            .unwrap_or_else(|| "No topics in this clan".into())
+    };
+    let topic_preview: SharedString = if topic_syncing {
+        "".into()
+    } else {
+        topic_preview
+            .map(SharedString::from)
+            .unwrap_or_else(|| "No replies yet".into())
+    };
+    let topic_cell = div()
+        .id("latest-topic-activity")
+        .flex()
+        .items_center()
+        .gap_3()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px_3()
+        .rounded(px(9.))
+        .overflow_hidden()
+        .when(latest_topic.is_some() && !topic_syncing, |cell| {
+            cell.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        // A stable semantic icon avoids remounting an image while clan/topic data resolves.
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(32.))
+                .child(
+                    Icon::new(IconName::ThreadIcon)
+                        .size(px(20.))
+                        .text_color(theme.interactive_active),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_muted)
+                        .child(topic_label),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(topic_title),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(topic_preview),
+                ),
+        )
+        .when_some(
+            (!topic_syncing).then_some(latest_topic).flatten(),
+            |cell, topic| cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx)),
+        );
+
+    let pin_attachment = latest_pin
+        .as_ref()
+        .and_then(|pin| pin.attachments.first())
+        .cloned();
+    let pin_profile = latest_pin.as_ref().and_then(|pin| {
+        let clan_id = active_clan_id?;
+        let sender_id = pin.sender_id.parse::<UserId>().ok()?;
+        resolve_user_profile(sender_id, ProfileContext::Clan(clan_id), cx)
+    });
+    let pin_title: SharedString = if pin_syncing {
+        "".into()
+    } else {
+        latest_pin
+            .as_ref()
+            .and_then(|pin| {
+                pin_profile
+                    .as_ref()
+                    .map(|profile| profile.display_name.trim())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        (!pin.sender_name.trim().is_empty()).then(|| pin.sender_name.trim())
+                    })
+            })
+            .map(|name| SharedString::from(name.to_string()))
+            .unwrap_or_else(|| "No pinned message".into())
+    };
+    let pin_time: SharedString = latest_pin
+        .as_ref()
+        .and_then(|pin| chrono::DateTime::from_timestamp(pin.create_time, 0))
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%d/%m/%Y, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+        .into();
+    let pin_preview: SharedString = if pin_syncing {
+        "".into()
+    } else {
+        latest_pin
+            .as_ref()
+            .map(|pin| pin.content.trim())
+            .filter(|text| !text.is_empty())
+            // Pinned code blocks and long text commonly contain newlines. A compact rail must
+            // remain one line; otherwise wrapping pushes the label/name/time out of the card and
+            // appears to change position when a sidebar opens.
+            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .or_else(|| {
+                pin_attachment.as_ref().map(|attachment| {
+                    if attachment.filename.is_empty() {
+                        SharedString::from("Image or attachment")
+                    } else {
+                        SharedString::from(attachment.filename.clone())
+                    }
+                })
+            })
+            .unwrap_or_else(|| "Nothing pinned in this channel".into())
+    };
+    let pin_message_id = latest_pin
+        .as_ref()
+        .and_then(|pin| pin.message_id.parse::<MessageId>().ok());
+    let pin_media = pin_attachment.as_ref().map(|attachment| {
+        if attachment.is_image() {
+            let source = if !attachment.thumbnail_proxied.is_empty() {
+                attachment.thumbnail_proxied.clone()
+            } else if !attachment.proxied_src.is_empty() {
+                attachment.proxied_src.clone()
+            } else {
+                SharedString::from(attachment.url.clone())
+            };
+            if !source.is_empty() {
+                return div()
+                    .flex_none()
+                    .size(px(42.))
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .child(img(source).size_full().object_fit(ObjectFit::Cover))
+                    .into_any_element();
+            }
+        }
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(38.))
+            .rounded(px(7.))
+            .bg(theme.bg_hover)
+            .child(
+                Icon::new(IconName::FileIcon)
+                    .size(px(19.))
+                    .text_color(theme.interactive_active),
+            )
+            .into_any_element()
+    });
+    let pin_avatar = latest_pin.as_ref().map(|pin| {
+        let display_name = pin_profile
+            .as_ref()
+            .map(|profile| profile.display_name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| pin.sender_name.clone());
+        let mut avatar = Avatar::new().name(display_name).size_px(px(32.));
+        let raw_source = pin_profile
+            .as_ref()
+            .map(|profile| profile.avatar_url.as_str())
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!pin.avatar_url.is_empty()).then(|| pin.avatar_url.clone()));
+        if let Some(raw_source) = raw_source {
+            avatar = avatar
+                .src(crate::util::imgproxy::avatar_url(cx, &raw_source))
+                .fallback_src(raw_source);
+        } else if !pin.avatar_proxied.is_empty() {
+            avatar = avatar.src(pin.avatar_proxied.clone());
+        }
+        avatar.into_any_element()
+    });
+    let pin_cell = div()
+        .id("latest-pinned-message")
+        .flex()
+        .items_center()
+        .gap_3()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px_3()
+        .rounded(px(9.))
+        .overflow_hidden()
+        .when(pin_message_id.is_some(), |cell| {
+            cell.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        .child(pin_avatar.unwrap_or_else(|| {
+            Icon::new(IconName::PinRight)
+                .size(px(20.))
+                .text_color(theme.text_muted)
+                .into_any_element()
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(12.))
+                        .whitespace_nowrap()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_muted)
+                        .child(pin_label),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .h(px(18.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .whitespace_nowrap()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary)
+                                .child(pin_title),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(theme.text_muted)
+                                .child(pin_time),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(16.))
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(pin_preview),
+                ),
+        )
+        .children(pin_media)
+        .when_some(pin_message_id, |cell, message_id| {
+            cell.on_click(move |_, _, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.jump_to_message(message_id, None, cx);
+                });
+            })
+        });
+
+    div()
+        .id("channel-latest-activity-strip")
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .h(px(78.))
+        .p_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.bg_primary)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .size_full()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_secondary)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .size_full()
+                        .child(topic_cell)
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(2.))
+                                .h(px(42.))
+                                .rounded_full()
+                                .bg(theme.text_muted),
+                        )
+                        .child(pin_cell),
+                ),
+        )
+        .into_any_element()
+}
+
+fn open_latest_topic(topic: TopicDiscussion, cx: &mut App) {
+    let (Ok(clan_id), Ok(channel_id), Ok(topic_id), Ok(message_id)) = (
+        topic.clan_id.parse::<ClanId>(),
+        topic.channel_id.parse::<ChannelId>(),
+        topic.id.parse::<i64>(),
+        topic.message_id.parse::<MessageId>(),
+    ) else {
+        return;
+    };
+    navigate(
+        cx,
+        Route::Channel {
+            clan_id,
+            channel_id,
+        },
+    );
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.clear_topic(&topic.id, cx);
+    });
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.apply_topic_read(ChannelId(topic_id), cx);
+    });
+    TopicsStore::global(cx).update(cx, |store, cx| {
+        store.begin_inbox_topic_jump_to_origin(channel_id, topic_id, message_id, message_id, cx);
+    });
+}
+
 fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
     let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
     if viewing {
@@ -281,6 +722,22 @@ impl ChatArea {
                 }
             },
         );
+        let topic_activity_sub = cx.subscribe(
+            &TopicsStore::global(cx),
+            |_: &mut crate::ChatLayout, _, event, cx| {
+                if matches!(event, TopicsEvent::Updated) {
+                    cx.notify();
+                }
+            },
+        );
+        let pinned_activity_sub = cx.subscribe(
+            &PinnedMessagesStore::global(cx),
+            |_: &mut crate::ChatLayout, _, event, cx| {
+                if matches!(event, mezon_store::PinnedEvent::Updated) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             timeline,
             mention_input: None,
@@ -307,6 +764,8 @@ impl ChatArea {
             _send_permission_channel_sub: send_permission_channel_sub,
             _send_permission_direct_sub: send_permission_direct_sub,
             _send_permission_friend_sub: send_permission_friend_sub,
+            _topic_activity_sub: topic_activity_sub,
+            _pinned_activity_sub: pinned_activity_sub,
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
@@ -756,6 +1215,20 @@ impl ChatArea {
             }
         };
 
+        let activity_strip = if !is_dm && !stream_sidebar && !media_channel_view {
+            clan_id.as_deref().map(|clan_id| {
+                TopicsStore::global(cx).update(cx, |store, cx| {
+                    store.fetch_if_needed(clan_id, cx);
+                });
+                PinnedMessagesStore::global(cx).update(cx, |store, cx| {
+                    store.ensure_loaded(cx);
+                });
+                latest_activity_strip(locale, clan_id, cx)
+            })
+        } else {
+            None
+        };
+
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
@@ -987,6 +1460,7 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
+            .children(activity_strip)
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
                 let input_visible = !send_denied && !banned;

@@ -124,6 +124,7 @@ pub struct TopicDiscussion {
     pub creator_id: String,
     pub last_sender_id: String,
     pub content: String,
+    pub last_message_content: String,
     pub last_message_timestamp: u32,
 }
 
@@ -956,7 +957,11 @@ pub fn inbox_notification_from_channel_mention(message: &api::ChannelMessage) ->
 
 impl TopicDiscussion {
     pub fn reply_preview(&self) -> TopicReplyPreview {
-        topic_reply_preview(&self.content)
+        topic_reply_preview(if self.last_message_content.is_empty() {
+            &self.content
+        } else {
+            &self.last_message_content
+        })
     }
 
     pub fn reply_preview_text(&self) -> String {
@@ -1085,6 +1090,11 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
         creator_id: id_str(t.creator_id),
         last_sender_id: id_str(last_sender_id),
         content: t.content.clone(),
+        last_message_content: t
+            .last_sent_message
+            .as_ref()
+            .map(|message| message.content.clone())
+            .unwrap_or_default(),
         last_message_timestamp,
     }
 }
