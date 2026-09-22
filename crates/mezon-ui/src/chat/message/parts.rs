@@ -11,8 +11,8 @@ use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
     MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url,
-    resolve_user_profile,
+    STICKER_MAX_HEIGHT, STICKER_MAX_WIDTH, ThreadsStore, TopicsStore, UserId, UsersByUserStore,
+    ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -1315,27 +1315,30 @@ fn render_photo(
     if src.is_empty() {
         return attachment_box(att.filename.clone(), theme);
     }
-    let object_fit = if is_gif(&att.url) {
+    let is_sticker = att.filetype == "sticker";
+    let intrinsic_sticker = is_sticker && (att.display_width <= 0.0 || att.display_height <= 0.0);
+    let object_fit = if is_sticker || is_gif(&att.url) {
         ObjectFit::Contain
     } else {
         ObjectFit::Cover
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
-    let is_sticker = att.filetype == "sticker";
     let settings = ctx.settings.clone();
     let viewer_att = AttachmentSeedInput::from_message(att);
     let message_id = msg.id;
     let create_time = msg.create_time;
     let uploader_id = viewer_uploader_id(msg);
     let selection = ctx.selection.clone();
-    let mut el = div()
-        .id(("msg-img", index))
-        .relative()
-        .w(px(att.display_width))
-        .h(px(att.display_height))
-        .rounded_md()
-        .overflow_hidden();
+    let mut el = div().id(("msg-img", index)).relative().rounded_md();
+    el = if intrinsic_sticker {
+        el.max_w(px(STICKER_MAX_WIDTH))
+            .max_h(px(STICKER_MAX_HEIGHT))
+    } else {
+        el.w(px(att.display_width))
+            .h(px(att.display_height))
+            .overflow_hidden()
+    };
     // `render_album` already refuses to open a tile that is still uploading;
     // the single-image path is the same picture with the same half-written
     // object behind it.
@@ -1354,27 +1357,32 @@ fn render_photo(
             }
         })
     });
-    el = el.child(
-        img(src)
-            .id(("msg-img-frames", msg.id.0 as usize))
-            .size_full()
-            .object_fit(object_fit)
-            .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
-            .with_fallback(move || {
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(fallback_bg)
-                    .child(
-                        Icon::new(IconName::ImageThumbnail)
-                            .size(px(32.))
-                            .text_color(fallback_fg),
-                    )
-                    .into_any_element()
-            }),
-    );
+    let mut image = img(src)
+        .id(("msg-img-frames", msg.id.0 as usize))
+        .object_fit(object_fit)
+        .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
+        .with_fallback(move || {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(fallback_bg)
+                .child(
+                    Icon::new(IconName::ImageThumbnail)
+                        .size(px(32.))
+                        .text_color(fallback_fg),
+                )
+                .into_any_element()
+        });
+    image = if intrinsic_sticker {
+        image
+            .max_w(px(STICKER_MAX_WIDTH))
+            .max_h(px(STICKER_MAX_HEIGHT))
+    } else {
+        image.size_full()
+    };
+    el = el.child(image);
     if att.upload_failed {
         el = el.child(attachment_failed_overlay(theme));
     } else if sending {

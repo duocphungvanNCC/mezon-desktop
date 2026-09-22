@@ -811,8 +811,30 @@ fn render_search_row(
         if image.proxied_src.is_empty() {
             return None;
         }
+        if image.contain && (image.display_width <= 0. || image.display_height <= 0.) {
+            return Some(
+                div()
+                    .mt_1()
+                    .max_w(px(120.))
+                    .max_h(px(120.))
+                    .flex_shrink_0()
+                    .image_cache(attachment_image_cache.clone())
+                    .child(
+                        img(image.proxied_src.clone())
+                            .max_w(px(120.))
+                            .max_h(px(120.))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .into_any_element(),
+            );
+        }
         let width = image.display_width.clamp(1., 280.);
         let height = image.display_height.clamp(1., 200.);
+        let fit = if image.contain {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
         Some(
             div()
                 .mt_1()
@@ -823,11 +845,7 @@ fn render_search_row(
                 .overflow_hidden()
                 .rounded_md()
                 .image_cache(attachment_image_cache.clone())
-                .child(
-                    img(image.proxied_src.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
+                .child(img(image.proxied_src.clone()).size_full().object_fit(fit))
                 .into_any_element(),
         )
     });

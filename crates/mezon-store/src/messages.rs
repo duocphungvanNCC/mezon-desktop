@@ -9694,17 +9694,26 @@ impl MessageAttachment {
         }
         let width = a.width.max(0) as u32;
         let height = a.height.max(0) as u32;
+        let is_sticker = a.filetype == STICKER_FILETYPE;
         let is_video = MessageAttachment::media_is_video(&a.filetype, &a.url);
-        let (proxied_src, display_width, display_height) = cfg
-            .map(|c| c.attachment_proxy(&a.url, width, height, is_video))
-            .unwrap_or_else(|| {
-                let (w, h) = if is_video {
-                    crate::config::video_attachment_display_dimensions(width, height)
-                } else {
-                    crate::config::attachment_display_dimensions(width, height)
-                };
-                (a.url.clone(), w, h)
-            });
+        let (proxied_src, display_width, display_height) = if is_sticker {
+            cfg.map(|c| c.sticker_attachment_proxy(&a.url, width, height))
+                .unwrap_or_else(|| {
+                    let (w, h) = crate::config::sticker_display_dimensions(width, height)
+                        .unwrap_or((0.0, 0.0));
+                    (a.url.clone(), w, h)
+                })
+        } else {
+            cfg.map(|c| c.attachment_proxy(&a.url, width, height, is_video))
+                .unwrap_or_else(|| {
+                    let (w, h) = if is_video {
+                        crate::config::video_attachment_display_dimensions(width, height)
+                    } else {
+                        crate::config::attachment_display_dimensions(width, height)
+                    };
+                    (a.url.clone(), w, h)
+                })
+        };
         let thumbnail_proxied: SharedString = if a.thumbnail.is_empty() {
             SharedString::default()
         } else {
@@ -11763,8 +11772,54 @@ mod tests {
         assert!(attachment.is_image());
         assert_eq!(
             (attachment.display_width, attachment.display_height),
-            (100.0, 100.0)
+            (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn sticker_attachment_keeps_aspect_with_fit_proxy() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let url = format!("{}/stickers/1.webp", cfg.base_img_url);
+        let unknown = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.clone(),
+                filename: "1".into(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(
+            unknown.proxied_src.contains("rs:fit:200:220:1/"),
+            "unknown sticker must fit inside 200x220, not fill-crop: {}",
+            unknown.proxied_src
+        );
+        assert_eq!((unknown.display_width, unknown.display_height), (0.0, 0.0));
+
+        let wide = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url,
+                filename: "1".into(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 640,
+                height: 200,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(wide.display_width > wide.display_height);
+        assert!(wide.proxied_src.contains("rs:fit:"));
+        assert!(!wide.proxied_src.contains("rs:fill:"));
     }
 
     #[test]

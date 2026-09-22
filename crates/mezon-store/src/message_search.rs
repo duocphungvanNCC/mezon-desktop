@@ -41,6 +41,7 @@ pub struct SearchHitImage {
     pub proxied_src: SharedString,
     pub display_width: f32,
     pub display_height: f32,
+    pub contain: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -713,12 +714,17 @@ fn first_search_media(raw: &str, cfg: Option<&AppConfig>) -> Option<SearchHitIma
             } else {
                 att.proxied_src
             };
-            let (display_width, display_height) =
-                clamp_search_media_size(att.display_width, att.display_height);
+            let contain = att.filetype == crate::message::STICKER_FILETYPE;
+            let (display_width, display_height) = if contain && att.display_width <= 0.0 {
+                (0.0, 0.0)
+            } else {
+                clamp_search_media_size(att.display_width, att.display_height)
+            };
             SearchHitImage {
                 proxied_src,
                 display_width,
                 display_height,
+                contain,
             }
         })
 }

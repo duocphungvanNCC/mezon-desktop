@@ -538,6 +538,25 @@ impl AppConfig {
         )
     }
 
+    pub fn sticker_attachment_proxy(
+        &self,
+        source: &str,
+        real_width: u32,
+        real_height: u32,
+    ) -> (String, f32, f32) {
+        let (proxy_w, proxy_h) = sticker_proxy_dimensions(real_width, real_height);
+        let (display_w, display_h) =
+            sticker_display_dimensions(real_width, real_height).unwrap_or((0.0, 0.0));
+        if source.is_empty() {
+            return (String::new(), display_w, display_h);
+        }
+        (
+            self.imgproxy_url(source, proxy_w, proxy_h, "fit"),
+            display_w,
+            display_h,
+        )
+    }
+
     /// Full-size imgproxy URL for the image viewer. Caps the longest side to
     /// 1600 px preserving aspect ratio (React `MessageAttachment` / `GalleryModal`
     /// open: width clamped to 1600, height scaled).
@@ -718,6 +737,39 @@ pub fn calculate_media_dimensions(
 pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
     let dimensions = calculate_media_dimensions(real_width, real_height, false, 0);
     (dimensions.width, dimensions.height)
+}
+
+pub const STICKER_MAX_WIDTH: f32 = 200.0;
+pub const STICKER_MAX_HEIGHT: f32 = 220.0;
+pub const STICKER_STANDARD_SIZE: f32 = 150.0;
+const STICKER_WIDE_RATIO: f32 = 0.85;
+const STICKER_TALL_RATIO: f32 = 1.15;
+
+pub fn sticker_display_dimensions(real_width: u32, real_height: u32) -> Option<(f32, f32)> {
+    if real_width == 0 || real_height == 0 {
+        return None;
+    }
+    let ratio = real_height as f32 / real_width as f32;
+    let (max_w, max_h) = if ratio > STICKER_TALL_RATIO {
+        (STICKER_STANDARD_SIZE, STICKER_MAX_HEIGHT)
+    } else if ratio < STICKER_WIDE_RATIO {
+        (STICKER_MAX_WIDTH, STICKER_STANDARD_SIZE)
+    } else {
+        (STICKER_STANDARD_SIZE, STICKER_STANDARD_SIZE)
+    };
+    Some(fit_within_box(
+        max_w,
+        max_h,
+        real_width as f32,
+        real_height as f32,
+    ))
+}
+
+pub fn sticker_proxy_dimensions(real_width: u32, real_height: u32) -> (u32, u32) {
+    match sticker_display_dimensions(real_width, real_height) {
+        Some((width, height)) => (width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32),
+        None => (STICKER_MAX_WIDTH as u32, STICKER_MAX_HEIGHT as u32),
+    }
 }
 
 pub fn video_attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
@@ -1079,7 +1131,10 @@ mod tests {
         assert!(cfg.is_voice_agent("2"));
         assert!(!cfg.is_voice_agent("3"));
         assert!(!cfg.is_voice_agent(""));
-        assert_eq!(AppConfig::dev_defaults().voice_agent_ids, ["2037383744142184448"]);
+        assert_eq!(
+            AppConfig::dev_defaults().voice_agent_ids,
+            ["2037383744142184448"]
+        );
     }
 
     #[test]
@@ -1101,6 +1156,34 @@ mod tests {
             out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
             "avatar must be 100x100 fit like React MessageAvatar: {out}"
         );
+    }
+
+    #[test]
+    fn sticker_display_keeps_wide_tall_and_square_aspect() {
+        assert_eq!(sticker_display_dimensions(0, 0), None);
+        assert_eq!(sticker_display_dimensions(640, 200), Some((200.0, 63.0)));
+        assert_eq!(sticker_display_dimensions(200, 640), Some((69.0, 220.0)));
+        assert_eq!(sticker_display_dimensions(320, 320), Some((150.0, 150.0)));
+        assert_eq!(sticker_display_dimensions(100, 40), Some((100.0, 40.0)));
+    }
+
+    #[test]
+    fn sticker_attachment_proxy_uses_fit() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = format!("{}/stickers/wide.webp", cfg.base_img_url);
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 0, 0);
+        assert!(
+            url.contains("rs:fit:200:220:1/mb:2097152/plain/"),
+            "sticker proxy must fit, not fill: {url}"
+        );
+        assert_eq!((display_w, display_h), (0.0, 0.0));
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 640, 200);
+        assert!(url.contains("rs:fit:200:63:1/"));
+        assert_eq!((display_w, display_h), (200.0, 63.0));
     }
 
     #[test]
