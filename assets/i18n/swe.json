@@ -3791,6 +3791,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Gå med i clan",
   "profileSetting.emptyClanProfile.title": "Du har inte gått med i någon clan än",
   "profileSetting.emptyUsername": "Visningsnamn inte får vara tomt!",
+  "profileSetting.invalidDisplayName": "Visningsnamnet får vara högst 32 tecken och får endast innehålla bokstäver, siffror, mellanslag och _ - . +",
   "profileSetting.fields.bio.label": "Biografi",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Clan Smeknamn",

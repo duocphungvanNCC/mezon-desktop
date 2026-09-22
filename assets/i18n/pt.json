@@ -3791,6 +3791,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Participar de um clã",
   "profileSetting.emptyClanProfile.title": "Você ainda não participa de nenhum clã",
   "profileSetting.emptyUsername": "O nome de exibição não pode estar vazio!",
+  "profileSetting.invalidDisplayName": "O nome de exibição deve ter no máximo 32 caracteres e conter apenas letras, números, espaços e _ - . +",
   "profileSetting.fields.bio.label": "Bio",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Apelido do Clã",

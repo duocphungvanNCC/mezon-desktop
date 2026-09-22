@@ -3790,6 +3790,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Clan betreden",
   "profileSetting.emptyClanProfile.title": "Je bent nog geen lid van een clan",
   "profileSetting.emptyUsername": "Weergavenaam mag niet leeg zijn!",
+  "profileSetting.invalidDisplayName": "Weergavenaam mag maximaal 32 tekens bevatten en alleen letters, cijfers, spaties en _ - . +",
   "profileSetting.fields.bio.label": "Biografie",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Clan Bijnaam",

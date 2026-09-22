@@ -3799,6 +3799,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Кланга кушылу",
   "profileSetting.emptyClanProfile.title": "Сезнең бернинди кланыгыз юк",
   "profileSetting.emptyUsername": "Күрсәтелә торган исем буш була алмый!",
+  "profileSetting.invalidDisplayName": "Күрсәтелә торган исем 32 символдан артык булмаска тиеш һәм бары тик хәрефләр, саннар, бушлыклар һәм _ - . + куеп була",
   "profileSetting.fields.bio.label": "Үзем турында",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Клан кушаматы",

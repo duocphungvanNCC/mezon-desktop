@@ -3790,6 +3790,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Далучыцца да клана",
   "profileSetting.emptyClanProfile.title": "Вы не далучыліся да ніводнага клана",
   "profileSetting.emptyUsername": "Адлюстроўванае імя не можа быць пустым!",
+  "profileSetting.invalidDisplayName": "Адлюстроўванае імя павінна змяшчаць не больш за 32 сімвалы і толькі літары, лічбы, прабелы і _ - . +",
   "profileSetting.fields.bio.label": "Біяграфія",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Мянушка клана",

@@ -10,7 +10,14 @@ use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPassword
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
+use crate::quick_menu::is_valid_name_content;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+pub const DISPLAY_NAME_MAX_BYTES: usize = 32;
+
+pub fn is_valid_account_display_name(name: &str) -> bool {
+    name.is_empty() || (name.len() <= DISPLAY_NAME_MAX_BYTES && is_valid_name_content(name))
+}
 
 #[derive(Debug, Clone)]
 pub struct UserAccount {
@@ -379,6 +386,14 @@ impl AccountStore {
         logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let display_name = display_name.trim().to_string();
+        if !is_valid_account_display_name(&display_name) {
+            cx.emit(AccountEvent::AccountSaveFailed(
+                "Invalid display name".into(),
+            ));
+            cx.notify();
+            return;
+        }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
@@ -1259,6 +1274,21 @@ mod tests {
         assert_eq!(acct.dob_seconds, 946_684_800);
         let restored = PersistedAccount::from_account(&acct).into_account();
         assert_eq!(restored.dob_seconds, 946_684_800);
+    }
+
+    #[test]
+    fn account_display_name_allows_empty_and_rejects_over_32_bytes() {
+        assert!(is_valid_account_display_name(""));
+        assert!(is_valid_account_display_name("Alice"));
+        assert!(is_valid_account_display_name(&"a".repeat(32)));
+        assert!(!is_valid_account_display_name(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn account_display_name_rejects_invalid_name_chars() {
+        assert!(!is_valid_account_display_name("_Alice"));
+        assert!(!is_valid_account_display_name("-Alice"));
+        assert!(!is_valid_account_display_name("Alice!"));
     }
 
     #[test]

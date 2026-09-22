@@ -3790,6 +3790,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Tham gia clan",
   "profileSetting.emptyClanProfile.title": "Bạn chưa tham gia clan nào",
   "profileSetting.emptyUsername": "Tên hiển thị không được để trống!",
+  "profileSetting.invalidDisplayName": "Tên hiển thị tối đa 32 ký tự và chỉ được chứa chữ cái, số, khoảng trắng và _ - . +",
   "profileSetting.fields.bio.label": "Tiểu sử",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Biệt danh Clan",

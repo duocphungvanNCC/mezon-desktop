@@ -3825,6 +3825,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Unirse a un clan",
   "profileSetting.emptyClanProfile.title": "No tienes ningún clan",
   "profileSetting.emptyUsername": "¡El nombre de visualización no puede estar vacío!",
+  "profileSetting.invalidDisplayName": "El nombre para mostrar debe tener como máximo 32 caracteres y contener solo letras, números, espacios y _ - . +",
   "profileSetting.fields.bio.label": "Biografía",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Apodo del Clan",

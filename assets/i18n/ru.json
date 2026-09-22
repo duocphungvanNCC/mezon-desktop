@@ -4029,6 +4029,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Присоединиться к клану",
   "profileSetting.emptyClanProfile.title": "У Вас нет никакого клана",
   "profileSetting.emptyUsername": "Отображаемое имя не может быть пустым!",
+  "profileSetting.invalidDisplayName": "Отображаемое имя должно содержать не более 32 символов и только буквы, цифры, пробелы и _ - . +",
   "profileSetting.fields.bio.label": "О себе",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Псевдоним клана",

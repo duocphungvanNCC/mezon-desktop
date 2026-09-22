@@ -3790,6 +3790,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Rejoindre un clan",
   "profileSetting.emptyClanProfile.title": "Vous ne faites partie d'aucun clan",
   "profileSetting.emptyUsername": "Le nom d'affichage ne peut pas être vide !",
+  "profileSetting.invalidDisplayName": "Le nom d'affichage doit contenir au maximum 32 caractères et uniquement des lettres, chiffres, espaces et _ - . +",
   "profileSetting.fields.bio.label": "Biographie",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Surnom du Clan",

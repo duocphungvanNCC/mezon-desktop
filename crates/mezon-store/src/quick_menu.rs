@@ -43,20 +43,20 @@ pub struct QuickMenuStore {
 struct GlobalQuickMenuStore(Entity<QuickMenuStore>);
 impl Global for GlobalQuickMenuStore {}
 
-pub fn is_valid_menu_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
+pub fn is_valid_name_content(name: &str) -> bool {
     let Some(first) = name.chars().next() else {
         return false;
     };
     if first == '_' || first == '-' {
         return false;
     }
-    if name.chars().count() > QUICK_MENU_NAME_MAX_RUNES {
-        return false;
-    }
     name.chars().all(is_valid_menu_name_char)
+}
+
+pub fn is_valid_menu_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= QUICK_MENU_NAME_MAX_RUNES
+        && is_valid_name_content(name)
 }
 
 pub fn is_valid_action_msg(action_msg: &str) -> bool {

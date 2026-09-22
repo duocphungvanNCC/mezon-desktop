@@ -3791,6 +3791,7 @@
   "profileSetting.emptyClanProfile.joinClan": "클랜 참가",
   "profileSetting.emptyClanProfile.title": "클랜이 없습니다",
   "profileSetting.emptyUsername": "표시 이름이 비어있지 않아야 합니다!",
+  "profileSetting.invalidDisplayName": "표시 이름은 최대 32자까지 가능하며 문자, 숫자, 공백 및 _ - . +만 포함할 수 있습니다",
   "profileSetting.fields.bio.label": "약력",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "클랜 별명",

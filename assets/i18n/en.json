@@ -3788,6 +3788,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Join a clan",
   "profileSetting.emptyClanProfile.title": "You don't have any clan",
   "profileSetting.emptyUsername": "Display name cannot be blank!",
+  "profileSetting.invalidDisplayName": "Display name must be at most 32 characters and contain only letters, numbers, spaces, and _ - . +",
   "profileSetting.fields.bio.label": "About me",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Clan nickname",

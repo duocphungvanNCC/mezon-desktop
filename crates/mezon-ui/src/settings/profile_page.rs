@@ -9,7 +9,8 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
+    AccountEvent, AccountStore, AppConfig, ClanList, DISPLAY_NAME_MAX_BYTES, LoginStore, Settings,
+    UserAccount, is_valid_account_display_name,
 };
 
 use super::clan_profile_section::ClanProfileSection;
@@ -361,7 +362,13 @@ impl ProfilePage {
         let locale = self.settings.read(cx).language.clone();
         let display_ph = mezon_i18n::t(&locale, "setting.profile.displayNamePlaceholder");
         let about_ph = mezon_i18n::t(&locale, "setting.profile.aboutPlaceholder");
-        let display = cx.new(|cx| InputState::new(window, cx).placeholder(display_ph));
+        let display = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(display_ph)
+                .validate(|value, _| {
+                    !value.starts_with(' ') && value.len() <= DISPLAY_NAME_MAX_BYTES
+                })
+        });
         let about = cx.new(|cx| {
             TextArea::new(window, cx)
                 .placeholder(about_ph)
@@ -468,10 +475,21 @@ impl ProfilePage {
         if state.saving {
             return;
         }
+        let display_name = state.display_name.to_string().trim().to_string();
+        if !is_valid_account_display_name(&display_name) {
+            let locale = self.settings.read(cx).language.clone();
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.error(
+                    mezon_i18n::t(&locale, "profileSetting.invalidDisplayName"),
+                    cx,
+                )
+            });
+            return;
+        }
+        state.display_name = display_name.clone().into();
         state.saving = true;
         cx.notify();
 
-        let display_name: String = state.display_name.to_string();
         let about_me: String = state.about_me.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
         let logo_url = Some(

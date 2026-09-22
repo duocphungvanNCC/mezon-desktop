@@ -3791,6 +3791,7 @@
   "profileSetting.emptyClanProfile.joinClan": "Clan beitreten",
   "profileSetting.emptyClanProfile.title": "Du bist noch keinem Clan beigetreten",
   "profileSetting.emptyUsername": "Anzeigename darf nicht leer sein!",
+  "profileSetting.invalidDisplayName": "Anzeigename darf höchstens 32 Zeichen lang sein und darf nur Buchstaben, Zahlen, Leerzeichen sowie _ - . + enthalten",
   "profileSetting.fields.bio.label": "Bio",
   "profileSetting.fields.bio.placeholder": "",
   "profileSetting.fields.clanNickname.label": "Clan-Spitzname",
