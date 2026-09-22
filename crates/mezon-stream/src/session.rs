@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -12,11 +13,18 @@ use libwebrtc::peer_connection_factory::{
 };
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
-use mezon_voice::StreamAudioOutput;
+use mezon_voice::{StreamAudioOutput, stabilize_inactive_video_sections};
 use parking_lot::Mutex;
 use serde_json::Value;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
+const MAX_RECONNECT_ATTEMPTS: u32 = 40;
+const MAX_TOKEN_REFRESH_ATTEMPTS: u32 = 3;
 
 pub type StreamTokenProvider =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String>> + Send + Sync + 'static>;
@@ -67,7 +75,7 @@ impl StreamSession {
             };
             *audio_for_thread.lock() = Some(audio_output.clone());
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             let Ok(runtime) = runtime else {
@@ -111,6 +119,8 @@ async fn run_session(
 ) {
     let mut token = config.token.clone();
     let mut reconnect_attempt = 0u32;
+    let mut token_refresh_attempt = 0u32;
+    let factory = PeerConnectionFactory::default();
 
     loop {
         match run_session_once(
@@ -119,56 +129,87 @@ async fn run_session(
             audio.clone(),
             &stop_rx,
             &event_tx,
+            &factory,
             &mut reconnect_attempt,
         )
         .await
         {
             Ok(()) => break,
-            Err(_) => {
+            Err(SessionFailure::Fatal(reason)) => {
+                let _ = event_tx.send(StreamEvent::Error(reason));
+                break;
+            }
+            Err(SessionFailure::RefreshToken(reason)) => {
+                token_refresh_attempt = token_refresh_attempt.saturating_add(1);
+                if token_refresh_attempt > MAX_TOKEN_REFRESH_ATTEMPTS {
+                    let _ = event_tx.send(StreamEvent::Error(format!(
+                        "SFU token refresh failed after {MAX_TOKEN_REFRESH_ATTEMPTS} attempts: {reason}"
+                    )));
+                    break;
+                }
                 reconnect_attempt = reconnect_attempt.saturating_add(1);
                 tracing::warn!(
                     attempt = reconnect_attempt,
+                    "SFU stream session refreshing token"
+                );
+                match refresh_token(&config, &stop_rx, reconnect_attempt).await {
+                    Some(next_token) => {
+                        token = next_token;
+                        token_refresh_attempt = 0;
+                    }
+                    None if token_refresh_attempt < MAX_TOKEN_REFRESH_ATTEMPTS => {
+                        if !wait_before_retry(&stop_rx, reconnect_attempt).await {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            Err(SessionFailure::Retry(reason)) => {
+                reconnect_attempt = reconnect_attempt.saturating_add(1);
+                if reconnect_attempt > MAX_RECONNECT_ATTEMPTS {
+                    let _ = event_tx.send(StreamEvent::Error(format!(
+                        "SFU stream reconnect limit reached: {reason}"
+                    )));
+                    break;
+                }
+                tracing::warn!(
+                    attempt = reconnect_attempt,
+                    %reason,
                     "SFU stream session reconnecting"
                 );
-                let Some(next_token) =
-                    wait_for_refreshed_token(&config, &stop_rx, &mut reconnect_attempt).await
-                else {
+                if !wait_before_retry(&stop_rx, reconnect_attempt).await {
                     break;
-                };
-                token = next_token;
+                }
             }
         }
     }
     let _ = event_tx.send(StreamEvent::Disconnected);
 }
 
-async fn wait_for_refreshed_token(
+async fn refresh_token(
     config: &StreamSessionConfig,
     stop_rx: &Receiver<()>,
-    reconnect_attempt: &mut u32,
+    reconnect_attempt: u32,
 ) -> Option<String> {
-    loop {
-        let backoff = reconnect_delay(*reconnect_attempt);
-        tokio::select! {
-            _ = stop_rx.recv_async() => return None,
-            _ = tokio::time::sleep(backoff) => {},
-        }
+    if !wait_before_retry(stop_rx, reconnect_attempt).await {
+        return None;
+    }
+    let refresh = (config.token_provider)();
+    let result = tokio::select! {
+        _ = stop_rx.recv_async() => return None,
+        result = refresh => result,
+    };
+    match result {
+        Ok(token) if !token.is_empty() => Some(token),
+        Ok(_) | Err(_) => None,
+    }
+}
 
-        let refresh = (config.token_provider)();
-        let result = tokio::select! {
-            _ = stop_rx.recv_async() => return None,
-            result = refresh => result,
-        };
-        match result {
-            Ok(token) if !token.is_empty() => return Some(token),
-            Ok(_) | Err(_) => {
-                *reconnect_attempt = reconnect_attempt.saturating_add(1);
-                tracing::warn!(
-                    attempt = *reconnect_attempt,
-                    "SFU stream token refresh failed; retrying"
-                );
-            }
-        }
+async fn wait_before_retry(stop_rx: &Receiver<()>, reconnect_attempt: u32) -> bool {
+    tokio::select! {
+        _ = stop_rx.recv_async() => false,
+        _ = tokio::time::sleep(reconnect_delay(reconnect_attempt)) => true,
     }
 }
 
@@ -177,18 +218,28 @@ fn reconnect_delay(attempt: u32) -> Duration {
         .min(Duration::from_secs(15))
 }
 
+#[derive(Debug)]
+enum SessionFailure {
+    Retry(String),
+    RefreshToken(String),
+    Fatal(String),
+}
+
 async fn run_session_once(
     config: &StreamSessionConfig,
     token: &str,
     audio: Arc<StreamAudioOutput>,
     stop_rx: &Receiver<()>,
     event_tx: &Sender<StreamEvent>,
+    factory: &PeerConnectionFactory,
     reconnect_attempt: &mut u32,
-) -> Result<()> {
-    let url = build_ws_url(&config.ws_url, token)?;
+) -> std::result::Result<(), SessionFailure> {
+    let url = build_ws_url(&config.ws_url, token)
+        .map_err(|error| SessionFailure::Fatal(format!("invalid SFU URL: {error}")))?;
     let (ws_stream, _) = tokio::select! {
         _ = stop_rx.recv_async() => return Ok(()),
-        result = connect_async(url.as_str()) => result.context("SFU websocket connect failed")?,
+        result = connect_async(url.as_str()) => result
+            .map_err(|error| SessionFailure::Retry(format!("SFU websocket connect failed: {error}")))?,
     };
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
     send_json(
@@ -200,30 +251,46 @@ async fn run_session_once(
             "role": "audience"
         }),
     )
-    .await?;
+    .await
+    .map_err(|error| SessionFailure::Retry(error.to_string()))?;
 
     let (connection_state_tx, connection_state_rx) = flume::unbounded::<PeerConnectionState>();
-    let mut _factory: Option<PeerConnectionFactory> = None;
-    let mut pc = PeerConnectionGuard::default();
-    let mut live = false;
+    let active_audio_tracks = Arc::new(AtomicUsize::new(0));
+    let pump_registry = Arc::new(AudioPumpRegistry::default());
+    let mut pc = PeerConnectionGuard::new(pump_registry.clone());
+    let mut connected = false;
+    let mut healthy_since = None;
 
     loop {
+        let healthy_deadline = healthy_since.map(|since| since + HEALTHY_CONNECTION);
         tokio::select! {
-            _ = stop_rx.recv_async() => break,
+            _ = async {
+                match healthy_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                *reconnect_attempt = 0;
+                healthy_since = None;
+            },
+            _ = stop_rx.recv_async() => {
+                let _ = ws_tx.send(Message::Close(None)).await;
+                break;
+            },
             state = connection_state_rx.recv_async() => {
                 match state {
                     Ok(PeerConnectionState::Connected) => {
-                        *reconnect_attempt = 0;
-                        if !live {
-                            live = true;
-                            let _ = event_tx.send(StreamEvent::Live);
+                        connected = true;
+                        healthy_since.get_or_insert_with(tokio::time::Instant::now);
+                        if active_audio_tracks.load(Ordering::Acquire) == 0 {
+                            let _ = event_tx.send(StreamEvent::NoBroadcast);
                         }
                     }
                     Ok(PeerConnectionState::Failed) => {
-                        return Err(anyhow!("SFU peer connection failed"));
+                        return Err(SessionFailure::Retry("SFU peer connection failed".into()));
                     }
                     Ok(PeerConnectionState::Closed) => {
-                        return Err(anyhow!("SFU peer connection closed"));
+                        return Err(SessionFailure::Retry("SFU peer connection closed".into()));
                     }
                     Ok(PeerConnectionState::New | PeerConnectionState::Connecting | PeerConnectionState::Disconnected) => {}
                     Err(_) => {}
@@ -231,49 +298,90 @@ async fn run_session_once(
             }
             incoming = ws_rx.next() => {
                 let Some(frame) = incoming else {
-                    return Err(anyhow!("SFU websocket closed"));
+                    return Err(SessionFailure::Retry("SFU websocket closed".into()));
                 };
-                let frame = frame.context("SFU websocket read failed")?;
+                let frame = frame.map_err(|error| {
+                    SessionFailure::Retry(format!("SFU websocket read failed: {error}"))
+                })?;
                 let text = match frame {
                     Message::Text(text) => text,
                     Message::Ping(payload) => {
-                        ws_tx.send(Message::Pong(payload)).await?;
+                        ws_tx.send(Message::Pong(payload)).await.map_err(|error| {
+                            SessionFailure::Retry(format!("SFU pong failed: {error}"))
+                        })?;
                         continue;
                     }
-                    Message::Close(_) => return Err(anyhow!("SFU closed stream session")),
+                    Message::Close(frame) => {
+                        let code = frame.as_ref().map(|frame| frame.code);
+                        let reason = close_reason(code);
+                        return Err(match classify_close(code) {
+                            CloseVerdict::Retry => SessionFailure::Retry(reason),
+                            CloseVerdict::RefreshToken => SessionFailure::RefreshToken(reason),
+                            CloseVerdict::Fatal => SessionFailure::Fatal(reason),
+                        });
+                    }
                     _ => continue,
                 };
-                let message: Value = serde_json::from_str(&text).context("invalid SFU JSON")?;
-                match message.get("type").and_then(Value::as_str).unwrap_or_default() {
-                    "ping" => send_json(&mut ws_tx, serde_json::json!({"type":"pong"})).await?,
-                    "pong" => {}
-                    "joined" => {
-                        if pc.0.is_none() {
-                            let created_factory = PeerConnectionFactory::default();
-                            pc.0 = Some(create_peer_connection(
-                                &created_factory,
-                                &message,
-                                &connection_state_tx,
-                                audio.clone(),
-                                event_tx,
-                            )?);
-                            _factory = Some(created_factory);
-                        }
+                let message: Value = match serde_json::from_str(&text) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        tracing::warn!(%error, "SFU sent an unparsable stream frame");
+                        continue;
                     }
+                };
+                match message.get("type").and_then(Value::as_str).unwrap_or_default() {
+                    "ping" => send_json(&mut ws_tx, serde_json::json!({"type":"pong"}))
+                        .await
+                        .map_err(|error| SessionFailure::Retry(error.to_string()))?,
+                    "pong" => {}
+                    "joined" if pc.peer_connection.is_none() => {
+                        pc.peer_connection = Some(create_peer_connection(
+                            factory,
+                            &message,
+                            &connection_state_tx,
+                            audio.clone(),
+                            event_tx,
+                            active_audio_tracks.clone(),
+                            pump_registry.clone(),
+                            Handle::current(),
+                        )
+                        .map_err(|error| {
+                            SessionFailure::Fatal(format!("peer connection setup failed: {error:#}"))
+                        })?);
+                    }
+                    "joined" => {}
                     "offer" => {
-                        let generation = message.get("offer_generation").and_then(Value::as_u64)
-                            .ok_or_else(|| anyhow!("SFU offer is missing offer_generation"))?;
-                        let sdp = message.get("sdp").and_then(Value::as_str)
-                            .ok_or_else(|| anyhow!("SFU offer is missing sdp"))?;
-                        let peer_connection = pc
-                            .0
-                            .as_ref()
-                            .ok_or_else(|| anyhow!("SFU offer arrived before joined"))?;
-                        negotiate(peer_connection, generation, sdp, &mut ws_tx).await?;
+                        let Some(generation) = message.get("offer_generation").and_then(Value::as_u64) else {
+                            tracing::warn!("SFU offer is missing offer_generation");
+                            continue;
+                        };
+                        let Some(sdp) = message.get("sdp").and_then(Value::as_str) else {
+                            tracing::warn!(generation, "SFU offer is missing sdp");
+                            continue;
+                        };
+                        let Some(peer_connection) = pc.peer_connection.as_ref() else {
+                            tracing::warn!(generation, "SFU offer arrived before joined");
+                            continue;
+                        };
+                        negotiate(peer_connection, generation, sdp, &mut ws_tx)
+                            .await
+                            .map_err(|error| {
+                                SessionFailure::Retry(format!("SFU offer negotiation failed: {error:#}"))
+                            })?;
                     }
                     "error" => {
                         let reason = message.get("message").and_then(Value::as_str).unwrap_or("SFU error");
-                        return Err(anyhow!("SFU error: {reason}"));
+                        if matches!(reason, "stale_offer_generation" | "future_offer_generation") {
+                            tracing::warn!(%reason, connected, "SFU rejected a stale or future offer generation");
+                            continue;
+                        }
+                        return Err(match classify_server_error(reason) {
+                            ServerErrorVerdict::Retry => SessionFailure::Retry(format!("SFU error: {reason}")),
+                            ServerErrorVerdict::RefreshToken => {
+                                SessionFailure::RefreshToken(format!("SFU error: {reason}"))
+                            }
+                            ServerErrorVerdict::Fatal => SessionFailure::Fatal(format!("SFU error: {reason}")),
+                        });
                     }
                     _ => {}
                 }
@@ -284,12 +392,116 @@ async fn run_session_once(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseVerdict {
+    Retry,
+    RefreshToken,
+    Fatal,
+}
+
+fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
+    match code.map(u16::from) {
+        Some(4004 | 4005) => CloseVerdict::RefreshToken,
+        Some(4006 | 4011) => CloseVerdict::Fatal,
+        _ => CloseVerdict::Retry,
+    }
+}
+
+fn close_reason(code: Option<CloseCode>) -> String {
+    match code.map(u16::from) {
+        Some(4004) => "SFU closed the session because the token is missing".into(),
+        Some(4005) => "SFU closed the session because the token is invalid".into(),
+        Some(4006) => "SFU removed the stream audience session".into(),
+        Some(4011) => "SFU closed the session because no publisher was present".into(),
+        Some(code) => format!("SFU closed the stream session (code {code})"),
+        None => "SFU closed the stream session".into(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerErrorVerdict {
+    Retry,
+    RefreshToken,
+    Fatal,
+}
+
+fn classify_server_error(reason: &str) -> ServerErrorVerdict {
+    match reason {
+        "invalid_token" | "missing_token" => ServerErrorVerdict::RefreshToken,
+        "room_not_found"
+        | "token_room_mismatch"
+        | "not_member"
+        | "kicked"
+        | "removed"
+        | "forbidden"
+        | "unauthorized"
+        | "auth_not_configured" => ServerErrorVerdict::Fatal,
+        _ => ServerErrorVerdict::Retry,
+    }
+}
+
 #[derive(Default)]
-struct PeerConnectionGuard(Option<PeerConnection>);
+struct AudioPumpRegistry {
+    next_key: AtomicU64,
+    pumps: Mutex<std::collections::HashMap<u64, JoinHandle<()>>>,
+}
+
+impl AudioPumpRegistry {
+    fn spawn(
+        self: &Arc<Self>,
+        track: libwebrtc::audio_track::RtcAudioTrack,
+        audio: Arc<StreamAudioOutput>,
+        event_tx: Sender<StreamEvent>,
+        active_audio_tracks: Arc<AtomicUsize>,
+        runtime: Handle,
+    ) {
+        let key = self.next_key.fetch_add(1, Ordering::Relaxed);
+        let weak_registry = Arc::downgrade(self);
+        let registry = Arc::clone(self);
+        let handle = runtime.spawn(async move {
+            let format = audio.format();
+            let mut stream =
+                NativeAudioStream::new(track, format.sample_rate as i32, format.channels as i32);
+            while let Some(frame) = stream.next().await {
+                audio.push_track(key, &frame.data);
+            }
+            audio.clear_track(key);
+            let _ = event_tx.send(StreamEvent::RemoteAudio(false));
+            if active_audio_tracks.fetch_sub(1, Ordering::AcqRel) == 1 {
+                let _ = event_tx.send(StreamEvent::NoBroadcast);
+            }
+            if let Some(registry) = weak_registry.upgrade() {
+                registry.pumps.lock().remove(&key);
+            }
+        });
+        registry.pumps.lock().insert(key, handle);
+    }
+
+    fn abort_all(&self) {
+        for (_, pump) in self.pumps.lock().drain() {
+            pump.abort();
+        }
+    }
+}
+
+struct PeerConnectionGuard {
+    peer_connection: Option<PeerConnection>,
+    pumps: Arc<AudioPumpRegistry>,
+}
+
+impl PeerConnectionGuard {
+    fn new(pumps: Arc<AudioPumpRegistry>) -> Self {
+        Self {
+            peer_connection: None,
+            pumps,
+        }
+    }
+}
 
 impl Drop for PeerConnectionGuard {
     fn drop(&mut self) {
-        if let Some(peer_connection) = self.0.take() {
+        self.pumps.abort_all();
+        if let Some(peer_connection) = self.peer_connection.take() {
             peer_connection.close();
         }
     }
@@ -301,6 +513,9 @@ fn create_peer_connection(
     connection_state_tx: &Sender<PeerConnectionState>,
     audio: Arc<StreamAudioOutput>,
     event_tx: &Sender<StreamEvent>,
+    active_audio_tracks: Arc<AtomicUsize>,
+    pump_registry: Arc<AudioPumpRegistry>,
+    runtime: Handle,
 ) -> Result<libwebrtc::peer_connection::PeerConnection> {
     let ice_servers = joined
         .get("iceServers")
@@ -330,29 +545,17 @@ fn create_peer_connection(
     let events = event_tx.clone();
     pc.on_track(Some(Box::new(move |track_event| match track_event.track {
         MediaStreamTrack::Audio(audio_track) => {
+            if active_audio_tracks.fetch_add(1, Ordering::AcqRel) == 0 {
+                let _ = events.send(StreamEvent::Live);
+            }
             let _ = events.send(StreamEvent::RemoteAudio(true));
-            let player = audio.clone();
-            let events_for_thread = events.clone();
-            std::thread::spawn(move || {
-                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    runtime.block_on(async move {
-                        let format = player.format();
-                        let mut stream = NativeAudioStream::new(
-                            audio_track,
-                            format.sample_rate as i32,
-                            format.channels as i32,
-                        );
-                        while let Some(frame) = stream.next().await {
-                            player.push(&frame.data);
-                        }
-                        player.clear();
-                    });
-                }
-                let _ = events_for_thread.send(StreamEvent::RemoteAudio(false));
-            });
+            pump_registry.spawn(
+                audio_track,
+                audio.clone(),
+                events.clone(),
+                active_audio_tracks.clone(),
+                runtime.clone(),
+            );
         }
         MediaStreamTrack::Video(_) => {}
     })));
@@ -371,13 +574,17 @@ async fn negotiate(
         Message,
     >,
 ) -> Result<()> {
-    let offer = SessionDescription::parse(offer_sdp, SdpType::Offer)
+    let previous = pc
+        .current_remote_description()
+        .map(|description| description.to_string());
+    let stabilized = stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
+    let offer = SessionDescription::parse(&stabilized, SdpType::Offer)
         .map_err(|e| anyhow!("parse SFU offer: {} {}", e.line, e.description))?;
     pc.set_remote_description(offer)
         .await
         .context("set SFU remote offer")?;
 
-    let offered_sections = media_sections(offer_sdp);
+    let offered_sections = media_sections(&stabilized);
     let transceivers = pc.transceivers();
     if transceivers.len() != offered_sections.len() {
         return Err(anyhow!("SFU transceiver count does not match offer"));
@@ -408,7 +615,7 @@ async fn negotiate(
         .current_local_description()
         .map(|description| description.to_string())
         .context("SFU local answer missing")?;
-    validate_full_sdp_layout(offer_sdp, &local_sdp)?;
+    validate_full_sdp_layout(&stabilized, &local_sdp)?;
     send_json(
         ws_tx,
         serde_json::json!({
@@ -452,10 +659,8 @@ fn media_sections(sdp: &str) -> Vec<MediaSection> {
         } else if matches!(
             line,
             "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
-        ) {
-            if let Some(section) = current.as_mut() {
-                section.direction = Some(line.to_owned());
-            }
+        ) && let Some(section) = current.as_mut() {
+            section.direction = Some(line.to_owned());
         }
     }
     if let Some(section) = current {
@@ -614,6 +819,46 @@ mod tests {
         assert_eq!(
             query.get("access_token").map(String::as_str),
             Some("opaque-token")
+        );
+    }
+
+    #[test]
+    fn token_close_codes_refresh_once_but_removal_codes_stop() {
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4004))),
+            CloseVerdict::RefreshToken
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4005))),
+            CloseVerdict::RefreshToken
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4006))),
+            CloseVerdict::Fatal
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4011))),
+            CloseVerdict::Fatal
+        );
+    }
+
+    #[test]
+    fn server_errors_do_not_refresh_for_room_or_membership_failures() {
+        assert_eq!(
+            classify_server_error("invalid_token"),
+            ServerErrorVerdict::RefreshToken
+        );
+        assert_eq!(
+            classify_server_error("room_not_found"),
+            ServerErrorVerdict::Fatal
+        );
+        assert_eq!(
+            classify_server_error("not_member"),
+            ServerErrorVerdict::Fatal
+        );
+        assert_eq!(
+            classify_server_error("transport_error"),
+            ServerErrorVerdict::Retry
         );
     }
 }

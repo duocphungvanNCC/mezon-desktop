@@ -1,19 +1,12 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
+use gpui::{App, AppContext, Context, Entity, Global, Task};
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_stream::{
-    STREAM_FRAME_KEY, StreamEvent, StreamSession, StreamSessionConfig, StreamTokenProvider,
-};
-use mezon_voice::VideoFrameStore;
-use parking_lot::Mutex;
+use mezon_stream::{StreamEvent, StreamSession, StreamSessionConfig, StreamTokenProvider};
 
 use crate::AppConfig;
 use crate::AuthState;
@@ -59,17 +52,11 @@ pub struct StreamStore {
     show_members: bool,
     controls_visible: bool,
     controls_hide_at: Option<Instant>,
-    remote_video: bool,
     playback_blocked: bool,
     volume: f32,
     muted: bool,
     fullscreen: bool,
     error_message: Option<String>,
-    frame_store: Arc<VideoFrameStore>,
-    render_cache: Mutex<Option<(u64, Arc<RenderImage>)>>,
-    pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
-    pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
-    pending_texture_work: AtomicBool,
     session: Option<StreamSession>,
     session_generation: u64,
     session_channel_label: String,
@@ -113,17 +100,11 @@ impl StreamStore {
             show_members: true,
             controls_visible: true,
             controls_hide_at: None,
-            remote_video: false,
             playback_blocked: false,
             volume: 1.0,
             muted: false,
             fullscreen: false,
             error_message: None,
-            frame_store: Arc::new(VideoFrameStore::default()),
-            render_cache: Mutex::new(None),
-            pending_texture_drops: Mutex::new(Vec::new()),
-            pending_texture_replaces: Mutex::new(Vec::new()),
-            pending_texture_work: AtomicBool::new(false),
             session: None,
             session_generation: 0,
             session_channel_label: String::new(),
@@ -277,68 +258,6 @@ impl StreamStore {
         }
     }
 
-    pub fn render_frame(&self) -> Option<Arc<RenderImage>> {
-        let cached_seq = self.render_cache.lock().as_ref().map(|(seq, _)| *seq);
-        let Some(frame) = self.frame_store.take_new(STREAM_FRAME_KEY, cached_seq) else {
-            return self
-                .render_cache
-                .lock()
-                .as_ref()
-                .map(|(_, image)| image.clone());
-        };
-        let seq = frame.seq;
-        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
-        let weak_store = Arc::downgrade(&self.frame_store);
-        let recycler = Arc::new(move |buffer| {
-            if let Some(store) = weak_store.upgrade() {
-                store.recycle(STREAM_FRAME_KEY, buffer);
-            }
-        });
-        let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
-        let previous_id = self.render_cache.lock().as_ref().map(|(_, image)| image.id);
-        if let Some(id) = previous_id {
-            render_image = render_image.with_id(id);
-        }
-        let image = Arc::new(render_image);
-        let previous = self.render_cache.lock().replace((seq, image.clone()));
-        if previous_id.is_some() {
-            let mut replaces = self.pending_texture_replaces.lock();
-            if let Some(existing) = replaces.iter_mut().find(|queued| queued.id == image.id) {
-                *existing = image.clone();
-            } else {
-                replaces.push(image.clone());
-            }
-            self.pending_texture_work.store(true, Ordering::Release);
-        } else if let Some((_, previous)) = previous {
-            self.pending_texture_drops.lock().push(previous);
-            self.pending_texture_work.store(true, Ordering::Release);
-        }
-        Some(image)
-    }
-
-    pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
-        if !self.pending_texture_work.swap(false, Ordering::AcqRel) {
-            return;
-        }
-        let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
-        let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
-        for image in drops {
-            cx.drop_image(image, window.as_deref_mut());
-        }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
-            }
-            cx.update_render_image(&image, window.as_deref_mut());
-        }
-    }
-
-    pub fn remote_video(&self) -> bool {
-        self.remote_video
-    }
-
     pub fn playback_blocked(&self) -> bool {
         self.playback_blocked
     }
@@ -361,14 +280,6 @@ impl StreamStore {
 
     pub fn error_message(&self) -> Option<&str> {
         self.error_message.as_deref()
-    }
-
-    pub fn frame_store(&self) -> &Arc<VideoFrameStore> {
-        &self.frame_store
-    }
-
-    pub fn has_video_frame(&self) -> bool {
-        self.frame_store.get(STREAM_FRAME_KEY).is_some() || self.render_cache.lock().is_some()
     }
 
     pub fn session_channel_label(&self) -> &str {
@@ -519,7 +430,6 @@ impl StreamStore {
         }
 
         self.disconnect_session();
-        self.session_generation = self.session_generation.wrapping_add(1);
         let session_generation = self.session_generation;
         self.session_channel_label = channel_label.to_string();
         self.session_clan_name = clan_name.to_string();
@@ -529,7 +439,6 @@ impl StreamStore {
         };
         self.join_started = Some(Instant::now());
         self.error_message = None;
-        self.remote_video = false;
         self.playback_blocked = false;
         self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
         cx.notify();
@@ -550,7 +459,6 @@ impl StreamStore {
         });
         let volume = self.volume;
         let muted = self.muted;
-        let session_user_id = self.session_user_id;
         let token_task = cx.spawn(async move |this, cx| {
             let token = api.generate_meet_token(&room, "").await;
             let _ = this.update(cx, |this, cx| {
@@ -581,7 +489,6 @@ impl StreamStore {
                     StreamSession::start(session_config, output_device_id, volume, muted);
                 let events = stream_session.events().clone();
                 this.session = Some(stream_session);
-                this.session_user_id = session_user_id;
                 this._session_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = events.recv_async().await {
                         let stop = this
@@ -656,14 +563,8 @@ impl StreamStore {
         }
         self._session_task = None;
         self._join_timeout = None;
-        self.remote_video = false;
         self.playback_blocked = false;
         self.join_started = None;
-        self.frame_store.remove(STREAM_FRAME_KEY);
-        if let Some((_, image)) = self.render_cache.lock().take() {
-            self.pending_texture_drops.lock().push(image);
-            self.pending_texture_work.store(true, Ordering::Release);
-        }
     }
 
     fn fail_stream(&mut self, message: String, cx: &mut Context<Self>) {
@@ -701,7 +602,6 @@ impl StreamStore {
                     clan_id,
                     is_live: false,
                 };
-                self.remote_video = false;
                 self.bump_controls_visible(cx);
             }
             StreamEvent::RemoteAudio(_) => {}
@@ -759,10 +659,6 @@ impl StreamStore {
         let user_id = UserId(user_id);
         self.members.remove(&(channel_id, user_id));
 
-        // A speaker leave resets every active audience member on the server. The
-        // server emits one leave event per affected user; when this event is for
-        // the local audience session, reset the whole local stream state instead
-        // of waiting for every individual event to arrive.
         let local_session_left = self.is_session_channel(channel_id)
             && (self.is_joined() || self.is_joining())
             && self.session_user_id == Some(user_id);
@@ -807,7 +703,6 @@ impl StreamStore {
             && *active == channel_id
         {
             *is_live = false;
-            self.remote_video = false;
             cx.notify();
         } else {
             cx.notify();

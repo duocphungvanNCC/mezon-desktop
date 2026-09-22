@@ -5791,7 +5791,6 @@ dependencies = [
  "libwebrtc",
  "mezon-voice",
  "parking_lot",
- "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

@@ -78,7 +78,6 @@ pub struct ChatLayout {
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
-    _stream_frame_pump: Option<Task<()>>,
     show_member_list: bool,
     ui_state: UiState,
     media_channel_view_mode: bool,
@@ -289,7 +288,6 @@ impl ChatLayout {
             }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
@@ -312,7 +310,6 @@ impl ChatLayout {
             if !fullscreen {
                 this.stream_fullscreen_focused = false;
             }
-            this.sync_stream_frame_pump(cx);
             cx.notify();
         })
         .detach();
@@ -366,7 +363,6 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
@@ -429,7 +425,6 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
@@ -549,7 +544,6 @@ impl ChatLayout {
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
-            _stream_frame_pump: None,
             show_member_list,
             ui_state,
             media_channel_view_mode: false,
@@ -603,7 +597,6 @@ impl ChatLayout {
         this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
-        this.sync_stream_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
@@ -1544,55 +1537,6 @@ impl ChatLayout {
         });
     }
 
-    fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const STREAM_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
-        let stream = self.stream_store.read(cx);
-        let on_stream = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .is_some_and(|ch| {
-                ch.channel_type == ChannelType::Stream && stream.is_session_channel(ch.id)
-            });
-        let want_pump =
-            stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
-        if !want_pump {
-            self._stream_frame_pump = None;
-            return;
-        }
-        if self._stream_frame_pump.is_some() {
-            return;
-        }
-        let frame_store = stream.frame_store().clone();
-        self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                let mut rx = frame_store.frame_watch();
-                loop {
-                    let seq = frame_store.publish_seq();
-                    if seq != last_seq {
-                        last_seq = seq;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                    let frame_published = {
-                        let changed = std::pin::pin!(rx.changed());
-                        let fallback =
-                            std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
-                        matches!(
-                            futures::future::select(changed, fallback).await,
-                            futures::future::Either::Left((Ok(()), _))
-                        )
-                    };
-                    if !frame_published {
-                        break;
-                    }
-                }
-            }
-        }));
-    }
-
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
         if self.is_dm_route(cx) {
             return false;
@@ -1712,9 +1656,6 @@ impl Render for ChatLayout {
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        self.stream_store
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
