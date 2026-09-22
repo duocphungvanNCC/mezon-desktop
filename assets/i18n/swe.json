@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "Privat kanal?",
   "createChannel.labels.placeholder": "Ange kanal namn",
   "createChannel.privacy.description": "Bara utvalda medlemmar och roller kan se denna kanal.",
+  "createChannel.privacy.descriptionVoice": "Bara utvalda medlemmar och roller kan se denna kanal och gå med i den.",
   "createChannel.privacy.private": "Privat kanal",
   "createChannel.validation.duplicateName": "Kanal namn finns redan i kategori. Vänligen ange ett annat namn.",
   "createChannel.validation.invalidName": "Vänligen ange giltigt kanal namn (max 64 tecken, bara ord, siffror, _ eller -).",

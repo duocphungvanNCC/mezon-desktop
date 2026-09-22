@@ -2587,6 +2587,7 @@
   "createChannel.labels.isPrivate": "Приватный канал?",
   "createChannel.labels.placeholder": "Введите имя канала",
   "createChannel.privacy.description": "Только выбранные участники и роли смогут просматривать этот канал.",
+  "createChannel.privacy.descriptionVoice": "Только выбранные участники и роли смогут просматривать этот канал и подключаться к нему.",
   "createChannel.privacy.private": "Приватный канал",
   "createChannel.validation.duplicateName": "Канал с таким именем уже существует в категории. Пожалуйста, введите другое имя.",
   "createChannel.validation.invalidName": "Введите корректное имя канала (макс. 64 символа, только буквы, цифры, _ или -).",

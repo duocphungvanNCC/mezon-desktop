@@ -2348,6 +2348,7 @@
   "createChannel.labels.isPrivate": "Прыватны канал?",
   "createChannel.labels.placeholder": "Увядзіце назву канала",
   "createChannel.privacy.description": "Толькі абраныя ўдзельнікі і ролі змогуць бачыць гэты канал.",
+  "createChannel.privacy.descriptionVoice": "Толькі абраныя ўдзельнікі і ролі змогуць бачыць гэты канал і далучацца да яго.",
   "createChannel.privacy.private": "Прыватны канал",
   "createChannel.validation.duplicateName": "Назва канала ўжо існуе ў катэгорыі. Увядзіце іншую назву.",
   "createChannel.validation.invalidName": "Увядзіце назву канала (максімум 64 сімвалы, толькі словы, лічбы, _ або -).",

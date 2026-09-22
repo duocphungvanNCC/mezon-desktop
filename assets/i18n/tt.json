@@ -2357,6 +2357,7 @@
   "createChannel.labels.isPrivate": "Шәхси каналмы?",
   "createChannel.labels.placeholder": "Канал исемен керетегез",
   "createChannel.privacy.description": "Бары тик сайланган катнашучылар һәм рольләр генә бу каналны күрә алачак.",
+  "createChannel.privacy.descriptionVoice": "Бары тик сайланган катнашучылар һәм рольләр генә бу каналны күрә һәм аңа кушыла алачак.",
   "createChannel.privacy.private": "Шәхси канал",
   "createChannel.validation.duplicateName": "Бу исем белән канал төркемчәдә инде бар. Зинһар, башка исем керетегез.",
   "createChannel.validation.invalidName": "Дөрес канал исемен керетегез (зурлыгы 64 символдан да ким, бары тик хәрефләр, саннар, _ яки -).",

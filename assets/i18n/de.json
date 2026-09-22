@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "Privater Kanal?",
   "createChannel.labels.placeholder": "Kanalnamen eingeben",
   "createChannel.privacy.description": "Nur ausgewählte Mitglieder und Rollen können diesen Kanal sehen.",
+  "createChannel.privacy.descriptionVoice": "Nur ausgewählte Mitglieder und Rollen können diesen Kanal sehen und ihm beitreten.",
   "createChannel.privacy.private": "Privater Kanal",
   "createChannel.validation.duplicateName": "Der Kanalname existiert bereits in dieser Kategorie. Bitte wähle einen anderen Namen.",
   "createChannel.validation.invalidName": "Bitte gib einen Kanalnamen ein (maximal 64 Zeichen, nur Wörter, Zahlen, _ oder -).",

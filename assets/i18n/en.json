@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "Is private channel?",
   "createChannel.labels.placeholder": "Enter the channel's name",
   "createChannel.privacy.description": "Only selected members and roles will be able to view this channel.",
+  "createChannel.privacy.descriptionVoice": "Only selected members and roles will be able to view and join this channel.",
   "createChannel.privacy.private": "Private Channel",
   "createChannel.validation.duplicateName": "The channel name already exists in the category. Please enter another name.",
   "createChannel.validation.invalidName": "Please enter a channel name (max 64 characters, only words, numbers, _ or -).",

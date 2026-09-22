@@ -613,6 +613,35 @@ impl McpRuntime {
                         });
                         let _ = reply.send(task.await);
                     }
+                    McpCommand::SidebarChannels { clan_id, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::sidebar_channels(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateChannel {
+                        clan_id,
+                        category_id,
+                        name,
+                        channel_type,
+                        private,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::create_channel_task(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                category_id.to_string(),
+                                name,
+                                &channel_type,
+                                private,
+                            )
+                        });
+                        let _ = reply.send(task.await);
+                    }
                     McpCommand::ChannelMenuState { reply } => {
                         let result = cx.update(|cx| mezon_ui::app::capture::channel_menu_state(cx));
                         let _ = reply.send(result);
