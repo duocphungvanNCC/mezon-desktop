@@ -1138,9 +1138,6 @@ fn render_banner_actions(
         }
         Some(FriendState::InviteSent) => {
             let user_id = this.user_id;
-            let username = resolve_user_profile(user_id, this.context, cx)
-                .map(|profile| profile.username)
-                .unwrap_or_default();
             buttons.push(
                 banner_icon_button(
                     "profile-pending",
@@ -1151,7 +1148,7 @@ fn render_banner_actions(
                         FriendStore::global(cx).update(cx, |store, cx| {
                             store.add_friend(
                                 user_id,
-                                username.clone(),
+                                String::new(),
                                 String::new(),
                                 String::new(),
                                 cx,

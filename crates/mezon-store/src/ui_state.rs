@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub struct UiState {
     pub show_member_list: bool,
     pub show_member_list_dm: bool,
-    pub show_profile_dm: bool,
 }
 
 impl Default for UiState {
@@ -15,16 +14,11 @@ impl Default for UiState {
         Self {
             show_member_list: true,
             show_member_list_dm: true,
-            show_profile_dm: true,
         }
     }
 }
 
 impl UiState {
-    pub fn close_dm_profile_for_clan(&mut self) -> bool {
-        std::mem::replace(&mut self.show_profile_dm, false)
-    }
-
     pub fn path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -81,7 +75,6 @@ mod tests {
         let state = UiState::default();
         assert!(state.show_member_list);
         assert!(state.show_member_list_dm);
-        assert!(state.show_profile_dm);
     }
 
     #[test]
@@ -89,32 +82,9 @@ mod tests {
         let state = UiState {
             show_member_list: false,
             show_member_list_dm: true,
-            show_profile_dm: false,
         };
         let json = serde_json::to_string(&state).unwrap();
         let restored: UiState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, state);
-    }
-
-    #[test]
-    fn entering_clan_closes_profile_without_closing_member_lists() {
-        let mut state = UiState::default();
-        assert!(state.close_dm_profile_for_clan());
-        assert!(!state.show_profile_dm);
-        assert!(state.show_member_list_dm);
-        assert!(state.show_member_list);
-        assert!(!state.close_dm_profile_for_clan());
-        let restored: UiState =
-            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert!(!restored.show_profile_dm);
-    }
-
-    #[test]
-    fn legacy_ui_state_keeps_group_visibility_and_defaults_profile_open() {
-        let state: UiState =
-            serde_json::from_str(r#"{"show_member_list":true,"show_member_list_dm":false}"#)
-                .unwrap();
-        assert!(!state.show_member_list_dm);
-        assert!(state.show_profile_dm);
     }
 }

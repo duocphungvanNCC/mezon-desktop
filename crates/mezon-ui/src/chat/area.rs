@@ -1048,11 +1048,10 @@ impl ChatArea {
         let has_search_panel = show_results_panel && message_search_panel.is_some();
         let member_visible = show_member_panel && !has_search_panel && !media_channel_view;
         let dm_profile_panel = self.dm_profile_panel.as_ref().and_then(|(id, panel)| {
-            (is_dm
-                && matches!(
-                    Router::global(cx).read(cx).route(),
-                    Route::DirectMessage { direct_id, .. } if direct_id == *id
-                ))
+            matches!(
+                Router::global(cx).read(cx).route_ref(),
+                Route::DirectMessage { direct_id, .. } if *direct_id == *id
+            )
             .then(|| panel.clone())
         });
         let body = div()

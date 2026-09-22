@@ -22,6 +22,23 @@ pub enum FriendState {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddFriendAction {
+    Send,
+    AlreadySent,
+    Accept,
+    Ignore,
+}
+
+fn add_friend_action(state: Option<FriendState>) -> AddFriendAction {
+    match state {
+        Some(FriendState::InviteSent) => AddFriendAction::AlreadySent,
+        Some(FriendState::InviteReceived) => AddFriendAction::Accept,
+        Some(FriendState::Friend) => AddFriendAction::Ignore,
+        Some(FriendState::Blocked) | None => AddFriendAction::Send,
+    }
+}
+
 impl FriendState {
     pub fn from_i32(value: i32) -> Self {
         match value {
@@ -450,13 +467,22 @@ impl FriendStore {
         avatar_url: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(friend) = self.friends.iter().find(|f| f.id == user_id)
-            && friend.state != FriendState::Blocked
-        {
-            if friend.state == FriendState::InviteSent {
+        let state = self
+            .friends
+            .iter()
+            .find(|friend| friend.id == user_id)
+            .map(|friend| friend.state);
+        match add_friend_action(state) {
+            AddFriendAction::AlreadySent => {
                 cx.emit(FriendEvent::AddAlreadySent);
+                return;
             }
-            return;
+            AddFriendAction::Accept => {
+                self.accept_friend(user_id, cx);
+                return;
+            }
+            AddFriendAction::Ignore => return,
+            AddFriendAction::Send => {}
         }
         if username.is_empty() || self.adding {
             return;
@@ -685,6 +711,27 @@ mod tests {
         assert_eq!(FriendState::from_i32(2), FriendState::InviteReceived);
         assert_eq!(FriendState::from_i32(3), FriendState::Blocked);
         assert_eq!(FriendState::from_i32(99), FriendState::Friend);
+    }
+
+    #[test]
+    fn repeated_add_friend_action_matches_relationship_state() {
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteSent)),
+            AddFriendAction::AlreadySent
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteReceived)),
+            AddFriendAction::Accept
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Friend)),
+            AddFriendAction::Ignore
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Blocked)),
+            AddFriendAction::Send
+        );
+        assert_eq!(add_friend_action(None), AddFriendAction::Send);
     }
 
     #[test]
