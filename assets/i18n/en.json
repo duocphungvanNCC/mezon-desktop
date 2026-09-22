@@ -4728,5 +4728,9 @@
   "token.history.all": "All",
   "token.history.sent": "Sent",
   "token.history.received": "Received",
-  "token.history.walletUnavailable": "Wallet is not available"
+  "token.history.walletUnavailable": "Wallet is not available",
+  "screenShare.modeText": "Text",
+  "screenShare.modeTextDescription": "Sharper text and slides, lower resource use.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Smoother video; may reduce sharpness on a slow connection."
 }

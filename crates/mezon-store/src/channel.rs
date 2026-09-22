@@ -2004,22 +2004,10 @@ impl ChannelList {
             users
                 .into_iter()
                 .map(|v| {
-                    let sharing: HashSet<UserId> =
-                        v.share_screen_ids.into_iter().map(UserId).collect();
-                    let members = v
-                        .user_ids
-                        .into_iter()
-                        .map(|uid| {
-                            let user_id = UserId(uid);
-                            VoiceMember {
-                                user_id,
-                                display_name: user_id.to_string(),
-                                avatar_url: String::new(),
-                                sharing_screen: sharing.contains(&user_id),
-                            }
-                        })
-                        .collect();
-                    (ChannelId(v.channel_id), members)
+                    (
+                        ChannelId(v.channel_id),
+                        voice_members_from(v.user_ids, v.share_screen_ids),
+                    )
                 })
                 .collect()
         });
@@ -5514,6 +5502,22 @@ fn thread_channel_from_context(
     }
 }
 
+fn voice_members_from(user_ids: Vec<i64>, share_screen_ids: Vec<i64>) -> Vec<VoiceMember> {
+    let sharing: HashSet<UserId> = share_screen_ids.into_iter().map(UserId).collect();
+    let mut seen: HashSet<UserId> = HashSet::new();
+    user_ids
+        .into_iter()
+        .map(UserId)
+        .filter(|user_id| seen.insert(*user_id))
+        .map(|user_id| VoiceMember {
+            user_id,
+            display_name: user_id.to_string(),
+            avatar_url: String::new(),
+            sharing_screen: sharing.contains(&user_id),
+        })
+        .collect()
+}
+
 fn channel_from_desc(
     c: ApiChannelDesc,
     badge_count: u32,
@@ -8309,6 +8313,17 @@ mod tests {
         )]
         .into_iter()
         .collect()
+    }
+
+    #[test]
+    fn a_user_present_on_two_devices_keeps_one_row_in_the_channel_list() {
+        let members = voice_members_from(vec![7, 9, 7], vec![9]);
+        assert_eq!(
+            members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            vec![UserId(7), UserId(9)]
+        );
+        assert!(!members[0].sharing_screen);
+        assert!(members[1].sharing_screen);
     }
 
     fn voice_members_of(channels: &ChannelList, category_ix: usize) -> Vec<UserId> {
