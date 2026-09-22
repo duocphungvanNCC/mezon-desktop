@@ -3173,6 +3173,7 @@
   "media.video.error.title": "Video unavailable",
   "memberPage.addedBy": "Added by {{name}}",
   "memberPage.inVoice": "In voice",
+  "memberPage.shareScreen": "Sharing screen",
   "memberPage.membersOf": "members of {{count}}",
   "memberPage.offlineCount": "Offline - {{count}}",
   "memberPage.onlineCount": "Online - {{count}}",

@@ -3175,6 +3175,7 @@
   "media.video.error.title": "Відэа недаступнае",
   "memberPage.addedBy": "Дададзена {{name}}",
   "memberPage.inVoice": "У галасавым канале",
+  "memberPage.shareScreen": "Абагульванне экрана",
   "memberPage.membersOf": "Усяго ўдзельнікаў {{count}}",
   "memberPage.noSearchResults": "Ніводзін удзельнік не адпавядае запыту",
   "memberPage.offlineCount": "Афлайн - {{count}}",

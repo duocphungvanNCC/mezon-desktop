@@ -3175,6 +3175,7 @@
   "media.video.error.title": "Video không khả dụng",
   "memberPage.addedBy": "Được thêm bởi {{name}}",
   "memberPage.inVoice": "Trong kênh thoại",
+  "memberPage.shareScreen": "Đang chia sẻ màn hình",
   "memberPage.membersOf": "Tổng thành viên {{count}}",
   "memberPage.noSearchResults": "Không có thành viên nào khớp với kết quả tìm kiếm",
   "memberPage.offlineCount": "Ngoại tuyến - {{count}}",

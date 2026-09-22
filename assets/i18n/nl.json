@@ -3175,6 +3175,7 @@
   "media.video.error.title": "Video niet beschikbaar",
   "memberPage.addedBy": "Toegevoegd door {{name}}",
   "memberPage.inVoice": "In stemkanaal",
+  "memberPage.shareScreen": "Scherm delen",
   "memberPage.membersOf": "Totaal {{count}} leden",
   "memberPage.noSearchResults": "Geen leden komen overeen met deze zoekopdracht",
   "memberPage.offlineCount": "Offline - {{count}}",

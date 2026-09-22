@@ -3414,6 +3414,7 @@
   "media.video.error.title": "Видео недоступно",
   "memberPage.addedBy": "Добавлен {{name}}",
   "memberPage.inVoice": "В звонке",
+  "memberPage.shareScreen": "Демонстрация экрана",
   "memberPage.membersOf": "участников из {{count}}",
   "memberPage.noSearchResults": "Нет участников, соответствующих этим результатам поиска.",
   "memberPage.offlineCount": "Оффлайн - {{count}}",

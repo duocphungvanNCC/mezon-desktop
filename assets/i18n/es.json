@@ -3207,6 +3207,7 @@
   "memberPage.addReaction": "Añadir reacción",
   "memberPage.addedBy": "Añadido por {{name}}",
   "memberPage.inVoice": "En voz",
+  "memberPage.shareScreen": "Compartiendo pantalla",
   "memberPage.membersOf": "miembros de {{count}}",
   "memberPage.noSearchResults": "Ningún miembro coincide con estos resultados.",
   "memberPage.offlineCount": "Desconectado - {{count}}",
