@@ -121,7 +121,7 @@ pub use channel_role_permissions::{
     OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL, PermissionEntity,
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
-pub use channel_users::{ChannelUsersEvent, ChannelUsersStore};
+pub use channel_users::{ChannelUserProfile, ChannelUsersEvent, ChannelUsersStore};
 pub use clan::*;
 pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
