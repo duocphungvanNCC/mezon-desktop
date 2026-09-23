@@ -75,16 +75,28 @@ fn is_wav(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WAVE"
 }
 
-fn skip_id3(bytes: &[u8]) -> &[u8] {
+fn id3_payload_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 10 || !bytes.starts_with(b"ID3") {
-        return bytes;
+        return None;
     }
     let size = u32::from(bytes[6] & 0x7F) << 21
         | u32::from(bytes[7] & 0x7F) << 14
         | u32::from(bytes[8] & 0x7F) << 7
         | u32::from(bytes[9] & 0x7F);
-    let skip = 10usize.saturating_add(size as usize);
-    bytes.get(skip..).unwrap_or(&[])
+    Some(size as usize)
+}
+
+fn skip_id3(bytes: &[u8]) -> &[u8] {
+    match id3_payload_len(bytes) {
+        Some(size) => bytes.get(10usize.saturating_add(size)..).unwrap_or(&[]),
+        None => bytes,
+    }
+}
+
+pub fn id3_tag_len(bytes: &[u8]) -> usize {
+    id3_payload_len(bytes)
+        .map(|size| 10usize.saturating_add(size))
+        .unwrap_or(0)
 }
 
 fn is_mpeg_audio(bytes: &[u8]) -> bool {
@@ -98,26 +110,23 @@ pub fn audio_duration_secs(bytes: &[u8]) -> Option<f64> {
 }
 
 pub fn audio_duration_secs_with_len(bytes: &[u8], total_len: u64) -> Option<f64> {
-    if let Some(duration) = wav_duration(bytes) {
-        return Some(duration);
+    let complete = !bytes.is_empty() && bytes.len() as u64 == total_len;
+    if complete && bytes.len() <= FULL_DECODE_MAX_BYTES {
+        if let Some(duration) = symphonia_header_duration(bytes) {
+            return Some(duration);
+        }
+        if let Some(duration) = decode_audio(bytes.to_vec())
+            .ok()
+            .map(|pcm| pcm.duration_secs())
+            .filter(|duration| *duration > 0.0)
+        {
+            return Some(duration);
+        }
     }
-    if let Some(duration) = mp3_duration(bytes, total_len) {
-        return Some(duration);
-    }
-    let complete = bytes.len() as u64 == total_len && !bytes.is_empty();
-    if !complete || bytes.len() > FULL_DECODE_MAX_BYTES {
-        return None;
-    }
-    if let Some(duration) = symphonia_header_duration(bytes) {
-        return Some(duration);
-    }
-    decode_audio(bytes.to_vec())
-        .ok()
-        .map(|pcm| pcm.duration_secs())
-        .filter(|duration| *duration > 0.0)
+    wav_duration(bytes, total_len).or_else(|| mp3_duration(bytes, total_len))
 }
 
-fn wav_duration(bytes: &[u8]) -> Option<f64> {
+fn wav_duration(bytes: &[u8], total_len: u64) -> Option<f64> {
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -134,7 +143,11 @@ fn wav_duration(bytes: &[u8]) -> Option<f64> {
             }
         } else if id == b"data" {
             let rate = byte_rate?;
-            return (size > 0).then_some(size as f64 / f64::from(rate));
+            let mut data_len = size;
+            if bytes.len() as u64 == total_len {
+                data_len = size.min(bytes.len().saturating_sub(body));
+            }
+            return (data_len > 0).then_some(data_len as f64 / f64::from(rate));
         }
         let padded = size + (size % 2);
         index = body.saturating_add(padded);
@@ -155,17 +168,6 @@ fn mp3_duration(bytes: &[u8], total_len: u64) -> Option<f64> {
     }
     let payload = total_len.saturating_sub(id3 as u64);
     (payload > 0).then_some(payload as f64 * 8.0 / f64::from(frame.bitrate))
-}
-
-fn id3_tag_len(bytes: &[u8]) -> usize {
-    if bytes.len() < 10 || !bytes.starts_with(b"ID3") {
-        return 0;
-    }
-    let size = u32::from(bytes[6] & 0x7F) << 21
-        | u32::from(bytes[7] & 0x7F) << 14
-        | u32::from(bytes[8] & 0x7F) << 7
-        | u32::from(bytes[9] & 0x7F);
-    10usize.saturating_add(size as usize)
 }
 
 struct Mp3Frame {
@@ -559,6 +561,29 @@ mod tests {
         let wav = crate::stream::tests::wav_sine(1.0);
         let duration = audio_duration_secs(&wav).expect("wav duration");
         assert!((duration - 1.0).abs() < 0.02, "{duration}");
+    }
+
+    #[test]
+    fn wav_duration_clamps_a_data_chunk_to_the_file() {
+        let wav = crate::stream::tests::wav_sine(1.0);
+        let prefix = &wav[..64.min(wav.len())];
+        let from_header = wav_duration(prefix, wav.len() as u64).expect("header duration");
+        assert!((from_header - 1.0).abs() < 0.02, "{from_header}");
+
+        let mut claimed = wav.clone();
+        claimed[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        let clamped = wav_duration(&claimed, claimed.len() as u64).expect("clamped duration");
+        assert!(clamped < 2.0, "{clamped}");
+    }
+
+    #[test]
+    fn id3_tag_len_uses_the_synchsafe_size() {
+        let mut bytes = vec![0u8; 20];
+        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[9] = 10;
+        assert_eq!(id3_tag_len(&bytes), 20);
+        assert!(skip_id3(&bytes).is_empty());
+        assert_eq!(id3_tag_len(b"nope"), 0);
     }
 
     #[test]

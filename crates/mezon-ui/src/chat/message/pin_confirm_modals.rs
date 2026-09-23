@@ -164,6 +164,10 @@ impl ConfirmPinMessageModal {
         };
 
         let locale_for_view = locale.clone();
+        crate::chat::message::audio_meta::AudioMetaCache::ensure_attachments(
+            &message.attachments,
+            cx,
+        );
         let view = cx.new(|cx| Self {
             focus_handle: cx.focus_handle(),
             message_id,
@@ -231,6 +235,17 @@ impl ConfirmUnpinMessageModal {
             ClanMembersStore::global(cx).update(cx, |members, cx| {
                 members.ensure_loaded(clan_id, cx);
             });
+        }
+        let attachments = {
+            let store = PinnedMessagesStore::global(cx).read(cx);
+            store
+                .pinned()
+                .iter()
+                .find(|pin| pin.id == pin_id.as_ref())
+                .map(|pin| pin.attachments.clone())
+        };
+        if let Some(attachments) = attachments {
+            crate::chat::message::audio_meta::AudioMetaCache::ensure_attachments(&attachments, cx);
         }
 
         let view = cx.new(|cx| Self {
@@ -517,10 +532,6 @@ fn modal_shell(
 
 impl Render for ConfirmPinMessageModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let probe = self.message.attachments.clone();
-        cx.defer(move |cx| {
-            super::audio_meta::AudioMetaCache::ensure_attachments(&probe, cx);
-        });
         let theme = cx.theme().clone();
         let tokens = &theme.tokens;
         let preview = self.preview(cx);
@@ -591,19 +602,6 @@ impl Render for ConfirmPinMessageModal {
 
 impl Render for ConfirmUnpinMessageModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pin_id = self.pin_id.clone();
-        cx.defer(move |cx| {
-            let Some(pin) = PinnedMessagesStore::global(cx)
-                .read(cx)
-                .pinned()
-                .iter()
-                .find(|pin| pin.id == pin_id.as_ref())
-                .cloned()
-            else {
-                return;
-            };
-            super::audio_meta::AudioMetaCache::ensure_attachments(&pin.attachments, cx);
-        });
         let theme = cx.theme().clone();
         let tokens = &theme.tokens;
         let preview = self.preview(cx);

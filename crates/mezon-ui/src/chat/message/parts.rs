@@ -974,26 +974,30 @@ fn render_audio(
     let seek_download_url = download_url.clone();
     let seek_download_name = download_name.clone();
     let seek_selection = ctx.selection.clone();
-    let seek = preview_seek_track(("audio-seek", index), move |fraction, _, cx| {
-        if seek_selection.borrow().has_selection() {
-            return;
-        }
-        let start_secs = if duration > 0.0 {
-            f64::from(fraction) * duration
-        } else {
-            0.0
-        };
-        let activation = AudioActivation {
-            url: seek_url.clone(),
-            duration,
-            start_secs,
-            download_url: seek_download_url.clone(),
-            download_name: seek_download_name.clone(),
-        };
-        let _ = seek_host.update(cx, |this, cx| {
-            this.activate_audio((msg_id, index), activation, cx);
-        });
-    });
+    let seek = preview_seek_track(
+        ("audio-seek", index),
+        (msg_id.get(), index),
+        move |fraction, _, cx| {
+            if seek_selection.borrow().has_selection() {
+                return;
+            }
+            let start_secs = if duration > 0.0 {
+                f64::from(fraction) * duration
+            } else {
+                0.0
+            };
+            let activation = AudioActivation {
+                url: seek_url.clone(),
+                duration,
+                start_secs,
+                download_url: seek_download_url.clone(),
+                download_name: seek_download_name.clone(),
+            };
+            let _ = seek_host.update(cx, |this, cx| {
+                this.activate_audio((msg_id, index), activation, cx);
+            });
+        },
+    );
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),

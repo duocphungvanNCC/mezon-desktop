@@ -248,6 +248,7 @@ impl PinnedPopoverPanel {
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
                 this.pin_cards = this.compute_pin_cards(cx);
+                this.probe_pin_audio(cx);
                 cx.notify();
             }),
             cx.subscribe(
@@ -310,6 +311,7 @@ impl PinnedPopoverPanel {
             _subs: subs,
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
+        panel.probe_pin_audio(cx);
         panel
     }
 
@@ -345,25 +347,31 @@ impl PinnedPopoverPanel {
             changed = true;
         }
         if changed {
+            self.probe_pin_audio(cx);
             cx.notify();
         }
     }
 
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
-        let store = PinnedMessagesStore::global(cx).read(cx);
-        if self.pin_cards.len() != store.pinned().len() {
+        let rebuild = {
+            let store = PinnedMessagesStore::global(cx).read(cx);
+            self.pin_cards.len() != store.pinned().len()
+                || self
+                    .pin_cards
+                    .iter()
+                    .zip(store.pinned())
+                    .any(|(vm, pin)| vm.message_id.as_ref() != pin.message_id.as_str())
+        };
+        if rebuild {
             self.pin_cards = self.compute_pin_cards(cx);
+            self.probe_pin_audio(cx);
             cx.notify();
             return;
         }
+        let store = PinnedMessagesStore::global(cx).read(cx);
         let clan_id = effective_clan_id(store.clan_id(), cx);
         let channel_id = store.channel_id();
         for (vm, pin) in self.pin_cards.iter_mut().zip(store.pinned()) {
-            if vm.message_id.as_ref() != pin.message_id.as_str() {
-                self.pin_cards = self.compute_pin_cards(cx);
-                cx.notify();
-                return;
-            }
             vm.sender_label = resolve_pin_sender_label_with_message(
                 &pin.sender_id,
                 &pin.sender_name,
@@ -377,6 +385,17 @@ impl PinnedPopoverPanel {
                 resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }
         cx.notify();
+    }
+
+    fn probe_pin_audio(&self, cx: &mut App) {
+        let urls = self
+            .pin_cards
+            .iter()
+            .flat_map(|card| card.pin.attachments.iter())
+            .filter(|att| crate::chat::message::audio_meta::attachment_needs_audio_probe(att))
+            .map(|att| att.url.clone())
+            .collect();
+        crate::chat::message::audio_meta::AudioMetaCache::ensure_urls(urls, cx);
     }
 
     fn compute_pin_cards(&self, cx: &App) -> Vec<PinCardVm> {
@@ -797,18 +816,6 @@ impl EventEmitter<DismissEvent> for PinnedPopoverPanel {}
 
 impl Render for PinnedPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let probe_urls: Vec<String> = self
-            .pin_cards
-            .iter()
-            .flat_map(|card| card.pin.attachments.iter())
-            .filter(|att| crate::chat::message::audio_meta::attachment_needs_audio_probe(att))
-            .map(|att| att.url.clone())
-            .collect();
-        if !probe_urls.is_empty() {
-            cx.defer(move |cx| {
-                crate::chat::message::audio_meta::AudioMetaCache::ensure_urls(probe_urls, cx);
-            });
-        }
         self.message_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.selection.borrow_mut().begin_render();

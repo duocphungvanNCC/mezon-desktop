@@ -14,7 +14,8 @@ use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
 const AUDIO_OUTPUT_TOAST_KEY: &str = "audio-output-unavailable";
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
-const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(50);
+const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(200);
+const AUDIO_TICK_IDLE: Duration = Duration::from_secs(1);
 const SEEK_TRACK_WIDTH: f32 = 112.0;
 const AUDIO_FETCH_CHUNK: usize = 64 * 1024;
 const AUDIO_FETCH_QUEUE: usize = 8;
@@ -52,7 +53,10 @@ impl Render for SeekDrag {
 }
 
 #[derive(Clone)]
-struct PreviewSeekDrag;
+struct PreviewSeekDrag {
+    message_id: i64,
+    index: usize,
+}
 
 impl Render for PreviewSeekDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -202,11 +206,9 @@ impl AudioPlayerView {
     }
 
     fn begin_playback(&mut self, cx: &mut Context<Self>) {
-        if let Some(at) = self.pending_seek.take() {
-            if let Some(player) = &self.player {
-                player.seek(at);
-            }
-            self.set_playhead(at);
+        if self.pending_seek.is_some() && !self.apply_pending_seek() {
+            self.restart_tick(cx);
+            return;
         }
         if self.want_play {
             if let Some(player) = &self.player {
@@ -214,6 +216,25 @@ impl AudioPlayerView {
             }
             self.restart_tick(cx);
         }
+    }
+
+    fn apply_pending_seek(&mut self) -> bool {
+        let Some(at) = self.pending_seek else {
+            return true;
+        };
+        let landed = self.player.as_ref().is_some_and(|player| player.seek(at));
+        if !landed {
+            return false;
+        }
+        self.pending_seek = None;
+        self.set_playhead(at);
+        if self.want_play
+            && let Some(player) = &self.player
+            && !player.is_playing()
+        {
+            player.play();
+        }
+        true
     }
 
     fn on_load_failed(&mut self, cx: &mut Context<Self>) {
@@ -228,7 +249,16 @@ impl AudioPlayerView {
     fn restart_tick(&mut self, cx: &mut Context<Self>) {
         self.tick_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(AUDIO_TICK_INTERVAL).await;
+                let interval = this
+                    .update(cx, |_view, cx| {
+                        if cx.active_window().is_none() {
+                            AUDIO_TICK_IDLE
+                        } else {
+                            AUDIO_TICK_INTERVAL
+                        }
+                    })
+                    .unwrap_or(AUDIO_TICK_INTERVAL);
+                cx.background_executor().timer(interval).await;
                 let keep_going = this.update(cx, |view, cx| view.tick(cx)).unwrap_or(false);
                 if !keep_going {
                     break;
@@ -238,12 +268,26 @@ impl AudioPlayerView {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let inactive = cx.active_window().is_none();
+        if self.pending_seek.is_some() {
+            let landed = self.apply_pending_seek();
+            if self.pending_seek.is_some() {
+                return self.want_play
+                    || self
+                        .player
+                        .as_ref()
+                        .is_some_and(|player| player.is_playing());
+            }
+            if landed && !inactive {
+                cx.notify();
+            }
+        }
         let (finished, position, playing) = {
             let Some(player) = &self.player else {
-                return false;
+                return self.pending_seek.is_some();
             };
-            if cx.active_window().is_none() {
-                return player.is_playing();
+            if inactive {
+                return player.is_playing() || self.pending_seek.is_some();
             }
             let finished = player.finished();
             if finished {
@@ -268,7 +312,7 @@ impl AudioPlayerView {
         if finished || label_changed || thumb_moved {
             cx.notify();
         }
-        playing
+        playing || self.pending_seek.is_some()
     }
 
     fn set_playhead(&mut self, position: f64) {
@@ -288,12 +332,21 @@ impl AudioPlayerView {
 
     fn seek_to(&mut self, secs: f64, cx: &mut Context<Self>) {
         let duration = self.effective_duration();
-        if duration <= 0.0 || !self.is_ready() {
+        if duration <= 0.0 {
             return;
         }
         let secs = secs.clamp(0.0, duration);
-        if let Some(player) = &self.player {
-            player.seek(secs);
+        if !self.is_ready() {
+            self.pending_seek = Some(secs);
+            self.set_playhead(secs);
+            cx.notify();
+            return;
+        }
+        let landed = self.player.as_ref().is_some_and(|player| player.seek(secs));
+        if landed {
+            self.pending_seek = None;
+        } else {
+            self.pending_seek = Some(secs);
         }
         self.set_playhead(secs);
         cx.notify();
@@ -479,6 +532,7 @@ fn seek_track_face(fraction: f32) -> impl IntoElement {
 
 pub(crate) fn preview_seek_track(
     id: impl Into<ElementId>,
+    owner: (i64, usize),
     on_fraction: impl Fn(f32, &mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
     let bounds = std::rc::Rc::new(std::cell::RefCell::new(Bounds::default()));
@@ -503,11 +557,21 @@ pub(crate) fn preview_seek_track(
                 on_down(fraction, window, cx);
             },
         )
-        .on_drag(PreviewSeekDrag, |drag, _, _, cx| {
-            cx.stop_propagation();
-            cx.new(|_| drag.clone())
-        })
+        .on_drag(
+            PreviewSeekDrag {
+                message_id: owner.0,
+                index: owner.1,
+            },
+            |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            },
+        )
         .on_drag_move(move |event: &DragMoveEvent<PreviewSeekDrag>, window, cx| {
+            let drag = event.drag(cx);
+            if drag.message_id != owner.0 || drag.index != owner.1 {
+                return;
+            }
             cx.stop_propagation();
             let fraction = fraction_from_position(*drag_bounds.borrow(), event.event.position.x);
             on_fraction(fraction, window, cx);

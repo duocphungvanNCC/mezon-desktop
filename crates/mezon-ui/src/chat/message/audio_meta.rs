@@ -1,12 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::AsyncReadExt;
-use gpui::{App, AppContext, Context, Entity, Global, SharedString, http_client::HttpClient};
+use futures::future::{Either, FutureExt};
+use gpui::{
+    App, AppContext, Context, Entity, Global, SharedString,
+    http_client::{AsyncBody, HttpClient, HttpRequestExt, RedirectPolicy},
+};
 use mezon_store::MessageAttachment;
 
-const AUDIO_META_MAX_BYTES: usize = 32 * 1024 * 1024;
-const AUDIO_META_CHUNK: usize = 64 * 1024;
+const AUDIO_META_PREFIX: usize = 64 * 1024;
+const AUDIO_META_PREFIX_MAX: usize = 256 * 1024;
+const AUDIO_META_FRAME_SLACK: usize = 8 * 1024;
+const AUDIO_META_INFLIGHT: usize = 3;
+const AUDIO_META_ATTEMPTS: u8 = 2;
+const AUDIO_META_CACHE_CAP: usize = 256;
+const AUDIO_META_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct GlobalAudioMetaCache(Entity<AudioMetaCache>);
 
@@ -21,7 +31,7 @@ struct AudioMeta {
 pub struct AudioMetaCache {
     known: HashMap<String, AudioMeta>,
     pending: HashSet<String>,
-    failed: HashSet<String>,
+    failures: HashMap<String, u8>,
 }
 
 impl AudioMetaCache {
@@ -32,7 +42,7 @@ impl AudioMetaCache {
         let entity = cx.new(|_| Self {
             known: HashMap::new(),
             pending: HashSet::new(),
-            failed: HashSet::new(),
+            failures: HashMap::new(),
         });
         cx.set_global(GlobalAudioMetaCache(entity.clone()));
         entity
@@ -59,7 +69,7 @@ impl AudioMetaCache {
         let missing = match Self::try_global(cx) {
             Some(cache) => urls
                 .into_iter()
-                .filter(|url| !cache.read(cx).contains(url))
+                .filter(|url| !cache.read(cx).settled(url))
                 .map(SharedString::from)
                 .collect::<Vec<_>>(),
             None => urls.into_iter().map(SharedString::from).collect(),
@@ -74,32 +84,95 @@ impl AudioMetaCache {
         });
     }
 
-    fn contains(&self, url: &str) -> bool {
-        self.known.contains_key(url) || self.pending.contains(url) || self.failed.contains(url)
+    fn settled(&self, url: &str) -> bool {
+        self.known.contains_key(url)
+            || self.pending.contains(url)
+            || self
+                .failures
+                .get(url)
+                .is_some_and(|count| *count >= AUDIO_META_ATTEMPTS)
+    }
+
+    fn remember(&mut self, key: String, meta: AudioMeta) {
+        self.failures.remove(&key);
+        self.known.insert(key.clone(), meta);
+        if self.known.len() <= AUDIO_META_CACHE_CAP {
+            return;
+        }
+        if let Some(evict) = self
+            .known
+            .keys()
+            .find(|candidate| *candidate != &key)
+            .cloned()
+        {
+            self.known.remove(&evict);
+        }
+    }
+
+    fn note_failure(&mut self, key: String, permanent: bool) {
+        let count = if permanent {
+            AUDIO_META_ATTEMPTS
+        } else {
+            self.failures
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1)
+        };
+        self.failures.insert(key.clone(), count);
+        if self.failures.len() <= AUDIO_META_CACHE_CAP {
+            return;
+        }
+        if let Some(evict) = self
+            .failures
+            .keys()
+            .find(|candidate| *candidate != &key)
+            .cloned()
+        {
+            self.failures.remove(&evict);
+        }
     }
 
     fn ensure(&mut self, url: SharedString, cx: &mut Context<Self>) {
         let key = url.to_string();
-        if key.is_empty() || self.contains(&key) {
+        if key.is_empty() || self.settled(&key) || self.pending.len() >= AUDIO_META_INFLIGHT {
             return;
         }
         self.pending.insert(key.clone());
         let client = cx.http_client();
         cx.spawn(async move |this, cx| {
-            let probed = cx
+            let fetch = cx
                 .background_executor()
-                .spawn(async move { probe_remote(client, &url).await })
-                .await;
+                .spawn(async move { probe_remote(&client, &url).await });
+            let timeout = cx.background_executor().timer(AUDIO_META_TIMEOUT);
+            let probed = match futures::future::select(fetch.fuse(), timeout.fuse()).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, _)) => Err(ProbeError::Transient("audio metadata timed out")),
+            };
             let _ = this.update(cx, |cache, cx| {
                 cache.pending.remove(&key);
                 match probed {
                     Ok(meta) => {
-                        cache.known.insert(key, meta);
+                        cache.remember(key, meta);
                         cx.notify();
                     }
-                    Err(err) => {
+                    Err(ProbeError::Permanent(err)) => {
                         tracing::warn!("audio metadata probe failed: {err}");
-                        cache.failed.insert(key);
+                        cache.note_failure(key, true);
+                    }
+                    Err(ProbeError::Transient(err)) => {
+                        tracing::warn!("audio metadata probe failed: {err}");
+                        let retry = cache
+                            .failures
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(1)
+                            < AUDIO_META_ATTEMPTS;
+                        cache.note_failure(key, false);
+                        if retry {
+                            cx.notify();
+                        }
                     }
                 }
             });
@@ -141,9 +214,8 @@ pub(crate) fn attachment_needs_audio_probe(att: &MessageAttachment) -> bool {
 }
 
 pub(crate) fn urls_needing_probe(attachments: &[MessageAttachment], cx: &App) -> Vec<String> {
-    let tracked = |url: &str| {
-        AudioMetaCache::try_global(cx).is_some_and(|cache| cache.read(cx).contains(url))
-    };
+    let tracked =
+        |url: &str| AudioMetaCache::try_global(cx).is_some_and(|cache| cache.read(cx).settled(url));
     attachments
         .iter()
         .filter(|att| attachment_needs_audio_probe(att))
@@ -169,39 +241,123 @@ fn lookup(cx: &App, url: &str) -> Option<AudioMeta> {
         .copied()
 }
 
-async fn probe_remote(client: Arc<dyn HttpClient>, url: &str) -> anyhow::Result<AudioMeta> {
-    let mut response = client.get(url, ().into(), true).await?;
-    if !response.status().is_success() {
-        anyhow::bail!("audio metadata status {}", response.status());
+enum ProbeError {
+    Permanent(&'static str),
+    Transient(&'static str),
+}
+
+struct RemotePrefix {
+    bytes: Vec<u8>,
+    total: Option<u64>,
+    ended: bool,
+}
+
+async fn probe_remote(client: &Arc<dyn HttpClient>, url: &str) -> Result<AudioMeta, ProbeError> {
+    let head_len = head_content_length(client, url).await;
+    let prefix = read_prefix(client, url).await?;
+    let size = prefix.total.or(head_len);
+    let Some(size) = size else {
+        if !prefix.ended {
+            return Err(ProbeError::Transient("audio metadata incomplete"));
+        }
+        let size = prefix.bytes.len() as u64;
+        let duration =
+            mezon_audio::audio_duration_secs_with_len(&prefix.bytes, size).unwrap_or(0.0);
+        return Ok(AudioMeta { duration, size });
+    };
+    let duration = mezon_audio::audio_duration_secs_with_len(&prefix.bytes, size).unwrap_or(0.0);
+    if duration <= 0.0 && (prefix.bytes.len() as u64) < size {
+        return Err(ProbeError::Transient("audio duration unavailable"));
     }
-    let content_length = response
-        .headers()
+    Ok(AudioMeta { duration, size })
+}
+
+async fn head_content_length(client: &Arc<dyn HttpClient>, url: &str) -> Option<u64> {
+    let request = gpui::http_client::http::Request::builder()
+        .method(gpui::http_client::Method::HEAD)
+        .uri(url)
+        .follow_redirects(RedirectPolicy::FollowAll)
+        .body(AsyncBody::empty())
+        .ok()?;
+    let response = client.send(request).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    header_len(response.headers())
+}
+
+async fn read_prefix(client: &Arc<dyn HttpClient>, url: &str) -> Result<RemotePrefix, ProbeError> {
+    let end = AUDIO_META_PREFIX_MAX.saturating_sub(1);
+    let request = gpui::http_client::http::Request::builder()
+        .method(gpui::http_client::Method::GET)
+        .uri(url)
+        .header("Range", format!("bytes=0-{end}"))
+        .follow_redirects(RedirectPolicy::FollowAll)
+        .body(AsyncBody::empty())
+        .map_err(|_| ProbeError::Permanent("audio metadata request failed"))?;
+    let mut response = client
+        .send(request)
+        .await
+        .map_err(|_| ProbeError::Transient("audio metadata request failed"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ProbeError::Permanent("audio metadata status"));
+    }
+    let total = if status == gpui::http_client::StatusCode::OK {
+        header_len(response.headers())
+    } else {
+        range_total(response.headers())
+    };
+    let (bytes, ended) = read_audio_prefix(response.body_mut())
+        .await
+        .map_err(|_| ProbeError::Transient("audio metadata read failed"))?;
+    Ok(RemotePrefix {
+        bytes,
+        total,
+        ended,
+    })
+}
+
+fn prefix_goal(bytes: &[u8]) -> usize {
+    let tag = mezon_audio::id3_tag_len(bytes);
+    if tag > bytes.len() {
+        return tag
+            .saturating_add(AUDIO_META_FRAME_SLACK)
+            .min(AUDIO_META_PREFIX_MAX);
+    }
+    AUDIO_META_PREFIX
+}
+
+async fn read_audio_prefix(body: &mut AsyncBody) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let goal = prefix_goal(&out);
+        if out.len() >= goal || out.len() >= AUDIO_META_PREFIX_MAX {
+            let peek = body.read(&mut buf[..1]).await?;
+            return Ok((out, peek == 0));
+        }
+        let want = (goal - out.len()).min(buf.len());
+        let read = body.read(&mut buf[..want]).await?;
+        if read == 0 {
+            return Ok((out, true));
+        }
+        out.extend_from_slice(&buf[..read]);
+    }
+}
+
+fn header_len(headers: &gpui::http_client::http::HeaderMap) -> Option<u64> {
+    headers
         .get("content-length")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if let Some(size) = content_length.filter(|length| *length > AUDIO_META_MAX_BYTES as u64) {
-        let mut prefix = vec![0u8; AUDIO_META_CHUNK];
-        let read = response.body_mut().read(&mut prefix).await?;
-        prefix.truncate(read);
-        let duration = mezon_audio::audio_duration_secs_with_len(&prefix, size).unwrap_or(0.0);
-        return Ok(AudioMeta { duration, size });
-    }
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|length| *length > 0)
+}
 
-    let mut body = Vec::new();
-    let mut buffer = vec![0u8; AUDIO_META_CHUNK];
-    loop {
-        let read = response.body_mut().read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        if body.len() + read > AUDIO_META_MAX_BYTES {
-            break;
-        }
-        body.extend_from_slice(&buffer[..read]);
-    }
-    let size = content_length.unwrap_or(body.len() as u64);
-    let duration = mezon_audio::audio_duration_secs_with_len(&body, size).unwrap_or(0.0);
-    Ok(AudioMeta { duration, size })
+fn range_total(headers: &gpui::http_client::http::HeaderMap) -> Option<u64> {
+    let value = headers.get("content-range")?.to_str().ok()?;
+    let total = value.rsplit('/').next()?;
+    total.parse::<u64>().ok().filter(|length| *length > 0)
 }
 
 #[cfg(test)]
