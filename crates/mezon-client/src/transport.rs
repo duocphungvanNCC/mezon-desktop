@@ -9415,15 +9415,17 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         room_name: &str,
+        metadata: &str,
     ) -> Result<api::GenerateMeetTokenResponse> {
         let cid = self.generate_cid();
         let body = api::GenerateMeetTokenRequest {
             channel_id,
             room_name: room_name.to_string(),
+            metadata: metadata.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self
-            .send_api_request(cid, "GenerateMeetToken", body)
+            .send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
             .await?;
         let token = meet_token_from_raw_body(code, &response)?;
         Ok(api::GenerateMeetTokenResponse { token })

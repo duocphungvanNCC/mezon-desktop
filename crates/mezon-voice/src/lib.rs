@@ -334,12 +334,7 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
-    pub fn start_screen_share(
-        &self,
-        pick: PickedScreen,
-        share_audio: bool,
-        mode: ScreenShareMode,
-    ) {
+    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool, mode: ScreenShareMode) {
         let _ = self
             .cmd_tx
             .send(Command::StartScreenShare(pick, share_audio, mode));
@@ -540,11 +535,11 @@ async fn session_main(
                             audio_tracks.insert(key, handle);
                         }
                     }
-                    SfuEvent::RemoteVideo { key, track } => {
+                    SfuEvent::RemoteVideo { key, stream } => {
                         if let Some(handle) = video_tracks.remove(&key) {
                             handle.stop();
                         }
-                        let handle = spawn_video(track, key, frame_store.clone());
+                        let handle = spawn_video(stream, key, frame_store.clone());
                         video_tracks.insert(key, handle);
                     }
                     SfuEvent::RemoteGone { key } => {
@@ -1109,7 +1104,10 @@ async fn start_screen_track(
     evt_tx: flume::Sender<VoiceEvent>,
     screen_audio_bus: ScreenAudioBus,
 ) -> Result<ScreenSession> {
-    tracing::info!(?mode, "starting screen share (share system audio: {share_audio})");
+    tracing::info!(
+        ?mode,
+        "starting screen share (share system audio: {share_audio})"
+    );
     let (stopper, source_rx) = screen::start_screen(
         identity.to_string(),
         frame_store,
@@ -1346,11 +1344,10 @@ impl VideoTrackHandle {
 }
 
 fn spawn_video(
-    track: RtcVideoTrack,
+    mut stream: NativeVideoStream,
     key: u64,
     frame_store: Arc<VideoFrameStore>,
 ) -> VideoTrackHandle {
-    let rtc_track = track;
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
@@ -1408,7 +1405,6 @@ fn spawn_video(
 
     let task_slot = slot.clone();
     let task = runtime::runtime().spawn(async move {
-        let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
             received_store.note_received(key);
             let mut buffer = frame.buffer.to_i420();
