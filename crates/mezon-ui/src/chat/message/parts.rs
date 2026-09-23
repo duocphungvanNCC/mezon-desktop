@@ -11,8 +11,8 @@ use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
     MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    STICKER_MAX_HEIGHT, STICKER_MAX_WIDTH, ThreadsStore, TopicsStore, UserId, UsersByUserStore,
-    ViewerMedia, resolve_avatar_url, resolve_user_profile,
+    STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia,
+    resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -1315,8 +1315,12 @@ fn render_photo(
     if src.is_empty() {
         return attachment_box(att.filename.clone(), theme);
     }
-    let is_sticker = att.filetype == "sticker";
-    let intrinsic_sticker = is_sticker && (att.display_width <= 0.0 || att.display_height <= 0.0);
+    let is_sticker = att.filetype == STICKER_FILETYPE && att.tenor_mp4.is_none();
+    let (box_w, box_h) = if is_sticker {
+        sticker_layout_size(att, ctx)
+    } else {
+        (att.display_width, att.display_height)
+    };
     let object_fit = if is_sticker || is_gif(&att.url) {
         ObjectFit::Contain
     } else {
@@ -1330,15 +1334,13 @@ fn render_photo(
     let create_time = msg.create_time;
     let uploader_id = viewer_uploader_id(msg);
     let selection = ctx.selection.clone();
-    let mut el = div().id(("msg-img", index)).relative().rounded_md();
-    el = if intrinsic_sticker {
-        el.max_w(px(STICKER_MAX_WIDTH))
-            .max_h(px(STICKER_MAX_HEIGHT))
-    } else {
-        el.w(px(att.display_width))
-            .h(px(att.display_height))
-            .overflow_hidden()
-    };
+    let mut el = div()
+        .id(("msg-img", index))
+        .relative()
+        .w(px(box_w))
+        .h(px(box_h))
+        .rounded_md()
+        .overflow_hidden();
     // `render_album` already refuses to open a tile that is still uploading;
     // the single-image path is the same picture with the same half-written
     // object behind it.
@@ -1357,32 +1359,27 @@ fn render_photo(
             }
         })
     });
-    let mut image = img(src)
-        .id(("msg-img-frames", msg.id.0 as usize))
-        .object_fit(object_fit)
-        .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
-        .with_fallback(move || {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(fallback_bg)
-                .child(
-                    Icon::new(IconName::ImageThumbnail)
-                        .size(px(32.))
-                        .text_color(fallback_fg),
-                )
-                .into_any_element()
-        });
-    image = if intrinsic_sticker {
-        image
-            .max_w(px(STICKER_MAX_WIDTH))
-            .max_h(px(STICKER_MAX_HEIGHT))
-    } else {
-        image.size_full()
-    };
-    el = el.child(image);
+    el = el.child(
+        img(src)
+            .id(("msg-img-frames", msg.id.0 as usize))
+            .size_full()
+            .object_fit(object_fit)
+            .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
+            .with_fallback(move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(fallback_bg)
+                    .child(
+                        Icon::new(IconName::ImageThumbnail)
+                            .size(px(32.))
+                            .text_color(fallback_fg),
+                    )
+                    .into_any_element()
+            }),
+    );
     if att.upload_failed {
         el = el.child(attachment_failed_overlay(theme));
     } else if sending {
@@ -1781,6 +1778,17 @@ fn render_file_box(
             )
         })
         .into_any_element()
+}
+
+fn sticker_layout_size(att: &MessageAttachment, ctx: &RowCtx) -> (f32, f32) {
+    if att.width > 0 && att.height > 0 {
+        return (att.display_width, att.display_height);
+    }
+    ctx.attachment_cache
+        .read(ctx.app)
+        .cached_bitmap_size(att.proxied_src.as_ref())
+        .map(|(width, height)| mezon_store::sticker_display_dimensions(width, height))
+        .unwrap_or((att.display_width, att.display_height))
 }
 
 fn is_gif(url: &str) -> bool {

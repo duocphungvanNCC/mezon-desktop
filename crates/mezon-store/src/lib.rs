@@ -128,7 +128,7 @@ pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
 pub use compose::{ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, PendingAttachment};
-pub use config::{AppConfig, STICKER_MAX_HEIGHT, STICKER_MAX_WIDTH};
+pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_dimensions};
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,

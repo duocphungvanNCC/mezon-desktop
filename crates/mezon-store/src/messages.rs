@@ -9694,13 +9694,13 @@ impl MessageAttachment {
         }
         let width = a.width.max(0) as u32;
         let height = a.height.max(0) as u32;
-        let is_sticker = a.filetype == STICKER_FILETYPE;
+        let tenor_mp4 = crate::message::tenor_mp4_url(&a.url);
+        let is_sticker = a.filetype == STICKER_FILETYPE && tenor_mp4.is_none();
         let is_video = MessageAttachment::media_is_video(&a.filetype, &a.url);
         let (proxied_src, display_width, display_height) = if is_sticker {
             cfg.map(|c| c.sticker_attachment_proxy(&a.url, width, height))
                 .unwrap_or_else(|| {
-                    let (w, h) = crate::config::sticker_display_dimensions(width, height)
-                        .unwrap_or((0.0, 0.0));
+                    let (w, h) = crate::config::sticker_display_dimensions(width, height);
                     (a.url.clone(), w, h)
                 })
         } else {
@@ -9728,7 +9728,7 @@ impl MessageAttachment {
             .unwrap_or_else(|| a.thumbnail.clone())
             .into()
         };
-        let tenor_mp4 = crate::message::tenor_mp4_url(&a.url).map(SharedString::from);
+        let tenor_mp4 = tenor_mp4.map(SharedString::from);
         let size = a.size.max(0) as u64;
         Self {
             url: a.url,
@@ -11772,7 +11772,7 @@ mod tests {
         assert!(attachment.is_image());
         assert_eq!(
             (attachment.display_width, attachment.display_height),
-            (0.0, 0.0)
+            (140.0, 140.0)
         );
     }
 
@@ -11784,6 +11784,7 @@ mod tests {
             ..AppConfig::dev_defaults()
         };
         let url = format!("{}/stickers/1.webp", cfg.base_img_url);
+        let thumb = format!("{}/stickers/1-thumb.webp", cfg.base_img_url);
         let unknown = MessageAttachment::from_api(
             mezon_client::transport::ApiAttachment {
                 url: url.clone(),
@@ -11791,18 +11792,26 @@ mod tests {
                 filetype: STICKER_FILETYPE.into(),
                 width: 0,
                 height: 0,
-                thumbnail: String::new(),
+                thumbnail: thumb,
                 duration: 0,
                 size: 0,
             },
             Some(&cfg),
         );
         assert!(
-            unknown.proxied_src.contains("rs:fit:200:220:1/"),
-            "unknown sticker must fit inside 200x220, not fill-crop: {}",
+            unknown.proxied_src.contains("rs:fit:200:220:0/"),
+            "unknown sticker must fit inside 200x220 without enlarging: {}",
             unknown.proxied_src
         );
-        assert_eq!((unknown.display_width, unknown.display_height), (0.0, 0.0));
+        assert!(
+            unknown.thumbnail_proxied.contains("rs:fit:140:140:1/"),
+            "thumbnail must use the loading box, not rs:fit:0:0: {}",
+            unknown.thumbnail_proxied
+        );
+        assert_eq!(
+            (unknown.display_width, unknown.display_height),
+            (140.0, 140.0)
+        );
 
         let wide = MessageAttachment::from_api(
             mezon_client::transport::ApiAttachment {
@@ -11820,6 +11829,49 @@ mod tests {
         assert!(wide.display_width > wide.display_height);
         assert!(wide.proxied_src.contains("rs:fit:"));
         assert!(!wide.proxied_src.contains("rs:fill:"));
+    }
+
+    #[test]
+    fn tenor_gif_keeps_attachment_sizing() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let url = "https://media.tenor.com/lfDATg4Bhc0AAAAM/happy-cat.gif";
+        let unknown = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.into(),
+                filename: String::new(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(unknown.tenor_mp4.is_some());
+        assert_eq!(
+            (unknown.display_width, unknown.display_height),
+            (100.0, 100.0)
+        );
+
+        let sized = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.into(),
+                filename: String::new(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 498,
+                height: 280,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert_eq!((sized.display_width, sized.display_height), (464.0, 261.0));
     }
 
     #[test]

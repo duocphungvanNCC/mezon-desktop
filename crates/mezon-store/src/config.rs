@@ -446,6 +446,17 @@ impl AppConfig {
         height: u32,
         resize_type: &str,
     ) -> String {
+        self.imgproxy_sized(source_image_url, width, height, resize_type, true)
+    }
+
+    fn imgproxy_sized(
+        &self,
+        source_image_url: &str,
+        width: u32,
+        height: u32,
+        resize_type: &str,
+        enlarge: bool,
+    ) -> String {
         if source_image_url.is_empty() {
             return String::new();
         }
@@ -453,7 +464,9 @@ impl AppConfig {
         if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
-        let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
+        let enlarge_flag = u8::from(enlarge);
+        let processing_options =
+            format!("rs:{resize_type}:{width}:{height}:{enlarge_flag}/mb:2097152");
         let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
@@ -544,14 +557,22 @@ impl AppConfig {
         real_width: u32,
         real_height: u32,
     ) -> (String, f32, f32) {
-        let (proxy_w, proxy_h) = sticker_proxy_dimensions(real_width, real_height);
-        let (display_w, display_h) =
-            sticker_display_dimensions(real_width, real_height).unwrap_or((0.0, 0.0));
+        let (display_w, display_h) = sticker_display_dimensions(real_width, real_height);
         if source.is_empty() {
             return (String::new(), display_w, display_h);
         }
+        let unknown = real_width == 0 || real_height == 0;
+        let (proxy_w, proxy_h, enlarge) = if unknown {
+            (STICKER_MAX_WIDTH as u32, STICKER_MAX_HEIGHT as u32, false)
+        } else {
+            (
+                display_w.ceil().max(1.0) as u32,
+                display_h.ceil().max(1.0) as u32,
+                true,
+            )
+        };
         (
-            self.imgproxy_url(source, proxy_w, proxy_h, "fit"),
+            self.imgproxy_sized(source, proxy_w, proxy_h, "fit", enlarge),
             display_w,
             display_h,
         )
@@ -742,34 +763,52 @@ pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32,
 pub const STICKER_MAX_WIDTH: f32 = 200.0;
 pub const STICKER_MAX_HEIGHT: f32 = 220.0;
 pub const STICKER_STANDARD_SIZE: f32 = 150.0;
+pub const STICKER_LOADING_SIDE: f32 = 140.0;
+const STICKER_SEARCH_MAX: f32 = 120.0;
+const STICKER_SEARCH_STANDARD: f32 = 100.0;
 const STICKER_WIDE_RATIO: f32 = 0.85;
 const STICKER_TALL_RATIO: f32 = 1.15;
 
-pub fn sticker_display_dimensions(real_width: u32, real_height: u32) -> Option<(f32, f32)> {
+pub fn sticker_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
+    sticker_bounds(
+        real_width,
+        real_height,
+        STICKER_MAX_WIDTH,
+        STICKER_MAX_HEIGHT,
+        STICKER_STANDARD_SIZE,
+    )
+}
+
+pub fn sticker_search_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
+    sticker_bounds(
+        real_width,
+        real_height,
+        STICKER_SEARCH_MAX,
+        STICKER_SEARCH_MAX,
+        STICKER_SEARCH_STANDARD,
+    )
+}
+
+fn sticker_bounds(
+    real_width: u32,
+    real_height: u32,
+    max_width: f32,
+    max_height: f32,
+    standard: f32,
+) -> (f32, f32) {
     if real_width == 0 || real_height == 0 {
-        return None;
+        return (STICKER_LOADING_SIDE, STICKER_LOADING_SIDE);
     }
     let ratio = real_height as f32 / real_width as f32;
     let (max_w, max_h) = if ratio > STICKER_TALL_RATIO {
-        (STICKER_STANDARD_SIZE, STICKER_MAX_HEIGHT)
+        (standard, max_height)
     } else if ratio < STICKER_WIDE_RATIO {
-        (STICKER_MAX_WIDTH, STICKER_STANDARD_SIZE)
+        (max_width, standard)
     } else {
-        (STICKER_STANDARD_SIZE, STICKER_STANDARD_SIZE)
+        (standard, standard)
     };
-    Some(fit_within_box(
-        max_w,
-        max_h,
-        real_width as f32,
-        real_height as f32,
-    ))
-}
-
-pub fn sticker_proxy_dimensions(real_width: u32, real_height: u32) -> (u32, u32) {
-    match sticker_display_dimensions(real_width, real_height) {
-        Some((width, height)) => (width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32),
-        None => (STICKER_MAX_WIDTH as u32, STICKER_MAX_HEIGHT as u32),
-    }
+    let (width, height) = fit_within_box(max_w, max_h, real_width as f32, real_height as f32);
+    (width.max(1.0), height.max(1.0))
 }
 
 pub fn video_attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
@@ -1160,11 +1199,15 @@ mod tests {
 
     #[test]
     fn sticker_display_keeps_wide_tall_and_square_aspect() {
-        assert_eq!(sticker_display_dimensions(0, 0), None);
-        assert_eq!(sticker_display_dimensions(640, 200), Some((200.0, 63.0)));
-        assert_eq!(sticker_display_dimensions(200, 640), Some((69.0, 220.0)));
-        assert_eq!(sticker_display_dimensions(320, 320), Some((150.0, 150.0)));
-        assert_eq!(sticker_display_dimensions(100, 40), Some((100.0, 40.0)));
+        assert_eq!(sticker_display_dimensions(0, 0), (140.0, 140.0));
+        assert_eq!(sticker_display_dimensions(640, 200), (200.0, 63.0));
+        assert_eq!(sticker_display_dimensions(200, 640), (69.0, 220.0));
+        assert_eq!(sticker_display_dimensions(320, 320), (150.0, 150.0));
+        assert_eq!(sticker_display_dimensions(100, 40), (100.0, 40.0));
+        assert_eq!(sticker_display_dimensions(128, 128), (128.0, 128.0));
+        assert_eq!(sticker_display_dimensions(1000, 2), (200.0, 1.0));
+        assert_eq!(sticker_search_display_dimensions(640, 200), (120.0, 38.0));
+        assert_eq!(sticker_search_display_dimensions(320, 320), (100.0, 100.0));
     }
 
     #[test]
@@ -1177,13 +1220,16 @@ mod tests {
         let src = format!("{}/stickers/wide.webp", cfg.base_img_url);
         let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 0, 0);
         assert!(
-            url.contains("rs:fit:200:220:1/mb:2097152/plain/"),
-            "sticker proxy must fit, not fill: {url}"
+            url.contains("rs:fit:200:220:0/mb:2097152/plain/"),
+            "unknown sticker must fit inside 200x220 without enlarging: {url}"
         );
-        assert_eq!((display_w, display_h), (0.0, 0.0));
+        assert_eq!((display_w, display_h), (140.0, 140.0));
         let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 640, 200);
         assert!(url.contains("rs:fit:200:63:1/"));
         assert_eq!((display_w, display_h), (200.0, 63.0));
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 128, 128);
+        assert!(url.contains("rs:fit:128:128:1/"));
+        assert_eq!((display_w, display_h), (128.0, 128.0));
     }
 
     #[test]

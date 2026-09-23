@@ -42,6 +42,7 @@ pub struct SearchHitImage {
     pub display_width: f32,
     pub display_height: f32,
     pub contain: bool,
+    pub unmeasured: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -714,9 +715,13 @@ fn first_search_media(raw: &str, cfg: Option<&AppConfig>) -> Option<SearchHitIma
             } else {
                 att.proxied_src
             };
-            let contain = att.filetype == crate::message::STICKER_FILETYPE;
-            let (display_width, display_height) = if contain && att.display_width <= 0.0 {
-                (0.0, 0.0)
+            let contain =
+                att.filetype == crate::message::STICKER_FILETYPE && att.tenor_mp4.is_none();
+            let unmeasured = contain && (att.width == 0 || att.height == 0);
+            let (display_width, display_height) = if contain && !unmeasured {
+                crate::config::sticker_search_display_dimensions(att.width, att.height)
+            } else if contain {
+                (att.display_width, att.display_height)
             } else {
                 clamp_search_media_size(att.display_width, att.display_height)
             };
@@ -725,6 +730,7 @@ fn first_search_media(raw: &str, cfg: Option<&AppConfig>) -> Option<SearchHitIma
                 display_width,
                 display_height,
                 contain,
+                unmeasured,
             }
         })
 }
