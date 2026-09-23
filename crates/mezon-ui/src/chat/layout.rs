@@ -80,6 +80,7 @@ pub struct ChatLayout {
     _voice_frame_pump: Option<Task<()>>,
     _stream_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    show_profile_dm: bool,
     ui_state: UiState,
     media_channel_view_mode: bool,
     message_search_expanded: bool,
@@ -398,6 +399,9 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if next_route.is_clan_space() {
+                    this.show_profile_dm = false;
+                }
                 if matches!(this.last_route, Route::Thread { .. }) {
                     this.focused_channel_id = None;
                 }
@@ -551,6 +555,7 @@ impl ChatLayout {
             _voice_frame_pump: None,
             _stream_frame_pump: None,
             show_member_list,
+            show_profile_dm: false,
             ui_state,
             media_channel_view_mode: false,
             message_search_expanded: false,
@@ -968,12 +973,21 @@ impl ChatLayout {
             self.chat_area.ensure_dm_profile_panel(window, cx);
         }
         self.show_member_list = !self.show_member_list;
-        if dm {
-            self.ui_state.show_member_list_dm = self.show_member_list;
+        let persist = if dm {
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm = self.show_member_list;
+                true
+            } else {
+                self.show_profile_dm = self.show_member_list;
+                false
+            }
         } else {
             self.ui_state.show_member_list = self.show_member_list;
+            true
+        };
+        if persist {
+            self.persist_ui_state(cx);
         }
-        self.persist_ui_state(cx);
         cx.notify();
     }
 
@@ -998,7 +1012,11 @@ impl ChatLayout {
 
     fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
         self.show_member_list = if self.is_dm_route(cx) {
-            self.ui_state.show_member_list_dm
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm
+            } else {
+                self.show_profile_dm
+            }
         } else {
             self.ui_state.show_member_list
         };
@@ -1404,9 +1422,16 @@ impl ChatLayout {
         self.prefetched_voice_channel = active_voice_channel;
 
         if let Some(channel_id) = active_voice_channel {
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
+            let clan_id = self
+                .channel_list
+                .read(cx)
+                .active_channel()
+                .map(|ch| ch.clan_id);
+            if let Some(clan_id) = clan_id {
+                self.voice_store.update(cx, |store, cx| {
+                    store.prefetch_meet_token(channel_id.to_string(), clan_id.to_string(), cx);
+                });
+            }
         }
     }
 
@@ -2435,6 +2460,24 @@ impl ChatLayout {
             Router::global(cx).read(cx).route(),
             Route::Direct | Route::Friends | Route::DirectMessage { .. }
         )
+    }
+
+    fn is_group_dm_route(&self, cx: &Context<Self>) -> bool {
+        let Route::DirectMessage {
+            direct_id,
+            message_type,
+        } = Router::global(cx).read(cx).route()
+        else {
+            return false;
+        };
+        self.direct_store
+            .read(cx)
+            .current()
+            .filter(|(id, _)| *id == direct_id)
+            .map(|(_, channel_type)| channel_type == DirectKind::Group.channel_type())
+            .unwrap_or_else(|| {
+                message_type.parse::<i32>().ok() == Some(DirectKind::Group.channel_type())
+            })
     }
 
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {

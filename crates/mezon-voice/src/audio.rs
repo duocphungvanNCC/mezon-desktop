@@ -1520,8 +1520,7 @@ fn transport_type(device: &cpal::Device) -> Option<u32> {
     use objc2_core_audio::{
         AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
         kAudioDevicePropertyTransportType, kAudioHardwarePropertyTranslateUIDToDevice,
-        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-        kAudioObjectSystemObject,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
     };
     use objc2_core_foundation::CFString;
 

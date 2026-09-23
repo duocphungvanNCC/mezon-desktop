@@ -8,6 +8,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, Global, RenderImage, SharedString,
     Subscription, Task, Window,
@@ -26,9 +28,9 @@ use parking_lot::Mutex;
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
-    ScreenShareListError, ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData,
-    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, system_screen_share_pick,
+    ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
+    VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -59,6 +61,7 @@ pub enum DeviceKind {
 pub enum DeviceMenuKind {
     Microphone,
     Camera,
+    ScreenShare,
 }
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
@@ -163,8 +166,23 @@ fn voice_join_error_message(err: &anyhow::Error, locale: &str) -> String {
     }
 }
 
+fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> String {
+    let username = names
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+    let avatar = avatars
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+    serde_json::json!({ "username": username, "avatar": avatar }).to_string()
+}
+
 struct CachedMeetToken {
     channel_id: String,
+    metadata: String,
     token: String,
     fetched_at: Instant,
 }
@@ -332,6 +350,7 @@ pub struct VoiceStore {
     join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
+    screen_share_mode: ScreenShareMode,
     link_copied: bool,
     recording: RecordingState,
     recording_elapsed: Duration,
@@ -352,6 +371,7 @@ pub struct VoiceStore {
 #[derive(Clone)]
 struct VoiceReconnectSnapshot {
     channel_id: String,
+    metadata: String,
     clan_id: String,
     ws_url: String,
     input_device_id: Option<String>,
@@ -692,6 +712,7 @@ impl VoiceStore {
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
+            screen_share_mode: ScreenShareMode::default(),
             interactive_launches: HashMap::new(),
             active_interactive_apps: HashMap::new(),
             opened_interactive_apps: HashMap::new(),
@@ -730,16 +751,75 @@ impl VoiceStore {
         }
     }
 
-    fn cached_token_for(&self, channel_id: &str) -> Option<String> {
+    fn meet_token_metadata(clan_id: &str, cx: &App) -> String {
+        let Some(account_store) = AccountStore::try_global(cx) else {
+            return meet_token_metadata_from_candidates(&[], &[]);
+        };
+        let account = account_store.read(cx);
+        let me = account.account.as_ref();
+        let clan_id = clan_id.parse::<i64>().ok().map(ClanId);
+        let profile = account
+            .clan_profile
+            .as_ref()
+            .filter(|p| Some(p.clan_id) == clan_id);
+        let member = clan_id.zip(me).and_then(|(clan_id, me)| {
+            ClanMembersStore::try_global(cx)
+                .and_then(|store| store.read(cx).member(clan_id, UserId(me.user_id)).cloned())
+        });
+        meet_token_metadata_from_candidates(
+            &[
+                profile.map(|p| p.nick_name.as_str()).unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.clan_nick.as_str())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.display_name.as_str())
+                    .unwrap_or_default(),
+                me.map(|m| m.display_name.as_str()).unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.username.as_str())
+                    .unwrap_or_default(),
+                me.map(|m| m.username.as_str()).unwrap_or_default(),
+            ],
+            &[
+                profile
+                    .and_then(|p| p.avatar_url.as_deref())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.clan_avatar.as_str())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.avatar_url.as_str())
+                    .unwrap_or_default(),
+                me.and_then(|m| m.avatar_url.as_deref()).unwrap_or_default(),
+            ],
+        )
+    }
+
+    fn cached_token_for(&self, channel_id: &str, metadata: &str) -> Option<String> {
         let cached = self.cached_meet_token.as_ref()?;
-        if cached.channel_id == channel_id && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL {
+        if cached.channel_id == channel_id
+            && cached.metadata == metadata
+            && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL
+        {
             return Some(cached.token.clone());
         }
         None
     }
 
-    pub fn prefetch_meet_token(&mut self, channel_id: String, cx: &mut Context<Self>) {
-        if self.cached_token_for(&channel_id).is_some() {
+    pub fn prefetch_meet_token(
+        &mut self,
+        channel_id: String,
+        clan_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let metadata = Self::meet_token_metadata(&clan_id, cx);
+        if self.cached_token_for(&channel_id, &metadata).is_some() {
             return;
         }
         if self.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
@@ -748,7 +828,9 @@ impl VoiceStore {
         self.meet_token_prefetching = Some(channel_id.clone());
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let token = api.generate_meet_token(&channel_id, "").await;
+            let token = api
+                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .await;
             let _ = this.update(cx, |this, _| {
                 if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
                     this.meet_token_prefetching = None;
@@ -756,6 +838,7 @@ impl VoiceStore {
                 if let Ok(token) = token {
                     this.cached_meet_token = Some(CachedMeetToken {
                         channel_id: channel_id.clone(),
+                        metadata: metadata.clone(),
                         token,
                         fetched_at: Instant::now(),
                     });
@@ -830,6 +913,22 @@ impl VoiceStore {
 
     pub fn camera_enabled(&self) -> bool {
         self.camera_enabled
+    }
+
+    pub fn screen_share_mode(&self) -> ScreenShareMode {
+        self.screen_share_mode
+    }
+
+    pub fn set_screen_share_mode(&mut self, mode: ScreenShareMode, cx: &mut Context<Self>) {
+        self.device_menu = None;
+        self.device_submenu = None;
+        if self.screen_share_mode != mode {
+            self.screen_share_mode = mode;
+            if let Some(session) = &self.session {
+                session.set_screen_share_mode(mode);
+            }
+        }
+        cx.notify();
     }
 
     pub fn screen_share_enabled(&self) -> bool {
@@ -2621,12 +2720,14 @@ impl VoiceStore {
         cx.notify();
 
         let api = self.api.clone();
-        let cached_token = self.cached_token_for(&channel_id);
+        let metadata = Self::meet_token_metadata(&clan_id, cx);
+        let cached_token = self.cached_token_for(&channel_id, &metadata);
         if let Some(token) = cached_token {
             self.start_session(
                 ws_url,
                 token,
                 channel_id,
+                false,
                 input_device_id,
                 output_device_id,
                 camera_device_id,
@@ -2635,11 +2736,14 @@ impl VoiceStore {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let token = api.generate_meet_token(&channel_id, "").await;
+            let token = api
+                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .await;
             let _ = this.update(cx, |this, cx| match token {
                 Ok(token) => {
                     this.cached_meet_token = Some(CachedMeetToken {
                         channel_id: channel_id.clone(),
+                        metadata: metadata.clone(),
                         token: token.clone(),
                         fetched_at: Instant::now(),
                     });
@@ -2647,6 +2751,7 @@ impl VoiceStore {
                         ws_url,
                         token,
                         channel_id,
+                        false,
                         input_device_id,
                         output_device_id,
                         camera_device_id,
@@ -2670,11 +2775,13 @@ impl VoiceStore {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_session(
         &mut self,
         ws_url: String,
         token: String,
         channel_id: String,
+        mic_enabled: bool,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
@@ -2704,6 +2811,23 @@ impl VoiceStore {
                     .map(|me| me.user_id.to_string())
             })
             .unwrap_or_default();
+        let refresh_clan = self
+            .active_connection_ids()
+            .map(|(_, clan)| clan)
+            .unwrap_or_default();
+        let (metadata_tx, mut metadata_rx) =
+            futures::channel::mpsc::unbounded::<futures::channel::oneshot::Sender<String>>();
+        cx.spawn(async move |this, cx| {
+            while let Some(reply) = metadata_rx.next().await {
+                let Ok(metadata) =
+                    this.update(cx, |_, cx| Self::meet_token_metadata(&refresh_clan, cx))
+                else {
+                    break;
+                };
+                let _ = reply.send(metadata);
+            }
+        })
+        .detach();
         let refresh_api = self.api.clone();
         let refresh_channel = channel_id.clone();
         let session = VoiceSession::connect(VoiceConnectOptions {
@@ -2712,6 +2836,7 @@ impl VoiceStore {
             room: channel_id.clone(),
             role: self.role,
             local_user_id,
+            mic_enabled,
             input_device_id,
             output_device_id,
             camera_device_id,
@@ -2719,8 +2844,15 @@ impl VoiceStore {
             refresh_token: Some(TokenRefresher::new(move || {
                 let api = refresh_api.clone();
                 let channel_id = refresh_channel.clone();
+                let metadata_tx = metadata_tx.clone();
                 async move {
-                    match api.generate_meet_token(&channel_id, "").await {
+                    let (reply, receiver) = futures::channel::oneshot::channel();
+                    metadata_tx.unbounded_send(reply).ok()?;
+                    let metadata = receiver.await.ok()?;
+                    match api
+                        .generate_meet_token(&channel_id, &channel_id, &metadata)
+                        .await
+                    {
                         Ok(token) => Some(token),
                         Err(e) => {
                             tracing::warn!("voice token refresh failed: {e:#}");
@@ -2842,6 +2974,7 @@ impl VoiceStore {
             tracing::warn!("voice reconnect cannot restore screen share without a saved target");
         }
         Some(VoiceReconnectSnapshot {
+            metadata: Self::meet_token_metadata(&clan_id, cx),
             channel_id,
             clan_id,
             ws_url,
@@ -2906,7 +3039,13 @@ impl VoiceStore {
                 return;
             };
 
-            let token = api.generate_meet_token(&snapshot.channel_id, "").await;
+            let token = api
+                .generate_meet_token(
+                    &snapshot.channel_id,
+                    &snapshot.channel_id,
+                    &snapshot.metadata,
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.reconnect_still_pending(generation) {
                     return;
@@ -2919,6 +3058,7 @@ impl VoiceStore {
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
                             channel_id: snapshot.channel_id.clone(),
+                            metadata: snapshot.metadata.clone(),
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
@@ -2991,6 +3131,7 @@ impl VoiceStore {
             snapshot.ws_url,
             token,
             snapshot.channel_id.clone(),
+            mic_enabled,
             snapshot.input_device_id,
             snapshot.output_device_id,
             snapshot.camera_device_id,
@@ -3029,7 +3170,7 @@ impl VoiceStore {
             session.set_mic_enabled(mic_enabled);
             session.set_camera_enabled(camera_enabled);
             if let Some((pick, share_audio)) = screen_share {
-                session.start_screen_share(pick, share_audio);
+                session.start_screen_share(pick, share_audio, self.screen_share_mode);
             }
         }
     }
@@ -3512,7 +3653,9 @@ impl VoiceStore {
         } else {
             self.device_menu = Some(kind);
             self.device_submenu = None;
-            self.refresh_devices(cx);
+            if kind != DeviceMenuKind::ScreenShare {
+                self.refresh_devices(cx);
+            }
         }
         cx.notify();
     }
@@ -3563,7 +3706,7 @@ impl VoiceStore {
         }
         self.last_screen_share = Some((pick.clone(), share_audio));
         if let Some(session) = &self.session {
-            session.start_screen_share(pick, share_audio);
+            session.start_screen_share(pick, share_audio, self.screen_share_mode);
         }
         cx.notify();
     }

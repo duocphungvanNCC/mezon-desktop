@@ -53,7 +53,10 @@ pub mod stack {
 }
 
 pub use avatar::Avatar;
-pub(crate) use avatar::{avatar_color, name_initials};
+pub(crate) use avatar::{
+    avatar_color, avatar_text_color, clipped_initials_tile, initials_tile,
+    initials_tile_identified, name_initials,
+};
 pub use badge::Badge;
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
@@ -64,7 +67,9 @@ pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
 pub use label::Label;
 pub use mention_count_badge::{mention_count_badge, mention_count_badge_on_channel_row};
 pub use modal::Modal;
-pub use pagination::{PaginationButton, pagination_button, pagination_items};
+pub use pagination::{
+    PaginationButton, pagination_button, pagination_items, pagination_slot_count,
+};
 pub use progress::Progress;
 pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent, SliderState, SliderValue};

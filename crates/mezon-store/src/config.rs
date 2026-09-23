@@ -1079,7 +1079,10 @@ mod tests {
         assert!(cfg.is_voice_agent("2"));
         assert!(!cfg.is_voice_agent("3"));
         assert!(!cfg.is_voice_agent(""));
-        assert_eq!(AppConfig::dev_defaults().voice_agent_ids, ["2037383744142184448"]);
+        assert_eq!(
+            AppConfig::dev_defaults().voice_agent_ids,
+            ["2037383744142184448"]
+        );
     }
 
     #[test]
