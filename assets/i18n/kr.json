@@ -4730,5 +4730,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "그룹에서 멤버 성공적으로 제거",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon 멤버",
   "userProfile.voiceInfo.inVoice": "음성 채널에서",
-  "userProfile.voiceInfo.joinVoice": "음성 참여"
+  "userProfile.voiceInfo.joinVoice": "음성 참여",
+  "chat.activityStrip.latestPin": "최근 고정",
+  "chat.activityStrip.latestTopicMessage": "토픽의 최신 메시지"
 }

@@ -4729,5 +4729,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Lid uit groep verwijderd",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon-lid sinds",
   "userProfile.voiceInfo.inVoice": "In stemkanaal",
-  "userProfile.voiceInfo.joinVoice": "Bij stem betreden"
+  "userProfile.voiceInfo.joinVoice": "Bij stem betreden",
+  "chat.activityStrip.latestPin": "Laatste pin",
+  "chat.activityStrip.latestTopicMessage": "Laatste bericht in topic"
 }

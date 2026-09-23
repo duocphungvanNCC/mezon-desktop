@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
@@ -51,6 +51,7 @@ pub struct PinnedMessagesStore {
     channel_id: Option<String>,
     clan_id: Option<String>,
     messages: Vec<PinnedMessage>,
+    channel_cache: HashMap<(String, String), Vec<PinnedMessage>>,
     loaded_channel: Option<String>,
     loading: bool,
     fetch_generation: u64,
@@ -85,6 +86,7 @@ impl PinnedMessagesStore {
         self.channel_id = None;
         self.clan_id = None;
         self.messages.clear();
+        self.channel_cache.clear();
         self.loaded_channel = None;
         self.loading = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -106,6 +108,7 @@ impl PinnedMessagesStore {
             channel_id: None,
             clan_id: None,
             messages: Vec::new(),
+            channel_cache: HashMap::new(),
             loaded_channel: None,
             loading: false,
             fetch_generation: 0,
@@ -187,8 +190,11 @@ impl PinnedMessagesStore {
         }
         self.channel_id = channel_id;
         self.clan_id = clan_id;
-        self.messages.clear();
-        self.loaded_channel = None;
+        let cached = self
+            .active_cache_key()
+            .and_then(|key| self.channel_cache.get(&key).cloned());
+        self.messages = cached.clone().unwrap_or_default();
+        self.loaded_channel = cached.and_then(|_| self.channel_id.clone());
         // A request for the previous channel must neither block nor overwrite the new one.
         self.loading = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -247,6 +253,7 @@ impl PinnedMessagesStore {
                     Ok(list) => {
                         let cfg = AppConfig::try_global(cx);
                         this.messages = list.into_iter().map(|m| pinned_from_api(m, cfg)).collect();
+                        this.cache_active_messages();
                         this.loaded_channel = Some(channel_id);
                     }
                     Err(e) => tracing::error!("get_pin_messages_list failed: {e}"),
@@ -260,6 +267,21 @@ impl PinnedMessagesStore {
 
     pub fn is_pinned(&self, message_id: &str) -> bool {
         self.messages.iter().any(|m| m.message_id == message_id)
+    }
+
+    fn active_cache_key(&self) -> Option<(String, String)> {
+        Some((self.clan_id.clone()?, self.channel_id.clone()?))
+    }
+
+    fn cache_active_messages(&mut self) {
+        if let Some(key) = self.active_cache_key() {
+            self.channel_cache.insert(key, self.messages.clone());
+        }
+    }
+
+    fn invalidate_channel_cache(&mut self, channel_id: &str) {
+        self.channel_cache
+            .retain(|(_, cached_channel_id), _| cached_channel_id != channel_id);
     }
 
     pub fn active_has_pin_badge(&self) -> bool {
@@ -299,6 +321,7 @@ impl PinnedMessagesStore {
         let channel_id = pin.channel_id.to_string();
         self.set_pin_badge(&channel_id, cx);
         if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            self.invalidate_channel_cache(&channel_id);
             return;
         }
         let message_id = pin.message_id.to_string();
@@ -308,6 +331,7 @@ impl PinnedMessagesStore {
         let cfg = AppConfig::try_global(cx);
         self.messages
             .insert(0, pinned_from_last_pin_event(pin, cfg));
+        self.cache_active_messages();
         cx.emit(PinnedEvent::Updated);
         cx.notify();
     }
@@ -321,6 +345,7 @@ impl PinnedMessagesStore {
         }
         let channel_id = ev.channel_id.to_string();
         if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            self.invalidate_channel_cache(&channel_id);
             return;
         }
         let message_id = ev.message_id.to_string();
@@ -329,6 +354,7 @@ impl PinnedMessagesStore {
         self.messages
             .retain(|m| m.message_id != message_id && m.id != pin_id && m.id != message_id);
         if self.messages.len() != before {
+            self.cache_active_messages();
             cx.emit(PinnedEvent::Updated);
             cx.notify();
         }
@@ -471,6 +497,7 @@ impl PinnedMessagesStore {
                 create_time,
             },
         );
+        self.cache_active_messages();
         cx.emit(PinnedEvent::Updated);
         self.set_pin_badge(&channel_id_str, cx);
         cx.notify();
@@ -517,6 +544,7 @@ impl PinnedMessagesStore {
             return;
         };
         self.messages.retain(|m| m.id != pin_id);
+        self.cache_active_messages();
         cx.emit(PinnedEvent::Updated);
         cx.notify();
 

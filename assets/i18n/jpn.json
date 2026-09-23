@@ -4732,5 +4732,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "グループからメンバーを削除しました",
   "userProfile.userInfoDM.mezonMemberSince": "Mezonメンバー desde",
   "userProfile.voiceInfo.inVoice": "ボイスチャンネル内",
-  "userProfile.voiceInfo.joinVoice": "ボイスに参加"
+  "userProfile.voiceInfo.joinVoice": "ボイスに参加",
+  "chat.activityStrip.latestPin": "最新のピン留め",
+  "chat.activityStrip.latestTopicMessage": "トピックの最新メッセージ"
 }

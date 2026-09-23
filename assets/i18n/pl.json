@@ -4729,5 +4729,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Usunięto członka z grupy",
   "userProfile.userInfoDM.mezonMemberSince": "Członek Mezon od",
   "userProfile.voiceInfo.inVoice": "W kanale głosowym",
-  "userProfile.voiceInfo.joinVoice": "Dołącz do rozmowy głosowej"
+  "userProfile.voiceInfo.joinVoice": "Dołącz do rozmowy głosowej",
+  "chat.activityStrip.latestPin": "Najnowsze przypięcie",
+  "chat.activityStrip.latestTopicMessage": "Najnowsza wiadomość w temacie"
 }

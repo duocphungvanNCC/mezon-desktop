@@ -4729,5 +4729,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Удзельнік паспяхова выдалены з групы",
   "userProfile.userInfoDM.mezonMemberSince": "Удзельнік Mezon з",
   "userProfile.voiceInfo.inVoice": "У галасавым канале",
-  "userProfile.voiceInfo.joinVoice": "Далучыцца да галасавога"
+  "userProfile.voiceInfo.joinVoice": "Далучыцца да галасавога",
+  "chat.activityStrip.latestPin": "Апошняе замацаванне",
+  "chat.activityStrip.latestTopicMessage": "Апошняе паведамленне ў тэме"
 }

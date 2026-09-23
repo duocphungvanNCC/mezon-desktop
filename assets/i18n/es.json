@@ -4768,5 +4768,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Eliminado del grupo",
   "userProfile.userInfoDM.mezonMemberSince": "MIEMBRO DE MEZON DESDE",
   "userProfile.voiceInfo.inVoice": "En voz",
-  "userProfile.voiceInfo.joinVoice": "Unirse a voz"
+  "userProfile.voiceInfo.joinVoice": "Unirse a voz",
+  "chat.activityStrip.latestPin": "Último mensaje fijado",
+  "chat.activityStrip.latestTopicMessage": "Último mensaje del tema"
 }

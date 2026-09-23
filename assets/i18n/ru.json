@@ -4972,5 +4972,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Удалено из группы",
   "userProfile.userInfoDM.mezonMemberSince": "Член Mezon с",
   "userProfile.voiceInfo.inVoice": "В голосе",
-  "userProfile.voiceInfo.joinVoice": "Присоединиться к голосу"
+  "userProfile.voiceInfo.joinVoice": "Присоединиться к голосу",
+  "chat.activityStrip.latestPin": "Последнее закрепление",
+  "chat.activityStrip.latestTopicMessage": "Последнее сообщение в теме"
 }

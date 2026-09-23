@@ -4730,5 +4730,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Mitglied erfolgreich aus der Gruppe entfernt",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon-Mitglied seit",
   "userProfile.voiceInfo.inVoice": "Im Sprachkanal",
-  "userProfile.voiceInfo.joinVoice": "Sprachkanal beitreten"
+  "userProfile.voiceInfo.joinVoice": "Sprachkanal beitreten",
+  "chat.activityStrip.latestPin": "Neueste Anheftung",
+  "chat.activityStrip.latestTopicMessage": "Neueste Nachricht im Thema"
 }

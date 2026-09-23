@@ -4742,5 +4742,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Төркемнән алынды",
   "userProfile.userInfoDM.mezonMemberSince": "МЕЗОН ОЧЫРЫШЫ",
   "userProfile.voiceInfo.inVoice": "Тавышта",
-  "userProfile.voiceInfo.joinVoice": "Тавышка кушылу"
+  "userProfile.voiceInfo.joinVoice": "Тавышка кушылу",
+  "chat.activityStrip.latestPin": "Соңгы беркетмә",
+  "chat.activityStrip.latestTopicMessage": "Темадагы соңгы хәбәр"
 }

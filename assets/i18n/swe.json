@@ -4730,5 +4730,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Medlem raderad från grupp framgångsrikt",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon medlem från",
   "userProfile.voiceInfo.inVoice": "I röstkanal",
-  "userProfile.voiceInfo.joinVoice": "Gå med i röst"
+  "userProfile.voiceInfo.joinVoice": "Gå med i röst",
+  "chat.activityStrip.latestPin": "Senast fäst",
+  "chat.activityStrip.latestTopicMessage": "Senaste meddelandet i ämnet"
 }

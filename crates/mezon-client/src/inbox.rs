@@ -125,6 +125,7 @@ pub struct TopicDiscussion {
     pub last_sender_id: String,
     pub content: String,
     pub last_message_content: String,
+    pub last_message_attachments: Vec<crate::transport::ApiAttachment>,
     pub last_message_timestamp: u32,
 }
 
@@ -1095,6 +1096,7 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
             .as_ref()
             .map(|message| message.content.clone())
             .unwrap_or_default(),
+        last_message_attachments: Vec::new(),
         last_message_timestamp,
     }
 }

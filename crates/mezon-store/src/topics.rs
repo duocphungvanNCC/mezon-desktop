@@ -167,6 +167,8 @@ impl TopicsData {
         if !message.content.is_empty() {
             topic.last_message_content = message.content.clone();
         }
+        topic.last_message_attachments =
+            mezon_client::transport::parse_message_attachments(&message.attachments);
         if message.sender_id > 0 {
             topic.last_sender_id = message.sender_id.to_string();
         }
@@ -194,13 +196,8 @@ impl TopicsData {
         };
         if !message.content.is_empty() {
             topic.last_message_content = message.content.clone();
-        } else if let Some(attachment) = message.attachments.first() {
-            topic.last_message_content = if attachment.filename.is_empty() {
-                "Attachment".to_string()
-            } else {
-                attachment.filename.clone()
-            };
         }
+        topic.last_message_attachments = message.attachments.clone();
         if message.sender_id > 0 {
             topic.last_sender_id = message.sender_id.to_string();
         }
@@ -222,6 +219,9 @@ impl TopicsData {
             }
             if !topic.last_message_content.is_empty() {
                 existing.last_message_content = topic.last_message_content;
+            }
+            if !topic.last_message_attachments.is_empty() {
+                existing.last_message_attachments = topic.last_message_attachments;
             }
             if topic.last_message_timestamp > 0 {
                 existing.last_message_timestamp = existing
@@ -1897,7 +1897,24 @@ impl TopicsStore {
     /// consistently the final reply. Resolve the winner once pagination is complete and use the
     /// actual newest message for the compact clan activity preview.
     fn hydrate_latest_topic_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(topic) = self.data.topics().first().cloned() else {
+        let active_channel_id = MessagesStore::try_global(cx)
+            .and_then(|store| store.read(cx).active_channel_id())
+            .map(|channel_id| channel_id.to_string());
+        self.hydrate_latest_topic_preview_for_channel(active_channel_id.as_deref(), cx);
+    }
+
+    pub fn hydrate_latest_topic_preview_for_channel(
+        &mut self,
+        channel_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topic) = self
+            .data
+            .topics()
+            .iter()
+            .find(|topic| channel_id.is_none_or(|channel_id| topic.channel_id == channel_id))
+            .cloned()
+        else {
             return;
         };
         if self.hydrated_preview_topic_id.as_deref() == Some(topic.id.as_str()) {
@@ -2115,6 +2132,7 @@ mod tests {
             last_sender_id: last_sender_id.to_string(),
             content: content.to_string(),
             last_message_content: String::new(),
+            last_message_attachments: Vec::new(),
             last_message_timestamp,
         }
     }
