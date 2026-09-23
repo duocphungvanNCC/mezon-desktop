@@ -91,21 +91,25 @@ fn modal_preview_image_cache(cx: &mut App, label: &'static str) -> Entity<LruIma
 }
 
 fn member_subscriptions(cx: &mut Context<ConfirmPinMessageModal>) -> Vec<Subscription> {
+    let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
     vec![
         cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&UsersByUserStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
+        cx.observe(&audio_meta, |_, _, cx| cx.notify()),
     ]
 }
 
 fn member_subscriptions_unpin(cx: &mut Context<ConfirmUnpinMessageModal>) -> Vec<Subscription> {
+    let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
     vec![
         cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&UsersByUserStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify()),
+        cx.observe(&audio_meta, |_, _, cx| cx.notify()),
     ]
 }
 
@@ -348,7 +352,7 @@ fn preview_from_message(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache),
+        body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache, cx),
         timestamp,
     }
 }
@@ -398,7 +402,7 @@ fn preview_from_pin(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache),
+        body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache, cx),
         timestamp: None,
     }
 }
@@ -513,6 +517,10 @@ fn modal_shell(
 
 impl Render for ConfirmPinMessageModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let probe = self.message.attachments.clone();
+        cx.defer(move |cx| {
+            super::audio_meta::AudioMetaCache::ensure_attachments(&probe, cx);
+        });
         let theme = cx.theme().clone();
         let tokens = &theme.tokens;
         let preview = self.preview(cx);
@@ -583,6 +591,19 @@ impl Render for ConfirmPinMessageModal {
 
 impl Render for ConfirmUnpinMessageModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pin_id = self.pin_id.clone();
+        cx.defer(move |cx| {
+            let Some(pin) = PinnedMessagesStore::global(cx)
+                .read(cx)
+                .pinned()
+                .iter()
+                .find(|pin| pin.id == pin_id.as_ref())
+                .cloned()
+            else {
+                return;
+            };
+            super::audio_meta::AudioMetaCache::ensure_attachments(&pin.attachments, cx);
+        });
         let theme = cx.theme().clone();
         let tokens = &theme.tokens;
         let preview = self.preview(cx);

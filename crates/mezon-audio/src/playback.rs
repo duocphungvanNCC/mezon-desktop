@@ -306,10 +306,22 @@ impl Source for PcmStreamSource {
         None
     }
 
-    fn try_seek(&mut self, _: Duration) -> Result<(), rodio::source::SeekError> {
-        Err(rodio::source::SeekError::NotSupported {
-            underlying_source: "PcmStreamSource",
-        })
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        let channels = self.channels.get() as usize;
+        let frames = (pos.as_secs_f64() * self.sample_rate.get() as f64).max(0.0) as usize;
+        let target = frames.saturating_mul(channels);
+        let Some((index, offset, chunk)) = self.stream.locate(target) else {
+            return Err(rodio::source::SeekError::NotSupported {
+                underlying_source: "PcmStreamSource",
+            });
+        };
+        let offset = offset - offset % channels;
+        self.chunk = Some(chunk);
+        self.offset = offset;
+        self.next_chunk = index + 1;
+        self.silence_debt = 0;
+        self.exhausted = false;
+        Ok(())
     }
 }
 
@@ -436,6 +448,55 @@ impl AudioPlayer {
         self.player.borrow().pause();
     }
 
+    pub fn seek(&self, secs: f64) {
+        let duration = self.duration_secs();
+        let secs = if duration > 0.0 {
+            secs.clamp(0.0, duration)
+        } else {
+            secs.max(0.0)
+        };
+        let playing = self.is_playing();
+        {
+            let player = self.player.borrow();
+            if !player.empty() && player.try_seek(Duration::from_secs_f64(secs)).is_ok() {
+                return;
+            }
+        }
+        self.requeue_at(secs, playing);
+    }
+
+    fn requeue_at(&self, secs: f64, playing: bool) {
+        self.follow_output();
+        let data = self.data.borrow();
+        let Some(data) = data.as_ref() else {
+            return;
+        };
+        let player = self.player.borrow();
+        player.clear();
+        match data {
+            Playable::Pcm(pcm) => {
+                let mut source = SharedSamplesSource {
+                    samples: Arc::clone(&pcm.samples),
+                    position: 0,
+                    channels: pcm.channels,
+                    sample_rate: pcm.sample_rate,
+                    duration: pcm.duration,
+                };
+                let _ = source.try_seek(Duration::from_secs_f64(secs));
+                player.append(source);
+            }
+            Playable::Stream(stream) => {
+                let mut source = PcmStreamSource::new(Arc::clone(stream));
+                let _ = source.try_seek(Duration::from_secs_f64(secs));
+                player.append(source);
+            }
+        }
+        self.started.set(true);
+        if playing {
+            player.play();
+        }
+    }
+
     pub fn is_playing(&self) -> bool {
         let player = self.player.borrow();
         !player.is_paused() && !player.empty()
@@ -467,6 +528,7 @@ impl Drop for AudioPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rodio::Source;
 
     #[test]
     fn stream_source_pads_underruns_to_whole_frames() {
@@ -489,6 +551,19 @@ mod tests {
         stream.finish();
         assert_eq!(source.next(), None);
         assert_eq!(source.current_span_len(), Some(0));
+    }
+
+    #[test]
+    fn stream_source_seeks_into_a_later_chunk() {
+        let stream = Arc::new(PcmStream::new(1, 8, Some(1.0)));
+        stream.push(&[0.0, 1.0, 2.0, 3.0]);
+        stream.push(&[4.0, 5.0, 6.0, 7.0]);
+        stream.finish();
+        let mut source = PcmStreamSource::new(stream);
+        source
+            .try_seek(Duration::from_secs_f64(0.5))
+            .expect("buffered audio can seek");
+        assert_eq!(source.next(), Some(4.0));
     }
 
     #[test]

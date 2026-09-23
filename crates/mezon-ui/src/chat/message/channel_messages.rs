@@ -684,6 +684,13 @@ enum PaginationDirection {
     Bottom,
 }
 
+const PINNED_TAIL_ROWS: usize = 24;
+
+fn pinned_tail_message_indexes(header: usize, count: usize) -> Vec<usize> {
+    let start = count.saturating_sub(PINNED_TAIL_ROWS).max(header);
+    (start..count).map(|list_ix| list_ix - header).collect()
+}
+
 fn pagination_proximity(
     visible_start: usize,
     visible_end: usize,
@@ -1110,6 +1117,19 @@ mod pagination_tests {
     use super::*;
 
     #[test]
+    fn a_bottom_pinned_timeline_still_covers_the_newest_row() {
+        assert_eq!(
+            pinned_tail_message_indexes(0, 100),
+            (76..100).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            pinned_tail_message_indexes(1, 10),
+            (0..9).collect::<Vec<_>>()
+        );
+        assert_eq!(pinned_tail_message_indexes(0, 3), vec![0, 1, 2]);
+    }
+
+    #[test]
     fn top_threshold_excludes_the_fixed_skeleton_row() {
         assert_eq!(pagination_proximity(13, 21, 100, true), (true, false));
         assert_eq!(pagination_proximity(14, 22, 100, true), (false, false));
@@ -1441,6 +1461,8 @@ impl ChannelMessages {
             memo.selection_text_pieces.clear();
             cx.notify();
         }));
+        let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
+        subs.push(cx.observe(&audio_meta, |_, _, cx| cx.notify()));
 
         let channel_list = ChannelList::global(cx);
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
@@ -2914,6 +2936,56 @@ impl ChannelMessages {
         if key != self.identity_inputs {
             self.store_identity(Self::compute_identity(cx));
         }
+    }
+
+    fn request_visible_audio_meta(&self, cx: &mut Context<Self>) {
+        let header = usize::from(self.header_shown);
+        let count = self.list_state.item_count();
+        if count <= header {
+            return;
+        }
+        let scroll_ix = self.list_state.logical_scroll_top().item_ix;
+        let row_indexes = if scroll_ix >= count {
+            pinned_tail_message_indexes(header, count)
+        } else {
+            let mut row_indexes = Vec::new();
+            for list_ix in scroll_ix.max(header)..count {
+                let below = self.list_state.item_is_below_viewport(list_ix);
+                if below == Some(true) {
+                    break;
+                }
+                if self.list_state.item_is_above_viewport(list_ix) != Some(false)
+                    || below != Some(false)
+                {
+                    continue;
+                }
+                row_indexes.push(list_ix - header);
+            }
+            row_indexes
+        };
+        if row_indexes.is_empty() {
+            return;
+        }
+        let mut urls = Vec::new();
+        let collect = |messages: &[Message], urls: &mut Vec<String>| {
+            for index in &row_indexes {
+                let Some(message) = messages.get(*index) else {
+                    continue;
+                };
+                for att in &message.attachments {
+                    if super::audio_meta::attachment_needs_audio_probe(att) {
+                        urls.push(att.url.clone());
+                    }
+                }
+            }
+        };
+        if self.is_topic_box {
+            collect(&self.topic_messages, &mut urls);
+        } else {
+            let store = MessagesStore::global(cx);
+            collect(store.read(cx).viewport_messages(), &mut urls);
+        }
+        super::audio_meta::AudioMetaCache::ensure_urls(urls, cx);
     }
 
     fn apply_gif_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4791,6 +4863,9 @@ impl ChannelMessages {
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let scroll_active =
             self.keyboard_scroll.is_some() || self.list_state.is_scroll_hover_active();
+        cx.defer_in(window, |this, _window, cx| {
+            this.request_visible_audio_meta(cx);
+        });
         self.sync_topic_header(cx);
         self.maybe_paginate_topic(cx);
         let header_shown = self.header_shown;
@@ -4896,6 +4971,16 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
+                    let probe_urls = {
+                        let topic = entity.read(cx);
+                        match topic.topic_messages.get(row_ix) {
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
+                        }
+                    };
+                    super::audio_meta::defer_audio_probe(probe_urls, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5162,6 +5247,9 @@ impl Render for ChannelMessages {
                 .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.last_image_cache_sweep = Some(Instant::now());
         }
+        cx.defer_in(window, |this, _window, cx| {
+            this.request_visible_audio_meta(cx);
+        });
         if !scroll_active {
             self.schedule_scroll_state_sync(window, cx);
             cx.defer_in(window, |this, window, cx| {
@@ -5283,6 +5371,16 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
+                    let probe_urls = {
+                        let messages = store.read(cx);
+                        match messages.viewport_messages().get(msg_ix) {
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
+                        }
+                    };
+                    super::audio_meta::defer_audio_probe(probe_urls, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
