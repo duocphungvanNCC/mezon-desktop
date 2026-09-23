@@ -100,6 +100,7 @@ pub struct VoiceMember {
 pub struct InVoiceInfo {
     pub clan_id: ClanId,
     pub channel_id: ChannelId,
+    pub sharing_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2030,22 +2031,10 @@ impl ChannelList {
             users
                 .into_iter()
                 .map(|v| {
-                    let sharing: HashSet<UserId> =
-                        v.share_screen_ids.into_iter().map(UserId).collect();
-                    let members = v
-                        .user_ids
-                        .into_iter()
-                        .map(|uid| {
-                            let user_id = UserId(uid);
-                            VoiceMember {
-                                user_id,
-                                display_name: user_id.to_string(),
-                                avatar_url: String::new(),
-                                sharing_screen: sharing.contains(&user_id),
-                            }
-                        })
-                        .collect();
-                    (ChannelId(v.channel_id), members)
+                    (
+                        ChannelId(v.channel_id),
+                        voice_members_from(v.user_ids, v.share_screen_ids),
+                    )
                 })
                 .collect()
         });
@@ -3780,6 +3769,7 @@ impl ChannelList {
                     InVoiceInfo {
                         clan_id,
                         channel_id,
+                        sharing_screen: false,
                     },
                 );
                 notify_in_voice_change(changed, in_voice_changed, cx);
@@ -3839,17 +3829,25 @@ impl ChannelList {
                         }
                     }
                 }
+                let in_voice_changed = self.in_voice.get_mut(&user_id).is_some_and(|info| {
+                    info.clan_id == clan_id
+                        && info.channel_id == channel_id
+                        && info.sharing_screen != is_sharing
+                        && {
+                            info.sharing_screen = is_sharing;
+                            true
+                        }
+                });
                 tracing::debug!(
                     %clan_id,
                     %channel_id,
                     %user_id,
                     is_sharing,
                     updated = changed,
+                    in_voice_changed,
                     "realtime ScreenShare"
                 );
-                if changed {
-                    cx.notify();
-                }
+                notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
@@ -5658,6 +5656,22 @@ fn thread_channel_from_context(
     }
 }
 
+fn voice_members_from(user_ids: Vec<i64>, share_screen_ids: Vec<i64>) -> Vec<VoiceMember> {
+    let sharing: HashSet<UserId> = share_screen_ids.into_iter().map(UserId).collect();
+    let mut seen: HashSet<UserId> = HashSet::new();
+    user_ids
+        .into_iter()
+        .map(UserId)
+        .filter(|user_id| seen.insert(*user_id))
+        .map(|user_id| VoiceMember {
+            user_id,
+            display_name: user_id.to_string(),
+            avatar_url: String::new(),
+            sharing_screen: sharing.contains(&user_id),
+        })
+        .collect()
+}
+
 fn channel_from_desc(
     c: ApiChannelDesc,
     badge_count: u32,
@@ -6036,11 +6050,8 @@ fn apply_in_voice_leaved(
 }
 
 fn should_sync_channel_to_user_list(channel: &Channel) -> bool {
-    if channel.clan_id.is_zero() {
-        let raw = channel.channel_type.as_raw();
-        return raw != 2 && raw != 3;
-    }
-    !matches!(channel.channel_type, ChannelType::App | ChannelType::Voice)
+    let raw = channel.channel_type.as_raw();
+    raw != 2 && raw != 3
 }
 
 fn upsert_user_channel(
@@ -6328,6 +6339,7 @@ fn seed_in_voice_from_categories(
                 InVoiceInfo {
                     clan_id,
                     channel_id: channel.id,
+                    sharing_screen: member.sharing_screen,
                 },
             );
         }
@@ -7040,6 +7052,15 @@ mod tests {
                 assert_eq!(targets.len(), 1);
                 assert_eq!(targets[0].id, ChannelId(1));
                 assert_eq!(targets[0].category_name, "General");
+
+                assert!(
+                    channels.user_channel(ChannelId(4)).is_some(),
+                    "DM hashtag suggestions read user_channels, which must keep voice"
+                );
+                assert_eq!(
+                    channels.user_channel(ChannelId(4)).unwrap().channel_type,
+                    ChannelType::Voice
+                );
             });
         });
     }
@@ -7502,6 +7523,31 @@ mod tests {
             ChannelType::from_raw(99),
             ChannelType::Unknown(99)
         ));
+    }
+
+    #[test]
+    fn user_channel_sync_keeps_voice_and_app_drops_dm_group() {
+        let mut voice = make_channel(4, "voice", "1");
+        voice.channel_type = ChannelType::Voice;
+        let mut app = make_channel(5, "app", "1");
+        app.channel_type = ChannelType::App;
+        let mut stream = make_channel(6, "stream", "1");
+        stream.channel_type = ChannelType::Stream;
+        let mut dm = make_channel(7, "dm", "1");
+        dm.clan_id = ClanId(0);
+        dm.channel_type = ChannelType::Unknown(3);
+        let mut group = make_channel(8, "group", "1");
+        group.clan_id = ClanId(0);
+        group.channel_type = ChannelType::Unknown(2);
+
+        assert!(should_sync_channel_to_user_list(&voice));
+        assert!(should_sync_channel_to_user_list(&app));
+        assert!(should_sync_channel_to_user_list(&stream));
+        assert!(should_sync_channel_to_user_list(&make_channel(
+            1, "text", "1"
+        )));
+        assert!(!should_sync_channel_to_user_list(&dm));
+        assert!(!should_sync_channel_to_user_list(&group));
     }
 
     #[test]
@@ -8540,6 +8586,17 @@ mod tests {
         .collect()
     }
 
+    #[test]
+    fn a_user_present_on_two_devices_keeps_one_row_in_the_channel_list() {
+        let members = voice_members_from(vec![7, 9, 7], vec![9]);
+        assert_eq!(
+            members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            vec![UserId(7), UserId(9)]
+        );
+        assert!(!members[0].sharing_screen);
+        assert!(members[1].sharing_screen);
+    }
+
     fn voice_members_of(channels: &ChannelList, category_ix: usize) -> Vec<UserId> {
         channels.categories_for_clan(ClanId(1))[category_ix]
             .channels
@@ -8687,6 +8744,14 @@ mod tests {
                 };
 
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8698,6 +8763,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(true));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: true,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8709,6 +8782,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
             });
         });
     }
@@ -11891,6 +11972,7 @@ mod tests {
         InVoiceInfo {
             clan_id: ClanId(clan),
             channel_id: ChannelId(channel),
+            sharing_screen: false,
         }
     }
 

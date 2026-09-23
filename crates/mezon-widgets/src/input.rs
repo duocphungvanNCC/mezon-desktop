@@ -160,7 +160,11 @@ impl InputState {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.placeholder = placeholder.into();
+        let placeholder = placeholder.into();
+        if self.placeholder == placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
         cx.notify();
     }
 
@@ -1107,13 +1111,21 @@ impl EntityInputHandler for InputState {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        let candidate =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        let valid = match &self.validate {
+            Some(validate) => validate(&candidate, cx),
+            None => true,
+        };
+        if !valid {
+            return;
+        }
+
         if self.marked_range.is_none() {
             self.record_history(EditKind::Insert);
         }
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        self.content = candidate.into();
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
