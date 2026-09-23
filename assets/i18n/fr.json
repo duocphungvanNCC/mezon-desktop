@@ -4739,5 +4739,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Membre supprimé du groupe",
   "userProfile.userInfoDM.mezonMemberSince": "Membre Mezon depuis",
   "userProfile.voiceInfo.inVoice": "Dans le canal vocal",
-  "userProfile.voiceInfo.joinVoice": "Rejoindre la voix"
+  "userProfile.voiceInfo.joinVoice": "Rejoindre la voix",
+  "screenShare.modeText": "Texte",
+  "screenShare.modeTextDescription": "Texte et diapositives plus nets, consommation de ressources réduite.",
+  "screenShare.modeVideo": "Vidéo",
+  "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente."
 }

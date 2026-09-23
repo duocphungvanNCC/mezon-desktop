@@ -4740,5 +4740,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Mitglied erfolgreich aus der Gruppe entfernt",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon-Mitglied seit",
   "userProfile.voiceInfo.inVoice": "Im Sprachkanal",
-  "userProfile.voiceInfo.joinVoice": "Sprachkanal beitreten"
+  "userProfile.voiceInfo.joinVoice": "Sprachkanal beitreten",
+  "screenShare.modeText": "Text",
+  "screenShare.modeTextDescription": "Schärferer Text und Folien, geringerer Ressourcenverbrauch.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Flüssigeres Video; bei langsamer Verbindung kann die Schärfe abnehmen."
 }

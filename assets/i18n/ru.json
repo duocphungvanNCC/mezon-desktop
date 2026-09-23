@@ -4982,5 +4982,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Удалено из группы",
   "userProfile.userInfoDM.mezonMemberSince": "Член Mezon с",
   "userProfile.voiceInfo.inVoice": "В голосе",
-  "userProfile.voiceInfo.joinVoice": "Присоединиться к голосу"
+  "userProfile.voiceInfo.joinVoice": "Присоединиться к голосу",
+  "screenShare.modeText": "Текст",
+  "screenShare.modeTextDescription": "Более чёткий текст и слайды, меньше нагрузка на ресурсы.",
+  "screenShare.modeVideo": "Видео",
+  "screenShare.modeVideoDescription": "Более плавное видео; при медленном соединении чёткость может снизиться."
 }

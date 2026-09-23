@@ -4740,5 +4740,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Medlem raderad från grupp framgångsrikt",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon medlem från",
   "userProfile.voiceInfo.inVoice": "I röstkanal",
-  "userProfile.voiceInfo.joinVoice": "Gå med i röst"
+  "userProfile.voiceInfo.joinVoice": "Gå med i röst",
+  "screenShare.modeText": "Text",
+  "screenShare.modeTextDescription": "Skarpare text och bilder, lägre resursanvändning.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Smidigare video; skärpan kan minska vid en långsam anslutning."
 }

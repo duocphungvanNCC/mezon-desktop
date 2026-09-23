@@ -4752,5 +4752,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Төркемнән алынды",
   "userProfile.userInfoDM.mezonMemberSince": "МЕЗОН ОЧЫРЫШЫ",
   "userProfile.voiceInfo.inVoice": "Тавышта",
-  "userProfile.voiceInfo.joinVoice": "Тавышка кушылу"
+  "userProfile.voiceInfo.joinVoice": "Тавышка кушылу",
+  "screenShare.modeText": "Текст",
+  "screenShare.modeTextDescription": "Текст һәм слайдлар ачыграк, ресурслар азрак тотыла.",
+  "screenShare.modeVideo": "Видео",
+  "screenShare.modeVideoDescription": "Видео шомарак; әкрен тоташуда ачыклык кимергә мөмкин."
 }

@@ -4739,5 +4739,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Удзельнік паспяхова выдалены з групы",
   "userProfile.userInfoDM.mezonMemberSince": "Удзельнік Mezon з",
   "userProfile.voiceInfo.inVoice": "У галасавым канале",
-  "userProfile.voiceInfo.joinVoice": "Далучыцца да галасавога"
+  "userProfile.voiceInfo.joinVoice": "Далучыцца да галасавога",
+  "screenShare.modeText": "Тэкст",
+  "screenShare.modeTextDescription": "Больш выразныя тэкст і слайды, меншае выкарыстанне рэсурсаў.",
+  "screenShare.modeVideo": "Відэа",
+  "screenShare.modeVideoDescription": "Больш плаўнае відэа; пры павольным злучэнні выразнасць можа знізіцца."
 }

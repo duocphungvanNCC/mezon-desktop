@@ -4739,5 +4739,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Учасника успішно видалено з групи",
   "userProfile.userInfoDM.mezonMemberSince": "Учасник Mezon з",
   "userProfile.voiceInfo.inVoice": "У голосовому каналі",
-  "userProfile.voiceInfo.joinVoice": "Приєднатися до голосового"
+  "userProfile.voiceInfo.joinVoice": "Приєднатися до голосового",
+  "screenShare.modeText": "Текст",
+  "screenShare.modeTextDescription": "Чіткіший текст і слайди, менше використання ресурсів.",
+  "screenShare.modeVideo": "Відео",
+  "screenShare.modeVideoDescription": "Плавніше відео; за повільного з’єднання чіткість може знизитися."
 }

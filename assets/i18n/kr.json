@@ -4740,5 +4740,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "그룹에서 멤버 성공적으로 제거",
   "userProfile.userInfoDM.mezonMemberSince": "Mezon 멤버",
   "userProfile.voiceInfo.inVoice": "음성 채널에서",
-  "userProfile.voiceInfo.joinVoice": "음성 참여"
+  "userProfile.voiceInfo.joinVoice": "음성 참여",
+  "screenShare.modeText": "텍스트",
+  "screenShare.modeTextDescription": "텍스트와 슬라이드가 더 선명하고 리소스 사용량이 적습니다.",
+  "screenShare.modeVideo": "동영상",
+  "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다."
 }

@@ -4742,5 +4742,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "グループからメンバーを削除しました",
   "userProfile.userInfoDM.mezonMemberSince": "Mezonメンバー desde",
   "userProfile.voiceInfo.inVoice": "ボイスチャンネル内",
-  "userProfile.voiceInfo.joinVoice": "ボイスに参加"
+  "userProfile.voiceInfo.joinVoice": "ボイスに参加",
+  "screenShare.modeText": "テキスト",
+  "screenShare.modeTextDescription": "文字やスライドがより鮮明になり、リソース使用量も少なくなります。",
+  "screenShare.modeVideo": "ビデオ",
+  "screenShare.modeVideoDescription": "動画がより滑らかになります。回線が遅いと鮮明さが下がる場合があります。"
 }
