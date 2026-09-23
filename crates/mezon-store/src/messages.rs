@@ -729,12 +729,35 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
         url: a.url.clone(),
         filename: a.filename.clone(),
         filetype: a.filetype.clone(),
-        width: i32::try_from(a.width).unwrap_or(i32::MAX),
-        height: i32::try_from(a.height).unwrap_or(i32::MAX),
+        width: i32::try_from(a.width).unwrap_or(0),
+        height: i32::try_from(a.height).unwrap_or(0),
         thumbnail: a.thumbnail.clone(),
         duration: a.duration,
-        size: i32::try_from(a.size).unwrap_or(i32::MAX),
+        size: i32::try_from(a.size).unwrap_or(0),
     }
+}
+
+fn inbox_content_with_attachment_preview(
+    content_json: &str,
+    fallback_text: &str,
+    attachments: &[mezon_client::transport::ApiAttachment],
+) -> String {
+    let Some(first) = attachments.first() else {
+        return content_json.to_string();
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(content_json).ok();
+    let mut content = match parsed {
+        Some(value) if value.is_object() => value,
+        Some(serde_json::Value::String(inner)) => serde_json::from_str(&inner)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({ "t": fallback_text })),
+        _ => serde_json::json!({ "t": fallback_text }),
+    };
+    // The desktop inbox renders only the first attachment. Keep its metadata in
+    // content because persisted notifications otherwise retain only URL/type.
+    content["attachments"] = serde_json::json!([first]);
+    content.to_string()
 }
 
 /// Mentions carried by the source message. The server delivers them in the binary
@@ -3349,47 +3372,23 @@ impl MessagesStore {
                 })
             })
             .collect();
-        let attachments: Vec<mezon_proto::api::MessageAttachment> = msg
-            .attachments
+        let inbox_attachments: Vec<mezon_client::transport::ApiAttachment> =
+            msg.attachments.iter().map(attachment_to_api).collect();
+        let content_json =
+            inbox_content_with_attachment_preview(&content_json, &msg.content, &inbox_attachments);
+        let attachments: Vec<mezon_proto::api::MessageAttachment> = inbox_attachments
             .iter()
             .map(|att| mezon_proto::api::MessageAttachment {
                 url: att.url.clone(),
                 filename: att.filename.clone(),
                 filetype: att.filetype.clone(),
-                width: i32::try_from(att.width).unwrap_or(0),
-                height: i32::try_from(att.height).unwrap_or(0),
+                width: att.width,
+                height: att.height,
                 thumbnail: att.thumbnail.clone(),
                 duration: att.duration,
-                size: i32::try_from(att.size).unwrap_or(0),
+                size: att.size,
             })
             .collect();
-
-        let content_json = if attachments.is_empty() {
-            content_json
-        } else {
-            let mut content = serde_json::from_str::<serde_json::Value>(&content_json)
-                .ok()
-                .filter(serde_json::Value::is_object)
-                .unwrap_or_else(|| serde_json::json!({ "t": msg.content }));
-            content["attachments"] = serde_json::Value::Array(
-                attachments
-                    .iter()
-                    .map(|att| {
-                        serde_json::json!({
-                            "url": att.url,
-                            "filename": att.filename,
-                            "filetype": att.filetype,
-                            "size": att.size,
-                            "thumbnail": att.thumbnail,
-                            "width": att.width,
-                            "height": att.height,
-                            "duration": att.duration,
-                        })
-                    })
-                    .collect(),
-            );
-            content.to_string()
-        };
         let first_attachment = attachments.first();
         let attachment_link = first_attachment
             .map(|att| att.url.clone())
@@ -9616,6 +9615,49 @@ impl MessageAttachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbox_test_attachment(name: &str) -> mezon_client::transport::ApiAttachment {
+        mezon_client::transport::ApiAttachment {
+            url: format!("https://cdn/{name}"),
+            filename: name.into(),
+            filetype: "text/plain".into(),
+            size: 512,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inbox_content_embeds_only_first_attachment_preview() {
+        let attachments = [
+            inbox_test_attachment("one.txt"),
+            inbox_test_attachment("two.txt"),
+        ];
+        let content = inbox_content_with_attachment_preview(
+            r#"{"t":"hello","mk":[{"s":0,"e":5,"type":"b"}]}"#,
+            "fallback",
+            &attachments,
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["t"], "hello");
+        assert!(value["mk"].is_array());
+        assert_eq!(value["attachments"].as_array().unwrap().len(), 1);
+        assert_eq!(value["attachments"][0]["filename"], "one.txt");
+    }
+
+    #[test]
+    fn inbox_content_unwraps_double_encoded_message_tokens() {
+        let inner = r#"{"t":"hello","lk":[{"s":0,"e":5}]}"#;
+        let encoded = serde_json::to_string(inner).unwrap();
+        let content = inbox_content_with_attachment_preview(
+            &encoded,
+            "fallback",
+            &[inbox_test_attachment("one.txt")],
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["t"], "hello");
+        assert!(value["lk"].is_array());
+        assert_eq!(value["attachments"][0]["filename"], "one.txt");
+    }
     use crate::ids::UserId;
     use crate::message::MessageSpan;
 

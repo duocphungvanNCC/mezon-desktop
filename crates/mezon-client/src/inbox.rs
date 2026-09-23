@@ -480,7 +480,7 @@ fn first_attachment_from_json(value: &serde_json::Value) -> Option<ParsedInboxAt
         .and_then(|v| v.as_str())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| filename_from_url(&url));
+        .unwrap_or_default();
     let size = item.get("size").map(json_u64).unwrap_or(0);
     let thumbnail = item
         .get("thumbnail")
@@ -1207,6 +1207,14 @@ mod tests {
         assert_eq!(preview.attachment_link, "https://cdn/b.pdf");
         assert_eq!(preview.attachment_type, "application/pdf");
         assert_eq!(preview.attachment_filename, "b.pdf");
+        assert_eq!(preview.attachment_size, 512);
+    }
+
+    #[test]
+    fn content_filename_wins_when_sibling_attachment_has_only_url() {
+        let bytes = br#"{"message_id":"42","content":"{\"attachments\":[{\"url\":\"https://cdn/2100.txt\",\"filename\":\"original.txt\",\"size\":512}]}","attachments":[{"url":"https://cdn/2100.txt"}]}"#;
+        let preview = parse_message_preview_json(bytes).unwrap();
+        assert_eq!(preview.attachment_filename, "original.txt");
         assert_eq!(preview.attachment_size, 512);
     }
 
