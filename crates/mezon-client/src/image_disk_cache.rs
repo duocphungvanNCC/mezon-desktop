@@ -604,6 +604,15 @@ mod tests {
     #[test]
     fn inline_images_reject_svg() {
         assert!(inline_image_response("data:image/svg+xml,%3Csvg%3E%3C/svg%3E").is_err());
+        assert!(inline_image_response("data:image/png,%3Csvg%3E%3C/svg%3E").is_err());
+    }
+
+    #[test]
+    fn inline_images_sniff_raster_bytes_instead_of_restricting_mime_aliases() {
+        for mime in ["image/jpg", "image/x-icon", "image/apng", "image/tiff"] {
+            let uri = format!("data:{mime};base64,iVBORw0KGgo=");
+            assert!(inline_image_response(&uri).is_ok(), "{mime}");
+        }
     }
 
     #[test]

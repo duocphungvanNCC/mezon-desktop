@@ -5,15 +5,6 @@ use base64::Engine as _;
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BASE64_ENCODED_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4;
 const MAX_BASE64_WHITESPACE_BYTES: usize = MAX_BASE64_ENCODED_BYTES / 32;
-const RASTER_MIMES: &[&str] = &[
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-    "image/avif",
-];
-
 pub fn is_data_image_uri(uri: &str) -> bool {
     uri.get(..5)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
@@ -31,9 +22,9 @@ pub fn decode_data_image(uri: &str) -> anyhow::Result<Vec<u8>> {
     let mut parameters = metadata.split(';');
     let mime = parameters.next().unwrap_or_default().trim();
     anyhow::ensure!(
-        RASTER_MIMES
-            .iter()
-            .any(|allowed| mime.eq_ignore_ascii_case(allowed)),
+        mime.get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+            && !mime.eq_ignore_ascii_case("image/svg+xml"),
         "unsupported inline image type"
     );
     let base64 = parameters.any(|parameter| parameter.trim().eq_ignore_ascii_case("base64"));
@@ -84,5 +75,6 @@ pub fn decode_data_image(uri: &str) -> anyhow::Result<Vec<u8>> {
         !bytes.is_empty() && bytes.len() <= MAX_IMAGE_BYTES,
         "invalid inline image size"
     );
+    image::guess_format(&bytes).map_err(|_| anyhow::anyhow!("unsupported inline image data"))?;
     Ok(bytes)
 }
