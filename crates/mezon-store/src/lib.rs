@@ -41,6 +41,7 @@ pub mod message;
 pub mod message_search;
 pub mod message_time;
 pub mod messages;
+pub mod name_validation;
 pub mod notification_push;
 pub mod notification_setting;
 pub mod ogp;
@@ -195,6 +196,10 @@ pub use mezon_client::{
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use name_validation::{
+    CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
+    is_valid_name_content, prepare_display_name_for_update,
+};
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{

@@ -3809,6 +3809,7 @@
   "profileSetting.fields.pronouns.label": "Pronomes",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Salvar",
+  "profileSetting.invalidDisplayName": "O nome de exibição deve ter no máximo 32 bytes (menos caracteres em japonês ou vietnamita). Use apenas letras, números, espaços e _ - . +. Os nomes não podem começar com _ ou -.",
   "profileSetting.moveImage": "Mover imagem",
   "profileSetting.nickNameExistsError": "Este apelido já existe no clã. Por favor, escolha outro.",
   "profileSetting.preview": "PRÉ-VISUALIZAÇÃO",

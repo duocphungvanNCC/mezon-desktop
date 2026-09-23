@@ -3808,6 +3808,7 @@
   "profileSetting.fields.pronouns.label": "Займенники",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Зберегти",
+  "profileSetting.invalidDisplayName": "Відображуване ім'я має містити не більше 32 байт (менше символів японською або в'єтнамською). Дозволені лише літери, цифри, пробіли та _ - . +. Ім'я не може починатися з _ або -.",
   "profileSetting.moveImage": "Перемістити зображення",
   "profileSetting.nickNameExistsError": "Прізвисько вже існує в клані. Введіть інше прізвисько.",
   "profileSetting.preview": "ПЕРЕДПЕРЕГЛЯД",

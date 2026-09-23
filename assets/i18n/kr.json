@@ -3809,6 +3809,7 @@
   "profileSetting.fields.pronouns.label": "대명사",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "저장",
+  "profileSetting.invalidDisplayName": "표시 이름은 최대 32바이트까지 가능합니다(일본어·베트남어는 더 적은 글자). 문자, 숫자, 공백 및 _ - . +만 사용할 수 있으며 _ 또는 -로 시작할 수 없습니다.",
   "profileSetting.moveImage": "이미지 이동",
   "profileSetting.nickNameExistsError": "클랜에 별명이 이미 있습니다. 다른 별명을 입력하세요.",
   "profileSetting.preview": "미리보기",

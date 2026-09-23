@@ -3811,6 +3811,7 @@
   "profileSetting.fields.pronouns.label": "代名詞",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "保存",
+  "profileSetting.invalidDisplayName": "表示名は最大32バイトまで（日本語やベトナム語では文字数が少なくなります）。使用できるのは文字、数字、スペース、および _ - . + のみです。_ または - で始めることはできません。",
   "profileSetting.moveImage": "画像を移動",
   "profileSetting.nickNameExistsError": "クランにニックネームがすでに存在します。別のニックネームを入力してください。",
   "profileSetting.preview": "プレビュー",

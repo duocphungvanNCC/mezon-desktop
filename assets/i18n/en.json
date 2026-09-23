@@ -3806,6 +3806,7 @@
   "profileSetting.fields.pronouns.label": "Pronouns",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Save",
+  "profileSetting.invalidDisplayName": "Display name must be at most 32 bytes (fewer characters in Japanese or Vietnamese). Use only letters, numbers, spaces, and _ - . +. Names cannot start with _ or -.",
   "profileSetting.moveImage": "Move Image",
   "profileSetting.nickNameExistsError": "The nick name already exists in the clan. Please enter another nick name.",
   "profileSetting.preview": "PREVIEW",

@@ -3808,6 +3808,7 @@
   "profileSetting.fields.pronouns.label": "Danh xưng",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Lưu",
+  "profileSetting.invalidDisplayName": "Tên hiển thị tối đa 32 byte (ít ký tự hơn với tiếng Nhật hoặc tiếng Việt). Chỉ dùng chữ cái, số, khoảng trắng và _ - . +. Tên không được bắt đầu bằng _ hoặc -.",
   "profileSetting.moveImage": "Di chuyển hình ảnh",
   "profileSetting.nickNameExistsError": "Biệt danh đã tồn tại trong clan. Vui lòng nhập biệt danh khác.",
   "profileSetting.preview": "XEM TRƯỚC",

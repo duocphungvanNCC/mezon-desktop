@@ -4047,6 +4047,7 @@
   "profileSetting.fields.pronouns.label": "Местоимения",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Сохранить",
+  "profileSetting.invalidDisplayName": "Отображаемое имя должно содержать не более 32 байт (меньше символов на японском или вьетнамском). Допустимы только буквы, цифры, пробелы и _ - . +. Имя не может начинаться с _ или -.",
   "profileSetting.moveImage": "Переместить изображение",
   "profileSetting.nickNameExistsError": "Такой псевдоним уже существует в клане. Пожалуйста, введите другой псевдоним.",
   "profileSetting.preview": "Предпросмотр",

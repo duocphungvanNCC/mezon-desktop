@@ -3808,6 +3808,7 @@
   "profileSetting.fields.pronouns.label": "Zaimki",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Zapisz",
+  "profileSetting.invalidDisplayName": "Nazwa wyświetlana może mieć maksymalnie 32 bajty (mniej znaków w języku japońskim lub wietnamskim). Dozwolone są tylko litery, cyfry, spacje oraz _ - . +. Nazwy nie mogą zaczynać się od _ ani -.",
   "profileSetting.moveImage": "Przenieś obraz",
   "profileSetting.nickNameExistsError": "Przydomek już istnieje w clanie. Proszę wprowadzić inny przydomek.",
   "profileSetting.preview": "PODGLĄD",

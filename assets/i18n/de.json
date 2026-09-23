@@ -3809,6 +3809,7 @@
   "profileSetting.fields.pronouns.label": "Pronomen",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Speichern",
+  "profileSetting.invalidDisplayName": "Anzeigename darf höchstens 32 Bytes lang sein (weniger Zeichen bei Japanisch oder Vietnamesisch). Nur Buchstaben, Zahlen, Leerzeichen und _ - . + sind erlaubt. Namen dürfen nicht mit _ oder - beginnen.",
   "profileSetting.moveImage": "Bild verschieben",
   "profileSetting.nickNameExistsError": "Dieser Spitzname existiert bereits im Clan. Bitte wähle einen anderen.",
   "profileSetting.preview": "VORSCHAU",

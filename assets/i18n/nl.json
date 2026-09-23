@@ -3808,6 +3808,7 @@
   "profileSetting.fields.pronouns.label": "Voorvoegsel",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Opslaan",
+  "profileSetting.invalidDisplayName": "Weergavenaam mag maximaal 32 bytes bevatten (minder tekens in Japans of Vietnamees). Gebruik alleen letters, cijfers, spaties en _ - . +. Namen mogen niet beginnen met _ of -.",
   "profileSetting.moveImage": "Afbeelding verplaatsen",
   "profileSetting.nickNameExistsError": "Bijnaam bestaat al in de clan. Voer een andere bijnaam in.",
   "profileSetting.preview": "VOORBEELD",

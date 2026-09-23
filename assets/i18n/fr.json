@@ -3808,6 +3808,7 @@
   "profileSetting.fields.pronouns.label": "Pronoms",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Sauvegarder",
+  "profileSetting.invalidDisplayName": "Le nom d'affichage doit contenir au maximum 32 octets (moins de caractères en japonais ou vietnamien). Utilisez uniquement des lettres, chiffres, espaces et _ - . +. Les noms ne peuvent pas commencer par _ ou -.",
   "profileSetting.moveImage": "Déplacer l'image",
   "profileSetting.nickNameExistsError": "Le surnom existe déjà dans le clan. Veuillez entrer un autre surnom.",
   "profileSetting.preview": "APERÇU",

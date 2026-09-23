@@ -3809,6 +3809,7 @@
   "profileSetting.fields.pronouns.label": "Pronomin",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Spara",
+  "profileSetting.invalidDisplayName": "Visningsnamnet får vara högst 32 byte (färre tecken på japanska eller vietnamesiska). Använd endast bokstäver, siffror, mellanslag och _ - . +. Namn får inte börja med _ eller -.",
   "profileSetting.moveImage": "Flytta bild",
   "profileSetting.nickNameExistsError": "Smeknamn finns redan i clan. Vänligen ange ett annat smeknamn.",
   "profileSetting.preview": "FÖRHANDSVISA",

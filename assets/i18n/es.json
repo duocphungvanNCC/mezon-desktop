@@ -3843,6 +3843,7 @@
   "profileSetting.fields.pronouns.label": "Pronombres",
   "profileSetting.fields.pronouns.placeholder": "",
   "profileSetting.header.save": "Guardar",
+  "profileSetting.invalidDisplayName": "El nombre para mostrar debe tener como máximo 32 bytes (menos caracteres en japonés o vietnamita). Usa solo letras, números, espacios y _ - . +. Los nombres no pueden empezar con _ o -.",
   "profileSetting.moveImage": "Mover imagen",
   "profileSetting.nickNameExistsError": "El apodo ya existe en el clan. Por favor, introduce otro apodo.",
   "profileSetting.preview": "VISTA PREVIA",
