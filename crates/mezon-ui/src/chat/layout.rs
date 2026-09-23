@@ -1422,9 +1422,16 @@ impl ChatLayout {
         self.prefetched_voice_channel = active_voice_channel;
 
         if let Some(channel_id) = active_voice_channel {
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
+            let clan_id = self
+                .channel_list
+                .read(cx)
+                .active_channel()
+                .map(|ch| ch.clan_id);
+            if let Some(clan_id) = clan_id {
+                self.voice_store.update(cx, |store, cx| {
+                    store.prefetch_meet_token(channel_id.to_string(), clan_id.to_string(), cx);
+                });
+            }
         }
     }
 

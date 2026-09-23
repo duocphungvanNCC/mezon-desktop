@@ -17,6 +17,7 @@ use libwebrtc::rtp_parameters::{DegradationPreference, Priority};
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,7 +28,9 @@ use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefre
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
-use super::screen_adaptation::{ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS};
+use super::screen_adaptation::{
+    ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
+};
 use super::sdp;
 
 struct CameraTier {
@@ -101,7 +104,11 @@ fn schedule_camera_tier(
     if matches!(pending, Some((tier, _)) if tier == next) {
         return pending;
     }
-    let delay = if next > current { CAMERA_TIER_DOWNGRADE } else { CAMERA_TIER_UPGRADE };
+    let delay = if next > current {
+        CAMERA_TIER_DOWNGRADE
+    } else {
+        CAMERA_TIER_UPGRADE
+    };
     Some((next, tokio::time::Instant::now() + delay))
 }
 const SCREEN_SCALABILITY_MODE: &str = "L1T1";
@@ -201,7 +208,7 @@ pub enum SfuEvent {
     Peers(Vec<SfuPeer>),
     RoomSnapshot,
     RemoteAudio { key: u64, track: RtcAudioTrack },
-    RemoteVideo { key: u64, track: RtcVideoTrack },
+    RemoteVideo { key: u64, stream: NativeVideoStream },
     RemoteGone { key: u64 },
     PttActive(bool),
     Reconnecting,
@@ -954,6 +961,8 @@ async fn session_loop(
     let mut membership = Membership::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
+    // Coalesce track notifications without blocking WebRTC's callback thread.
+    let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_offer: Option<(u64, String)> = None;
@@ -1044,6 +1053,10 @@ async fn session_loop(
                         match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
                             Ok(created) => {
                                 let attempt = *attempts;
+                                let media_tx = remote_media_tx.clone();
+                                created.on_track(Some(Box::new(move |_| {
+                                    let _ = media_tx.try_send(());
+                                })));
                                 let state_tx = transport_state_tx.clone();
                                 created.on_connection_state_change(Some(Box::new(move |state| {
                                     tracing::info!(attempt, ?state, "sfu transport state");
@@ -1283,6 +1296,16 @@ async fn session_loop(
                     }
                 }
             }
+            _ = remote_media_rx.recv_async() => {
+                if let Some(peer_connection) = pc.as_ref() {
+                    sync_remote_media(peer_connection, &mut membership, evt_tx);
+                    if !membership.live_tracks.is_empty()
+                        && let Some(previous) = retiring.take()
+                    {
+                        previous.close();
+                    }
+                }
+            }
             state = transport_state_rx.recv_async() => {
                 match state {
                     Ok(PeerConnectionState::Failed) => {
@@ -1503,6 +1526,8 @@ async fn session_loop(
                     config.role,
                     tiers,
                     &mut ws_tx,
+                    &mut membership,
+                    evt_tx,
                 )
                 .await
                 {
@@ -1943,6 +1968,7 @@ fn transceiver_summary(pc: &PeerConnection) -> String {
         .join(" ")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
     generation: u64,
@@ -1951,6 +1977,8 @@ async fn negotiate(
     role: SfuRole,
     tiers: PublishTiers,
     ws_tx: &mut WsSink,
+    membership: &mut Membership,
+    evt_tx: &flume::Sender<SfuEvent>,
 ) -> Result<()> {
     let previous = pc.current_remote_description().map(|d| d.to_string());
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
@@ -2022,6 +2050,10 @@ async fn negotiate(
         setup = %sdp::setup_roles(&local_sdp),
         "answer m-lines"
     );
+
+    // Attach receive sinks before the answer lets the SFU start forwarding media.
+    // Static screen shares may not produce another decoded frame immediately.
+    sync_remote_media(pc, membership, evt_tx);
 
     send(
         ws_tx,
@@ -2251,7 +2283,9 @@ fn sync_remote_media(
             (MediaStreamTrack::Video(track), RemoteKind::Camera | RemoteKind::Screen) => {
                 membership.live_tracks.insert(key, track_id);
                 tracing::info!(mid = %mid, key, "remote video attached");
-                let _ = evt_tx.send(SfuEvent::RemoteVideo { key, track });
+                // Preserve the latest frame even before the consumer task is scheduled.
+                let stream = NativeVideoStream::new(track);
+                let _ = evt_tx.send(SfuEvent::RemoteVideo { key, stream });
             }
             (_, kind) => {
                 tracing::warn!("mid {mid} carries a track of the wrong media type for {kind:?}");
@@ -2387,10 +2421,7 @@ mod tests {
             SfuEvent::Peers(_)
         ));
         assert!(
-            matches!(
-                evt_rx.recv_async().await.unwrap(),
-                SfuEvent::RoomSnapshot
-            ),
+            matches!(evt_rx.recv_async().await.unwrap(), SfuEvent::RoomSnapshot),
             "the room snapshot must be announced right after its peer list"
         );
         if !held {
