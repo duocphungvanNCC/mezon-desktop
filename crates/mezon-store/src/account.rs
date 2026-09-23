@@ -10,14 +10,8 @@ use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPassword
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
-use crate::quick_menu::is_valid_name_content;
+use crate::name_validation::prepare_display_name_for_update;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-
-pub const DISPLAY_NAME_MAX_BYTES: usize = 32;
-
-pub fn is_valid_account_display_name(name: &str) -> bool {
-    name.is_empty() || (name.len() <= DISPLAY_NAME_MAX_BYTES && is_valid_name_content(name))
-}
 
 #[derive(Debug, Clone)]
 pub struct UserAccount {
@@ -380,25 +374,27 @@ impl AccountStore {
 
     pub fn save_account(
         &mut self,
-        display_name: String,
+        display_name: Option<String>,
         avatar_url: Option<String>,
         about_me: String,
         logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let display_name = display_name.trim().to_string();
-        if !is_valid_account_display_name(&display_name) {
-            cx.emit(AccountEvent::AccountSaveFailed(
-                "Invalid display name".into(),
-            ));
-            cx.notify();
-            return;
-        }
+        let display_name_update = match display_name {
+            None => None,
+            Some(raw) => match prepare_display_name_for_update(&raw) {
+                Ok(update) => update,
+                Err(error) => {
+                    tracing::warn!("unexpected display name validation failure: {error:?}");
+                    return;
+                }
+            },
+        };
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_account(
-                    Some(&display_name),
+                    display_name_update.as_deref(),
                     Some(avatar_url.as_deref().unwrap_or_default()),
                     Some(&about_me),
                     logo_url.as_deref(),
@@ -409,7 +405,9 @@ impl AccountStore {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(account) = &mut this.account {
-                            account.display_name = display_name;
+                            if let Some(display_name) = display_name_update {
+                                account.display_name = display_name;
+                            }
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
                             account.logo = logo_url.filter(|url| !url.is_empty());
@@ -1274,21 +1272,6 @@ mod tests {
         assert_eq!(acct.dob_seconds, 946_684_800);
         let restored = PersistedAccount::from_account(&acct).into_account();
         assert_eq!(restored.dob_seconds, 946_684_800);
-    }
-
-    #[test]
-    fn account_display_name_allows_empty_and_rejects_over_32_bytes() {
-        assert!(is_valid_account_display_name(""));
-        assert!(is_valid_account_display_name("Alice"));
-        assert!(is_valid_account_display_name(&"a".repeat(32)));
-        assert!(!is_valid_account_display_name(&"a".repeat(33)));
-    }
-
-    #[test]
-    fn account_display_name_rejects_invalid_name_chars() {
-        assert!(!is_valid_account_display_name("_Alice"));
-        assert!(!is_valid_account_display_name("-Alice"));
-        assert!(!is_valid_account_display_name("Alice!"));
     }
 
     #[test]

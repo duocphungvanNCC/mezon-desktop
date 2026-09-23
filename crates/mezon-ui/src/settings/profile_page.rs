@@ -9,8 +9,8 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, AppConfig, ClanList, DISPLAY_NAME_MAX_BYTES, LoginStore, Settings,
-    UserAccount, is_valid_account_display_name,
+    AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
+    prepare_display_name_for_update,
 };
 
 use super::clan_profile_section::ClanProfileSection;
@@ -362,13 +362,7 @@ impl ProfilePage {
         let locale = self.settings.read(cx).language.clone();
         let display_ph = mezon_i18n::t(&locale, "setting.profile.displayNamePlaceholder");
         let about_ph = mezon_i18n::t(&locale, "setting.profile.aboutPlaceholder");
-        let display = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(display_ph)
-                .validate(|value, _| {
-                    !value.starts_with(' ') && value.len() <= DISPLAY_NAME_MAX_BYTES
-                })
-        });
+        let display = cx.new(|cx| InputState::new(window, cx).placeholder(display_ph));
         let about = cx.new(|cx| {
             TextArea::new(window, cx)
                 .placeholder(about_ph)
@@ -464,29 +458,57 @@ impl ProfilePage {
         }
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
-        self.save_user_profile(cx);
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_user_profile(window, cx);
     }
 
-    fn save_user_profile(&mut self, cx: &mut Context<Self>) {
+    fn save_user_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = &mut self.profile else {
             return;
         };
         if state.saving {
             return;
         }
-        let display_name = state.display_name.to_string().trim().to_string();
-        if !is_valid_account_display_name(&display_name) {
-            let locale = self.settings.read(cx).language.clone();
-            Shell::global(cx).update(cx, |shell, cx| {
-                shell.error(
-                    mezon_i18n::t(&locale, "profileSetting.invalidDisplayName"),
-                    cx,
-                )
-            });
-            return;
-        }
-        state.display_name = display_name.clone().into();
+        let display_name_raw = state.display_name.to_string();
+        let display_name_changed = display_name_raw != state.original_display_name.as_ref();
+        let display_name_for_store = if display_name_changed {
+            match prepare_display_name_for_update(&display_name_raw) {
+                Ok(Some(normalized)) => {
+                    state.display_name = normalized.clone().into();
+                    if let Some(input) = &self.display_name_input {
+                        input.update(cx, |input_state, input_cx| {
+                            input_state.set_value(normalized.clone(), window, input_cx);
+                        });
+                    }
+                    Some(normalized)
+                }
+                Ok(None) => {
+                    state.display_name = state.original_display_name.clone();
+                    if let Some(input) = &self.display_name_input {
+                        input.update(cx, |input_state, input_cx| {
+                            input_state.set_value(
+                                state.original_display_name.clone(),
+                                window,
+                                input_cx,
+                            );
+                        });
+                    }
+                    None
+                }
+                Err(_) => {
+                    let locale = self.settings.read(cx).language.clone();
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(
+                            mezon_i18n::t(&locale, "profileSetting.invalidDisplayName"),
+                            cx,
+                        )
+                    });
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         state.saving = true;
         cx.notify();
 
@@ -501,7 +523,7 @@ impl ProfilePage {
         );
 
         AccountStore::global(cx).update(cx, |store, cx| {
-            store.save_account(display_name, avatar_url, about_me, logo_url, cx);
+            store.save_account(display_name_for_store, avatar_url, about_me, logo_url, cx);
         });
     }
 
@@ -843,7 +865,7 @@ impl Render for ProfilePage {
                                 .on_click({
                                     let profile_entity = profile_entity.clone();
                                     let clan_section = clan_section.clone();
-                                    move |_, _, cx| {
+                                    move |_, window, cx| {
                                         if is_clan {
                                             if let Some(section) = &clan_section {
                                                 section.update(cx, |section, cx| {
@@ -851,7 +873,9 @@ impl Render for ProfilePage {
                                                 });
                                             }
                                         } else {
-                                            profile_entity.update(cx, |page, cx| page.save(cx));
+                                            profile_entity.update(cx, |page, cx| {
+                                                page.save(window, cx);
+                                            });
                                         }
                                     }
                                 }),
