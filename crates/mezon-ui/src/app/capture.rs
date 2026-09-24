@@ -983,6 +983,65 @@ pub fn create_category_task(
     })
 }
 
+pub fn sidebar_channels(cx: &App, clan_id: mezon_store::ClanId) -> anyhow::Result<Value> {
+    let channels = mezon_store::ChannelList::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("channel store unavailable"))?;
+    let channels = channels.read(cx);
+    let mut seen = std::collections::HashSet::new();
+    let items: Vec<Value> = channels
+        .categories_for_clan(clan_id)
+        .iter()
+        .flat_map(|category| category.channels.iter().map(move |ch| (category, ch)))
+        .filter(|(_, ch)| seen.insert(ch.id))
+        .map(|(category, ch)| {
+            json!({
+                "id": ch.id.to_string(),
+                "label": ch.name,
+                "channel_type": format!("{:?}", ch.channel_type),
+                "private": ch.private,
+                "category_id": category.id,
+                "category_name": category.name,
+                "voice_member_ids": ch.voice_members.iter().map(|m| m.user_id.to_string()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Value::Array(items))
+}
+
+pub fn create_channel_task(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    category_id: String,
+    name: String,
+    channel_type: &str,
+    private: bool,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let channel_type = match channel_type {
+        "text" => mezon_store::ChannelType::Text,
+        "voice" => mezon_store::ChannelType::Voice,
+        "stream" => mezon_store::ChannelType::Stream,
+        other => {
+            return gpui::Task::ready(Err(anyhow::anyhow!(
+                "unsupported channel_type {other:?}: expected text, voice or stream"
+            )));
+        }
+    };
+    let Some(channels) = mezon_store::ChannelList::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("channel store unavailable")));
+    };
+    let task = channels.update(cx, |list, cx| {
+        list.create_channel(clan_id, category_id, name, channel_type, private, cx)
+    });
+    cx.background_spawn(async move {
+        let (channel_id, created_type) = task.await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(json!({
+            "ok": true,
+            "channel_id": channel_id.to_string(),
+            "channel_type": format!("{created_type:?}"),
+        }))
+    })
+}
+
 pub fn channel_menu_state(cx: &App) -> anyhow::Result<Value> {
     crate::sidebar::channel_sidebar::channel_menu_state(cx)
 }

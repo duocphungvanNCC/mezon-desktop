@@ -719,6 +719,24 @@ impl LruImageCache {
             })
     }
 
+    pub fn cached_bitmap_size(&self, src: &str) -> Option<(u32, u32)> {
+        if src.is_empty() {
+            return None;
+        }
+        let resource = Resource::Uri(src.into());
+        let image = self
+            .cache
+            .get(&hash(&resource))
+            .and_then(|entry| match &entry.item {
+                ImageCacheItem::Loaded(Ok(image)) => Some(image),
+                _ => None,
+            })?;
+        let size = image.size(0);
+        let width = u32::try_from(size.width.0).unwrap_or(0);
+        let height = u32::try_from(size.height.0).unwrap_or(0);
+        (width > 0 && height > 0).then_some((width, height))
+    }
+
     pub fn new(max_items: usize, max_bytes: u64, cx: &mut Context<Self>) -> Self {
         Self::labeled("image", max_items, max_bytes, u64::MAX, cx)
     }

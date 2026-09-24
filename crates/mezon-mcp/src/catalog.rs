@@ -468,6 +468,35 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "sidebar_channels",
+        description: "\
+List the channels the app currently holds for a clan — the store behind the sidebar, not a
+fresh API call (list_channels asks the server). Use it to see what realtime events did to
+the client.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+
+Returns [{ id, label, channel_type, private, category_id, category_name, voice_member_ids }].",
+        write: false,
+    },
+    ToolSpec {
+        name: "create_channel",
+        description: "\
+Create a channel in a clan through the same store path the Create Channel modal uses.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- category_id (required): category snowflake id from list_categories.
+- name (required): channel name (same rules as the modal).
+- channel_type (optional): \"text\" (default), \"voice\" or \"stream\".
+- private (optional, default false): create it private — text and voice only; the store
+  ignores it for any other type, exactly like the modal.
+
+Returns { ok, channel_id, channel_type }.",
+        write: true,
+    },
+    ToolSpec {
         name: "mute_channel",
         description: "\
 Mute or unmute a channel for the signed-in user (backend SetMuteChannel).

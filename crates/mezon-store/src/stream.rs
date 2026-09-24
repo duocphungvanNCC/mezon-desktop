@@ -452,7 +452,7 @@ impl StreamStore {
             let api = provider_api.clone();
             let room = provider_room.clone();
             Box::pin(async move {
-                api.generate_meet_token(&room, "")
+                api.generate_meet_token(&room, &room, "")
                     .await
                     .map_err(|error| anyhow!("{error:#}"))
             })
@@ -460,7 +460,7 @@ impl StreamStore {
         let volume = self.volume;
         let muted = self.muted;
         let token_task = cx.spawn(async move |this, cx| {
-            let token = api.generate_meet_token(&room, "").await;
+            let token = api.generate_meet_token(&room, &room, "").await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_generation != session_generation
                     || !this.is_session_channel(channel_id)

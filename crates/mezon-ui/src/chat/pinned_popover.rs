@@ -13,8 +13,8 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, AttachmentSeedInput, ChannelId, ClanMembersStore, DirectMessageStore, Embed,
-    Message, MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage,
-    PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
+    Message, MessageAttachment, MessageId, MessageSpan, MessagesEvent, MessagesStore,
+    PinnedMessage, PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
     strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -56,6 +56,22 @@ const EMPTY_BODY_HEIGHT: f32 = 144.;
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 const ATTACHMENT_PREVIEW_SIZE: f32 = 120.;
 
+fn pin_attachments_match(left: &[MessageAttachment], right: &[MessageAttachment]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.url == right.url
+                && left.filename == right.filename
+                && left.filetype == right.filetype
+                && left.proxied_src == right.proxied_src
+                && left.thumbnail == right.thumbnail
+                && left.thumbnail_proxied == right.thumbnail_proxied
+                && left.width == right.width
+                && left.height == right.height
+                && left.size == right.size
+                && left.duration == right.duration
+        })
+}
+
 #[derive(Clone)]
 struct PinCardVm {
     pin_id: SharedString,
@@ -91,6 +107,17 @@ impl PinCardVm {
         let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
         let text_spans = prepare_pin_text_spans(msg);
         let selectable_text = pin_canonical_text(msg, &text_spans);
+        let mut pin = msg.clone();
+        if let Some(channel_id) = channel_id
+            && !pin.attachments_from_source
+            && let Ok(message_id) = msg.message_id.parse::<MessageId>()
+            && let Some(message) = MessagesStore::global(cx)
+                .read(cx)
+                .message_in_channel(channel_id, message_id)
+            && !message.attachments.is_empty()
+        {
+            pin.attachments = msg.preview_attachments(Some(message)).to_vec();
+        }
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -99,7 +126,7 @@ impl PinCardVm {
             is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
-            pin: Arc::new(msg.clone()),
+            pin: Arc::new(pin),
             text_spans,
             selectable_text,
             poll,
@@ -136,6 +163,7 @@ pub(crate) fn render_pinned_message_preview(
     locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let text_spans = prepare_pin_text_spans(pin);
     let selectable_text = pin_canonical_text(pin, &text_spans);
@@ -151,6 +179,7 @@ pub(crate) fn render_pinned_message_preview(
         ogp_cache,
         None,
         None,
+        cx,
     )
 }
 
@@ -169,6 +198,7 @@ fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
         ogp: msg.ogp.clone(),
         embeds: msg.embeds.clone(),
         attachments: msg.attachments.clone(),
+        attachments_from_source: false,
         poll: msg.poll.clone(),
         create_time: msg.create_time,
     }
@@ -180,6 +210,7 @@ pub(crate) fn render_pin_message_preview(
     locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
+    cx: &App,
 ) -> gpui::AnyElement {
     render_pinned_message_preview(
         &pinned_message_from_chat_message(msg),
@@ -187,6 +218,7 @@ pub(crate) fn render_pin_message_preview(
         locale,
         image_cache,
         ogp_cache,
+        cx,
     )
 }
 
@@ -211,12 +243,32 @@ impl PinnedPopoverPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let audio_meta = crate::chat::message::audio_meta::AudioMetaCache::global(cx);
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
                 this.pin_cards = this.compute_pin_cards(cx);
+                this.probe_pin_audio(cx);
                 cx.notify();
             }),
+            cx.subscribe(
+                &MessagesStore::global(cx),
+                |this, _, event, cx| match event {
+                    MessagesEvent::Updated { message_id } => {
+                        this.refresh_attachment_rows(*message_id, cx);
+                    }
+                    MessagesEvent::Reset { .. }
+                    | MessagesEvent::Resized { .. }
+                    | MessagesEvent::Shifted { .. } => this.refresh_attachment_rows(None, cx),
+                    MessagesEvent::TopicUpdated { topic_id }
+                        if PinnedMessagesStore::global(cx).read(cx).channel_id()
+                            == Some(ChannelId(*topic_id)) =>
+                    {
+                        this.refresh_attachment_rows(None, cx);
+                    }
+                    _ => {}
+                },
+            ),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
                 this.refresh_name_rows(cx);
             }),
@@ -230,6 +282,7 @@ impl PinnedPopoverPanel {
                 this.refresh_name_rows(cx);
             }),
             cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&audio_meta, |_, _, cx| cx.notify()),
         ];
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
@@ -258,24 +311,67 @@ impl PinnedPopoverPanel {
             _subs: subs,
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
+        panel.probe_pin_audio(cx);
         panel
     }
 
+    fn refresh_attachment_rows(&mut self, message_id: Option<MessageId>, cx: &mut Context<Self>) {
+        let pins = PinnedMessagesStore::global(cx).read(cx);
+        let Some(channel_id) = pins.channel_id() else {
+            return;
+        };
+        let messages = MessagesStore::global(cx).read(cx);
+        let mut changed = false;
+        for (index, vm) in self.pin_cards.iter_mut().enumerate() {
+            if vm.pin.attachments_from_source {
+                continue;
+            }
+            let Ok(id) = vm.message_id.parse::<MessageId>() else {
+                continue;
+            };
+            if message_id.is_some_and(|message_id| message_id != id) {
+                continue;
+            }
+            let Some(message) = messages.message_in_channel(channel_id, id) else {
+                continue;
+            };
+            if message.attachments.is_empty()
+                || pin_attachments_match(&vm.pin.attachments, &message.attachments)
+            {
+                continue;
+            }
+            Arc::make_mut(&mut vm.pin).attachments = message.attachments.clone();
+            if index < self.list_state.item_count() {
+                self.list_state.remeasure_items(index..index + 1);
+            }
+            changed = true;
+        }
+        if changed {
+            self.probe_pin_audio(cx);
+            cx.notify();
+        }
+    }
+
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
-        let store = PinnedMessagesStore::global(cx).read(cx);
-        if self.pin_cards.len() != store.pinned().len() {
+        let rebuild = {
+            let store = PinnedMessagesStore::global(cx).read(cx);
+            self.pin_cards.len() != store.pinned().len()
+                || self
+                    .pin_cards
+                    .iter()
+                    .zip(store.pinned())
+                    .any(|(vm, pin)| vm.message_id.as_ref() != pin.message_id.as_str())
+        };
+        if rebuild {
             self.pin_cards = self.compute_pin_cards(cx);
+            self.probe_pin_audio(cx);
             cx.notify();
             return;
         }
+        let store = PinnedMessagesStore::global(cx).read(cx);
         let clan_id = effective_clan_id(store.clan_id(), cx);
         let channel_id = store.channel_id();
         for (vm, pin) in self.pin_cards.iter_mut().zip(store.pinned()) {
-            if vm.message_id.as_ref() != pin.message_id.as_str() {
-                self.pin_cards = self.compute_pin_cards(cx);
-                cx.notify();
-                return;
-            }
             vm.sender_label = resolve_pin_sender_label_with_message(
                 &pin.sender_id,
                 &pin.sender_name,
@@ -289,6 +385,17 @@ impl PinnedPopoverPanel {
                 resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }
         cx.notify();
+    }
+
+    fn probe_pin_audio(&self, cx: &mut App) {
+        let urls = self
+            .pin_cards
+            .iter()
+            .flat_map(|card| card.pin.attachments.iter())
+            .filter(|att| crate::chat::message::audio_meta::attachment_needs_audio_probe(att))
+            .map(|att| att.url.clone())
+            .collect();
+        crate::chat::message::audio_meta::AudioMetaCache::ensure_urls(urls, cx);
     }
 
     fn compute_pin_cards(&self, cx: &App) -> Vec<PinCardVm> {
@@ -891,7 +998,7 @@ fn render_body(
             .pr(px(LIST_PAD_X))
             .py(px(LIST_PAD_Y))
             .child(
-                list(list_state.clone(), move |ix, _window, _cx| {
+                list(list_state.clone(), move |ix, _window, cx| {
                     let Some(vm) = cards_for_list.get(ix) else {
                         return div().into_any_element();
                     };
@@ -909,6 +1016,7 @@ fn render_body(
                             ogp_for_list.clone(),
                             selection_for_list.clone(),
                             settings_for_list.clone(),
+                            cx,
                         ))
                         .into_any_element()
                 })
@@ -980,6 +1088,7 @@ fn pin_card(
     ogp_cache: Entity<LruImageCache>,
     selection: SharedSelection,
     settings: Entity<Settings>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
@@ -1040,6 +1149,7 @@ fn pin_card(
         ogp_cache,
         Some(selection),
         Some(settings),
+        cx,
     );
 
     let jump_message_id = vm.message_id.clone();
@@ -1124,6 +1234,7 @@ fn render_pin_body(
     ogp_cache: Entity<LruImageCache>,
     selection: Option<SharedSelection>,
     settings: Option<Entity<Settings>>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
     let text_body = match poll {
@@ -1154,7 +1265,7 @@ fn render_pin_body(
         .attachments
         .iter()
         .find(|att| !att.is_image())
-        .map(|att| render_pin_file_attachment(att, theme));
+        .map(|att| render_pin_file_attachment(att, theme, cx));
     let ogp = pin
         .ogp
         .as_ref()
@@ -2061,17 +2172,18 @@ fn render_pin_image_attachment(
         .into_any_element()
 }
 
-fn render_pin_file_attachment(att: &MessageAttachment, theme: &Theme) -> gpui::AnyElement {
+fn render_pin_file_attachment(
+    att: &MessageAttachment,
+    theme: &Theme,
+    cx: &App,
+) -> gpui::AnyElement {
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
         SharedString::from(att.filename.clone())
     };
-    let size_line = if att.size_label.is_empty() {
-        SharedString::from(format!("size: {}", mezon_store::format_file_size(att.size)))
-    } else {
-        SharedString::from(format!("size: {}", att.size_label))
-    };
+    let bytes = crate::chat::message::audio_meta::display_attachment_bytes(att, cx);
+    let size_line = SharedString::from(format!("size: {}", mezon_store::format_file_size(bytes)));
     let icon = file_type_icon_for(&att.filetype, &att.filename);
     let file_id = SharedString::from(att.url.clone());
     let download_url = file_id.clone();

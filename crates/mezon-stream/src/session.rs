@@ -523,15 +523,7 @@ fn create_peer_connection(
         .unwrap_or_default();
     let pc = factory
         .create_peer_connection(RtcConfiguration {
-            ice_servers: if ice_servers.is_empty() {
-                vec![IceServer {
-                    urls: vec!["stun:stun.l.google.com:19302".into()],
-                    username: String::new(),
-                    password: String::new(),
-                }]
-            } else {
-                ice_servers
-            },
+            ice_servers,
             continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
             ice_transport_type: IceTransportsType::All,
         })
