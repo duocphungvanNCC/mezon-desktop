@@ -545,7 +545,7 @@ pub enum UpdateChannelOverviewError {
     Other(String),
 }
 
-pub const MAX_CHANNEL_TOPIC_CHARS: usize = 1024;
+pub const MAX_CHANNEL_TOPIC_CHARS: usize = 512;
 pub const MAX_STREAM_THUMBNAIL_BYTES: u64 = 10 * 1024 * 1024;
 
 pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
