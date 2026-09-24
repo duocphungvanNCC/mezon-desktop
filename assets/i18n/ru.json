@@ -1144,6 +1144,8 @@
   "channelVoice.recordingSaved": "Запись сохранена:",
   "channelVoice.recordingVideoStalled": "Окно скрыто — записывается только звук",
   "channelVoice.recordingVideoUnavailable": "Записывается только звук — захват экрана недоступен",
+  "channelVoice.recordingBy": "{{name}} записывает звонок",
+  "channelVoice.recordingByMany": "{{name}} и ещё {{count}} записывают звонок",
   "channelVoice.removeAgent": "Убрать ИИ-агента",
   "channelVoice.retry": "Повторить",
   "channelVoice.shareYourScreen": "Поделиться экраном",

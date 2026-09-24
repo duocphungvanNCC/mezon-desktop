@@ -1142,6 +1142,8 @@
   "channelVoice.recordingFailed": "Recording failed",
   "channelVoice.recordingVideoStalled": "The window is hidden — only audio is being recorded",
   "channelVoice.recordingVideoUnavailable": "Recording audio only — screen capture is unavailable",
+  "channelVoice.recordingBy": "{{name}} is recording the call",
+  "channelVoice.recordingByMany": "{{name}} and {{count}} others are recording the call",
   "channelVoice.toast.cameraPermissionRequired": "Camera permission is required",
   "channelVoice.toast.connectionConnected": "Connection connected",
   "channelVoice.toast.connectionDisconnected": "Connection disconnected",

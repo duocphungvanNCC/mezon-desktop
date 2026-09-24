@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Запис збережено:",
   "channelVoice.recordingVideoStalled": "Вікно приховано — записується лише звук",
   "channelVoice.recordingVideoUnavailable": "Записується лише звук — захоплення екрана недоступне",
+  "channelVoice.recordingBy": "{{name}} записує дзвінок",
+  "channelVoice.recordingByMany": "{{name}} та ще {{count}} записують дзвінок",
   "channelVoice.removeAgent": "Вилучити ШІ-агента",
   "channelVoice.retry": "Повторити",
   "channelVoice.shareYourScreen": "Поділитися екраном",

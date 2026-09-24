@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "録画を保存しました:",
   "channelVoice.recordingVideoStalled": "ウィンドウが非表示のため、音声のみ録音しています",
   "channelVoice.recordingVideoUnavailable": "音声のみ録音中 — 画面キャプチャは利用できません",
+  "channelVoice.recordingBy": "{{name}} が通話を録画しています",
+  "channelVoice.recordingByMany": "{{name}} ほか {{count}} 人が通話を録画しています",
   "channelVoice.removeAgent": "AIエージェントを削除",
   "channelVoice.retry": "再試行",
   "channelVoice.shareYourScreen": "スクリーンを共有",

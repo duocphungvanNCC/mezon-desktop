@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Đã lưu bản ghi:",
   "channelVoice.recordingVideoStalled": "Cửa sổ đang bị ẩn — chỉ còn ghi tiếng",
   "channelVoice.recordingVideoUnavailable": "Chỉ ghi được tiếng — không truy cập được màn hình",
+  "channelVoice.recordingBy": "{{name}} đang ghi cuộc gọi",
+  "channelVoice.recordingByMany": "{{name}} và {{count}} người khác đang ghi cuộc gọi",
   "channelVoice.removeAgent": "Gỡ AI agent",
   "channelVoice.retry": "Thử lại",
   "channelVoice.shareYourScreen": "Chia sẻ màn hình",

@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Gravação guardada:",
   "channelVoice.recordingVideoStalled": "A janela está oculta — só o áudio está a ser gravado",
   "channelVoice.recordingVideoUnavailable": "A gravar apenas áudio — a captura de ecrã não está disponível",
+  "channelVoice.recordingBy": "{{name}} está a gravar a chamada",
+  "channelVoice.recordingByMany": "{{name}} e mais {{count}} estão a gravar a chamada",
   "channelVoice.removeAgent": "Remover agente de IA",
   "channelVoice.retry": "Tentar novamente",
   "channelVoice.shareYourScreen": "Compartilhar tela",

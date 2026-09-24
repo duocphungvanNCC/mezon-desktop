@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "녹화 저장됨:",
   "channelVoice.recordingVideoStalled": "창이 숨겨져 있어 오디오만 녹음됩니다",
   "channelVoice.recordingVideoUnavailable": "오디오만 녹음 중 — 화면 캡처를 사용할 수 없습니다",
+  "channelVoice.recordingBy": "{{name}} 님이 통화를 녹화하고 있습니다",
+  "channelVoice.recordingByMany": "{{name}} 님 외 {{count}}명이 통화를 녹화하고 있습니다",
   "channelVoice.removeAgent": "AI 에이전트 제거",
   "channelVoice.retry": "다시 시도",
   "channelVoice.shareYourScreen": "화면 공유",

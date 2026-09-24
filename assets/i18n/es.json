@@ -1138,6 +1138,8 @@
   "channelVoice.recordingSaved": "Grabación guardada:",
   "channelVoice.recordingVideoStalled": "La ventana está oculta: solo se está grabando el audio",
   "channelVoice.recordingVideoUnavailable": "Grabando solo audio: la captura de pantalla no está disponible",
+  "channelVoice.recordingBy": "{{name}} está grabando la llamada",
+  "channelVoice.recordingByMany": "{{name}} y {{count}} más están grabando la llamada",
   "channelVoice.removeAgent": "Quitar agente de IA",
   "channelVoice.retry": "Reintentar",
   "channelVoice.shareYourScreen": "Comparte tu pantalla",

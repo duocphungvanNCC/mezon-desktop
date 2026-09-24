@@ -1144,6 +1144,8 @@
   "channelVoice.recordingSaved": "Язма сакланды:",
   "channelVoice.recordingVideoStalled": "Тәрәзә яшерелгән — фәкать тавыш кына языла",
   "channelVoice.recordingVideoUnavailable": "Фәкать тавыш языла — экранны төшерү мөмкин түгел",
+  "channelVoice.recordingBy": "{{name}} шалтыратуны яздыра",
+  "channelVoice.recordingByMany": "{{name}} һәм тагын {{count}} кеше шалтыратуны яздыра",
   "channelVoice.removeAgent": "AI агентны алып ташларга",
   "channelVoice.retry": "Кабатлау",
   "channelVoice.shareYourScreen": "Экран белән уртаклашу",
