@@ -50,6 +50,7 @@ pub use mezon_record::{RecordError, RecordStats};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
