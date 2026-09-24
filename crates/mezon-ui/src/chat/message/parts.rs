@@ -18,6 +18,7 @@ use smallvec::SmallVec;
 
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
+    preview_seek_track,
 };
 use super::content::{
     INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip, profile_popover_trigger,
@@ -939,7 +940,7 @@ fn render_audio(
     ctx: &RowCtx,
     sending: bool,
 ) -> AnyElement {
-    let duration = att.duration.max(0) as f64;
+    let duration = super::audio_meta::display_audio_duration(att, ctx.app);
     // `uploading` only ever covers OUR OWN outgoing message. A recipient sees
     // the message the moment it is posted, with `presign_pending` set until the
     // sender's upload lands — play it then and the player fetches an object the
@@ -968,11 +969,41 @@ fn render_audio(
     let activate_download_name = download_name.clone();
     let activate_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
+    let seek_host = host.clone();
+    let seek_url = url.clone();
+    let seek_download_url = download_url.clone();
+    let seek_download_name = download_name.clone();
+    let seek_selection = ctx.selection.clone();
+    let seek = preview_seek_track(
+        ("audio-seek", index),
+        (msg_id.get(), index),
+        move |fraction, _, cx| {
+            if seek_selection.borrow().has_selection() {
+                return;
+            }
+            let start_secs = if duration > 0.0 {
+                f64::from(fraction) * duration
+            } else {
+                0.0
+            };
+            let activation = AudioActivation {
+                url: seek_url.clone(),
+                duration,
+                start_secs,
+                download_url: seek_download_url.clone(),
+                download_name: seek_download_name.clone(),
+            };
+            let _ = seek_host.update(cx, |this, cx| {
+                this.activate_audio((msg_id, index), activation, cx);
+            });
+        },
+    );
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
         IconName::AudioPlay,
         audio_time_label(0.0, duration),
+        seek,
         move |_, _, cx| {
             if activate_selection.borrow().has_selection() {
                 return;
@@ -980,6 +1011,7 @@ fn render_audio(
             let activation = AudioActivation {
                 url: url.clone(),
                 duration,
+                start_secs: 0.0,
                 download_url: activate_download_url.clone(),
                 download_name: activate_download_name.clone(),
             };
