@@ -2806,7 +2806,11 @@ fn render_sidebar_item(
                                     el.child(
                                         Icon::new(IconName::VoiceScreenShareIcon)
                                             .size(px(16.))
-                                            .text_color(gpui::rgb(0x22c55e)),
+                                            .text_color(
+                                                crate::util::user_status::in_voice_icon_color(
+                                                    theme,
+                                                ),
+                                            ),
                                     )
                                 })
                         }))
