@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Nagranie zapisano:",
   "channelVoice.recordingVideoStalled": "Okno jest ukryte — nagrywany jest tylko dźwięk",
   "channelVoice.recordingVideoUnavailable": "Nagrywany jest tylko dźwięk — przechwytywanie ekranu jest niedostępne",
+  "channelVoice.recordingBy": "{{name}} nagrywa rozmowę",
+  "channelVoice.recordingByMany": "{{name}} i {{count}} innych nagrywa rozmowę",
   "channelVoice.removeAgent": "Usuń agenta AI",
   "channelVoice.retry": "Ponów",
   "channelVoice.shareYourScreen": "Udostępnij swój ekran",

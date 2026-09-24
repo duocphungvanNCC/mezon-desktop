@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Opname opgeslagen:",
   "channelVoice.recordingVideoStalled": "Het venster is verborgen — alleen audio wordt opgenomen",
   "channelVoice.recordingVideoUnavailable": "Alleen audio wordt opgenomen — schermopname is niet beschikbaar",
+  "channelVoice.recordingBy": "{{name}} neemt het gesprek op",
+  "channelVoice.recordingByMany": "{{name}} en {{count}} anderen nemen het gesprek op",
   "channelVoice.removeAgent": "AI-agent verwijderen",
   "channelVoice.retry": "Opnieuw proberen",
   "channelVoice.shareYourScreen": "Scherm delen",

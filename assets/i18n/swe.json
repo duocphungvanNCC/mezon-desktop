@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Inspelning sparad:",
   "channelVoice.recordingVideoStalled": "Fönstret är dolt – endast ljud spelas in",
   "channelVoice.recordingVideoUnavailable": "Spelar endast in ljud – skärminspelning är inte tillgänglig",
+  "channelVoice.recordingBy": "{{name}} spelar in samtalet",
+  "channelVoice.recordingByMany": "{{name}} och {{count}} till spelar in samtalet",
   "channelVoice.removeAgent": "Ta bort AI-agent",
   "channelVoice.retry": "Försök igen",
   "channelVoice.shareYourScreen": "Dela din skärm",

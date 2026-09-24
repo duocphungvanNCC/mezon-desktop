@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Запіс захаваны:",
   "channelVoice.recordingVideoStalled": "Акно схаванае — запісваецца толькі гук",
   "channelVoice.recordingVideoUnavailable": "Запісваецца толькі гук — захоп экрана недаступны",
+  "channelVoice.recordingBy": "{{name}} запісвае званок",
+  "channelVoice.recordingByMany": "{{name}} і яшчэ {{count}} запісваюць званок",
   "channelVoice.removeAgent": "Выдаліць ШІ-агента",
   "channelVoice.retry": "Паўтарыць",
   "channelVoice.shareYourScreen": "Падзяліцца экранам",

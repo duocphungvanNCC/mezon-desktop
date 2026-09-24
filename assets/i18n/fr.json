@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Enregistrement sauvegardé :",
   "channelVoice.recordingVideoStalled": "La fenêtre est masquée — seul l'audio est enregistré",
   "channelVoice.recordingVideoUnavailable": "Enregistrement audio uniquement — la capture d'écran est indisponible",
+  "channelVoice.recordingBy": "{{name}} enregistre l'appel",
+  "channelVoice.recordingByMany": "{{name}} et {{count}} autres enregistrent l'appel",
   "channelVoice.removeAgent": "Retirer l'agent IA",
   "channelVoice.retry": "Réessayer",
   "channelVoice.shareYourScreen": "Partager votre écran",

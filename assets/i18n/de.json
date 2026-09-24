@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Aufnahme gespeichert:",
   "channelVoice.recordingVideoStalled": "Das Fenster ist ausgeblendet – es wird nur Audio aufgenommen",
   "channelVoice.recordingVideoUnavailable": "Es wird nur Audio aufgenommen – Bildschirmaufnahme ist nicht verfügbar",
+  "channelVoice.recordingBy": "{{name}} zeichnet den Anruf auf",
+  "channelVoice.recordingByMany": "{{name}} und {{count}} weitere zeichnen den Anruf auf",
   "channelVoice.removeAgent": "KI-Agent entfernen",
   "channelVoice.retry": "Erneut versuchen",
   "channelVoice.shareYourScreen": "Bildschirm teilen",

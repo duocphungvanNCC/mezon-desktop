@@ -1135,6 +1135,8 @@
   "channelVoice.recordingSaved": "Registrazione salvata:",
   "channelVoice.recordingVideoStalled": "La finestra è nascosta: viene registrato solo l'audio",
   "channelVoice.recordingVideoUnavailable": "Registrazione solo audio: la cattura dello schermo non è disponibile",
+  "channelVoice.recordingBy": "{{name}} sta registrando la chiamata",
+  "channelVoice.recordingByMany": "{{name}} e altri {{count}} stanno registrando la chiamata",
   "channelVoice.removeAgent": "Rimuovi agente IA",
   "channelVoice.retry": "Riprova",
   "channelVoice.shareYourScreen": "Condividi schermo",
