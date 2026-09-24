@@ -2946,6 +2946,7 @@ impl ChannelList {
                     c.order
                 }
             });
+            self.invalidate_channel_index(clan_id);
             cx.notify();
         }
         let api = self.api.clone();
@@ -13123,6 +13124,45 @@ mod tests {
             );
         }
         assert_eq!(SidebarOrderKey::parse_storage_key("nonsense"), None);
+    }
+
+    #[gpui::test]
+    fn a_channel_is_still_found_after_its_category_moves(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let api_cats = vec![
+                    ApiCategoryDesc {
+                        category_id: 1,
+                        category_name: "One".into(),
+                        clan_id: 1,
+                        category_order: 1,
+                    },
+                    ApiCategoryDesc {
+                        category_id: 2,
+                        category_name: "Two".into(),
+                        clan_id: 1,
+                        category_order: 2,
+                    },
+                ];
+                let mut rows = vec![
+                    make_channel(10, "ten", "1"),
+                    make_channel(20, "twenty", "2"),
+                ];
+                let categories = build_categories(api_cats, &mut rows);
+                channels.apply_clan_structure(ClanId(1), categories, None, cx);
+                let found = |channels: &ChannelList, id: i64| {
+                    channels
+                        .channel(ClanId(1), ChannelId(id))
+                        .map(|channel| channel.id)
+                };
+                assert_eq!(found(channels, 10), Some(ChannelId(10)));
+
+                drop(channels.move_category(ClanId(1), 0, 1, cx));
+                assert_eq!(found(channels, 10), Some(ChannelId(10)));
+                assert_eq!(found(channels, 20), Some(ChannelId(20)));
+            });
+        });
     }
 
     #[gpui::test]
