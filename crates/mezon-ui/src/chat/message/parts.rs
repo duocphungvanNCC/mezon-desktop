@@ -11,8 +11,8 @@ use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
     MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url,
-    resolve_user_profile,
+    STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia,
+    resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -1347,14 +1347,19 @@ fn render_photo(
     if src.is_empty() {
         return attachment_box(att.filename.clone(), theme);
     }
-    let object_fit = if is_gif(&att.url) {
+    let is_sticker = att.filetype == STICKER_FILETYPE && att.tenor_mp4.is_none();
+    let (box_w, box_h) = if is_sticker {
+        sticker_layout_size(att, ctx)
+    } else {
+        (att.display_width, att.display_height)
+    };
+    let object_fit = if is_sticker || is_gif(&att.url) {
         ObjectFit::Contain
     } else {
         ObjectFit::Cover
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
-    let is_sticker = att.filetype == "sticker";
     let settings = ctx.settings.clone();
     let viewer_att = AttachmentSeedInput::from_message(att);
     let message_id = msg.id;
@@ -1364,8 +1369,8 @@ fn render_photo(
     let mut el = div()
         .id(("msg-img", index))
         .relative()
-        .w(px(att.display_width))
-        .h(px(att.display_height))
+        .w(px(box_w))
+        .h(px(box_h))
         .rounded_md()
         .overflow_hidden();
     // `render_album` already refuses to open a tile that is still uploading;
@@ -1805,6 +1810,17 @@ fn render_file_box(
             )
         })
         .into_any_element()
+}
+
+fn sticker_layout_size(att: &MessageAttachment, ctx: &RowCtx) -> (f32, f32) {
+    if att.width > 0 && att.height > 0 {
+        return (att.display_width, att.display_height);
+    }
+    ctx.attachment_cache
+        .read(ctx.app)
+        .cached_bitmap_size(att.proxied_src.as_ref())
+        .map(|(width, height)| mezon_store::sticker_display_dimensions(width, height))
+        .unwrap_or((att.display_width, att.display_height))
 }
 
 fn is_gif(url: &str) -> bool {

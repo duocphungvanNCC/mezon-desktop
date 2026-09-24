@@ -4851,6 +4851,7 @@ impl ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let attachment_cache = self.image_cache.clone();
         let highlight_id = self.highlight_id;
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
@@ -4927,6 +4928,7 @@ impl ChannelMessages {
                         ogp_cache: ogp_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
+                        attachment_cache: attachment_cache.clone(),
                         unread_boundary_id: None,
                         highlight_id,
                         reply_highlight_id,
@@ -5239,6 +5241,7 @@ impl Render for ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let attachment_cache = self.image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
         let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
@@ -5324,6 +5327,7 @@ impl Render for ChannelMessages {
                         ogp_cache: ogp_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
+                        attachment_cache: attachment_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,
