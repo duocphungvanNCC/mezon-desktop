@@ -255,6 +255,24 @@ impl VoiceConnection {
         }
     }
 
+    pub fn active_channel(&self) -> Option<(&str, &str)> {
+        match self {
+            VoiceConnection::Connecting {
+                channel_id,
+                clan_id,
+            }
+            | VoiceConnection::Connected {
+                channel_id,
+                clan_id,
+            } => Some((channel_id, clan_id)),
+            _ => None,
+        }
+    }
+
+    pub fn is_connecting(&self) -> bool {
+        matches!(self, VoiceConnection::Connecting { .. })
+    }
+
     fn mark_connected(&mut self) -> bool {
         let VoiceConnection::Connecting {
             channel_id,
@@ -5039,6 +5057,29 @@ mod tests {
         };
         assert!(!failed.mark_connected());
         assert_eq!(failed.active_channel_id(), None);
+    }
+
+    #[test]
+    fn a_call_still_connecting_already_has_its_channel() {
+        let mut connection = VoiceConnection::Connecting {
+            channel_id: "a".into(),
+            clan_id: "1".into(),
+        };
+        assert_eq!(connection.active_channel(), Some(("a", "1")));
+        assert!(connection.is_connecting());
+        assert_eq!(connection.connected_channel(), None);
+
+        assert!(connection.mark_connected());
+        assert_eq!(connection.active_channel(), Some(("a", "1")));
+        assert!(!connection.is_connecting());
+
+        let failed = VoiceConnection::Failed {
+            channel_id: "a".into(),
+            message: "boom".into(),
+        };
+        assert_eq!(failed.active_channel(), None);
+        assert!(!failed.is_connecting());
+        assert_eq!(VoiceConnection::Idle.active_channel(), None);
     }
 
     #[test]

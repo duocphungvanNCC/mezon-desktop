@@ -134,6 +134,7 @@ pub fn render_mini_bar(
     clan_id: &str,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
+    connecting: bool,
     mic_enabled: bool,
     camera_enabled: bool,
     screen_enabled: bool,
@@ -145,10 +146,17 @@ pub fn render_mini_bar(
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
 
-    let header_key = if camera_enabled {
+    let header_key = if connecting {
+        "channelVoice.connecting"
+    } else if camera_enabled {
         "channelVoice.videoConnected"
     } else {
         "channelVoice.voiceConnected"
+    };
+    let header_color = if connecting {
+        theme.status_idle
+    } else {
+        theme.status_online
     };
 
     let address = format!("{channel_label} / {clan_name}");
@@ -241,13 +249,13 @@ pub fn render_mini_bar(
                         .child(
                             Icon::new(IconName::Speaker)
                                 .size(px(16.))
-                                .text_color(theme.status_online),
+                                .text_color(header_color),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.status_online)
+                                .text_color(header_color)
                                 .child(mezon_i18n::t(locale, header_key).to_string()),
                         ),
                 )
