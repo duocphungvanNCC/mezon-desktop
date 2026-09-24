@@ -3479,6 +3479,18 @@ impl VoiceStore {
                 Self::persist_device(kind, None, cx);
                 cx.notify();
             }
+            VoiceEvent::InputDeviceChangeFailed {
+                requested,
+                retained,
+                error,
+            } => {
+                tracing::warn!(?requested, ?retained, "microphone change failed: {error}");
+                let selected = crate::Settings::try_global(cx)
+                    .map(|settings| settings.read(cx).input_device_id.clone());
+                if selected == Some(requested) {
+                    Self::persist_device(DeviceKind::AudioInput, retained, cx);
+                }
+            }
             VoiceEvent::Participants(mut list) => {
                 if let Some(config) = AppConfig::try_global(cx) {
                     for participant in &mut list {
