@@ -295,7 +295,6 @@ pub struct VoiceStore {
     moderation_error: Option<VoiceModerationError>,
     muted_by_moderator: bool,
     agent_pending: bool,
-    agent_channels: HashSet<String>,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -677,7 +676,6 @@ impl VoiceStore {
             moderation_error: None,
             muted_by_moderator: false,
             agent_pending: false,
-            agent_channels: HashSet::new(),
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -1160,9 +1158,6 @@ impl VoiceStore {
                 &entity,
                 |this, event, cx| this.handle_voice_interactive(event, cx),
             );
-            dispatch.on(RealtimeKind::AiAgentEnabled, &entity, |this, event, cx| {
-                this.handle_agent_enabled(event, cx)
-            });
             dispatch.on(
                 RealtimeKind::UserChannelRemoved,
                 &entity,
@@ -1226,19 +1221,6 @@ impl VoiceStore {
         }
         tracing::info!(channel_id, "leaving voice: access to the channel was lost");
         self.teardown(None, cx);
-        cx.notify();
-    }
-
-    fn handle_agent_enabled(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::AiAgentEnabled(event) = event else {
-            return;
-        };
-        let channel_key = event.channel_id.to_string();
-        if event.enabled {
-            self.agent_channels.insert(channel_key);
-        } else {
-            self.agent_channels.remove(&channel_key);
-        }
         cx.notify();
     }
 
@@ -2536,11 +2518,10 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        let Some((channel_id, _)) = self.connection.connected_channel() else {
+        if self.connection.connected_channel().is_none() {
             return false;
-        };
-        self.agent_channels.contains(channel_id)
-            || self.participants.iter().any(|p| p.is_agent && !p.is_local)
+        }
+        self.participants.iter().any(|p| p.is_agent && !p.is_local)
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
@@ -2550,7 +2531,6 @@ impl VoiceStore {
         let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let channel_key = channel_key.to_string();
         let Ok(channel_id) = channel_key.parse::<i64>() else {
             return;
         };
@@ -2572,16 +2552,8 @@ impl VoiceStore {
             }
             let _ = this.update(cx, |this, cx| {
                 this.agent_pending = false;
-                match result {
-                    Ok(()) if on_agent => {
-                        this.agent_channels.remove(&channel_key);
-                    }
-                    Ok(()) => {
-                        this.agent_channels.insert(channel_key);
-                    }
-                    Err(_) => {
-                        this.moderation_error = Some(VoiceModerationError::AgentFailed);
-                    }
+                if result.is_err() {
+                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
                 }
                 cx.notify();
             });
@@ -4334,7 +4306,6 @@ impl VoiceStore {
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
-        self.agent_channels.clear();
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
