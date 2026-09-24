@@ -1393,7 +1393,7 @@ fn render_voice_button(
         .child(
             Icon::new(IconName::Speaker)
                 .size(px(14.))
-                .text_color(theme.status_online),
+                .text_color(crate::util::user_status::in_voice_icon_color(theme)),
         )
         .into_any_element()
 }
