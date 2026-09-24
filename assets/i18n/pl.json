@@ -4746,5 +4746,6 @@
   "screenShare.modeVideo": "Wideo",
   "screenShare.modeVideoDescription": "Płynniejsze wideo; przy wolnym połączeniu ostrość może spaść.",
   "chat.activityStrip.latestPin": "Najnowsze przypięcie",
-  "chat.activityStrip.latestTopicMessage": "Najnowsza wiadomość w temacie"
+  "chat.activityStrip.latestTopicMessage": "Najnowsza wiadomość w temacie",
+  "chat.activityStrip.messageFrom": "Wiadomość od {{name}}: {{message}}"
 }

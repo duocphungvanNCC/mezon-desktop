@@ -4746,5 +4746,6 @@
   "screenShare.modeVideo": "Відэа",
   "screenShare.modeVideoDescription": "Больш плаўнае відэа; пры павольным злучэнні выразнасць можа знізіцца.",
   "chat.activityStrip.latestPin": "Апошняе замацаванне",
-  "chat.activityStrip.latestTopicMessage": "Апошняе паведамленне ў тэме"
+  "chat.activityStrip.latestTopicMessage": "Апошняе паведамленне ў тэме",
+  "chat.activityStrip.messageFrom": "Паведамленне ад {{name}}: {{message}}"
 }

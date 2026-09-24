@@ -47,6 +47,7 @@ pub struct ChatArea {
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
+    activity_strip: Entity<LatestActivityStripView>,
     media_channel_panel: Option<Entity<MediaChannelPanel>>,
     media_channel_context: Option<(ClanId, ChannelId)>,
     replying_to: Option<ReplyTarget>,
@@ -62,8 +63,6 @@ pub struct ChatArea {
     _send_permission_channel_sub: Subscription,
     _send_permission_direct_sub: Subscription,
     _send_permission_friend_sub: Subscription,
-    _topic_activity_sub: Subscription,
-    _pinned_activity_sub: Subscription,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
@@ -238,15 +237,9 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
     // and its realtime topic metadata so an existing topic never renders as "empty".
     let latest_topic = (!topic_syncing)
         .then(|| {
-            topics
-                .topics_for(clan_id)
-                .iter()
-                .filter(|topic| {
-                    active_channel_key
-                        .as_deref()
-                        .is_some_and(|channel_id| topic.channel_id == channel_id)
-                })
-                .max_by_key(|topic| topic.last_message_timestamp)
+            active_channel_key
+                .as_deref()
+                .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
                 .cloned()
                 .or_else(|| {
                     let clan_id = messages.active_clan_id()?;
@@ -405,6 +398,13 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 })
         })
     });
+    let topic_sender_name = latest_topic.as_ref().and_then(|topic| {
+        let clan_id = topic.clan_id.parse::<ClanId>().ok()?;
+        let sender_id = topic.last_sender_id.parse::<UserId>().ok()?;
+        resolve_user_profile(sender_id, ProfileContext::Clan(clan_id), cx)
+            .map(|profile| profile.display_name)
+            .filter(|name| !name.trim().is_empty())
+    });
     let pinned_store = PinnedMessagesStore::global(cx);
     let pinned = pinned_store.read(cx);
     let pin_syncing = pinned.is_loading();
@@ -422,9 +422,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
 
     let theme = cx.theme();
     let hover = theme.bg_hover;
-    let topic_label: SharedString =
-        mezon_i18n::t(locale, "chat.activityStrip.latestTopicMessage").into();
-    let pin_label: SharedString = mezon_i18n::t(locale, "chat.activityStrip.latestPin").into();
+
     let topic_title: SharedString = if topic_syncing {
         "".into()
     } else {
@@ -437,19 +435,40 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             })
             .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into())
     };
+    let topic_has_attachment = topic_attachment.is_some()
+        || latest_topic
+            .as_ref()
+            .is_some_and(TopicDiscussion::reply_is_attachment);
     let topic_preview: SharedString = if topic_syncing {
-        "".into()
-    } else if topic_preview.is_none()
-        && (topic_attachment.is_some()
-            || latest_topic
-                .as_ref()
-                .is_some_and(TopicDiscussion::reply_is_attachment))
-    {
         "".into()
     } else {
         topic_preview
-            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into())
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|text| {
+                if let Some(sender_name) = topic_sender_name.as_deref() {
+                    mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                        .replace("{{name}}", sender_name)
+                        .replace("{{message}}", &text)
+                } else {
+                    text
+                }
+            })
+            .map(SharedString::from)
+            .unwrap_or_else(|| {
+                if topic_has_attachment {
+                    topic_sender_name
+                        .as_deref()
+                        .map(|sender_name| {
+                            mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                                .replace("{{name}}", sender_name)
+                                .replace("{{message}}", "")
+                        })
+                        .unwrap_or_default()
+                        .into()
+                } else {
+                    mezon_i18n::t(locale, "notifications.empty.topics.description").into()
+                }
+            })
     };
     let topic_media = topic_attachment.as_ref().map(|attachment| {
         if attachment.is_image() {
@@ -566,16 +585,6 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .child(
                     div()
                         .flex_none()
-                        .h(px(12.))
-                        .whitespace_nowrap()
-                        .text_size(px(9.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child(topic_label),
-                )
-                .child(
-                    div()
-                        .flex_none()
                         .h(px(18.))
                         .truncate()
                         .whitespace_nowrap()
@@ -642,19 +651,25 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
     } else {
         latest_pin
             .as_ref()
-            .map(|pin| pin.content.trim())
-            .filter(|text| !text.is_empty())
+            .and_then(|pin| {
+                pin.poll
+                    .as_ref()
+                    .map(|poll| poll.question.trim())
+                    .filter(|question| !question.is_empty())
+                    .map(|question| {
+                        format!(
+                            "{}: {question}",
+                            mezon_i18n::t(locale, "message.poll.pollLabel")
+                        )
+                    })
+                    .or_else(|| Some(pin.content.trim().to_string()))
+            })
+            .filter(|text| !text.trim().is_empty())
             // Pinned code blocks and long text commonly contain newlines. A compact rail must
             // remain one line; otherwise wrapping pushes the label/name/time out of the card and
             // appears to change position when a sidebar opens.
             .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .unwrap_or_else(|| {
-                if latest_pin.is_some() {
-                    "".into()
-                } else {
-                    mezon_i18n::t(locale, "pinMessage.emptyTitle").into()
-                }
-            })
+            .unwrap_or_else(|| "".into())
     };
     let pin_message_id = latest_pin
         .as_ref()
@@ -781,16 +796,6 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .overflow_hidden()
                 .child(
                     div()
-                        .flex_none()
-                        .h(px(12.))
-                        .whitespace_nowrap()
-                        .text_size(px(9.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child(pin_label),
-                )
-                .child(
-                    div()
                         .flex()
                         .flex_none()
                         .items_center()
@@ -813,7 +818,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(9.))
+                                .text_sm()
                                 .text_color(theme.text_muted)
                                 .child(pin_time),
                         ),
@@ -844,8 +849,8 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .flex_row()
         .flex_none()
         .w_full()
-        .h(px(78.))
-        .p_2()
+        .h(px(70.))
+        .p_1()
         .border_b_1()
         .border_color(theme.border)
         .bg(theme.bg_primary)
@@ -879,6 +884,59 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 ),
         )
         .into_any_element()
+}
+
+struct LatestActivityStripView {
+    settings: Entity<Settings>,
+    _topics_sub: Subscription,
+    _pinned_sub: Subscription,
+    _messages_sub: Subscription,
+    _settings_sub: Subscription,
+}
+
+impl LatestActivityStripView {
+    fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
+            if matches!(event, TopicsEvent::Updated) {
+                cx.notify();
+            }
+        });
+        let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
+            if matches!(event, mezon_store::PinnedEvent::Updated) {
+                cx.notify();
+            }
+        });
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |_, _, event, cx| {
+            if matches!(
+                event,
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
+            ) {
+                cx.notify();
+            }
+        });
+        let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
+        Self {
+            settings,
+            _topics_sub: topics_sub,
+            _pinned_sub: pinned_sub,
+            _messages_sub: messages_sub,
+            _settings_sub: settings_sub,
+        }
+    }
+}
+
+impl Render for LatestActivityStripView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.settings.read(cx).language.clone();
+        let clan_id = MessagesStore::global(cx)
+            .read(cx)
+            .active_clan_id()
+            .filter(|clan_id| !clan_id.is_zero())
+            .map(|clan_id| clan_id.to_string());
+        clan_id
+            .map(|clan_id| latest_activity_strip(&locale, &clan_id, cx))
+            .unwrap_or_else(|| div().hidden().into_any_element())
+    }
 }
 
 fn open_latest_topic(topic: TopicDiscussion, cx: &mut App) {
@@ -932,6 +990,10 @@ impl ChatArea {
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
+        let activity_strip = cx.new({
+            let settings = settings.clone();
+            move |cx| LatestActivityStripView::new(settings, cx)
+        });
         let member_avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let send_permission_sub = cx.subscribe(
             &ChannelPermissionsStore::global(cx),
@@ -944,9 +1006,6 @@ impl ChatArea {
             |this: &mut crate::ChatLayout, _, event: &mezon_store::MessagesEvent, cx| {
                 if matches!(event, mezon_store::MessagesEvent::Reset { .. }) {
                     this.chat_area.sync_send_permission(cx);
-                }
-                if matches!(event, mezon_store::MessagesEvent::TopicUpdated { .. }) {
-                    cx.notify();
                 }
             },
         );
@@ -974,22 +1033,6 @@ impl ChatArea {
                 }
             },
         );
-        let topic_activity_sub = cx.subscribe(
-            &TopicsStore::global(cx),
-            |_: &mut crate::ChatLayout, _, event, cx| {
-                if matches!(event, TopicsEvent::Updated) {
-                    cx.notify();
-                }
-            },
-        );
-        let pinned_activity_sub = cx.subscribe(
-            &PinnedMessagesStore::global(cx),
-            |_: &mut crate::ChatLayout, _, event, cx| {
-                if matches!(event, mezon_store::PinnedEvent::Updated) {
-                    cx.notify();
-                }
-            },
-        );
         Self {
             timeline,
             mention_input: None,
@@ -1001,6 +1044,7 @@ impl ChatArea {
             settings,
             header,
             typing,
+            activity_strip,
             media_channel_panel: None,
             media_channel_context: None,
             replying_to: None,
@@ -1016,8 +1060,6 @@ impl ChatArea {
             _send_permission_channel_sub: send_permission_channel_sub,
             _send_permission_direct_sub: send_permission_direct_sub,
             _send_permission_friend_sub: send_permission_friend_sub,
-            _topic_activity_sub: topic_activity_sub,
-            _pinned_activity_sub: pinned_activity_sub,
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
@@ -1468,24 +1510,8 @@ impl ChatArea {
             }
         };
 
-        let activity_channel_key = channel_id.map(|channel_id| channel_id.to_string());
-        let activity_strip = if !is_dm && !stream_sidebar && !media_channel_view {
-            clan_id.as_deref().map(|clan_id| {
-                TopicsStore::global(cx).update(cx, |store, cx| {
-                    store.fetch_if_needed(clan_id, cx);
-                    store.hydrate_latest_topic_preview_for_channel(
-                        activity_channel_key.as_deref(),
-                        cx,
-                    );
-                });
-                PinnedMessagesStore::global(cx).update(cx, |store, cx| {
-                    store.ensure_loaded(cx);
-                });
-                latest_activity_strip(locale, clan_id, cx)
-            })
-        } else {
-            None
-        };
+        let activity_strip = (!is_dm && !stream_sidebar && !media_channel_view)
+            .then(|| AnyView::from(self.activity_strip.clone()));
 
         self.header.update(cx, |header, cx| {
             header.sync(

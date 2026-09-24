@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
@@ -11,6 +12,7 @@ use mezon_client::transport::{ApiMessage, ApiPinMessage, parse_message_content_t
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
+use crate::CACHE_TTL;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
     Embed, Message, MessageAttachment, MessageSpan, OgpPreview, PollData, RichLayout,
@@ -69,6 +71,7 @@ pub struct PinnedMessagesStore {
     clan_id: Option<String>,
     messages: Vec<PinnedMessage>,
     channel_cache: HashMap<(String, String), Vec<PinnedMessage>>,
+    channel_fetched_at: HashMap<(String, String), Instant>,
     loaded_channel: Option<String>,
     fetch_state: PinFetchState,
     pin_badges: HashSet<String>,
@@ -151,6 +154,7 @@ impl PinnedMessagesStore {
         self.clan_id = None;
         self.messages.clear();
         self.channel_cache.clear();
+        self.channel_fetched_at.clear();
         self.loaded_channel = None;
         self.fetch_state.reset();
         self.pin_badges.clear();
@@ -172,6 +176,7 @@ impl PinnedMessagesStore {
             clan_id: None,
             messages: Vec::new(),
             channel_cache: HashMap::new(),
+            channel_fetched_at: HashMap::new(),
             loaded_channel: None,
             fetch_state: PinFetchState::default(),
             pin_badges: HashSet::new(),
@@ -252,13 +257,19 @@ impl PinnedMessagesStore {
         }
         self.channel_id = channel_id;
         self.clan_id = clan_id;
-        let cached = self
-            .active_cache_key()
-            .and_then(|key| self.channel_cache.get(&key).cloned());
+        let cache_key = self.active_cache_key();
+        let cached = cache_key
+            .as_ref()
+            .and_then(|key| self.channel_cache.get(key).cloned());
+        let cache_fresh = cache_key.as_ref().is_some_and(|key| {
+            self.channel_fetched_at
+                .get(key)
+                .is_some_and(|fetched_at| fetched_at.elapsed() < CACHE_TTL)
+        });
         self.messages = cached.unwrap_or_default();
         // Render cached pins immediately, but still fetch the channel so upstream's freshness and
         // attachment verification guarantees are preserved.
-        self.loaded_channel = None;
+        self.loaded_channel = cache_fresh.then(|| self.channel_id.clone()).flatten();
         // A request for the previous channel must neither block nor overwrite the new one. Keep
         // the per-channel cache visible while the latest state is fetched to avoid UI flicker.
         self.fetch_state.reset();
@@ -306,7 +317,7 @@ impl PinnedMessagesStore {
                 Ok(mut pins) => {
                     if let (Ok(clan), Ok(channel)) = (clan_id.parse(), channel_id.parse()) {
                         let verified =
-                            hydrate_pin_attachments(&api, clan, channel, &mut pins).await;
+                            hydrate_latest_pin_attachment(&api, clan, channel, &mut pins).await;
                         Ok((pins, verified))
                     } else {
                         Ok((pins, HashSet::new()))
@@ -348,9 +359,15 @@ impl PinnedMessagesStore {
                             })
                             .collect();
                         this.cache_active_messages();
+                        if let Some(key) = this.active_cache_key() {
+                            this.channel_fetched_at.insert(key, Instant::now());
+                        }
                         this.loaded_channel = Some(channel_id);
                     }
-                    Err(e) => tracing::error!("get_pin_messages_list failed: {e}"),
+                    Err(e) => {
+                        this.loaded_channel = Some(channel_id);
+                        tracing::error!("get_pin_messages_list failed: {e}");
+                    }
                 }
                 cx.emit(PinnedEvent::Updated);
                 cx.notify();
@@ -700,32 +717,29 @@ fn apply_source_attachments(pins: &mut [ApiPinMessage], sources: &[ApiMessage]) 
     }
 }
 
-async fn hydrate_pin_attachments(
+async fn hydrate_latest_pin_attachment(
     api: &AppApi,
     clan_id: i64,
     channel_id: i64,
     pins: &mut [ApiPinMessage],
 ) -> HashSet<i64> {
     let mut verified = HashSet::new();
-    let mut pending: HashSet<i64> = pins
+    let Some(anchor) = pins
         .iter()
-        .filter_map(|p| p.message_id.parse().ok())
-        .collect();
-    while let Some(anchor) = pending.iter().copied().next() {
-        pending.remove(&anchor);
-        match api
-            .list_channel_messages(clan_id, channel_id, anchor, 2, 100)
-            .await
-        {
-            Ok(page) => {
-                for source in &page.messages {
-                    pending.remove(&source.message_id);
-                    verified.insert(source.message_id);
-                }
-                apply_source_attachments(pins, &page.messages);
-            }
-            Err(error) => tracing::warn!("read original pinned messages failed: {error}"),
+        .max_by_key(|pin| pin.create_time)
+        .and_then(|pin| pin.message_id.parse().ok())
+    else {
+        return verified;
+    };
+    match api
+        .list_channel_messages(clan_id, channel_id, anchor, 2, 100)
+        .await
+    {
+        Ok(page) => {
+            verified.extend(page.messages.iter().map(|source| source.message_id));
+            apply_source_attachments(pins, &page.messages);
         }
+        Err(error) => tracing::warn!("read original pinned message failed: {error}"),
     }
     verified
 }

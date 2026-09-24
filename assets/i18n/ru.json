@@ -4989,5 +4989,6 @@
   "screenShare.modeVideo": "Видео",
   "screenShare.modeVideoDescription": "Более плавное видео; при медленном соединении чёткость может снизиться.",
   "chat.activityStrip.latestPin": "Последнее закрепление",
-  "chat.activityStrip.latestTopicMessage": "Последнее сообщение в теме"
+  "chat.activityStrip.latestTopicMessage": "Последнее сообщение в теме",
+  "chat.activityStrip.messageFrom": "Сообщение от {{name}}: {{message}}"
 }

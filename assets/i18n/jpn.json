@@ -4749,5 +4749,6 @@
   "screenShare.modeVideo": "ビデオ",
   "screenShare.modeVideoDescription": "動画がより滑らかになります。回線が遅いと鮮明さが下がる場合があります。",
   "chat.activityStrip.latestPin": "最新のピン留め",
-  "chat.activityStrip.latestTopicMessage": "トピックの最新メッセージ"
+  "chat.activityStrip.latestTopicMessage": "トピックの最新メッセージ",
+  "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}"
 }

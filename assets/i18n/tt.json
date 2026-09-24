@@ -4759,5 +4759,6 @@
   "screenShare.modeVideo": "Видео",
   "screenShare.modeVideoDescription": "Видео шомарак; әкрен тоташуда ачыклык кимергә мөмкин.",
   "chat.activityStrip.latestPin": "Соңгы беркетмә",
-  "chat.activityStrip.latestTopicMessage": "Темадагы соңгы хәбәр"
+  "chat.activityStrip.latestTopicMessage": "Темадагы соңгы хәбәр",
+  "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}"
 }

@@ -4746,5 +4746,6 @@
   "screenShare.modeVideo": "Video",
   "screenShare.modeVideoDescription": "Vloeiendere video; bij een trage verbinding kan de scherpte afnemen.",
   "chat.activityStrip.latestPin": "Laatste pin",
-  "chat.activityStrip.latestTopicMessage": "Laatste bericht in topic"
+  "chat.activityStrip.latestTopicMessage": "Laatste bericht in topic",
+  "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}"
 }

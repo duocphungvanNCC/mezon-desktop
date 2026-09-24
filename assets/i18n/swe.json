@@ -4747,5 +4747,6 @@
   "screenShare.modeVideo": "Video",
   "screenShare.modeVideoDescription": "Smidigare video; skärpan kan minska vid en långsam anslutning.",
   "chat.activityStrip.latestPin": "Senast fäst",
-  "chat.activityStrip.latestTopicMessage": "Senaste meddelandet i ämnet"
+  "chat.activityStrip.latestTopicMessage": "Senaste meddelandet i ämnet",
+  "chat.activityStrip.messageFrom": "Meddelande från {{name}}: {{message}}"
 }

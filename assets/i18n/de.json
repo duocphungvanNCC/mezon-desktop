@@ -4747,5 +4747,6 @@
   "screenShare.modeVideo": "Video",
   "screenShare.modeVideoDescription": "Flüssigeres Video; bei langsamer Verbindung kann die Schärfe abnehmen.",
   "chat.activityStrip.latestPin": "Neueste Anheftung",
-  "chat.activityStrip.latestTopicMessage": "Neueste Nachricht im Thema"
+  "chat.activityStrip.latestTopicMessage": "Neueste Nachricht im Thema",
+  "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}"
 }

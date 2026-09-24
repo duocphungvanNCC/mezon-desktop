@@ -22,7 +22,6 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
-const MAX_EAGER_TOPIC_PAGES: i32 = 100;
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
@@ -154,7 +153,7 @@ impl TopicsData {
     }
 
     fn note_topic_message(&mut self, message: &api::ChannelMessage) -> bool {
-        if message.topic_id <= 0 || matches!(message.code, 1 | 2) {
+        if message.topic_id <= 0 || message.code == 2 {
             return false;
         }
         let topic_id = message.topic_id.to_string();
@@ -164,7 +163,7 @@ impl TopicsData {
         let Some(topic) = self.topics.get_mut(index) else {
             return false;
         };
-        if !message.content.is_empty() {
+        if !message.content.is_empty() || message.code == 1 {
             topic.last_message_content = message.content.clone();
         }
         topic.last_message_attachments =
@@ -185,7 +184,7 @@ impl TopicsData {
         topic_id: &str,
         message: &mezon_client::transport::ApiMessage,
     ) -> bool {
-        if matches!(message.code, 1 | 2) {
+        if message.code == 2 {
             return false;
         }
         let Some(index) = self.topic_index.get(topic_id).copied() else {
@@ -194,7 +193,7 @@ impl TopicsData {
         let Some(topic) = self.topics.get_mut(index) else {
             return false;
         };
-        if !message.content.is_empty() {
+        if !message.content.is_empty() || message.code == 1 {
             topic.last_message_content = message.content.clone();
         }
         topic.last_message_attachments = message.attachments.clone();
@@ -480,6 +479,7 @@ impl TopicsStore {
 
     fn refetch_active_clan(&mut self, cx: &mut Context<Self>) {
         self.fetched_at = None;
+        self.fetch_failures = 0;
         if let Some(clan_id) = self.clan_id.clone() {
             self.fetch(&clan_id, cx);
         }
@@ -767,9 +767,11 @@ impl TopicsStore {
         if !self.is_active_clan(message.clan_id, cx) {
             return;
         }
-        if self.data.note_topic_message(message) {
-            cx.emit(TopicsEvent::Updated);
-            cx.notify();
+        if message.code == 2 && message.topic_id > 0 {
+            self.hydrated_preview_topic_id = None;
+            self.hydrate_latest_topic_preview(cx);
+        } else if self.data.note_topic_message(message) {
+            self.schedule_updated_notify(cx);
         }
     }
 
@@ -1773,6 +1775,21 @@ impl TopicsStore {
         }
     }
 
+    pub fn latest_topic_for_channel(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+    ) -> Option<&TopicDiscussion> {
+        self.topics_for(clan_id)
+            .iter()
+            .filter(|topic| topic.channel_id == channel_id)
+            .max_by(|left, right| {
+                left.last_message_timestamp
+                    .cmp(&right.last_message_timestamp)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }
@@ -1787,7 +1804,10 @@ impl TopicsStore {
     }
 
     pub fn fetch_if_needed(&mut self, clan_id: &str, cx: &mut Context<Self>) {
-        if self.is_fresh(clan_id) {
+        if self.is_fresh(clan_id)
+            || (self.clan_id.as_deref() == Some(clan_id)
+                && self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES)
+        {
             return;
         }
         self.fetch(clan_id, cx);
@@ -1802,10 +1822,10 @@ impl TopicsStore {
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
             self.hydrated_preview_topic_id = None;
+            self.fetch_failures = 0;
         }
         self.has_more = true;
         self.next_page = 1;
-        self.fetch_failures = 0;
         self.fetch_page(clan_id, 1, false, cx);
     }
 
@@ -1860,25 +1880,10 @@ impl TopicsStore {
                 }
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
-                // The service pages clan topics oldest-to-newest for some clans. Loading only page
-                // one therefore made the header point at an old topic, and every Inbox scroll
-                // appeared to change it again. Eagerly merge the remaining pages so consumers see
-                // one clan-wide, timestamp-sorted result without requiring user interaction.
-                if self.has_more && self.next_page <= MAX_EAGER_TOPIC_PAGES {
-                    let next_page = self.next_page;
-                    self.fetch_page(clan_id, next_page, true, cx);
-                } else if self.next_page > MAX_EAGER_TOPIC_PAGES {
-                    self.has_more = false;
-                    self.loading = false;
-                    cx.emit(TopicsEvent::Updated);
-                    cx.notify();
-                    self.hydrate_latest_topic_preview(cx);
-                } else {
-                    self.loading = false;
-                    cx.emit(TopicsEvent::Updated);
-                    cx.notify();
-                    self.hydrate_latest_topic_preview(cx);
-                }
+                self.loading = false;
+                cx.emit(TopicsEvent::Updated);
+                cx.notify();
+                self.hydrate_latest_topic_preview(cx);
             }
             Err(e) => {
                 self.loading = false;
@@ -1908,11 +1913,12 @@ impl TopicsStore {
         channel_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(topic) = self
-            .data
-            .topics()
-            .iter()
-            .find(|topic| channel_id.is_none_or(|channel_id| topic.channel_id == channel_id))
+        let Some(topic) = channel_id
+            .and_then(|channel_id| {
+                let clan_id = self.clan_id.as_deref()?;
+                self.latest_topic_for_channel(clan_id, channel_id)
+            })
+            .or_else(|| self.data.topics().first())
             .cloned()
         else {
             return;
@@ -1947,6 +1953,7 @@ impl TopicsStore {
                         if let Some(message) = page
                             .messages
                             .iter()
+                            .filter(|message| message.code != 2)
                             .max_by_key(|message| normalize_unix_seconds(message.create_time))
                         {
                             this.data.note_api_topic_message(&topic_key, message);
