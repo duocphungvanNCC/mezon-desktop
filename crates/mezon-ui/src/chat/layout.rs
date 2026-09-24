@@ -176,6 +176,7 @@ impl ActiveChannelSlice {
 struct VoiceMiniSlice {
     channel_id: String,
     clan_id: String,
+    connecting: bool,
     label: String,
     clan_name: String,
     mic_enabled: bool,
@@ -1668,9 +1669,10 @@ impl ChatLayout {
 
     fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = self.voice_store.read(cx);
-        let Some((channel_id, clan_id)) = store.connection().connected_channel() else {
+        let Some((channel_id, clan_id)) = store.connection().active_channel() else {
             return self.displayed_voice_mini.take().is_some();
         };
+        let connecting = store.connection().is_connecting();
 
         if let Some(prev) = self.displayed_voice_mini.as_mut()
             && prev.channel_id == channel_id
@@ -1683,7 +1685,8 @@ impl ChatLayout {
             let link_copied = store.link_copied();
             let noise_suppression_enabled = store.noise_suppression_enabled();
             let noise_suppression_level = store.noise_suppression_level();
-            let changed = prev.label != label
+            let changed = prev.connecting != connecting
+                || prev.label != label
                 || prev.mic_enabled != mic_enabled
                 || prev.camera_enabled != camera_enabled
                 || prev.screen_enabled != screen_enabled
@@ -1694,6 +1697,7 @@ impl ChatLayout {
                 if prev.label != label {
                     prev.label = label.to_string();
                 }
+                prev.connecting = connecting;
                 prev.mic_enabled = mic_enabled;
                 prev.camera_enabled = camera_enabled;
                 prev.screen_enabled = screen_enabled;
@@ -1712,6 +1716,7 @@ impl ChatLayout {
         self.displayed_voice_mini = Some(VoiceMiniSlice {
             channel_id: channel_id.to_string(),
             clan_id: clan_id.to_string(),
+            connecting,
             label: store.channel_label().to_string(),
             clan_name,
             mic_enabled: store.mic_enabled(),
@@ -2482,7 +2487,8 @@ impl ChatLayout {
 
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let store = self.voice_store.read(cx);
-        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().active_channel()?;
+        let connecting = store.connection().is_connecting();
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
         let clan_name = clan_id
@@ -2509,6 +2515,7 @@ impl ChatLayout {
             &clan_id,
             &self.voice_store,
             &self.settings,
+            connecting,
             mic_enabled,
             camera_enabled,
             screen_enabled,
