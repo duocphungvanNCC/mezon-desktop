@@ -634,7 +634,9 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                     })
             })
             .map(|name| SharedString::from(name.to_string()))
-            .unwrap_or_else(|| mezon_i18n::t(locale, "pinMessage.emptyTitle").into())
+            .unwrap_or_else(|| {
+                mezon_i18n::t(locale, "channelTopbar.pinnedMessages.emptyTitle").into()
+            })
     };
     let pin_time: SharedString = latest_pin
         .as_ref()
@@ -669,7 +671,13 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             // remain one line; otherwise wrapping pushes the label/name/time out of the card and
             // appears to change position when a sidebar opens.
             .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .unwrap_or_else(|| "".into())
+            .unwrap_or_else(|| {
+                if latest_pin.is_some() {
+                    "".into()
+                } else {
+                    mezon_i18n::t(locale, "channelTopbar.pinnedMessages.emptyDescription").into()
+                }
+            })
     };
     let pin_message_id = latest_pin
         .as_ref()
@@ -766,6 +774,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         }
         avatar.into_any_element()
     });
+    let has_pin_time = !pin_time.is_empty();
     let pin_cell = div()
         .id("latest-pinned-message")
         .flex()
@@ -805,23 +814,27 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                         .overflow_hidden()
                         .child(
                             div()
-                                .flex_none()
-                                .max_w(px(180.))
                                 .min_w_0()
                                 .truncate()
                                 .whitespace_nowrap()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text_primary)
-                                .child(pin_title),
+                                .child(pin_title)
+                                .when(pin_message_id.is_some(), |title| {
+                                    title.flex_none().max_w(px(180.))
+                                })
+                                .when(pin_message_id.is_none(), |title| title.flex_1()),
                         )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_sm()
-                                .text_color(theme.text_muted)
-                                .child(pin_time),
-                        ),
+                        .when(has_pin_time, |header| {
+                            header.child(
+                                div()
+                                    .flex_none()
+                                    .text_sm()
+                                    .text_color(theme.text_muted)
+                                    .child(pin_time),
+                            )
+                        }),
                 )
                 .child(
                     div()
