@@ -109,7 +109,7 @@ impl Render for ConfirmDeleteThreadModal {
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.tokens.bg_modal_theme)
+            .bg(theme.bg_floating)
             .shadow_lg()
             .child(
                 v_flex()
@@ -121,13 +121,13 @@ impl Render for ConfirmDeleteThreadModal {
                         div()
                             .text_size(px(20.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.title.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(15.))
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.description.clone()),
                     ),
             )
@@ -139,7 +139,7 @@ impl Render for ConfirmDeleteThreadModal {
                     .p(px(16.))
                     .border_t_1()
                     .border_color(theme.border)
-                    .bg(theme.tokens.bg_hover)
+                    .bg(theme.tokens.bg_option_active)
                     .child(
                         Button::new("confirm-delete-thread-cancel")
                             .label(self.cancel_label.clone())

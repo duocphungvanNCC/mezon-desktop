@@ -8,8 +8,8 @@ use gpui::{
     div, img, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
-    filename_matches_query,
+    ChannelDocument, ChannelId, ClanId, ClanMembersStore, DirectKind, DirectMessageStore,
+    FilesStore, GroupMembersStore, Settings, filename_matches_query,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -18,7 +18,7 @@ use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, Spinner,
     h_flex, v_flex,
 };
-use crate::router::{Route, Router};
+use crate::router::Router;
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::download::save_with_progress_toast;
 
@@ -34,6 +34,30 @@ const SEARCH_DEBOUNCE_MS: u64 = 200;
 const LIST_PAD_X: f32 = 16.;
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy)]
+enum FileMemberSource {
+    Clan(ClanId),
+    GroupDm(ChannelId),
+    Direct,
+}
+
+fn file_member_source(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> FileMemberSource {
+    if !clan_id.is_zero() {
+        return FileMemberSource::Clan(clan_id);
+    }
+    let is_group = DirectMessageStore::try_global(cx).is_some_and(|store| {
+        store
+            .read(cx)
+            .find(channel_id)
+            .is_some_and(|dm| dm.kind == DirectKind::Group)
+    });
+    if is_group {
+        FileMemberSource::GroupDm(channel_id)
+    } else {
+        FileMemberSource::Direct
+    }
+}
 
 #[derive(Clone)]
 struct FileRowVm {
@@ -124,12 +148,23 @@ impl FilesPopoverPanel {
                 this.refresh_rows(cx);
             }),
         ];
-        if clan_id.0 != 0 {
-            subs.push(cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-                FilesStore::global(cx).update(cx, |store, cx| {
-                    store.refresh_uploaders(this.channel_id, cx);
-                });
-            }));
+        let member_source = file_member_source(clan_id, channel_id, cx);
+        match member_source {
+            FileMemberSource::Clan(_) => {
+                subs.push(cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+                    FilesStore::global(cx).update(cx, |store, cx| {
+                        store.refresh_uploaders(this.channel_id, cx);
+                    });
+                }));
+            }
+            FileMemberSource::GroupDm(_) => {
+                subs.push(cx.observe(&GroupMembersStore::global(cx), |this, _, cx| {
+                    FilesStore::global(cx).update(cx, |store, cx| {
+                        store.refresh_uploaders(this.channel_id, cx);
+                    });
+                }));
+            }
+            FileMemberSource::Direct => {}
         }
         subs.push(
             cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
@@ -141,10 +176,18 @@ impl FilesPopoverPanel {
 
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
-        if clan_id.0 != 0 {
-            ClanMembersStore::global(cx).update(cx, |members, cx| {
-                members.ensure_loaded(clan_id, cx);
-            });
+        match member_source {
+            FileMemberSource::Clan(clan_id) => {
+                ClanMembersStore::global(cx).update(cx, |members, cx| {
+                    members.ensure_loaded(clan_id, cx);
+                });
+            }
+            FileMemberSource::GroupDm(channel_id) => {
+                GroupMembersStore::global(cx).update(cx, |members, cx| {
+                    members.ensure_loaded(channel_id, cx);
+                });
+            }
+            FileMemberSource::Direct => {}
         }
 
         let mut this = Self {
@@ -1018,28 +1061,7 @@ fn format_file_time(create_time: i64, locale: &str) -> String {
 }
 
 pub fn active_files_channel(cx: &App) -> Option<(ClanId, ChannelId)> {
-    files_channel_for_route(&Router::global(cx).read(cx).route())
-}
-
-fn files_channel_for_route(route: &Route) -> Option<(ClanId, ChannelId)> {
-    match route {
-        Route::Channel {
-            clan_id,
-            channel_id,
-        }
-        | Route::Thread {
-            clan_id,
-            channel_id,
-            ..
-        }
-        | Route::Canvas {
-            clan_id,
-            channel_id,
-            ..
-        } => (clan_id.0 != 0).then_some((*clan_id, *channel_id)),
-        Route::DirectMessage { direct_id, .. } => Some((ClanId(0), *direct_id)),
-        _ => None,
-    }
+    Router::global(cx).read(cx).conversation_context()
 }
 
 pub fn files_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
@@ -1050,47 +1072,18 @@ pub fn files_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
         FilesStore::global(cx).update(cx, |store, cx| {
             store.refresh(clan_id, channel_id, cx);
         });
-        if clan_id.0 != 0 {
-            ClanMembersStore::global(cx).update(cx, |members, cx| {
-                members.ensure_loaded(clan_id, cx);
-            });
+        match file_member_source(clan_id, channel_id, cx) {
+            FileMemberSource::Clan(clan_id) => {
+                ClanMembersStore::global(cx).update(cx, |members, cx| {
+                    members.ensure_loaded(clan_id, cx);
+                });
+            }
+            FileMemberSource::GroupDm(channel_id) => {
+                GroupMembersStore::global(cx).update(cx, |members, cx| {
+                    members.ensure_loaded(channel_id, cx);
+                });
+            }
+            FileMemberSource::Direct => {}
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::files_channel_for_route;
-    use crate::router::Route;
-    use mezon_store::{ChannelId, ClanId};
-
-    #[test]
-    fn files_route_supports_channels_and_direct_messages() {
-        assert_eq!(
-            files_channel_for_route(&Route::Channel {
-                clan_id: ClanId(7),
-                channel_id: ChannelId(11),
-            }),
-            Some((ClanId(7), ChannelId(11)))
-        );
-        assert_eq!(
-            files_channel_for_route(&Route::DirectMessage {
-                direct_id: ChannelId(13),
-                message_type: "3".into(),
-            }),
-            Some((ClanId(0), ChannelId(13)))
-        );
-    }
-
-    #[test]
-    fn files_route_rejects_non_conversation_and_zero_clan_channel_routes() {
-        assert_eq!(files_channel_for_route(&Route::Friends), None);
-        assert_eq!(
-            files_channel_for_route(&Route::Channel {
-                clan_id: ClanId(0),
-                channel_id: ChannelId(11),
-            }),
-            None
-        );
-    }
 }
