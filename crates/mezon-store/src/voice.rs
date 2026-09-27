@@ -230,7 +230,7 @@ fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> Stri
         .map(|value| value.trim())
         .find(|value| !value.is_empty())
         .unwrap_or_default();
-    serde_json::json!({ "username": username, "avatar": avatar }).to_string()
+    format!("{username};{avatar}")
 }
 
 struct CachedMeetToken {
@@ -1046,8 +1046,27 @@ impl VoiceStore {
         self.frame_store.clone()
     }
 
+    pub fn begin_screen_recovery_view(
+        &self,
+        active: bool,
+    ) -> Option<mezon_voice::screen_recovery::ScreenViewGuard> {
+        let store = self.frame_store.as_ref()?;
+        let priority = self.fullscreen_screen.or_else(|| {
+            self.participants
+                .iter()
+                .find(|p| {
+                    self.focused_tile.as_deref() == Some(screen_tile_id(&p.session_id).as_str())
+                })
+                .and_then(|p| p.screenshare)
+        });
+        Some(store.screen_views.begin(active, priority))
+    }
+
     pub fn render_frame(&self, key: u64) -> Option<VoiceRenderFrame> {
         let store = self.frame_store.as_ref()?;
+        if self.fullscreen_screen.is_none_or(|screen| screen == key) {
+            store.screen_views.note_rendered(key);
+        }
         let cached_seq = self.render_cache.lock().get(&key).map(|entry| entry.seq);
         let Some(frame) = store.take_new(key, cached_seq) else {
             return self
@@ -2373,6 +2392,9 @@ impl VoiceStore {
     }
 
     fn sync_screen_full_res(&self) {
+        if let Some(store) = &self.frame_store {
+            store.screen_views.set_pip(self.pip_key());
+        }
         if let Some(session) = &self.session {
             session.set_screen_full_res(self.desired_screen_full_res());
         }
