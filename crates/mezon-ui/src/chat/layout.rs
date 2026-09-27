@@ -194,6 +194,12 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.on_release(|this, cx| {
+            if let Some(store) = this.voice_store.read(cx).frame_store() {
+                store.screen_views.clear_main();
+            }
+        })
+        .detach();
         cx.subscribe(
             &AccountStore::global(cx),
             |_, _, event: &AccountEvent, cx| {
@@ -1694,6 +1700,10 @@ impl ChatLayout {
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
+        let _screen_recovery_view = self
+            .voice_store
+            .read(cx)
+            .begin_screen_recovery_view(window.is_window_active());
         self.chat_area.ensure_input(window, cx);
         if self.show_member_list && self.is_dm_route(cx) {
             self.chat_area.ensure_dm_profile_panel(window, cx);
@@ -3052,10 +3062,14 @@ impl ChatLayout {
                     self._voice_ptt_activation =
                         Some(cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
+                                if let Some(store) = this.voice_store.read(cx).frame_store() {
+                                    store.screen_views.clear_main();
+                                }
                                 this.voice_store.update(cx, |store, cx| {
                                     store.set_push_to_talk(false, cx);
                                 });
                             }
+                            cx.notify();
                         }));
                 }
                 let channel = ch.clone();
