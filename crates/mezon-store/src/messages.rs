@@ -6371,13 +6371,6 @@ impl MessagesStore {
         };
         let attachments_in_update = !incoming.attachments.is_empty();
         merge_message_update(existing, &incoming);
-        if attachments_in_update {
-            let cfg = AppConfig::try_global(cx);
-            let (album_layout, viewer_media) =
-                build_media_presentation(&existing.attachments, cfg.as_deref());
-            existing.album_layout = album_layout;
-            existing.viewer_media = viewer_media;
-        }
         if let Some(keys) = &presign_keys {
             apply_presign_gate(
                 &mut existing.attachments,
@@ -6385,6 +6378,12 @@ impl MessagesStore {
                 &base_img,
                 existing.create_time,
             );
+        }
+        if attachments_in_update {
+            let cfg = AppConfig::try_global(cx);
+            let (album_layout, viewer_media) = build_media_presentation(&existing.attachments, cfg);
+            existing.album_layout = album_layout;
+            existing.viewer_media = viewer_media;
         }
         let arms_expiry = existing.attachments.iter().any(|a| a.presign_pending);
         patch_reply_previews_after_update(
@@ -10067,6 +10066,77 @@ mod tests {
         assert_eq!(first_non_empty("", ""), "");
     }
 
+    fn album_image(name: &str) -> MessageAttachment {
+        MessageAttachment {
+            url: format!("https://cdn.mezon.ai/uploads/{name}.png"),
+            filename: format!("{name}.png"),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        }
+    }
+
+    fn message_with_images(id: i64, names: &[&str], create_time: i64) -> Message {
+        let attachments: Vec<MessageAttachment> =
+            names.iter().map(|name| album_image(name)).collect();
+        let (album_layout, viewer_media) = build_media_presentation(&attachments, None);
+        Message::new(MessageId(id), "hi", "u1", "U1", create_time)
+            .with_attachments(attachments)
+            .with_media_presentation(album_layout, viewer_media)
+    }
+
+    #[gpui::test]
+    fn attachment_update_rebuilds_album_layout_after_the_presign_gate(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let channel = ChannelId(10);
+            let created = now_unix_seconds() - presign::PRESIGN_PENDING_MAX_AGE_SEC - 1;
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![message_with_images(1, &["a", "b", "c"], created)],
+                );
+                let incoming = Message::new(MessageId(1), "hi", "u1", "U1", created)
+                    .with_attachments(vec![
+                        album_image("a"),
+                        album_image("b"),
+                        album_image("gone"),
+                    ]);
+                store.apply_message_update(
+                    channel,
+                    MessageId(1),
+                    incoming,
+                    Some(vec!["a".into(), "b".into()]),
+                    cx,
+                );
+                let updated = store
+                    .cache
+                    .get(&channel)
+                    .and_then(|bucket| bucket.messages.get_by_id(MessageId(1)))
+                    .expect("updated message");
+                assert_eq!(updated.attachments.len(), 2);
+                assert_eq!(updated.viewer_media.len(), 2);
+                assert_eq!(
+                    updated
+                        .album_layout
+                        .as_ref()
+                        .map(|layout| layout.tiles.len()),
+                    Some(2)
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn a_topic_pages_older_replies_from_its_own_bucket(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -12545,33 +12615,6 @@ mod tests {
             confirmed.attachments[0].local_source,
             Some(std::path::PathBuf::from("/tmp/photo.png"))
         );
-    }
-
-    #[test]
-    fn attachment_update_rebuilds_album_layout() {
-        let image = |n: u32| MessageAttachment {
-            url: format!("https://cdn.example/{n}.png"),
-            filename: format!("{n}.png"),
-            filetype: "image/png".into(),
-            width: 800,
-            height: 600,
-            ..Default::default()
-        };
-        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
-            .with_attachments(vec![image(1), image(2), image(3)]);
-        let (layout_three, _) = build_media_presentation(&existing.attachments, None);
-        existing.album_layout = layout_three;
-
-        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100)
-            .with_attachments(vec![image(1), image(2)]);
-        merge_message_update(&mut existing, &incoming);
-        let (layout_two, viewer_media) = build_media_presentation(&existing.attachments, None);
-        existing.album_layout = layout_two;
-        existing.viewer_media = viewer_media;
-
-        assert_eq!(existing.attachments.len(), 2);
-        assert!(existing.album_layout.is_some());
-        assert_eq!(existing.viewer_media.len(), 2);
     }
 
     #[test]
