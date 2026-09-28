@@ -81,7 +81,7 @@ pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,
-    peek_screen_share_options,
+    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;

@@ -30,7 +30,8 @@ pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
     ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
     VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, system_screen_share_pick,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, system_screen_share_pick,
 };
 
 use crate::AppConfig;
