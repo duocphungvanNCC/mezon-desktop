@@ -498,6 +498,15 @@ const SKELETON_FADE_IN_MS: u64 = 150;
 const SKELETON_SETTLE_MS: u64 = 250;
 const SKELETON_FADE_OUT_MS: u64 = 180;
 const JUMP_PRESENT_MIN_MESSAGES: usize = 20;
+const ACTIVITY_STRIP_JUMP_OFFSET: f32 = -58.;
+
+fn should_offset_jump_for_activity_strip(target_is_above: bool, strip_visible: bool) -> bool {
+    target_is_above && strip_visible
+}
+
+fn activity_strip_visible_from_state(mounted: bool, has_activity: bool) -> bool {
+    mounted && has_activity
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SkeletonPhase {
@@ -1340,6 +1349,8 @@ pub struct ChannelMessages {
     last_visible_end: usize,
     header_shown: bool,
     pending_jump: Option<MessageId>,
+    activity_strip_mounted: bool,
+    activity_strip_has_activity: bool,
     highlight_id: Option<MessageId>,
     _highlight_timer: Option<Task<()>>,
     last_seen_at_bottom: Option<MessageId>,
@@ -1394,6 +1405,22 @@ pub struct ChannelMessages {
 }
 
 impl ChannelMessages {
+    pub(crate) fn set_activity_strip_state(&mut self, mounted: bool, has_activity: bool) {
+        self.activity_strip_mounted = mounted;
+        self.activity_strip_has_activity = has_activity;
+    }
+
+    pub(crate) fn set_activity_strip_has_activity(&mut self, has_activity: bool) {
+        self.activity_strip_has_activity = has_activity;
+    }
+
+    fn activity_strip_visible(&self) -> bool {
+        activity_strip_visible_from_state(
+            self.activity_strip_mounted,
+            self.activity_strip_has_activity,
+        )
+    }
+
     pub fn register_as_active_timeline(entity: &Entity<Self>, cx: &mut App) {
         cx.set_global(ActiveTimeline(entity.downgrade()));
     }
@@ -1991,6 +2018,8 @@ impl ChannelMessages {
             last_visible_end: 0,
             header_shown: false,
             pending_jump: None,
+            activity_strip_mounted: false,
+            activity_strip_has_activity: false,
             highlight_id: None,
             _highlight_timer: None,
             last_seen_at_bottom: None,
@@ -5212,8 +5241,17 @@ impl Render for ChannelMessages {
                 .position(|m| m.id == target)
             {
                 self.pending_jump = None;
-                self.list_state
-                    .scroll_to_reveal_item(usize::from(header_shown) + pos);
+                let item_ix = usize::from(header_shown) + pos;
+                let target_is_above = item_ix <= self.list_state.logical_scroll_top().item_ix;
+                self.list_state.scroll_to_reveal_item(item_ix);
+                if should_offset_jump_for_activity_strip(
+                    target_is_above,
+                    self.activity_strip_visible(),
+                ) {
+                    let mut scroll_top = self.list_state.logical_scroll_top();
+                    scroll_top.offset_in_item = px(ACTIVITY_STRIP_JUMP_OFFSET);
+                    self.list_state.scroll_to(scroll_top);
+                }
             } else if self.is_topic_jump_target(target, cx) {
                 self.pending_jump = None;
             }
@@ -5436,6 +5474,27 @@ impl Render for ChannelMessages {
             );
         SelectionCapture::new(content.into_any_element(), selection_host, selection_state)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod activity_strip_jump_tests {
+    use super::{activity_strip_visible_from_state, should_offset_jump_for_activity_strip};
+
+    #[test]
+    fn live_activity_changes_only_affect_a_mounted_strip() {
+        assert!(!activity_strip_visible_from_state(true, false));
+        assert!(activity_strip_visible_from_state(true, true));
+        assert!(!activity_strip_visible_from_state(false, true));
+        assert!(!activity_strip_visible_from_state(false, false));
+    }
+
+    #[test]
+    fn jump_offset_requires_an_above_target_and_a_visible_strip() {
+        assert!(should_offset_jump_for_activity_strip(true, true));
+        assert!(!should_offset_jump_for_activity_strip(true, false));
+        assert!(!should_offset_jump_for_activity_strip(false, true));
+        assert!(!should_offset_jump_for_activity_strip(false, false));
     }
 }
 

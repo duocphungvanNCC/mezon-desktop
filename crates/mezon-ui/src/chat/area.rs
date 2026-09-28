@@ -222,6 +222,116 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
     )
 }
 
+fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
+    let topics_store = TopicsStore::global(cx);
+    let messages_store = MessagesStore::global(cx);
+    let topics = topics_store.read(cx);
+    let messages = messages_store.read(cx);
+    if topics.is_loading() {
+        return None;
+    }
+    let active_channel_id = messages.active_channel_id();
+    let active_channel_key = active_channel_id.map(|channel_id| channel_id.to_string());
+
+    // The list endpoint is the richest source. While it is still loading (or when an older topic
+    // only exists in the current channel buffer), synthesize the same row from the origin message
+    // and its realtime topic metadata so an existing topic never renders as "empty".
+    active_channel_key
+        .as_deref()
+        .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
+        .cloned()
+        .or_else(|| {
+            let clan_id = messages.active_clan_id()?;
+            let channel_id = messages.active_channel_id()?;
+            messages
+                .messages()
+                .iter()
+                .filter_map(|origin| {
+                    let topic_id = origin.topic_id?;
+                    let meta = topics.topic_meta_for_topic(topic_id)?;
+                    Some((meta.lsnt, origin, topic_id))
+                })
+                .max_by_key(|(timestamp, _, _)| *timestamp)
+                .map(|(timestamp, origin, topic_id)| {
+                    let last_visible_message = messages
+                        .messages_in_channel(topic_id)
+                        .iter()
+                        .rev()
+                        .find(|message| {
+                            !message.content.trim().is_empty() || !message.attachments.is_empty()
+                        });
+                    TopicDiscussion {
+                        id: topic_id.to_string(),
+                        message_id: origin.id.to_string(),
+                        clan_id: clan_id.to_string(),
+                        channel_id: channel_id.to_string(),
+                        creator_id: origin.sender_id.clone(),
+                        last_sender_id: origin.sender_id.clone(),
+                        content: origin.content.clone(),
+                        last_message_content: last_visible_message
+                            .map(|message| message.content.clone())
+                            .unwrap_or_default(),
+                        last_message_attachments: last_visible_message
+                            .map(|message| {
+                                message
+                                    .attachments
+                                    .iter()
+                                    .map(|attachment| mezon_client::transport::ApiAttachment {
+                                        url: attachment.url.clone(),
+                                        filename: attachment.filename.clone(),
+                                        filetype: attachment.filetype.clone(),
+                                        width: attachment.width as i32,
+                                        height: attachment.height as i32,
+                                        thumbnail: attachment.thumbnail.clone(),
+                                        duration: attachment.duration,
+                                        size: attachment.size.min(i32::MAX as u64) as i32,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX)) as u32,
+                    }
+                })
+        })
+}
+
+fn latest_activity_strip_visible(clan_id: &str, cx: &App) -> bool {
+    if latest_activity_topic(clan_id, cx).is_some() {
+        return true;
+    }
+    let messages = MessagesStore::global(cx).read(cx);
+    let pinned = PinnedMessagesStore::global(cx).read(cx);
+    let active_clan_id = clan_id.parse::<ClanId>().ok();
+    pinned.clan_id() == active_clan_id
+        && pinned.channel_id() == messages.active_channel_id()
+        && !pinned.pinned().is_empty()
+}
+
+fn current_activity_strip_has_activity(cx: &App) -> bool {
+    MessagesStore::global(cx)
+        .read(cx)
+        .active_clan_id()
+        .filter(|clan_id| !clan_id.is_zero())
+        .is_some_and(|clan_id| latest_activity_strip_visible(&clan_id.to_string(), cx))
+}
+
+fn sync_activity_strip_has_activity(cx: &mut App) {
+    let has_activity = current_activity_strip_has_activity(cx);
+    if let Some(timeline) = ChannelMessages::active_timeline(cx) {
+        timeline.update(cx, |timeline, _| {
+            timeline.set_activity_strip_has_activity(has_activity);
+        });
+    }
+}
+
+fn should_mount_activity_strip(
+    is_dm: bool,
+    stream_sidebar: bool,
+    media_channel_view: bool,
+) -> bool {
+    !is_dm && !stream_sidebar && !media_channel_view
+}
+
 /// Compact activity rail owned by the message column (never the member/topic sidebars).
 fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
     let topics_store = TopicsStore::global(cx);
@@ -230,76 +340,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
     let messages = messages_store.read(cx);
     let topic_syncing = topics.is_loading();
     let active_channel_id = messages.active_channel_id();
-    let active_channel_key = active_channel_id.map(|channel_id| channel_id.to_string());
-
-    // The list endpoint is the richest source. While it is still loading (or when an older topic
-    // only exists in the current channel buffer), synthesize the same row from the origin message
-    // and its realtime topic metadata so an existing topic never renders as "empty".
-    let latest_topic = (!topic_syncing)
-        .then(|| {
-            active_channel_key
-                .as_deref()
-                .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
-                .cloned()
-                .or_else(|| {
-                    let clan_id = messages.active_clan_id()?;
-                    let channel_id = messages.active_channel_id()?;
-                    messages
-                        .messages()
-                        .iter()
-                        .filter_map(|origin| {
-                            let topic_id = origin.topic_id?;
-                            let meta = topics.topic_meta_for_topic(topic_id)?;
-                            Some((meta.lsnt, origin, topic_id))
-                        })
-                        .max_by_key(|(timestamp, _, _)| *timestamp)
-                        .map(|(timestamp, origin, topic_id)| {
-                            let last_visible_message =
-                                messages.messages_in_channel(topic_id).iter().rev().find(
-                                    |message| {
-                                        !message.content.trim().is_empty()
-                                            || !message.attachments.is_empty()
-                                    },
-                                );
-                            TopicDiscussion {
-                                id: topic_id.to_string(),
-                                message_id: origin.id.to_string(),
-                                clan_id: clan_id.to_string(),
-                                channel_id: channel_id.to_string(),
-                                creator_id: origin.sender_id.clone(),
-                                last_sender_id: origin.sender_id.clone(),
-                                content: origin.content.clone(),
-                                last_message_content: last_visible_message
-                                    .map(|message| message.content.clone())
-                                    .unwrap_or_default(),
-                                last_message_attachments: last_visible_message
-                                    .map(|message| {
-                                        message
-                                            .attachments
-                                            .iter()
-                                            .map(|attachment| {
-                                                mezon_client::transport::ApiAttachment {
-                                                    url: attachment.url.clone(),
-                                                    filename: attachment.filename.clone(),
-                                                    filetype: attachment.filetype.clone(),
-                                                    width: attachment.width as i32,
-                                                    height: attachment.height as i32,
-                                                    thumbnail: attachment.thumbnail.clone(),
-                                                    duration: attachment.duration,
-                                                    size: attachment.size.min(i32::MAX as u64)
-                                                        as i32,
-                                                }
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                                last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX))
-                                    as u32,
-                            }
-                        })
-                })
-        })
-        .flatten();
+    let latest_topic = latest_activity_topic(clan_id, cx);
     let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
         mezon_client::TopicReplyPreview::Text(text) => Some(text),
         _ => None,
@@ -914,11 +955,13 @@ impl LatestActivityStripView {
     fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
+                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
         let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
             if matches!(event, mezon_store::PinnedEvent::Updated) {
+                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
@@ -927,6 +970,7 @@ impl LatestActivityStripView {
                 event,
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
             ) {
+                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
@@ -1526,8 +1570,16 @@ impl ChatArea {
             }
         };
 
-        let activity_strip = (!is_dm && !stream_sidebar && !media_channel_view)
-            .then(|| AnyView::from(self.activity_strip.clone()));
+        let has_activity = clan_id
+            .as_deref()
+            .is_some_and(|clan_id| latest_activity_strip_visible(clan_id, cx));
+        let activity_strip_mounted =
+            should_mount_activity_strip(is_dm, stream_sidebar, media_channel_view);
+        self.timeline.update(cx, |timeline, _| {
+            timeline.set_activity_strip_state(activity_strip_mounted, has_activity);
+        });
+        let activity_strip =
+            activity_strip_mounted.then(|| AnyView::from(self.activity_strip.clone()));
 
         self.header.update(cx, |header, cx| {
             header.sync(
@@ -1913,7 +1965,7 @@ impl ChatArea {
 
 #[cfg(test)]
 mod removed_conversation_tests {
-    use super::{ChannelId, Route, route_targets_conversation};
+    use super::{ChannelId, Route, route_targets_conversation, should_mount_activity_strip};
 
     fn direct(id: i64) -> Route {
         Route::DirectMessage {
@@ -1935,5 +1987,13 @@ mod removed_conversation_tests {
     #[test]
     fn a_route_outside_direct_messages_stays_put() {
         assert!(!route_targets_conversation(&Route::Friends, ChannelId(7)));
+    }
+
+    #[test]
+    fn activity_strip_is_only_mounted_in_the_main_channel_view() {
+        assert!(should_mount_activity_strip(false, false, false));
+        assert!(!should_mount_activity_strip(true, false, false));
+        assert!(!should_mount_activity_strip(false, true, false));
+        assert!(!should_mount_activity_strip(false, false, true));
     }
 }
