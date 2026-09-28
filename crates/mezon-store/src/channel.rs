@@ -3683,19 +3683,25 @@ impl ChannelList {
                 // clan-wide refetch from every client at once is the one
                 // thing this must not turn into.
                 match (was_private, e.channel_private) {
-                    (Some(false), true) => match self.private_flip_keeps_us(clan_id, e, cx) {
-                        Some(true) => cx.emit(ChannelEvent::PrivacyChanged {
-                            clan_id,
-                            channel_id: id,
-                            private: true,
-                            role_ids: e.role_ids.iter().copied().map(RoleId).collect(),
-                        }),
-                        Some(false) => {
-                            self.apply_self_removed_from_channel(id, cx);
-                            cx.emit(ChannelEvent::AccessLost(id));
+                    (Some(false), true) => {
+                        let keeps_us = self.private_flip_keeps_us(clan_id, e, cx);
+                        if keeps_us != Some(false) {
+                            cx.emit(ChannelEvent::PrivacyChanged {
+                                clan_id,
+                                channel_id: id,
+                                private: true,
+                                role_ids: e.role_ids.iter().copied().map(RoleId).collect(),
+                            });
                         }
-                        None => self.refresh_clan(clan_id, cx),
-                    },
+                        match keeps_us {
+                            Some(true) => {}
+                            Some(false) => {
+                                self.apply_self_removed_from_channel(id, cx);
+                                cx.emit(ChannelEvent::AccessLost(id));
+                            }
+                            None => self.refresh_clan(clan_id, cx),
+                        }
+                    }
                     (Some(true), false) => cx.emit(ChannelEvent::PrivacyChanged {
                         clan_id,
                         channel_id: id,
@@ -10191,11 +10197,14 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn a_privacy_flip_resets_the_member_and_role_lists_of_the_channel(
+    fn init_privacy_stores(
         cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<ChannelList>,
+        Entity<crate::ChannelUsersStore>,
+        Entity<crate::RolesStore>,
     ) {
-        let (channels, users, roles) = cx.update(|cx| {
+        cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -10239,17 +10248,29 @@ mod tests {
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
             });
             (channels, users, roles)
-        });
-        let linked_roles = |cx: &mut gpui::TestAppContext| {
-            cx.read(|cx| {
-                roles
-                    .read(cx)
-                    .roles_for_channel(ClanId(1), ChannelId(1))
-                    .into_iter()
-                    .map(|(role_id, _)| role_id)
-                    .collect::<Vec<_>>()
-            })
-        };
+        })
+    }
+
+    fn roles_linked_to(
+        roles: &Entity<crate::RolesStore>,
+        channel_id: i64,
+        cx: &mut gpui::TestAppContext,
+    ) -> Vec<RoleId> {
+        cx.read(|cx| {
+            roles
+                .read(cx)
+                .roles_for_channel(ClanId(1), ChannelId(channel_id))
+                .into_iter()
+                .map(|(role_id, _)| role_id)
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn a_privacy_flip_resets_the_member_and_role_lists_of_the_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (channels, users, roles) = init_privacy_stores(cx);
 
         cx.update(|cx| {
             channels.update(cx, |channels, cx| {
@@ -10260,7 +10281,7 @@ mod tests {
             });
         });
         assert!(cx.read(|cx| users.read(cx).is_loading(ChannelId(1))));
-        assert_eq!(linked_roles(cx), vec![RoleId(42)]);
+        assert_eq!(roles_linked_to(&roles, 1, cx), vec![RoleId(42)]);
 
         cx.update(|cx| {
             channels.update(cx, |channels, cx| {
@@ -10268,7 +10289,20 @@ mod tests {
             });
         });
         assert!(cx.read(|cx| users.read(cx).user_ids(ChannelId(1)).is_empty()));
-        assert!(linked_roles(cx).is_empty());
+        assert!(roles_linked_to(&roles, 1, cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_private_flip_resets_the_lists_while_our_roles_are_unknown(cx: &mut gpui::TestAppContext) {
+        let (channels, users, roles) = init_privacy_stores(cx);
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.handle_event(&private_flip_event_with_roles(1, vec![], vec![42], 9), cx);
+            });
+        });
+        assert!(cx.read(|cx| users.read(cx).is_loading(ChannelId(1))));
+        assert_eq!(roles_linked_to(&roles, 1, cx), vec![RoleId(42)]);
     }
 
     fn flip_event(channel_id: i64, private: bool, user_ids: Vec<i64>) -> RealtimeEvent {

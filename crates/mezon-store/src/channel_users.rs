@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
@@ -41,7 +41,8 @@ struct ChannelUsers {
 
 pub struct ChannelUsersStore {
     cache: KeyedCache<ChannelId, ChannelUsers>,
-    loading: HashSet<ChannelId>,
+    loading: HashMap<ChannelId, u64>,
+    next_fetch: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
     _channel_list_sub: Option<Subscription>,
@@ -75,7 +76,8 @@ impl ChannelUsersStore {
         });
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
-            loading: HashSet::new(),
+            loading: HashMap::new(),
+            next_fetch: 0,
             api,
             _conn_watch: conn_watch,
             _channel_list_sub: channel_list_sub,
@@ -140,37 +142,53 @@ impl ChannelUsersStore {
     }
 
     pub fn is_loading(&self, channel_id: ChannelId) -> bool {
-        self.loading.contains(&channel_id)
+        self.loading.contains_key(&channel_id)
     }
 
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if channel_id.get() == 0 || self.cache.is_fresh(&channel_id, CACHE_TTL) {
+        if channel_id.get() == 0
+            || self.cache.is_fresh(&channel_id, CACHE_TTL)
+            || self.loading.contains_key(&channel_id)
+        {
             return;
         }
-        if !self.loading.insert(channel_id) {
-            return;
-        }
+        self.next_fetch += 1;
+        let fetch = self.next_fetch;
+        self.loading.insert(channel_id, fetch);
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_users_uc(channel_id.get(), CHANNEL_USER_FETCH_LIMIT)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading.remove(&channel_id);
-                match result {
-                    Ok(response) => {
-                        this.cache
-                            .insert(channel_id, channel_users_from(response), None);
-                        cx.emit(ChannelUsersEvent::Changed { channel_id });
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        tracing::error!("list_channel_users_uc failed for {channel_id}: {error}")
-                    }
-                }
+                this.finish_fetch(channel_id, fetch, result, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_fetch(
+        &mut self,
+        channel_id: ChannelId,
+        fetch: u64,
+        result: anyhow::Result<api::AllUsersAddChannelResponse>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading.get(&channel_id) != Some(&fetch) {
+            return;
+        }
+        self.loading.remove(&channel_id);
+        match result {
+            Ok(response) => {
+                self.cache
+                    .insert(channel_id, channel_users_from(response), None);
+                cx.emit(ChannelUsersEvent::Changed { channel_id });
+                cx.notify();
+            }
+            Err(error) => {
+                tracing::error!("list_channel_users_uc failed for {channel_id}: {error}")
+            }
+        }
     }
 
     pub fn apply_privacy_change(
@@ -179,7 +197,8 @@ impl ChannelUsersStore {
         private: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.cache.contains(&channel_id) {
+        let in_flight = self.loading.remove(&channel_id).is_some();
+        if !in_flight && !self.cache.contains(&channel_id) {
             return;
         }
         if private {
@@ -336,6 +355,49 @@ mod tests {
                 assert!(!store.is_loaded(ChannelId(3)));
             });
         });
+    }
+
+    #[gpui::test]
+    fn going_public_discards_a_fetch_already_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.seed_users_for_test(ChannelId(1), &[UserId(5), UserId(6)]);
+                store.cache.mark_stale(&ChannelId(1));
+                store.ensure_loaded(ChannelId(1), cx);
+                let stale_fetch = store.loading[&ChannelId(1)];
+                store.apply_privacy_change(ChannelId(1), false, cx);
+                store.finish_fetch(ChannelId(1), stale_fetch, Ok(listing(&[5, 6])), cx);
+                assert!(store.user_ids(ChannelId(1)).is_empty());
+                assert!(!store.is_loading(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn going_private_restarts_a_fetch_already_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.ensure_loaded(ChannelId(1), cx);
+                let stale_fetch = store.loading[&ChannelId(1)];
+                store.apply_privacy_change(ChannelId(1), true, cx);
+                let fresh_fetch = store.loading[&ChannelId(1)];
+                assert_ne!(stale_fetch, fresh_fetch);
+                store.finish_fetch(ChannelId(1), stale_fetch, Ok(listing(&[5, 6])), cx);
+                assert!(store.is_loading(ChannelId(1)));
+                assert!(!store.is_loaded(ChannelId(1)));
+                store.finish_fetch(ChannelId(1), fresh_fetch, Ok(listing(&[9])), cx);
+                assert_eq!(store.user_ids(ChannelId(1)), &[UserId(9)]);
+            });
+        });
+    }
+
+    fn listing(ids: &[i64]) -> api::AllUsersAddChannelResponse {
+        api::AllUsersAddChannelResponse {
+            user_ids: ids.to_vec(),
+            ..Default::default()
+        }
     }
 
     #[test]
