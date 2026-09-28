@@ -37,6 +37,7 @@ pub mod ids;
 pub mod inbox;
 pub mod invite;
 pub mod login;
+pub mod media_permission;
 pub mod message;
 pub mod message_search;
 pub mod message_time;
@@ -175,6 +176,7 @@ pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
+pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
@@ -196,6 +198,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use mezon_voice::{MediaDevice, MediaPermission};
 pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,

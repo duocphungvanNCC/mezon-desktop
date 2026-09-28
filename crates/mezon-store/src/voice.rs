@@ -19,8 +19,8 @@ use mezon_client::{
     AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
 };
 use mezon_voice::{
-    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
-    VoiceSession,
+    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, MediaDevice, TokenRefresher, VoiceConnectOptions,
+    VoiceEvent, VoiceSession,
 };
 use parking_lot::Mutex;
 
@@ -46,6 +46,7 @@ use crate::gifts::{
     parse_flower_reaction_token, serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
+use crate::media_permission::MediaPermissionStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::users_by_user::UsersByUserStore;
 use crate::wallet::{WalletEvent, WalletStore};
@@ -350,7 +351,6 @@ pub struct VoiceStore {
     call_status: VoiceCallStatus,
     channel_label: String,
     mic_enabled: bool,
-    mic_permission_denied: bool,
     camera_enabled: bool,
     screen_share_enabled: bool,
     noise_suppression_enabled: bool,
@@ -740,7 +740,6 @@ impl VoiceStore {
             call_status: VoiceCallStatus::Stable,
             channel_label: String::new(),
             mic_enabled: false,
-            mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
             noise_suppression_enabled: false,
@@ -983,17 +982,6 @@ impl VoiceStore {
 
     pub fn mic_enabled(&self) -> bool {
         self.mic_enabled
-    }
-
-    pub fn mic_permission_denied(&self) -> bool {
-        self.mic_permission_denied
-    }
-
-    pub fn dismiss_mic_permission_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.mic_permission_denied {
-            self.mic_permission_denied = false;
-            cx.notify();
-        }
     }
 
     pub fn camera_enabled(&self) -> bool {
@@ -2930,7 +2918,6 @@ impl VoiceStore {
         };
         self.call_status = VoiceCallStatus::Stable;
         self.mic_enabled = false;
-        self.mic_permission_denied = false;
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
@@ -3337,8 +3324,8 @@ impl VoiceStore {
             return;
         }
 
-        let mic_enabled = snapshot.mic_enabled && !mezon_voice::microphone_denied();
-        self.mic_permission_denied = snapshot.mic_enabled && !mic_enabled;
+        let mic_enabled = snapshot.mic_enabled
+            && MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx);
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);
@@ -3578,6 +3565,7 @@ impl VoiceStore {
                 tracing::warn!("voice error: {message}");
                 if message.starts_with("camera:") {
                     self.camera_enabled = false;
+                    MediaPermissionStore::warn_if_denied_global(MediaDevice::Camera, cx);
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
@@ -3662,12 +3650,9 @@ impl VoiceStore {
             self.set_hold_to_talk(active, cx);
             return;
         }
-        if active && mezon_voice::microphone_denied() {
-            self.mic_permission_denied = true;
-            cx.notify();
+        if active && !MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx) {
             return;
         }
-        self.mic_permission_denied = false;
         self.ptt_held = active;
         if let Some(session) = &self.session {
             session.set_push_to_talk(active);
@@ -3685,7 +3670,9 @@ impl VoiceStore {
         }
         self.ptt_held = active;
         if active {
-            if self.mic_enabled {
+            if self.mic_enabled
+                || !MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx)
+            {
                 return;
             }
             self.set_mic_enabled(true, cx);
@@ -3697,13 +3684,11 @@ impl VoiceStore {
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if enabled && mezon_voice::microphone_denied() {
+        if enabled && !Self::media_granted(MediaDevice::Microphone, cx) {
             self.mic_enabled = false;
-            self.mic_permission_denied = true;
             cx.notify();
             return;
         }
-        self.mic_permission_denied = false;
         self.mic_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_mic_enabled(enabled);
@@ -3716,10 +3701,37 @@ impl VoiceStore {
     }
 
     pub fn set_camera_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled && !Self::media_granted(MediaDevice::Camera, cx) {
+            return;
+        }
         if let Some(session) = &self.session {
             session.set_camera_enabled(enabled);
         }
         cx.notify();
+    }
+
+    fn media_granted(device: MediaDevice, cx: &mut Context<Self>) -> bool {
+        let this = cx.weak_entity();
+        MediaPermissionStore::ensure_global(
+            device,
+            move |cx| {
+                let _ = this.update(cx, |this, cx| this.enable_after_grant(device, cx));
+            },
+            cx,
+        )
+    }
+
+    fn enable_after_grant(&mut self, device: MediaDevice, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        match device {
+            MediaDevice::Microphone if !self.mic_enabled && !self.is_audience() => {
+                self.set_mic_enabled(true, cx);
+            }
+            MediaDevice::Camera if !self.camera_enabled => self.set_camera_enabled(true, cx),
+            _ => {}
+        }
     }
 
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
@@ -4534,7 +4546,6 @@ impl VoiceStore {
         self.mic_enabled = false;
         self.hold_to_talk = false;
         self.ptt_held = false;
-        self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
         self.noise_suppression_enabled = false;

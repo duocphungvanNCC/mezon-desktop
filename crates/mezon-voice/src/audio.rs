@@ -1120,57 +1120,11 @@ fn drop_stream_detached(stream: cpal::Stream) {
 }
 
 #[cfg(target_os = "macos")]
-fn mic_authorization_status() -> i64 {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    unsafe {
-        let Some(cls) = Class::get("AVCaptureDevice") else {
-            return 3;
-        };
-        let media_type: id = NSString::alloc(nil).init_str("soun");
-        msg_send![cls, authorizationStatusForMediaType: media_type]
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn microphone_denied() -> bool {
-    matches!(mic_authorization_status(), 1 | 2)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn microphone_denied() -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
 fn request_macos_microphone_permission() {
-    use std::time::Duration;
-
-    use block::ConcreteBlock;
-    use cocoa::base::{BOOL, NO, id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    if mic_authorization_status() != 0 {
-        return;
-    }
-    let Some(cls) = Class::get("AVCaptureDevice") else {
-        return;
-    };
-    let media_type: id = unsafe { NSString::alloc(nil).init_str("soun") };
-    let (tx, rx) = flume::bounded::<bool>(1);
-    let handler = ConcreteBlock::new(move |granted: BOOL| {
-        let _ = tx.send(granted != NO);
-    });
-    let handler = handler.copy();
-    let _: () = unsafe {
-        msg_send![cls, requestAccessForMediaType: media_type completionHandler: &*handler]
-    };
-    let _ = rx.recv_timeout(Duration::from_secs(15));
+    crate::permission::request_media_permission_blocking(
+        crate::MediaDevice::Microphone,
+        Duration::from_secs(15),
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
