@@ -28,6 +28,8 @@ pub struct MediaPermissionStore {
     camera: MediaPermission,
     prompt: Option<MediaPermissionPrompt>,
     on_granted: Option<GrantedAction>,
+    denial_blocks: bool,
+    epoch: u64,
     _changes: Task<()>,
     _refresh: Option<Task<()>>,
 }
@@ -56,7 +58,7 @@ impl MediaPermissionStore {
                     .background_spawn(async move { mezon_voice::media_permission(device) })
                     .await;
                 if this
-                    .update(cx, |this, cx| this.apply(device, status, cx))
+                    .update(cx, |this, cx| this.apply_live(device, status, cx))
                     .is_err()
                 {
                     break;
@@ -68,6 +70,8 @@ impl MediaPermissionStore {
             camera: MediaPermission::Granted,
             prompt: None,
             on_granted: None,
+            denial_blocks: mezon_voice::MEDIA_DENIAL_IS_AUTHORITATIVE,
+            epoch: 0,
             _changes: changes_task,
             _refresh: None,
         };
@@ -86,10 +90,17 @@ impl MediaPermissionStore {
         }
     }
 
-    pub fn warn_if_denied_global(device: MediaDevice, cx: &mut App) {
-        if let Some(store) = Self::try_global(cx) {
-            store.update(cx, |store, cx| store.warn_if_denied(device, cx));
-        }
+    pub fn warn_if_denied_global(device: MediaDevice, cx: &mut App) -> bool {
+        Self::try_global(cx)
+            .is_some_and(|store| store.update(cx, |store, cx| store.warn_if_denied(device, cx)))
+    }
+
+    pub fn blocked_global(device: MediaDevice, cx: &mut App) -> bool {
+        Self::try_global(cx).is_some_and(|store| {
+            store.update(cx, |store, cx| {
+                store.denial_blocks && store.warn_if_denied(device, cx)
+            })
+        })
     }
 
     pub fn status(&self, device: MediaDevice) -> MediaPermission {
@@ -107,17 +118,26 @@ impl MediaPermissionStore {
         self.prompt
     }
 
+    pub fn settings_url(&self) -> Option<&'static str> {
+        self.prompt
+            .and_then(|prompt| mezon_voice::media_privacy_settings_url(prompt.device()))
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.epoch;
         self._refresh = Some(cx.spawn(async move |this, cx| {
             let (microphone, camera) = cx
                 .background_spawn(async {
                     (
-                        mezon_voice::recheck_media_permission(MediaDevice::Microphone),
-                        mezon_voice::recheck_media_permission(MediaDevice::Camera),
+                        mezon_voice::media_permission(MediaDevice::Microphone),
+                        mezon_voice::media_permission(MediaDevice::Camera),
                     )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.epoch != epoch {
+                    return;
+                }
                 this.apply(MediaDevice::Microphone, microphone, cx);
                 this.apply(MediaDevice::Camera, camera, cx);
             });
@@ -141,15 +161,22 @@ impl MediaPermissionStore {
         on_granted: impl FnOnce(&mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.apply(device, status, cx);
+        self.apply_live(device, status, cx);
         let prompt = match status {
             MediaPermission::Granted => return true,
+            MediaPermission::Denied if !self.denial_blocks => return true,
             MediaPermission::Undetermined => MediaPermissionPrompt::Request {
                 device,
                 requesting: false,
             },
             MediaPermission::Denied => MediaPermissionPrompt::Blocked(device),
         };
+        if self.prompt.is_some_and(|open| {
+            open.device() == device
+                && std::mem::discriminant(&open) == std::mem::discriminant(&prompt)
+        }) {
+            return false;
+        }
         self.on_granted = matches!(prompt, MediaPermissionPrompt::Request { .. })
             .then(|| Box::new(on_granted) as GrantedAction);
         self.prompt = Some(prompt);
@@ -157,13 +184,26 @@ impl MediaPermissionStore {
         false
     }
 
-    pub fn warn_if_denied(&mut self, device: MediaDevice, cx: &mut Context<Self>) {
+    pub fn warn_if_denied(&mut self, device: MediaDevice, cx: &mut Context<Self>) -> bool {
         let status = mezon_voice::media_permission(device);
-        self.apply(device, status, cx);
-        if status == MediaPermission::Denied && self.prompt.is_none() {
+        self.warn_with_status(device, status, cx)
+    }
+
+    fn warn_with_status(
+        &mut self,
+        device: MediaDevice,
+        status: MediaPermission,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_live(device, status, cx);
+        if status != MediaPermission::Denied {
+            return false;
+        }
+        if self.prompt.is_none() {
             self.prompt = Some(MediaPermissionPrompt::Blocked(device));
             cx.notify();
         }
+        true
     }
 
     pub fn request_access(&mut self, cx: &mut Context<Self>) {
@@ -182,17 +222,16 @@ impl MediaPermissionStore {
         mezon_voice::request_media_permission(device);
     }
 
-    pub fn open_settings(&self) {
-        if let Some(prompt) = self.prompt {
-            mezon_voice::open_media_privacy_settings(prompt.device());
-        }
-    }
-
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.on_granted = None;
         if self.prompt.take().is_some() {
             cx.notify();
         }
+    }
+
+    fn apply_live(&mut self, device: MediaDevice, status: MediaPermission, cx: &mut Context<Self>) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.apply(device, status, cx);
     }
 
     fn apply(&mut self, device: MediaDevice, status: MediaPermission, cx: &mut Context<Self>) {
@@ -238,12 +277,21 @@ mod tests {
     use super::*;
 
     fn idle_store(cx: &mut gpui::TestAppContext) -> Entity<MediaPermissionStore> {
+        store_with(true, cx)
+    }
+
+    fn store_with(
+        denial_blocks: bool,
+        cx: &mut gpui::TestAppContext,
+    ) -> Entity<MediaPermissionStore> {
         cx.update(|cx| {
             cx.new(|_| MediaPermissionStore {
                 microphone: MediaPermission::Undetermined,
                 camera: MediaPermission::Granted,
                 prompt: None,
                 on_granted: None,
+                denial_blocks,
+                epoch: 0,
                 _changes: Task::ready(()),
                 _refresh: None,
             })
@@ -409,5 +457,65 @@ mod tests {
             Some(MediaDevice::Microphone)
         );
         assert!(!ran.get());
+    }
+
+    #[gpui::test]
+    fn a_second_ensure_keeps_the_pending_action(cx: &mut gpui::TestAppContext) {
+        let store = idle_store(cx);
+        let clicked = Rc::new(Cell::new(false));
+        let held = Rc::new(Cell::new(false));
+        ensure(
+            &store,
+            MediaDevice::Microphone,
+            MediaPermission::Undetermined,
+            &clicked,
+            cx,
+        );
+        cx.update(|cx| store.update(cx, |store, cx| store.request_access(cx)));
+        ensure(
+            &store,
+            MediaDevice::Microphone,
+            MediaPermission::Undetermined,
+            &held,
+            cx,
+        );
+        assert_eq!(
+            prompt(&store, cx),
+            Some(MediaPermissionPrompt::Request {
+                device: MediaDevice::Microphone,
+                requesting: true,
+            })
+        );
+        apply(
+            &store,
+            MediaDevice::Microphone,
+            MediaPermission::Granted,
+            cx,
+        );
+        assert!(clicked.get());
+        assert!(!held.get());
+    }
+
+    #[gpui::test]
+    fn an_advisory_denial_lets_the_device_start(cx: &mut gpui::TestAppContext) {
+        let store = store_with(false, cx);
+        let ran = Rc::new(Cell::new(false));
+        assert!(ensure(
+            &store,
+            MediaDevice::Camera,
+            MediaPermission::Denied,
+            &ran,
+            cx
+        ));
+        assert_eq!(prompt(&store, cx), None);
+        assert!(cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.warn_with_status(MediaDevice::Camera, MediaPermission::Denied, cx)
+            })
+        }));
+        assert_eq!(
+            prompt(&store, cx),
+            Some(MediaPermissionPrompt::Blocked(MediaDevice::Camera))
+        );
     }
 }

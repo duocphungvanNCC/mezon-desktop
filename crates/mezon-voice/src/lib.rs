@@ -47,15 +47,14 @@ pub use audio::{
     AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
 };
 pub use camera::{
-    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
-    start_camera_into,
+    CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
-    MediaDevice, MediaPermission, media_permission, media_permission_changes,
-    open_media_privacy_settings, recheck_media_permission, request_media_permission,
+    MEDIA_DENIAL_IS_AUTHORITATIVE, MediaDevice, MediaPermission, media_permission,
+    media_permission_changes, media_privacy_settings_url, request_media_permission,
 };
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,

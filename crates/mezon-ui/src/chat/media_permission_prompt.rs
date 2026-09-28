@@ -14,6 +14,25 @@ pub fn media_access_missing(device: MediaDevice, cx: &App) -> bool {
     MediaPermissionStore::try_global(cx).is_some_and(|store| !store.read(cx).is_granted(device))
 }
 
+fn media_access_flags(cx: &App) -> (bool, bool) {
+    (
+        media_access_missing(MediaDevice::Microphone, cx),
+        media_access_missing(MediaDevice::Camera, cx),
+    )
+}
+
+pub fn observe_media_access<V: 'static>(cx: &mut Context<V>) -> Option<Subscription> {
+    let store = MediaPermissionStore::try_global(cx)?;
+    let mut shown = media_access_flags(cx);
+    Some(cx.observe(&store, move |_, _, cx| {
+        let flags = media_access_flags(cx);
+        if flags != shown {
+            shown = flags;
+            cx.notify();
+        }
+    }))
+}
+
 pub fn media_access_needed_label(device: MediaDevice, locale: &str) -> &'static str {
     mezon_i18n::t(
         locale,
@@ -129,7 +148,7 @@ fn close_button(store: &Entity<MediaPermissionStore>, theme: &Theme) -> AnyEleme
         .child(
             Icon::new(IconName::Close)
                 .size(px(16.))
-                .text_color(theme.text_muted),
+                .text_color(theme.tokens.text_secondary),
         )
         .on_click(move |_, _, cx| store.update(cx, |store, cx| store.dismiss(cx)))
         .into_any_element()
@@ -201,14 +220,14 @@ fn request_card(
                         .text_size(px(18.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_center()
-                        .text_color(theme.text_primary)
+                        .text_color(theme.tokens.text_theme_primary)
                         .child(mezon_i18n::t(locale, title_key)),
                 )
                 .child(
                     div()
                         .text_sm()
                         .text_center()
-                        .text_color(theme.text_muted)
+                        .text_color(theme.tokens.text_secondary)
                         .child(mezon_i18n::t(locale, body_key)),
                 )
                 .child(
@@ -303,7 +322,7 @@ fn blocked_card(
                         .w(px(16.))
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_primary)
+                        .text_color(theme.tokens.text_theme_primary)
                         .child(SharedString::from(format!("{}.", index + 1))),
                 )
                 .child(
@@ -311,7 +330,7 @@ fn blocked_card(
                         .flex_1()
                         .min_w_0()
                         .text_sm()
-                        .text_color(theme.text_primary)
+                        .text_color(theme.tokens.text_theme_primary)
                         .child(text),
                 )
         });
@@ -334,7 +353,7 @@ fn blocked_card(
                             div()
                                 .text_size(px(18.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_primary)
+                                .text_color(theme.tokens.text_theme_primary)
                                 .child(mezon_i18n::t(locale, title_key)),
                         )
                         .child(v_flex().gap_2().children(steps))
@@ -343,9 +362,24 @@ fn blocked_card(
                                 Button::new("media-permission-open-settings")
                                     .label(mezon_i18n::t(locale, "channelVoice.openSettings"))
                                     .primary()
-                                    .on_click(move |_, _, cx| open_store.read(cx).open_settings()),
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(url) = open_store.read(cx).settings_url() {
+                                            cx.open_url(url);
+                                        }
+                                    }),
                             ),
-                        ),
+                        )
+                        .when(cfg!(target_os = "macos"), |column| {
+                            column.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(mezon_i18n::t(
+                                        locale,
+                                        "screenShare.permissionRestartHint",
+                                    )),
+                            )
+                        }),
                 ),
         )
         .child(close_button(store, theme))
@@ -360,7 +394,7 @@ fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> An
             .bg(if cfg!(target_os = "macos") {
                 rgb(color).into()
             } else {
-                Hsla::from(theme.text_muted).opacity(0.4)
+                Hsla::from(theme.tokens.text_secondary).opacity(0.4)
             })
     };
     let device_label = mezon_i18n::t(
@@ -419,13 +453,13 @@ fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> An
                         .child(
                             Icon::new(device_icon(device))
                                 .size(px(14.))
-                                .text_color(theme.text_muted),
+                                .text_color(theme.tokens.text_secondary),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_primary)
+                                .text_color(theme.tokens.text_theme_primary)
                                 .child(device_label),
                         ),
                 )
@@ -442,7 +476,7 @@ fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> An
                             h_flex().gap_2().child(img(APP_ICON).size(px(16.))).child(
                                 div()
                                     .text_xs()
-                                    .text_color(theme.text_primary)
+                                    .text_color(theme.tokens.text_theme_primary)
                                     .child("Mezon"),
                             ),
                         )

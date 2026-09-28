@@ -7,11 +7,13 @@ use gpui::{
 };
 use mezon_store::{
     AudioDeviceInfo, AudioStore, CallPeer, CallPhase, CallStore, ChannelId, DirectMessageStore,
-    MediaDevice, MediaFlags, MediaPermissionStore, Settings, VoiceRenderFrame,
+    MediaDevice, MediaFlags, Settings, VoiceRenderFrame,
 };
 
 use crate::app::shell::Shell;
-use crate::chat::media_permission_prompt::{media_access_missing, media_permission_badge};
+use crate::chat::media_permission_prompt::{
+    media_access_missing, media_permission_badge, observe_media_access,
+};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -56,6 +58,14 @@ impl CallOverlay {
             let phase = call.read(cx).phase();
             let was = this.last_phase;
             this.last_phase = phase;
+            if call.update(cx, |store, _| store.take_mic_unavailable()) {
+                let locale = Settings::try_global(cx)
+                    .map(|s| s.read(cx).language.clone())
+                    .unwrap_or_else(|| "en".to_string());
+                let msg = mezon_i18n::t(&locale, "channelVoice.mediaPermission.micUnavailable")
+                    .to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
             if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
@@ -185,9 +195,8 @@ impl CallPanelView {
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
-        if let Some(media_permissions) = MediaPermissionStore::try_global(cx) {
-            cx.observe(&media_permissions, |_, _, cx| cx.notify())
-                .detach();
+        if let Some(media_access) = observe_media_access(cx) {
+            media_access.detach();
         }
         let mut audio_sub = None;
         let (input_devices, output_devices, default_input, default_output) =

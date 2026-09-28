@@ -611,10 +611,6 @@ fn request_macos_permission() -> bool {
     true
 }
 
-pub fn camera_denied() -> bool {
-    crate::media_permission(crate::MediaDevice::Camera) == crate::MediaPermission::Denied
-}
-
 #[cfg(test)]
 mod tests {
     use super::parse_camera_index;
