@@ -295,50 +295,10 @@ fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
         })
 }
 
-fn latest_activity_strip_visible(clan_id: &str, cx: &App) -> bool {
-    if latest_activity_topic(clan_id, cx).is_some() {
-        return true;
-    }
-    let messages = MessagesStore::global(cx).read(cx);
-    let pinned = PinnedMessagesStore::global(cx).read(cx);
-    let active_clan_id = clan_id.parse::<ClanId>().ok();
-    pinned.clan_id() == active_clan_id
-        && pinned.channel_id() == messages.active_channel_id()
-        && !pinned.pinned().is_empty()
-}
-
-fn current_activity_strip_has_activity(cx: &App) -> bool {
-    MessagesStore::global(cx)
-        .read(cx)
-        .active_clan_id()
-        .filter(|clan_id| !clan_id.is_zero())
-        .is_some_and(|clan_id| latest_activity_strip_visible(&clan_id.to_string(), cx))
-}
-
-fn sync_activity_strip_has_activity(cx: &mut App) {
-    let has_activity = current_activity_strip_has_activity(cx);
-    if let Some(timeline) = ChannelMessages::active_timeline(cx) {
-        timeline.update(cx, |timeline, _| {
-            timeline.set_activity_strip_has_activity(has_activity);
-        });
-    }
-}
-
-fn should_mount_activity_strip(
-    is_dm: bool,
-    stream_sidebar: bool,
-    media_channel_view: bool,
-) -> bool {
-    !is_dm && !stream_sidebar && !media_channel_view
-}
-
 /// Compact activity rail owned by the message column (never the member/topic sidebars).
 fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
-    let topics_store = TopicsStore::global(cx);
     let messages_store = MessagesStore::global(cx);
-    let topics = topics_store.read(cx);
     let messages = messages_store.read(cx);
-    let topic_syncing = topics.is_loading();
     let active_channel_id = messages.active_channel_id();
     let latest_topic = latest_activity_topic(clan_id, cx);
     let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
@@ -460,7 +420,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .cloned()
         })
         .flatten();
-    let has_topic = latest_topic.is_some() && !topic_syncing;
+    let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
     if !has_topic && !has_pin {
         return div().hidden().into_any_element();
@@ -469,53 +429,45 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
     let theme = cx.theme();
     let hover = theme.bg_hover;
 
-    let topic_title: SharedString = if topic_syncing {
-        "".into()
-    } else {
-        topic_title
-            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .or_else(|| {
-                latest_topic
-                    .as_ref()
-                    .map(|topic| SharedString::from(topic_content_kind(&topic.content)))
-            })
-            .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into())
-    };
+    let topic_title: SharedString = topic_title
+        .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .or_else(|| {
+            latest_topic
+                .as_ref()
+                .map(|topic| SharedString::from(topic_content_kind(&topic.content)))
+        })
+        .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into());
     let topic_has_attachment = topic_attachment.is_some()
         || latest_topic
             .as_ref()
             .is_some_and(TopicDiscussion::reply_is_attachment);
-    let topic_preview: SharedString = if topic_syncing {
-        "".into()
-    } else {
-        topic_preview
-            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-            .map(|text| {
-                if let Some(sender_name) = topic_sender_name.as_deref() {
-                    mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
-                        .replace("{{name}}", sender_name)
-                        .replace("{{message}}", &text)
-                } else {
-                    text
-                }
-            })
-            .map(SharedString::from)
-            .unwrap_or_else(|| {
-                if topic_has_attachment {
-                    topic_sender_name
-                        .as_deref()
-                        .map(|sender_name| {
-                            mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
-                                .replace("{{name}}", sender_name)
-                                .replace("{{message}}", "")
-                        })
-                        .unwrap_or_default()
-                        .into()
-                } else {
-                    mezon_i18n::t(locale, "notifications.empty.topics.description").into()
-                }
-            })
-    };
+    let topic_preview: SharedString = topic_preview
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|text| {
+            if let Some(sender_name) = topic_sender_name.as_deref() {
+                mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                    .replace("{{name}}", sender_name)
+                    .replace("{{message}}", &text)
+            } else {
+                text
+            }
+        })
+        .map(SharedString::from)
+        .unwrap_or_else(|| {
+            if topic_has_attachment {
+                topic_sender_name
+                    .as_deref()
+                    .map(|sender_name| {
+                        mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                            .replace("{{name}}", sender_name)
+                            .replace("{{message}}", "")
+                    })
+                    .unwrap_or_default()
+                    .into()
+            } else {
+                mezon_i18n::t(locale, "notifications.empty.topics.description").into()
+            }
+        });
     let topic_media = topic_attachment.as_ref().map(|attachment| {
         if attachment.is_image() {
             if let Some(path) = attachment.local_source.clone() {
@@ -603,7 +555,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .px(px(6.))
         .rounded(px(9.))
         .overflow_hidden()
-        .when(latest_topic.is_some() && !topic_syncing, |cell| {
+        .when(latest_topic.is_some(), |cell| {
             cell.cursor_pointer().hover(move |style| style.bg(hover))
         })
         // A stable semantic icon avoids remounting an image while clan/topic data resolves.
@@ -651,10 +603,9 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 ),
         )
         .children(topic_media)
-        .when_some(
-            (!topic_syncing).then_some(latest_topic).flatten(),
-            |cell, topic| cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx)),
-        );
+        .when_some(latest_topic, |cell, topic| {
+            cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx))
+        });
 
     let pin_attachment = latest_pin
         .as_ref()
@@ -904,11 +855,12 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
 
     div()
         .id("channel-latest-activity-strip")
-        .block_mouse_except_scroll()
         .flex()
         .flex_row()
         .flex_none()
-        .w_full()
+        .mt(px(4.))
+        .ml(px(6.))
+        .mr(px(6.))
         .h(px(48.))
         .child(
             div()
@@ -956,13 +908,11 @@ impl LatestActivityStripView {
     fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
-                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
         let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
             if matches!(event, mezon_store::PinnedEvent::Updated) {
-                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
@@ -971,7 +921,6 @@ impl LatestActivityStripView {
                 event,
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
             ) {
-                sync_activity_strip_has_activity(cx);
                 cx.notify();
             }
         });
@@ -1571,16 +1520,8 @@ impl ChatArea {
             }
         };
 
-        let has_activity = clan_id
-            .as_deref()
-            .is_some_and(|clan_id| latest_activity_strip_visible(clan_id, cx));
-        let activity_strip_mounted =
-            should_mount_activity_strip(is_dm, stream_sidebar, media_channel_view);
-        self.timeline.update(cx, |timeline, _| {
-            timeline.set_activity_strip_state(activity_strip_mounted, has_activity);
-        });
-        let activity_strip =
-            activity_strip_mounted.then(|| AnyView::from(self.activity_strip.clone()));
+        let activity_strip = (!is_dm && !stream_sidebar && !media_channel_view)
+            .then(|| AnyView::from(self.activity_strip.clone()));
 
         self.header.update(cx, |header, cx| {
             header.sync(
@@ -1838,46 +1779,41 @@ impl ChatArea {
                 }
             })
             .when(!media_channel_view, |col| {
-                col.child(div().flex_1().min_h_0().overflow_hidden().child(
-                    if timeline_popover_open {
-                        div()
-                            .size_full()
-                            .child(AnyView::from(self.timeline.clone()))
-                            .into_any_element()
-                    } else {
-                        AnyView::from(self.timeline.clone())
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    },
-                ))
-                .when_some(ban_notice, |col, notice| col.child(notice))
-                .when(send_denied, |col| col.child(no_permission_notice))
-                .when(!banned && !send_denied, |col| {
-                    col.children(onboarding_mission)
-                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
-                        .when_some(app_channel_bar.as_ref(), |col, target| {
-                            col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
-                        })
-                        .child(
-                            AnyView::from(self.typing.clone()).cached(
-                                StyleRefinement::default()
-                                    .w_full()
-                                    .h(px(16.))
-                                    .flex_shrink_0(),
-                            ),
-                        )
-                })
-                .when_some(drop_overlay, |col, overlay| col.child(overlay))
-            })
-            .when_some(activity_strip, |col, strip| {
-                col.child(
-                    div()
-                        .absolute()
-                        .top(px(4.))
-                        .left(px(6.))
-                        .right(px(6.))
-                        .child(strip),
-                )
+                col.when_some(activity_strip, |col, strip| col.child(strip))
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(
+                        if timeline_popover_open {
+                            div()
+                                .size_full()
+                                .child(AnyView::from(self.timeline.clone()))
+                                .into_any_element()
+                        } else {
+                            AnyView::from(self.timeline.clone())
+                                .cached(StyleRefinement::default().size_full())
+                                .into_any_element()
+                        },
+                    ))
+                    .when_some(ban_notice, |col, notice| col.child(notice))
+                    .when(send_denied, |col| col.child(no_permission_notice))
+                    .when(!banned && !send_denied, |col| {
+                        col.children(onboarding_mission)
+                            .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                            .when_some(app_channel_bar.as_ref(), |col, target| {
+                                col.child(render_channel_app_bar(
+                                    locale,
+                                    target.clone(),
+                                    cx.theme(),
+                                ))
+                            })
+                            .child(
+                                AnyView::from(self.typing.clone()).cached(
+                                    StyleRefinement::default()
+                                        .w_full()
+                                        .h(px(16.))
+                                        .flex_shrink_0(),
+                                ),
+                            )
+                    })
+                    .when_some(drop_overlay, |col, overlay| col.child(overlay))
             });
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
@@ -1966,7 +1902,7 @@ impl ChatArea {
 
 #[cfg(test)]
 mod removed_conversation_tests {
-    use super::{ChannelId, Route, route_targets_conversation, should_mount_activity_strip};
+    use super::{ChannelId, Route, route_targets_conversation};
 
     fn direct(id: i64) -> Route {
         Route::DirectMessage {
@@ -1988,13 +1924,5 @@ mod removed_conversation_tests {
     #[test]
     fn a_route_outside_direct_messages_stays_put() {
         assert!(!route_targets_conversation(&Route::Friends, ChannelId(7)));
-    }
-
-    #[test]
-    fn activity_strip_is_only_mounted_in_the_main_channel_view() {
-        assert!(should_mount_activity_strip(false, false, false));
-        assert!(!should_mount_activity_strip(true, false, false));
-        assert!(!should_mount_activity_strip(false, true, false));
-        assert!(!should_mount_activity_strip(false, false, true));
     }
 }
