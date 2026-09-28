@@ -55,7 +55,7 @@ pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
     MediaDevice, MediaPermission, media_permission, media_permission_changes,
-    open_media_privacy_settings, request_media_permission,
+    open_media_privacy_settings, recheck_media_permission, request_media_permission,
 };
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,

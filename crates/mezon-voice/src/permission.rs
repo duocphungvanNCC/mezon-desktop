@@ -22,6 +22,10 @@ pub fn media_permission(device: MediaDevice) -> MediaPermission {
     platform::status(device)
 }
 
+pub fn recheck_media_permission(device: MediaDevice) -> MediaPermission {
+    platform::recheck(device)
+}
+
 pub fn media_permission_changes() -> flume::Receiver<MediaDevice> {
     CHANGES.1.clone()
 }
@@ -79,6 +83,7 @@ mod platform {
 
     const NOT_DETERMINED: i64 = 0;
     const AUTHORIZED: i64 = 3;
+    const RECHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
     fn media_type_name(device: MediaDevice) -> &'static str {
         match device {
@@ -108,16 +113,35 @@ mod platform {
         }
     }
 
+    pub(super) fn recheck(device: MediaDevice) -> MediaPermission {
+        let cached = status(device);
+        if cached != MediaPermission::Denied {
+            return cached;
+        }
+        let (tx, rx) = flume::bounded(1);
+        ask(device, move |granted| {
+            let _ = tx.send(granted);
+        });
+        match rx.recv_timeout(RECHECK_TIMEOUT) {
+            Ok(true) => MediaPermission::Granted,
+            Ok(false) => MediaPermission::Denied,
+            Err(_) => cached,
+        }
+    }
+
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
+        ask(device, move |granted| {
+            on_done(granted);
+            publish_change(device);
+        });
+    }
+
+    fn ask(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
         let Some(cls) = capture_device_class() else {
             on_done(true);
             return;
         };
-        let handler = ConcreteBlock::new(move |granted: BOOL| {
-            on_done(granted != NO);
-            publish_change(device);
-        })
-        .copy();
+        let handler = ConcreteBlock::new(move |granted: BOOL| on_done(granted != NO)).copy();
         unsafe {
             let media_type: id = NSString::alloc(nil).init_str(media_type_name(device));
             let _: () =
@@ -226,6 +250,10 @@ mod platform {
         }
     }
 
+    pub(super) fn recheck(device: MediaDevice) -> MediaPermission {
+        status(device)
+    }
+
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
         on_done(status(device) == MediaPermission::Granted);
         publish_change(device);
@@ -252,6 +280,10 @@ mod platform {
     use super::{MediaDevice, MediaPermission, publish_change};
 
     pub(super) fn status(_device: MediaDevice) -> MediaPermission {
+        MediaPermission::Granted
+    }
+
+    pub(super) fn recheck(_device: MediaDevice) -> MediaPermission {
         MediaPermission::Granted
     }
 

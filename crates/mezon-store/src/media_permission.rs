@@ -112,8 +112,8 @@ impl MediaPermissionStore {
             let (microphone, camera) = cx
                 .background_spawn(async {
                     (
-                        mezon_voice::media_permission(MediaDevice::Microphone),
-                        mezon_voice::media_permission(MediaDevice::Camera),
+                        mezon_voice::recheck_media_permission(MediaDevice::Microphone),
+                        mezon_voice::recheck_media_permission(MediaDevice::Camera),
                     )
                 })
                 .await;
