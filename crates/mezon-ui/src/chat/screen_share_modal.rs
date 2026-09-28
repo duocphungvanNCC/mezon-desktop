@@ -814,6 +814,9 @@ pub fn start_screen_share_flow(
         });
         mezon_store::schedule_settings_save(&settings, cx);
         request_screen_capture_access();
+        let locale = settings.read(cx).language.clone();
+        let msg = mezon_i18n::t(&locale, "screenShare.permissionPromptToast").to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
         return;
     }
     let portal = system_screen_share_pick();

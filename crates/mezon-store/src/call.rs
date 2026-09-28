@@ -130,6 +130,7 @@ pub struct CallStore {
     media: MediaKind,
     local: MediaFlags,
     remote: MediaFlags,
+    mic_unavailable: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
     incoming_offer: Option<String>,
@@ -181,6 +182,7 @@ impl CallStore {
             media: MediaKind::Audio,
             local: MediaFlags::default(),
             remote: MediaFlags::default(),
+            mic_unavailable: false,
             selected_input: None,
             selected_output: None,
             incoming_offer: None,
@@ -279,6 +281,10 @@ impl CallStore {
 
     pub fn remote_frame_key(&self) -> u64 {
         mezon_call::REMOTE_FRAME_KEY
+    }
+
+    pub fn take_mic_unavailable(&mut self) -> bool {
+        std::mem::take(&mut self.mic_unavailable)
     }
 
     pub fn has_remote_video(&self) -> bool {
@@ -395,9 +401,7 @@ impl CallStore {
         if !matches!(self.phase, CallPhase::Idle) {
             return;
         }
-        if !Self::start_media_granted(MediaDevice::Microphone, &peer, video, cx)
-            || (video && !Self::start_media_granted(MediaDevice::Camera, &peer, video, cx))
-        {
+        if !Self::start_media_granted(&peer, video, cx) {
             return;
         }
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
@@ -545,16 +549,11 @@ impl CallStore {
         cx.notify();
     }
 
-    fn start_media_granted(
-        device: MediaDevice,
-        peer: &CallPeer,
-        video: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn start_media_granted(peer: &CallPeer, video: bool, cx: &mut Context<Self>) -> bool {
         let this = cx.weak_entity();
         let peer = peer.clone();
         MediaPermissionStore::ensure_global(
-            device,
+            MediaDevice::Microphone,
             move |cx| {
                 let _ = this.update(cx, |this, cx| this.start_call(peer, video, cx));
             },
@@ -750,7 +749,10 @@ impl CallStore {
                 self.end_call(EndReason::Failed, cx);
             }
             EngineEvent::MicUnavailable => {
-                MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
+                if !MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx) {
+                    self.mic_unavailable = true;
+                    cx.notify();
+                }
             }
             EngineEvent::CameraUnavailable => {
                 MediaPermissionStore::warn_if_denied_global(MediaDevice::Camera, cx);
@@ -1098,6 +1100,7 @@ impl CallStore {
         self.media = MediaKind::Audio;
         self.local = MediaFlags::default();
         self.remote = MediaFlags::default();
+        self.mic_unavailable = false;
         self.incoming_offer = None;
         self.pending_remote_ice.clear();
         self.pending_local_ice.clear();

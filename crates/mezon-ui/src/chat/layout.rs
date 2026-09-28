@@ -305,9 +305,8 @@ impl ChatLayout {
         let call_panel = cx.new(CallPanelView::new);
         cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
             .detach();
-        if let Some(media_permissions) = mezon_store::MediaPermissionStore::try_global(cx) {
-            cx.observe(&media_permissions, |_, _, cx| cx.notify())
-                .detach();
+        if let Some(media_access) = crate::chat::media_permission_prompt::observe_media_access(cx) {
+            media_access.detach();
         }
 
         let stream_store = StreamStore::global(cx);

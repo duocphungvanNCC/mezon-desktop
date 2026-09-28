@@ -3326,7 +3326,7 @@ impl VoiceStore {
         }
 
         let mic_enabled = snapshot.mic_enabled
-            && MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx);
+            && !MediaPermissionStore::blocked_global(MediaDevice::Microphone, cx);
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);
@@ -3676,20 +3676,24 @@ impl VoiceStore {
             {
                 return;
             }
-            self.set_mic_enabled(true, cx);
-            self.hold_to_talk = self.mic_enabled;
+            self.apply_mic_enabled(true, cx);
+            self.hold_to_talk = true;
         } else if self.hold_to_talk {
             self.hold_to_talk = false;
-            self.set_mic_enabled(false, cx);
+            self.apply_mic_enabled(false, cx);
         }
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if enabled && !Self::media_granted(MediaDevice::Microphone, cx) {
+        if enabled && !self.media_granted(MediaDevice::Microphone, cx) {
             self.mic_enabled = false;
             cx.notify();
             return;
         }
+        self.apply_mic_enabled(enabled, cx);
+    }
+
+    fn apply_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.mic_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_mic_enabled(enabled);
@@ -3702,7 +3706,7 @@ impl VoiceStore {
     }
 
     pub fn set_camera_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if enabled && !Self::media_granted(MediaDevice::Camera, cx) {
+        if enabled && !self.media_granted(MediaDevice::Camera, cx) {
             return;
         }
         if let Some(session) = &self.session {
@@ -3711,19 +3715,27 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn media_granted(device: MediaDevice, cx: &mut Context<Self>) -> bool {
+    fn media_granted(&self, device: MediaDevice, cx: &mut Context<Self>) -> bool {
         let this = cx.weak_entity();
+        let session_generation = self.session_generation;
         MediaPermissionStore::ensure_global(
             device,
             move |cx| {
-                let _ = this.update(cx, |this, cx| this.enable_after_grant(device, cx));
+                let _ = this.update(cx, |this, cx| {
+                    this.enable_after_grant(device, session_generation, cx)
+                });
             },
             cx,
         )
     }
 
-    fn enable_after_grant(&mut self, device: MediaDevice, cx: &mut Context<Self>) {
-        if self.session.is_none() {
+    fn enable_after_grant(
+        &mut self,
+        device: MediaDevice,
+        session_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() || self.session_generation != session_generation {
             return;
         }
         match device {

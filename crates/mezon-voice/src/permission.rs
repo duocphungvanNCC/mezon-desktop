@@ -14,16 +14,14 @@ pub enum MediaPermission {
     Denied,
 }
 
+pub const MEDIA_DENIAL_IS_AUTHORITATIVE: bool = cfg!(target_os = "macos");
+
 type ChangeChannel = (flume::Sender<MediaDevice>, flume::Receiver<MediaDevice>);
 
 static CHANGES: LazyLock<ChangeChannel> = LazyLock::new(flume::unbounded);
 
 pub fn media_permission(device: MediaDevice) -> MediaPermission {
     platform::status(device)
-}
-
-pub fn recheck_media_permission(device: MediaDevice) -> MediaPermission {
-    platform::recheck(device)
 }
 
 pub fn media_permission_changes() -> flume::Receiver<MediaDevice> {
@@ -34,20 +32,8 @@ pub fn request_media_permission(device: MediaDevice) {
     platform::request(device, |_| {});
 }
 
-pub fn open_media_privacy_settings(device: MediaDevice) {
-    let Some(mut command) = platform::settings_command(device) else {
-        return;
-    };
-    let spawned = std::thread::Builder::new()
-        .name("mezon-privacy-settings".into())
-        .spawn(move || {
-            if let Err(e) = command.status() {
-                tracing::warn!("open privacy settings failed: {e}");
-            }
-        });
-    if let Err(e) = spawned {
-        tracing::warn!("open privacy settings failed: {e}");
-    }
+pub fn media_privacy_settings_url(device: MediaDevice) -> Option<&'static str> {
+    platform::settings_url(device)
 }
 
 #[cfg(target_os = "macos")]
@@ -83,7 +69,6 @@ mod platform {
 
     const NOT_DETERMINED: i64 = 0;
     const AUTHORIZED: i64 = 3;
-    const RECHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
     fn media_type_name(device: MediaDevice) -> &'static str {
         match device {
@@ -113,35 +98,16 @@ mod platform {
         }
     }
 
-    pub(super) fn recheck(device: MediaDevice) -> MediaPermission {
-        let cached = status(device);
-        if cached != MediaPermission::Denied {
-            return cached;
-        }
-        let (tx, rx) = flume::bounded(1);
-        ask(device, move |granted| {
-            let _ = tx.send(granted);
-        });
-        match rx.recv_timeout(RECHECK_TIMEOUT) {
-            Ok(true) => MediaPermission::Granted,
-            Ok(false) => MediaPermission::Denied,
-            Err(_) => cached,
-        }
-    }
-
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
-        ask(device, move |granted| {
-            on_done(granted);
-            publish_change(device);
-        });
-    }
-
-    fn ask(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
         let Some(cls) = capture_device_class() else {
             on_done(true);
             return;
         };
-        let handler = ConcreteBlock::new(move |granted: BOOL| on_done(granted != NO)).copy();
+        let handler = ConcreteBlock::new(move |granted: BOOL| {
+            on_done(granted != NO);
+            publish_change(device);
+        })
+        .copy();
         unsafe {
             let media_type: id = NSString::alloc(nil).init_str(media_type_name(device));
             let _: () =
@@ -150,21 +116,22 @@ mod platform {
         }
     }
 
-    pub(super) fn settings_command(device: MediaDevice) -> Option<std::process::Command> {
-        let pane = match device {
-            MediaDevice::Microphone => "Privacy_Microphone",
-            MediaDevice::Camera => "Privacy_Camera",
-        };
-        let mut command = std::process::Command::new("open");
-        command.arg(format!(
-            "x-apple.systempreferences:com.apple.preference.security?{pane}"
-        ));
-        Some(command)
+    pub(super) fn settings_url(device: MediaDevice) -> Option<&'static str> {
+        Some(match device {
+            MediaDevice::Microphone => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            }
+            MediaDevice::Camera => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
+            }
+        })
     }
 }
 
 #[cfg(target_os = "windows")]
 mod platform {
+    use std::sync::LazyLock;
+
     use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
@@ -173,48 +140,33 @@ mod platform {
 
     use super::{MediaDevice, MediaPermission, publish_change};
 
-    fn consent_keys(device: MediaDevice) -> [(HKEY, PCWSTR); 3] {
+    static PACKAGED: LazyLock<bool> = LazyLock::new(|| {
+        std::env::current_exe().is_ok_and(|exe| {
+            exe.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("\\windowsapps\\")
+        })
+    });
+
+    fn device_key(device: MediaDevice) -> PCWSTR {
         match device {
-            MediaDevice::Microphone => [
-                (
-                    HKEY_LOCAL_MACHINE,
-                    w!(
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-                    ),
-                ),
-                (
-                    HKEY_CURRENT_USER,
-                    w!(
-                        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-                    ),
-                ),
-                (
-                    HKEY_CURRENT_USER,
-                    w!(
-                        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
-                    ),
-                ),
-            ],
-            MediaDevice::Camera => [
-                (
-                    HKEY_LOCAL_MACHINE,
-                    w!(
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
-                    ),
-                ),
-                (
-                    HKEY_CURRENT_USER,
-                    w!(
-                        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
-                    ),
-                ),
-                (
-                    HKEY_CURRENT_USER,
-                    w!(
-                        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"
-                    ),
-                ),
-            ],
+            MediaDevice::Microphone => w!(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+            ),
+            MediaDevice::Camera => w!(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+            ),
+        }
+    }
+
+    fn desktop_apps_key(device: MediaDevice) -> PCWSTR {
+        match device {
+            MediaDevice::Microphone => w!(
+                r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
+            ),
+            MediaDevice::Camera => w!(
+                r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"
+            ),
         }
     }
 
@@ -240,18 +192,13 @@ mod platform {
     }
 
     pub(super) fn status(device: MediaDevice) -> MediaPermission {
-        if consent_keys(device)
-            .into_iter()
-            .any(|(root, key)| consent_denied(root, key))
-        {
+        let denied = consent_denied(HKEY_LOCAL_MACHINE, device_key(device))
+            || (!*PACKAGED && consent_denied(HKEY_CURRENT_USER, desktop_apps_key(device)));
+        if denied {
             MediaPermission::Denied
         } else {
             MediaPermission::Granted
         }
-    }
-
-    pub(super) fn recheck(device: MediaDevice) -> MediaPermission {
-        status(device)
     }
 
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
@@ -259,19 +206,11 @@ mod platform {
         publish_change(device);
     }
 
-    pub(super) fn settings_command(device: MediaDevice) -> Option<std::process::Command> {
-        use std::os::windows::process::CommandExt as _;
-
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let page = match device {
+    pub(super) fn settings_url(device: MediaDevice) -> Option<&'static str> {
+        Some(match device {
             MediaDevice::Microphone => "ms-settings:privacy-microphone",
             MediaDevice::Camera => "ms-settings:privacy-webcam",
-        };
-        let mut command = std::process::Command::new("cmd");
-        command
-            .args(["/C", "start", "", page])
-            .creation_flags(CREATE_NO_WINDOW);
-        Some(command)
+        })
     }
 }
 
@@ -283,16 +222,12 @@ mod platform {
         MediaPermission::Granted
     }
 
-    pub(super) fn recheck(_device: MediaDevice) -> MediaPermission {
-        MediaPermission::Granted
-    }
-
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
         on_done(true);
         publish_change(device);
     }
 
-    pub(super) fn settings_command(_device: MediaDevice) -> Option<std::process::Command> {
+    pub(super) fn settings_url(_device: MediaDevice) -> Option<&'static str> {
         None
     }
 }
