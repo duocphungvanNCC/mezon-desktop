@@ -1,4 +1,4 @@
-use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, RoleId, UserId};
 use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -497,6 +497,12 @@ pub enum ChannelEvent {
     /// channel turned private without us, or it was deleted while we were
     /// away). The voice store leaves a call running in that channel.
     AccessLost(ChannelId),
+    PrivacyChanged {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        private: bool,
+        role_ids: Vec<RoleId>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3678,13 +3684,24 @@ impl ChannelList {
                 // thing this must not turn into.
                 match (was_private, e.channel_private) {
                     (Some(false), true) => match self.private_flip_keeps_us(clan_id, e, cx) {
-                        Some(true) => {}
+                        Some(true) => cx.emit(ChannelEvent::PrivacyChanged {
+                            clan_id,
+                            channel_id: id,
+                            private: true,
+                            role_ids: e.role_ids.iter().copied().map(RoleId).collect(),
+                        }),
                         Some(false) => {
                             self.apply_self_removed_from_channel(id, cx);
                             cx.emit(ChannelEvent::AccessLost(id));
                         }
                         None => self.refresh_clan(clan_id, cx),
                     },
+                    (Some(true), false) => cx.emit(ChannelEvent::PrivacyChanged {
+                        clan_id,
+                        channel_id: id,
+                        private: false,
+                        role_ids: Vec::new(),
+                    }),
                     // A channel we do not hold. Turned public (or we were
                     // granted a private one): it is ours now, and the event
                     // carries enough to show it without a refetch, like
@@ -10172,6 +10189,86 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[gpui::test]
+    fn a_privacy_flip_resets_the_member_and_role_lists_of_the_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (channels, users, roles) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| {
+                crate::AuthState::Authenticated(mezon_client::Session {
+                    user_id: REMOVED_SELF.to_string(),
+                    ..Default::default()
+                })
+            });
+            crate::badge::BadgeService::init(auth_state, cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            let channels = ChannelList::init(api.clone(), cx);
+            crate::clan_members::ClanMembersStore::init(api.clone(), cx);
+            let users = crate::ChannelUsersStore::init(api.clone(), cx);
+            let roles = crate::RolesStore::init(api, cx);
+            users.update(cx, |users, _| {
+                users.seed_users_for_test(ChannelId(1), &[UserId(5), UserId(6)]);
+            });
+            roles.update(cx, |roles, _| {
+                roles.seed_roles_for_test(
+                    ClanId(1),
+                    vec![
+                        mezon_proto::api::Role {
+                            id: 41,
+                            active: 1,
+                            channel_ids: vec![1],
+                            role_channel_active: 1,
+                            ..Default::default()
+                        },
+                        mezon_proto::api::Role {
+                            id: 42,
+                            active: 1,
+                            ..Default::default()
+                        },
+                    ],
+                );
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+            });
+            (channels, users, roles)
+        });
+        let linked_roles = |cx: &mut gpui::TestAppContext| {
+            cx.read(|cx| {
+                roles
+                    .read(cx)
+                    .roles_for_channel(ClanId(1), ChannelId(1))
+                    .into_iter()
+                    .map(|(role_id, _)| role_id)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.handle_event(
+                    &private_flip_event_with_roles(1, vec![REMOVED_SELF], vec![42], 9),
+                    cx,
+                );
+            });
+        });
+        assert!(cx.read(|cx| users.read(cx).is_loading(ChannelId(1))));
+        assert_eq!(linked_roles(cx), vec![RoleId(42)]);
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.handle_event(&flip_event(1, false, vec![]), cx);
+            });
+        });
+        assert!(cx.read(|cx| users.read(cx).user_ids(ChannelId(1)).is_empty()));
+        assert!(linked_roles(cx).is_empty());
     }
 
     fn flip_event(channel_id: i64, private: bool, user_ids: Vec<i64>) -> RealtimeEvent {

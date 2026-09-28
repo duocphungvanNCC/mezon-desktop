@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::ids::{ChannelId, UserId};
 use crate::{CACHE_TTL, KeyedCache};
+use crate::{ChannelEvent, ChannelList};
 
 const MAX_CACHED_CHANNELS: usize = 64;
 
@@ -43,6 +44,7 @@ pub struct ChannelUsersStore {
     loading: HashSet<ChannelId>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
+    _channel_list_sub: Option<Subscription>,
 }
 
 struct GlobalChannelUsersStore(Entity<ChannelUsersStore>);
@@ -59,11 +61,24 @@ impl ChannelUsersStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let channel_list_sub = ChannelList::try_global(cx).map(|channels| {
+            cx.subscribe(&channels, |this, _, event: &ChannelEvent, cx| {
+                if let ChannelEvent::PrivacyChanged {
+                    channel_id,
+                    private,
+                    ..
+                } = event
+                {
+                    this.apply_privacy_change(*channel_id, *private, cx);
+                }
+            })
+        });
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
             loading: HashSet::new(),
             api,
             _conn_watch: conn_watch,
+            _channel_list_sub: channel_list_sub,
         }
     }
 
@@ -158,6 +173,34 @@ impl ChannelUsersStore {
         .detach();
     }
 
+    pub fn apply_privacy_change(
+        &mut self,
+        channel_id: ChannelId,
+        private: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.cache.contains(&channel_id) {
+            return;
+        }
+        if private {
+            self.cache.mark_stale(&channel_id);
+            self.ensure_loaded(channel_id, cx);
+            return;
+        }
+        self.cache.insert(channel_id, ChannelUsers::default(), None);
+        cx.emit(ChannelUsersEvent::Changed { channel_id });
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_users_for_test(&mut self, channel_id: ChannelId, user_ids: &[UserId]) {
+        let users = ChannelUsers {
+            ids: user_ids.to_vec(),
+            profiles: HashMap::new(),
+        };
+        self.cache.insert(channel_id, users, None);
+    }
+
     pub fn add_users(
         &mut self,
         channel_id: ChannelId,
@@ -246,6 +289,53 @@ mod tests {
             ids: ids.iter().copied().map(UserId).collect(),
             profiles: HashMap::new(),
         }
+    }
+
+    fn init_store(cx: &mut App) -> Entity<ChannelUsersStore> {
+        let api = Arc::new(AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        ChannelUsersStore::init(api, cx)
+    }
+
+    #[gpui::test]
+    fn going_public_empties_the_cached_member_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.seed_users_for_test(ChannelId(1), &[UserId(5), UserId(6)]);
+                store.apply_privacy_change(ChannelId(1), false, cx);
+                assert!(store.user_ids(ChannelId(1)).is_empty());
+                assert!(store.is_loaded(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn going_private_refetches_a_cached_member_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.seed_users_for_test(ChannelId(1), &[UserId(5), UserId(6)]);
+                store.apply_privacy_change(ChannelId(1), true, cx);
+                assert!(store.is_loading(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_privacy_change_leaves_uncached_channels_alone(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.apply_privacy_change(ChannelId(2), true, cx);
+                store.apply_privacy_change(ChannelId(3), false, cx);
+                assert!(!store.is_loading(ChannelId(2)));
+                assert!(!store.is_loaded(ChannelId(2)));
+                assert!(!store.is_loaded(ChannelId(3)));
+            });
+        });
     }
 
     #[test]
