@@ -904,6 +904,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
 
     div()
         .id("channel-latest-activity-strip")
+        .block_mouse_except_scroll()
         .flex()
         .flex_row()
         .flex_none()
