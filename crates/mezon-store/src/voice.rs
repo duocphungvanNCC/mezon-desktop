@@ -66,7 +66,17 @@ pub enum DeviceMenuKind {
     ScreenShare,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoiseSuppressionStatus {
+    Applying,
+    Applied,
+    Disabled,
+    Error,
+}
+
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+// The web voice thunk normalizes an empty roomName to "0" before requesting the SFU token.
+const SFU_TOKEN_ROOM_NAME: &str = "0";
 const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
 const SFU_RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(30);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
@@ -134,7 +144,8 @@ fn redact_interactive_app_url(url: &str) -> String {
 }
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
-const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
+const NOISE_STATUS_MIN_LOADING: Duration = Duration::from_millis(400);
+const NOISE_STATUS_VISIBLE: Duration = Duration::from_millis(1800);
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -355,7 +366,9 @@ pub struct VoiceStore {
     camera_enabled: bool,
     screen_share_enabled: bool,
     noise_suppression_enabled: bool,
-    noise_suppression_level: u8,
+    noise_suppression_status: Option<NoiseSuppressionStatus>,
+    noise_suppression_started: Option<Instant>,
+    noise_suppression_generation: u64,
     focused_tile: Option<String>,
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
@@ -744,7 +757,9 @@ impl VoiceStore {
             camera_enabled: false,
             screen_share_enabled: false,
             noise_suppression_enabled: false,
-            noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
+            noise_suppression_status: None,
+            noise_suppression_started: None,
+            noise_suppression_generation: 0,
             focused_tile: None,
             auto_focused_screen: None,
             fullscreen_screen: None,
@@ -914,7 +929,7 @@ impl VoiceStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let token = api
-                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                 .await;
             let _ = this.update(cx, |this, _| {
                 if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
@@ -1013,22 +1028,87 @@ impl VoiceStore {
         self.noise_suppression_enabled
     }
 
-    pub fn noise_suppression_level(&self) -> u8 {
-        self.noise_suppression_level
+    pub fn noise_suppression_loading(&self) -> bool {
+        self.noise_suppression_status == Some(NoiseSuppressionStatus::Applying)
+    }
+
+    pub fn noise_suppression_status(&self) -> Option<NoiseSuppressionStatus> {
+        self.noise_suppression_status
     }
 
     pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
+        if self.noise_suppression_loading() {
+            return;
+        }
+        let Some(session) = &self.session else {
+            tracing::warn!("Mezon-NS toggle ignored: voice session is not ready");
+            self.noise_suppression_status = Some(NoiseSuppressionStatus::Error);
+            self.clear_noise_suppression_status_later(cx);
+            cx.notify();
+            return;
+        };
         self.noise_suppression_enabled = !self.noise_suppression_enabled;
+        self.noise_suppression_status = Some(NoiseSuppressionStatus::Applying);
+        self.noise_suppression_started = Some(Instant::now());
+        self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
+        session.set_noise_suppression(
+            self.noise_suppression_enabled,
+            self.noise_suppression_generation,
+        );
         cx.notify();
     }
 
-    pub fn set_noise_suppression_level(&mut self, level: u8, cx: &mut Context<Self>) {
-        let level = level.min(100);
-        if self.noise_suppression_level == level {
+    fn finish_noise_suppression(
+        &mut self,
+        generation: u64,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.noise_suppression_generation {
             return;
         }
-        self.noise_suppression_level = level;
+        self.noise_suppression_started = None;
+        let status = match result {
+            Ok(()) => {
+                let status = if self.noise_suppression_enabled {
+                    NoiseSuppressionStatus::Applied
+                } else {
+                    NoiseSuppressionStatus::Disabled
+                };
+                status
+            }
+            Err(error) => {
+                tracing::warn!(generation, "Mezon-NS unavailable: {error}");
+                self.noise_suppression_enabled = false;
+                self.noise_suppression_generation =
+                    self.noise_suppression_generation.wrapping_add(1);
+                if let Some(session) = &self.session {
+                    session.set_noise_suppression(false, self.noise_suppression_generation);
+                }
+                NoiseSuppressionStatus::Error
+            }
+        };
+        self.noise_suppression_status = Some(status);
+        self.clear_noise_suppression_status_later(cx);
         cx.notify();
+    }
+
+    fn clear_noise_suppression_status_later(&self, cx: &mut Context<Self>) {
+        let current_generation = self.noise_suppression_generation;
+        let status = self.noise_suppression_status;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOISE_STATUS_VISIBLE).await;
+            this.update(cx, |this, cx| {
+                if this.noise_suppression_generation == current_generation
+                    && this.noise_suppression_status == status
+                {
+                    this.noise_suppression_status = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -2942,7 +3022,7 @@ impl VoiceStore {
         }
         cx.spawn(async move |this, cx| {
             let token = api
-                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                 .await;
             let _ = this.update(cx, |this, cx| match token {
                 Ok(token) => {
@@ -3055,7 +3135,7 @@ impl VoiceStore {
                     metadata_tx.unbounded_send(reply).ok()?;
                     let metadata = receiver.await.ok()?;
                     match api
-                        .generate_meet_token(&channel_id, &channel_id, &metadata)
+                        .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                         .await
                     {
                         Ok(token) => Some(token),
@@ -3247,7 +3327,7 @@ impl VoiceStore {
             let token = api
                 .generate_meet_token(
                     &snapshot.channel_id,
-                    &snapshot.channel_id,
+                    SFU_TOKEN_ROOM_NAME,
                     &snapshot.metadata,
                 )
                 .await;
@@ -3405,6 +3485,9 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
             }
             VoiceEvent::Reconnecting => {
+                if self.connection.is_connecting() {
+                    self.cached_meet_token = None;
+                }
                 if self
                     .reconnect_healthy_since
                     .is_some_and(|since| since.elapsed() >= SFU_RECONNECT_HEALTHY_SESSION)
@@ -3458,6 +3541,26 @@ impl VoiceStore {
             VoiceEvent::MutedByModerator => {
                 self.mic_enabled = false;
                 self.muted_by_moderator = true;
+            }
+            VoiceEvent::NoiseSuppressionReady { generation, result } => {
+                if generation == self.noise_suppression_generation {
+                    let remaining = self
+                        .noise_suppression_started
+                        .and_then(|started| NOISE_STATUS_MIN_LOADING.checked_sub(started.elapsed()))
+                        .unwrap_or_default();
+                    if !remaining.is_zero() {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(remaining).await;
+                            this.update(cx, |this, cx| {
+                                this.finish_noise_suppression(generation, result, cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    } else {
+                        self.finish_noise_suppression(generation, result, cx);
+                    }
+                }
             }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
@@ -3542,6 +3645,9 @@ impl VoiceStore {
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
+                if reason.contains("invalid_token") || reason.contains("missing_token") {
+                    self.cached_meet_token = None;
+                }
                 let was_connected = matches!(&self.connection, VoiceConnection::Connected { .. });
                 let unjoined_channel = match &self.connection {
                     VoiceConnection::Connecting { channel_id, .. }
@@ -4562,7 +4668,9 @@ impl VoiceStore {
         self.camera_enabled = false;
         self.screen_share_enabled = false;
         self.noise_suppression_enabled = false;
-        self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
+        self.noise_suppression_status = None;
+        self.noise_suppression_started = None;
+        self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
         self.focused_tile = None;
         self.auto_focused_screen = None;
         self.room_name.clear();

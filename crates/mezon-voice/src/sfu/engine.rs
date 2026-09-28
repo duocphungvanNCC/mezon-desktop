@@ -641,6 +641,7 @@ async fn engine_main(
     let mut retiring = RetiredPeerConnection(None);
     let mut first_session = true;
     let mut token_rejected = false;
+    let mut auth_rejections = 0u32;
 
     loop {
         if !first_session {
@@ -662,7 +663,11 @@ async fn engine_main(
             };
             if !ready {
                 let _ = evt_tx.send(SfuEvent::Disconnected {
-                    reason: "SFU token refresh failed".into(),
+                    reason: if token_rejected {
+                        "invalid_token: SFU token refresh failed".into()
+                    } else {
+                        "SFU token refresh failed".into()
+                    },
                 });
                 return Ok(());
             }
@@ -701,6 +706,14 @@ async fn engine_main(
                 return Ok(());
             }
             SessionOutcome::RefreshToken { joined, reason } => {
+                auth_rejections += 1;
+                if auth_rejections >= 2 {
+                    tracing::warn!(auth_rejections, %reason, "SFU rejected both the original and refreshed join tokens");
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: format!("{reason}: refreshed token was also rejected"),
+                    });
+                    return Ok(());
+                }
                 token_rejected = true;
                 (joined, reason)
             }
@@ -717,6 +730,7 @@ async fn engine_main(
         ever_joined |= joined;
         if joined {
             token_refreshes = 0;
+            auth_rejections = 0;
         }
         let _ = evt_tx.send(SfuEvent::Reconnecting);
         if LocalRoutes::probe().is_empty() {

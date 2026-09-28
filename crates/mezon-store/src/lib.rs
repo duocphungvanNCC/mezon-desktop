@@ -259,8 +259,8 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, PickedScreen, RecordingState, RecordingToast, RemovalCause,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
+    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,

@@ -10,10 +10,10 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
-    DisplayedReaction, MediaDevice, PERMISSION_MANAGE_CHANNEL, PermissionStore, RecordingState,
-    ScreenShareMode, Settings, SfuRole, UserId, VoiceCallStatus, VoiceConnection,
-    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
-    flower_menu_blocked,
+    DisplayedReaction, MediaDevice, NoiseSuppressionStatus, PERMISSION_MANAGE_CHANNEL,
+    PermissionStore, RecordingState, ScreenShareMode, Settings, SfuRole, UserId, VoiceCallStatus,
+    VoiceConnection, VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame,
+    VoiceStore, WalletStore, flower_menu_blocked,
 };
 
 use crate::ChatLayout;
@@ -147,6 +147,7 @@ pub fn render_mini_bar(
     link_copied: bool,
     mic_access_missing: bool,
     camera_access_missing: bool,
+    noise_status: Option<NoiseSuppressionStatus>,
     noise_control: AnyElement,
 ) -> AnyElement {
     let neutral_bg = theme.bg_secondary;
@@ -172,7 +173,7 @@ pub fn render_mini_bar(
         address
     };
 
-    let subtitle = {
+    let address_subtitle = {
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
         let hover_color = theme.text_primary;
@@ -197,6 +198,22 @@ pub fn render_mini_bar(
                     },
                 );
             })
+            .into_any_element()
+    };
+    let subtitle = if let Some(status) = noise_status {
+        let (label, color) = match status {
+            NoiseSuppressionStatus::Applying => ("Applying noise filter…", theme.text_secondary),
+            NoiseSuppressionStatus::Applied => ("Noise filter applied", theme.status_online),
+            NoiseSuppressionStatus::Disabled => ("Noise filter off", theme.text_secondary),
+            NoiseSuppressionStatus::Error => ("Noise filter failed", theme.danger_text),
+        };
+        div()
+            .text_xs()
+            .text_color(color)
+            .child(label)
+            .into_any_element()
+    } else {
+        address_subtitle
     };
 
     let copy_button = {
