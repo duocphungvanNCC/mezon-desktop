@@ -88,6 +88,7 @@ pub struct AudioPlayerView {
     download_name: SharedString,
     player: Option<AudioPlayer>,
     state: LoadState,
+    download_failed: bool,
     want_play: bool,
     pending_seek: Option<f64>,
     server_duration: f64,
@@ -114,6 +115,7 @@ impl AudioPlayerView {
             download_name,
             player: None,
             state: LoadState::Loading,
+            download_failed: false,
             want_play: true,
             pending_seek: (start_secs > 0.0).then_some(start_secs),
             server_duration: duration,
@@ -154,6 +156,7 @@ impl AudioPlayerView {
             return;
         }
         tracing::info!("message audio loading started");
+        self.download_failed = false;
         let client = cx.http_client();
         self._load_task = Some(cx.spawn(async move |this, cx| {
             let (byte_tx, byte_rx) = flume::bounded(AUDIO_FETCH_QUEUE);
@@ -186,7 +189,7 @@ impl AudioPlayerView {
                     }
                     Err(err) => {
                         tracing::warn!("message audio download failed: {err}");
-                        let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
+                        let _ = this.update(cx, |view, cx| view.on_stream_download_failed(cx));
                     }
                 }
                 return;
@@ -267,15 +270,30 @@ impl AudioPlayerView {
         true
     }
 
+    fn on_stream_download_failed(&mut self, cx: &mut Context<Self>) {
+        self.download_failed = true;
+        let drained_at = self
+            .player
+            .as_ref()
+            .filter(|player| player.finished())
+            .map(|player| player.position_secs());
+        if let Some(position) = drained_at {
+            self.fail_at(position, cx);
+        }
+    }
+
+    fn fail_at(&mut self, position: f64, cx: &mut Context<Self>) {
+        self.set_playhead(position);
+        self.on_load_failed(cx);
+    }
+
     fn on_load_failed(&mut self, cx: &mut Context<Self>) {
         self.state = LoadState::Failed;
+        self.download_failed = false;
         self.tick_task = None;
         self.player = None;
         self.want_play = false;
         self.pending_seek = None;
-        self.playhead = 0.0;
-        self.time_label = SharedString::from(time_label(0.0, self.server_duration));
-        self.last_label_seconds = (0, whole_seconds(self.server_duration));
         cx.notify();
     }
 
@@ -309,6 +327,10 @@ impl AudioPlayerView {
         if self.pending_seek.is_some() {
             let landed = self.apply_pending_seek();
             if self.pending_seek.is_some() {
+                if self.download_failed {
+                    self.fail_at(self.playhead, cx);
+                    return false;
+                }
                 return self.want_play
                     || self
                         .player
@@ -323,6 +345,7 @@ impl AudioPlayerView {
             let Some(player) = &self.player else {
                 return self.pending_seek.is_some();
             };
+            player.poll_output();
             if inactive {
                 return player.is_playing() || self.pending_seek.is_some();
             }
@@ -336,6 +359,10 @@ impl AudioPlayerView {
                 player.is_playing() && !finished,
             )
         };
+        if finished && self.download_failed {
+            self.fail_at(position, cx);
+            return false;
+        }
         let position = if finished {
             self.effective_duration()
         } else {
@@ -416,9 +443,7 @@ impl AudioPlayerView {
         if matches!(self.state, LoadState::Failed) {
             self.state = LoadState::Loading;
             self.want_play = true;
-            self.playhead = 0.0;
-            self.time_label = SharedString::from(time_label(0.0, self.server_duration));
-            self.last_label_seconds = (0, whole_seconds(self.server_duration));
+            self.pending_seek = (self.playhead > 0.0).then_some(self.playhead);
             self.start_loading(self.url.clone(), cx);
             cx.notify();
             return;

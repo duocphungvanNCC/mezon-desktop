@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use rodio::cpal;
@@ -19,6 +19,10 @@ const OUTPUT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const PLAYBACK_STALL_INTERVAL: Duration = Duration::from_secs(3);
 const OUTPUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const STALL_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
+const HEARTBEAT_STALE: Duration = Duration::from_secs(2);
+const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+const NO_HEARTBEAT: u64 = u64::MAX;
 
 static PREFERRED_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
 
@@ -39,7 +43,149 @@ struct SharedSink {
     requested: String,
     broken: Arc<AtomicBool>,
     actual_id: Option<String>,
+    heartbeat: OutputHeartbeat,
     last_preferred_probe: Cell<Instant>,
+}
+
+impl SharedSink {
+    fn new(
+        mut sink: MixerDeviceSink,
+        requested: String,
+        broken: Arc<AtomicBool>,
+        actual_id: Option<String>,
+    ) -> Self {
+        sink.log_on_drop(false);
+        let heartbeat = OutputHeartbeat::attach(&sink);
+        Self {
+            sink,
+            requested,
+            broken,
+            actual_id,
+            heartbeat,
+            last_preferred_probe: Cell::new(Instant::now()),
+        }
+    }
+
+    fn usable(&self) -> bool {
+        if self.broken.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !self.heartbeat.stalled() {
+            return true;
+        }
+        if !self.broken.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                device = ?self.actual_id,
+                "sound output stopped pulling audio, reopening"
+            );
+        }
+        false
+    }
+}
+
+struct OutputHeartbeat {
+    origin: Instant,
+    last_beat_ms: Arc<AtomicU64>,
+}
+
+impl OutputHeartbeat {
+    fn attach(sink: &MixerDeviceSink) -> Self {
+        let origin = Instant::now();
+        let last_beat_ms = Arc::new(AtomicU64::new(NO_HEARTBEAT));
+        let config = sink.config();
+        sink.mixer().add(HeartbeatSource::new(
+            origin,
+            Arc::clone(&last_beat_ms),
+            config.channel_count(),
+            config.sample_rate(),
+        ));
+        Self {
+            origin,
+            last_beat_ms,
+        }
+    }
+
+    fn stalled(&self) -> bool {
+        output_stalled(
+            self.origin.elapsed(),
+            self.last_beat_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
+fn output_stalled(since_open: Duration, last_beat_ms: u64) -> bool {
+    if last_beat_ms == NO_HEARTBEAT {
+        return since_open >= HEARTBEAT_STARTUP_GRACE;
+    }
+    since_open.saturating_sub(Duration::from_millis(last_beat_ms)) >= HEARTBEAT_STALE
+}
+
+struct HeartbeatSource {
+    origin: Instant,
+    last_beat_ms: Arc<AtomicU64>,
+    channels: NonZeroU16,
+    sample_rate: NonZeroU32,
+    samples_per_beat: usize,
+    until_beat: usize,
+}
+
+impl HeartbeatSource {
+    fn new(
+        origin: Instant,
+        last_beat_ms: Arc<AtomicU64>,
+        channels: NonZeroU16,
+        sample_rate: NonZeroU32,
+    ) -> Self {
+        let samples_per_second = u128::from(sample_rate.get()) * u128::from(channels.get());
+        let samples_per_beat =
+            usize::try_from(samples_per_second * HEARTBEAT_INTERVAL.as_millis() / 1000)
+                .unwrap_or(usize::MAX)
+                .max(1);
+        Self {
+            origin,
+            last_beat_ms,
+            channels,
+            sample_rate,
+            samples_per_beat,
+            until_beat: 0,
+        }
+    }
+}
+
+impl Iterator for HeartbeatSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.until_beat == 0 {
+            self.until_beat = self.samples_per_beat;
+            let elapsed_ms = self
+                .origin
+                .elapsed()
+                .as_millis()
+                .min(u128::from(NO_HEARTBEAT - 1)) as u64;
+            self.last_beat_ms.store(elapsed_ms, Ordering::Relaxed);
+        }
+        self.until_beat -= 1;
+        Some(0.0)
+    }
+}
+
+impl Source for HeartbeatSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> NonZeroU16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> NonZeroU32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
 }
 
 fn requested_output(host: &cpal::Host) -> String {
@@ -130,7 +276,7 @@ fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, 
         Some(device) => open_on(device),
         None => Err("no output device".to_string()),
     };
-    let (mut sink, actual_device_name, actual_id, broken) = match opened {
+    let (sink, actual_device_name, actual_id, broken) = match opened {
         Ok((sink, broken)) => (sink, device_name.clone(), device_id, broken),
         Err(e) => {
             tracing::warn!(
@@ -144,7 +290,6 @@ fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, 
             })?
         }
     };
-    sink.log_on_drop(false);
     tracing::info!(
         requested = %requested,
         device = ?actual_device_name,
@@ -153,13 +298,7 @@ fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, 
         channels = ?sink.config().channel_count(),
         "sound output opened"
     );
-    Ok(SharedSink {
-        sink,
-        requested,
-        broken,
-        actual_id,
-        last_preferred_probe: Cell::new(Instant::now()),
-    })
+    Ok(SharedSink::new(sink, requested, broken, actual_id))
 }
 
 fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<Rc<SharedSink>> {
@@ -168,20 +307,18 @@ fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<Rc<Sha
         .description()
         .ok()
         .map(|description| description.to_string());
-    let (mut sink, broken) = open_on(device).ok()?;
-    sink.log_on_drop(false);
+    let (sink, broken) = open_on(device).ok()?;
     tracing::info!(
         requested,
         device = ?device_name,
         "sound output preference restored"
     );
-    Some(Rc::new(SharedSink {
+    Some(Rc::new(SharedSink::new(
         sink,
-        requested: requested.to_string(),
+        requested.to_string(),
         broken,
-        actual_id: Some(requested.to_string()),
-        last_preferred_probe: Cell::new(Instant::now()),
-    }))
+        Some(requested.to_string()),
+    )))
 }
 
 fn shared_sink() -> Result<Rc<SharedSink>, AudioError> {
@@ -191,7 +328,7 @@ fn shared_sink() -> Result<Rc<SharedSink>, AudioError> {
         let mut slot = cell.borrow_mut();
         if let Some(existing) = slot.upgrade()
             && existing.requested == requested
-            && !existing.broken.load(Ordering::Relaxed)
+            && existing.usable()
         {
             if !requested.is_empty()
                 && existing.actual_id.as_deref() != Some(requested.as_str())
@@ -569,7 +706,7 @@ impl AudioPlayer {
         let had_source = !self.player.borrow().empty();
         let playing = self.is_playing();
         let prepared = if had_source {
-            self.prepare_source(self.current_position_secs())
+            self.prepare_source(self.position_secs())
         } else {
             None
         };
@@ -794,12 +931,7 @@ impl AudioPlayer {
         self.started.get() && self.player.borrow().empty()
     }
 
-    pub fn position_secs(&self) -> f64 {
-        self.check_output_progress();
-        self.current_position_secs()
-    }
-
-    fn check_output_progress(&self) {
+    pub fn poll_output(&self) {
         let now = Instant::now();
         let broken = self.sink.borrow().broken.load(Ordering::Relaxed);
         let check_interval = if broken {
@@ -815,12 +947,19 @@ impl AudioPlayer {
             self.last_output_check.set(Some(now));
             self.follow_output();
         }
+        if self.playback_stalled(now) {
+            tracing::warn!("sound playback stalled, restarting the source");
+            self.restart_source();
+        }
+    }
+
+    fn playback_stalled(&self, now: Instant) -> bool {
         if self.sink.borrow().broken.load(Ordering::Relaxed) {
             self.output_progress.borrow_mut().reset();
-            return;
+            return false;
         }
         let Some(cursor) = self.cursor.borrow().clone() else {
-            return;
+            return false;
         };
         let index = cursor.load(Ordering::Relaxed);
         let playable = match self.data.borrow().as_ref() {
@@ -830,19 +969,20 @@ impl AudioPlayer {
             }
             None => false,
         };
-        let stalled =
-            self.output_progress
-                .borrow_mut()
-                .observe(now, self.is_playing(), index, playable);
-        if stalled {
-            tracing::warn!("sound output playback stalled, reopening output");
-            self.sink.borrow().broken.store(true, Ordering::Relaxed);
-            self.last_output_check.set(Some(now));
-            self.follow_output();
+        self.output_progress
+            .borrow_mut()
+            .observe(now, self.is_playing(), index, playable)
+    }
+
+    fn restart_source(&self) {
+        let sink = Rc::clone(&self.sink.borrow());
+        self.follow_output();
+        if Rc::ptr_eq(&sink, &self.sink.borrow()) {
+            self.requeue_at(self.position_secs(), true);
         }
     }
 
-    fn current_position_secs(&self) -> f64 {
+    pub fn position_secs(&self) -> f64 {
         let Some(cursor) = self.cursor.borrow().clone() else {
             return 0.0;
         };
@@ -911,6 +1051,36 @@ mod tests {
         assert!(!progress.observe(start + Duration::from_secs(30), true, 0, true));
         assert!(!progress.observe(start + Duration::from_secs(32), true, 0, true));
         assert!(progress.observe(start + Duration::from_secs(33), true, 0, true));
+    }
+
+    #[test]
+    fn a_silent_output_is_stalled_only_after_its_grace_windows() {
+        assert!(!output_stalled(Duration::from_secs(4), NO_HEARTBEAT));
+        assert!(output_stalled(HEARTBEAT_STARTUP_GRACE, NO_HEARTBEAT));
+        assert!(!output_stalled(Duration::from_secs(60), 58_500));
+        assert!(output_stalled(Duration::from_secs(60), 58_000));
+        assert!(output_stalled(Duration::from_secs(9 * 3600), 1_000));
+    }
+
+    #[test]
+    fn heartbeat_beats_while_the_mixer_pulls_audio() {
+        let channels = NonZeroU16::new(2).unwrap();
+        let sample_rate = NonZeroU32::new(48_000).unwrap();
+        let (mixer, mut output) = rodio::mixer::mixer(channels, sample_rate);
+        let last_beat_ms = Arc::new(AtomicU64::new(NO_HEARTBEAT));
+        mixer.add(HeartbeatSource::new(
+            Instant::now(),
+            Arc::clone(&last_beat_ms),
+            channels,
+            sample_rate,
+        ));
+
+        assert_eq!(last_beat_ms.load(Ordering::Relaxed), NO_HEARTBEAT);
+        let pulled: Vec<f32> = (&mut output).take(48_000 * 2).collect();
+        assert_eq!(pulled.len(), 48_000 * 2);
+        assert!(pulled.iter().all(|sample| *sample == 0.0));
+        assert_ne!(last_beat_ms.load(Ordering::Relaxed), NO_HEARTBEAT);
+        assert!(output.next().is_some());
     }
 
     #[test]
