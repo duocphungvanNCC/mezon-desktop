@@ -4,6 +4,7 @@ pub mod compose;
 mod input_switch;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
+mod permission;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod pipewire_init;
 mod playback_health;
@@ -52,6 +53,10 @@ pub use camera::{
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
+pub use permission::{
+    MediaDevice, MediaPermission, media_permission, media_permission_changes,
+    open_media_privacy_settings, recheck_media_permission, request_media_permission,
+};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
@@ -60,7 +65,7 @@ pub use sfu::{RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
-    audio::microphone_denied()
+    media_permission(MediaDevice::Microphone) == MediaPermission::Denied
 }
 
 pub fn record_supported() -> bool {
@@ -76,7 +81,7 @@ pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,
-    peek_screen_share_options,
+    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;

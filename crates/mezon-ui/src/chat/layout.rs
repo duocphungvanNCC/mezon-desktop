@@ -305,6 +305,10 @@ impl ChatLayout {
         let call_panel = cx.new(CallPanelView::new);
         cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        if let Some(media_permissions) = mezon_store::MediaPermissionStore::try_global(cx) {
+            cx.observe(&media_permissions, |_, _, cx| cx.notify())
+                .detach();
+        }
 
         let stream_store = StreamStore::global(cx);
         cx.observe(&stream_store, |this, store, cx| {
@@ -2471,6 +2475,14 @@ impl ChatLayout {
         let is_audience = store.is_audience();
         let ptt_active = store.push_to_talk_active();
         let link_copied = store.link_copied();
+        let mic_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Microphone,
+            cx,
+        );
+        let camera_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Camera,
+            cx,
+        );
         let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -2490,6 +2502,8 @@ impl ChatLayout {
             is_audience,
             ptt_active,
             link_copied,
+            mic_access_missing,
+            camera_access_missing,
             noise_control,
         ))
     }
