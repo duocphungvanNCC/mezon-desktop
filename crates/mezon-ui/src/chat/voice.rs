@@ -4098,7 +4098,7 @@ fn device_flyout(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .w(px(220.))
+        .w(px(280.))
         .p_2()
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
@@ -4323,8 +4323,8 @@ fn device_row(
                     div()
                         .mt(px(2.))
                         .text_xs()
+                        .whitespace_normal()
                         .text_color(theme.text_muted)
-                        .truncate()
                         .child(active_name),
                 ),
         )
@@ -4363,7 +4363,7 @@ fn device_list_panel(
         .flex()
         .flex_col()
         .gap(px(2.))
-        .min_w(px(240.))
+        .min_w(px(280.))
         .max_h(px(320.))
         .overflow_y_scroll()
         .p_1()
@@ -4397,8 +4397,8 @@ fn device_list_panel(
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
+                        .min_w(px(160.))
+                        .whitespace_normal()
                         .text_sm()
                         .text_color(text_color)
                         .child(name),
