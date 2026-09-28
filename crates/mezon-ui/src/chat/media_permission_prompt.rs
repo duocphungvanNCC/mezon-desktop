@@ -6,6 +6,7 @@ use mezon_store::{MediaDevice, MediaPermissionPrompt, MediaPermissionStore, Sett
 
 use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::assets::APP_ICON;
 
 const BADGE_TEXT: u32 = 0x1e1f22;
 
@@ -438,15 +439,12 @@ fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> An
                         .border_1()
                         .border_color(theme.brand)
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .child(img("images/icon-logo-mezon.svg").size(px(16.)))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_primary)
-                                        .child("Mezon"),
-                                ),
+                            h_flex().gap_2().child(img(APP_ICON).size(px(16.))).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.text_primary)
+                                    .child("Mezon"),
+                            ),
                         )
                         .child(toggle),
                 ),
