@@ -321,6 +321,14 @@ fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<Rc<Sha
     )))
 }
 
+fn replacement_opened(sink: &Rc<SharedSink>) -> bool {
+    SHARED_SINK.with(|cell| {
+        cell.borrow()
+            .upgrade()
+            .is_some_and(|current| !Rc::ptr_eq(&current, sink))
+    })
+}
+
 fn shared_sink() -> Result<Rc<SharedSink>, AudioError> {
     let host = cpal::default_host();
     let requested = requested_output(&host);
@@ -933,17 +941,7 @@ impl AudioPlayer {
 
     pub fn poll_output(&self) {
         let now = Instant::now();
-        let broken = self.sink.borrow().broken.load(Ordering::Relaxed);
-        let check_interval = if broken {
-            OUTPUT_RETRY_INTERVAL
-        } else {
-            OUTPUT_CHECK_INTERVAL
-        };
-        if self
-            .last_output_check
-            .get()
-            .is_none_or(|checked| now.duration_since(checked) >= check_interval)
-        {
+        if self.output_check_due(now) {
             self.last_output_check.set(Some(now));
             self.follow_output();
         }
@@ -951,6 +949,23 @@ impl AudioPlayer {
             tracing::warn!("sound playback stalled, restarting the source");
             self.restart_source();
         }
+    }
+
+    fn output_check_due(&self, now: Instant) -> bool {
+        let sink = Rc::clone(&self.sink.borrow());
+        let check_interval = if sink.broken.load(Ordering::Relaxed) {
+            if replacement_opened(&sink) {
+                return true;
+            }
+            OUTPUT_RETRY_INTERVAL
+        } else if sink.heartbeat.stalled() {
+            return true;
+        } else {
+            OUTPUT_CHECK_INTERVAL
+        };
+        self.last_output_check
+            .get()
+            .is_none_or(|checked| now.duration_since(checked) >= check_interval)
     }
 
     fn playback_stalled(&self, now: Instant) -> bool {
