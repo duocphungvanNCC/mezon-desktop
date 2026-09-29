@@ -9609,7 +9609,7 @@ fn message_reference_from_api(
     let content_preview = crate::message::reply_preview_line(&content).into();
     let preview_spans = parsed
         .as_ref()
-        .filter(|c| !c.hg.is_empty())
+        .filter(|c| !c.hg.is_empty() || !c.ej.is_empty())
         .map(|c| crate::message::reply_preview_spans(&parse_spans(c)))
         .unwrap_or_default();
     MessageReference {
@@ -12474,6 +12474,29 @@ mod tests {
         assert!(message_from_api(reply(), None, Some(UserId(42))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, Some(UserId(7))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, None).highlights_viewer_direct);
+    }
+
+    #[test]
+    fn api_reply_reference_preserves_emoji_tokens_without_hashtags() {
+        let reference = mezon_client::transport::ApiMessageRef {
+            message_ref_id: 9,
+            content: r#"{"t":"yoyohohoh :melon:","ej":[{"s":10,"e":17,"emojiid":"123"}]}"#.into(),
+            ..Default::default()
+        };
+
+        let mapped = message_reference_from_api(&reference, None);
+
+        assert_eq!(
+            mapped.preview_spans,
+            vec![
+                MessageSpan::Text("yoyohohoh".into()),
+                MessageSpan::Emoji {
+                    name: ":melon:".into(),
+                    emoji_id: "123".into(),
+                    src: SharedString::default(),
+                },
+            ]
+        );
     }
 
     #[test]

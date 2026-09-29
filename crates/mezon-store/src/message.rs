@@ -1440,10 +1440,12 @@ pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
 const REPLY_PREVIEW_MAX_CHARS: usize = 120;
 
 pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
-    if !spans
-        .iter()
-        .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
-    {
+    if !spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Hashtag { .. } | MessageSpan::Emoji { .. }
+        )
+    }) {
         return Vec::new();
     }
     let mut builder = ReplyPreviewBuilder::default();
@@ -1456,13 +1458,17 @@ pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
                 display,
                 channel_id,
             } => builder.push_hashtag(display, channel_id.clone()),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => builder.push_emoji(name, emoji_id, src),
             MessageSpan::Text(text)
             | MessageSpan::Bold(text)
             | MessageSpan::Code(text)
             | MessageSpan::CodeBlock { text, .. }
             | MessageSpan::Link { text, .. }
             | MessageSpan::Mention { display: text, .. }
-            | MessageSpan::Emoji { name: text, .. }
             | MessageSpan::Canvas { title: text, .. }
             | MessageSpan::Heading { text, .. } => builder.push_text(text),
         }
@@ -1515,6 +1521,22 @@ impl ReplyPreviewBuilder {
         self.out.push(MessageSpan::Hashtag {
             display: label.into(),
             channel_id,
+        });
+        self.needs_space = false;
+    }
+
+    fn push_emoji(&mut self, name: &SharedString, emoji_id: &str, src: &SharedString) {
+        let emoji_chars = name.chars().count().max(1);
+        if self.chars + emoji_chars > REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        self.flush_text();
+        self.chars += emoji_chars;
+        self.out.push(MessageSpan::Emoji {
+            name: name.clone(),
+            emoji_id: emoji_id.to_string(),
+            src: src.clone(),
         });
         self.needs_space = false;
     }

@@ -37,6 +37,8 @@ use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
+const REPLY_EMOJI_SIZE: f32 = 16.;
+const REPLY_EMOJI_SOURCE_PX: u32 = 32;
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -663,6 +665,77 @@ fn render_reply_preview_spans(
     spans: &[MessageSpan],
     ctx: &RowCtx,
 ) -> AnyElement {
+    if spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::Emoji { .. }))
+    {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden();
+        for (index, span) in spans.iter().enumerate() {
+            row = match span {
+                MessageSpan::Emoji {
+                    name,
+                    emoji_id,
+                    src,
+                } => {
+                    let source: SharedString = if src.is_empty() {
+                        crate::util::imgproxy::emoji_url_sized(
+                            ctx.app,
+                            emoji_id,
+                            REPLY_EMOJI_SOURCE_PX,
+                        )
+                        .into()
+                    } else {
+                        src.clone()
+                    };
+                    if source.is_empty() {
+                        row.child(name.clone())
+                    } else {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .size(px(REPLY_EMOJI_SIZE))
+                                .image_cache(ctx.icon_cache.clone())
+                                .child(
+                                    img(source)
+                                        .id(("reply-emoji-frames", index))
+                                        .size(px(REPLY_EMOJI_SIZE))
+                                        .object_fit(ObjectFit::Contain)
+                                        .with_fallback(emoji_error_fallback(
+                                            px(REPLY_EMOJI_SIZE),
+                                            ctx.theme.text_muted,
+                                        )),
+                                ),
+                        )
+                    }
+                }
+                _ => row.child(render_reply_text_spans(
+                    reference,
+                    index,
+                    std::slice::from_ref(span),
+                    true,
+                    ctx,
+                )),
+            };
+        }
+        return row.into_any_element();
+    }
+    render_reply_text_spans(reference, 0, spans, false, ctx)
+}
+
+fn render_reply_text_spans(
+    reference: &MessageReference,
+    segment: usize,
+    spans: &[MessageSpan],
+    compact: bool,
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let mention_color: Hsla = theme.tokens.mention_color.into();
     let mention_bg: Hsla = theme.tokens.mention_primary.into();
@@ -712,11 +785,15 @@ fn render_reply_preview_spans(
         }
     }
     div()
-        .flex_1()
+        .when(!compact, |preview| preview.flex_1())
+        .when(compact, |preview| preview.flex_none())
         .min_w_0()
         .truncate()
         .child(InlineContent::new(
-            ("reply-preview", reference.message_ref_id.0 as usize),
+            SharedString::from(format!(
+                "reply-preview-{}-{segment}",
+                reference.message_ref_id.0
+            )),
             text.into(),
             runs,
             icons,
