@@ -379,6 +379,10 @@ impl ChatLayout {
         })
         .detach();
         cx.subscribe(&channel_list, |this, _, event, cx| {
+            if let ChannelEvent::AccessLost(channel_id) = event {
+                Self::leave_lost_channel_screen(*channel_id, cx);
+                return;
+            }
             let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
                 return;
             };
@@ -1235,6 +1239,27 @@ impl ChatLayout {
         );
     }
 
+    /// The settings or canvas of a channel we can no longer see would stay on
+    /// screen with nothing behind it. `redirect_removed_thread_route` only
+    /// leaves a deleted channel, so a lost one is left here. A chat route is
+    /// already moved on by `ensure_active_channel_for_clan`.
+    fn leave_lost_channel_screen(lost: ChannelId, cx: &mut App) {
+        let clan_id = match Router::global(cx).read(cx).route() {
+            Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } if channel_id == lost => clan_id,
+            _ => return,
+        };
+        crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, lost);
+    }
+
     fn redirect_removed_thread_route(&mut self, cx: &mut Context<Self>) {
         let route = Router::global(cx).read(cx).route().clone();
         match route {
@@ -2026,14 +2051,15 @@ impl ChatLayout {
             );
             return;
         }
-        if mention_input
-            .update(cx, |mention_input, _| mention_input.take_flash_command())
-            .is_some()
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
         {
+            let invocation = command.invocation(&content);
             crate::chat::ChatSending::send_to_bot(
                 content,
                 content_tokens,
                 attachments,
+                invocation,
                 &self.auth_state,
                 cx,
             );

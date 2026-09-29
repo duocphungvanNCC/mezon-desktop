@@ -4115,7 +4115,7 @@ fn device_flyout(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .w(px(220.))
+        .w(px(280.))
         .p_2()
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
@@ -4340,8 +4340,8 @@ fn device_row(
                     div()
                         .mt(px(2.))
                         .text_xs()
-                        .text_color(theme.text_muted)
                         .truncate()
+                        .text_color(theme.text_muted)
                         .child(active_name),
                 ),
         )
@@ -4380,7 +4380,7 @@ fn device_list_panel(
         .flex()
         .flex_col()
         .gap(px(2.))
-        .min_w(px(240.))
+        .min_w(px(280.))
         .max_h(px(320.))
         .overflow_y_scroll()
         .p_1()
