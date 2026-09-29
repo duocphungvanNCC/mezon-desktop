@@ -493,9 +493,10 @@ pub enum ChannelEvent {
         is_thread: bool,
     },
     /// A channel the store used to hold is no longer listed for this user:
-    /// a refetch of the clan dropped it (removed from a private channel, the
-    /// channel turned private without us, or it was deleted while we were
-    /// away). The voice store leaves a call running in that channel.
+    /// we were removed from it (`UserChannelRemoved`), it turned private
+    /// without us, or a refetch of the clan dropped it (deleted while we were
+    /// away). The voice store leaves a call running in that channel, and a
+    /// settings or canvas screen still showing it closes.
     AccessLost(ChannelId),
     PrivacyChanged {
         clan_id: ClanId,
@@ -4009,6 +4010,7 @@ impl ChannelList {
                     return;
                 }
                 self.apply_self_removed_from_channel(channel_id, cx);
+                cx.emit(ChannelEvent::AccessLost(channel_id));
             }
             RealtimeEvent::ChannelArchive(e) => {
                 self.apply_channel_archive_event(e, cx);
@@ -10021,6 +10023,56 @@ mod tests {
             ch
         }];
         build_categories(api_cats, &mut channels)
+    }
+
+    /// Being removed from a channel loses it too, and the settings or canvas
+    /// screen still showing it closes on that announcement.
+    #[gpui::test]
+    fn being_removed_from_a_channel_announces_access_lost(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+            });
+            channels
+        });
+        let removed = |user_id: i64| {
+            RealtimeEvent::UserChannelRemoved(mezon_proto::realtime::UserChannelRemoved {
+                channel_id: 2,
+                user_ids: vec![user_id],
+                channel_type: 1,
+                ..Default::default()
+            })
+        };
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.handle_event(&removed(REMOVED_SELF + 1), cx);
+            });
+        });
+        assert!(
+            lost.borrow().is_empty(),
+            "another member's removal is not ours"
+        );
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.handle_event(&removed(REMOVED_SELF), cx);
+            });
+        });
+        assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+        cx.update(|cx| {
+            assert!(!channels.read(cx).channel_in_clan(ClanId(1), ChannelId(2)));
+        });
     }
 
     /// A refetch that no longer lists a channel is the server telling us we

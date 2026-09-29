@@ -95,7 +95,7 @@ pub enum RolesEvent {
     RoleOrderSaveFailed { clan_id: ClanId },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct ClanRoles {
     order: Vec<RoleId>,
     by_id: HashMap<RoleId, ClanRoleDetail>,
@@ -673,9 +673,15 @@ impl RolesStore {
                             roles.order.len()
                         );
                         let empty = roles.order.is_empty();
+                        // A reload usually returns what we already hold. Announcing it
+                        // anyway would rebuild the member list for nothing.
+                        let unchanged = this.cache.get(&clan_id) == Some(&roles);
                         this.cache.insert(clan_id, roles, None);
                         if empty {
                             this.cache.mark_stale(&clan_id);
+                        }
+                        if unchanged {
+                            return;
                         }
                         this.rebuild_role_styles(clan_id, cx);
                         cx.emit(RolesEvent::Changed { clan_id });
