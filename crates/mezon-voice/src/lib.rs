@@ -965,10 +965,12 @@ async fn session_main(
             _ = playback_health_tick.tick() => {
                 let now = Instant::now();
                 for (&key, task) in audio_tracks.iter_mut() {
-                    if let Some(attempt) = task.health.poll(now) {
-                        tracing::warn!(key, attempt,
-                            "remote audio has no decoded callbacks; requesting current receiver track");
-                        engine.refresh_remote_audio(key);
+                    if let Some(recovery) = task.health.poll(now) {
+                        if recovery.rebind() {
+                            tracing::warn!(key, attempt = recovery.attempt,
+                                "remote audio has no decoded callbacks; checking receiver recovery");
+                        }
+                        engine.refresh_remote_audio(key, recovery);
                     }
                 }
             }

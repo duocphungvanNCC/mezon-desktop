@@ -24,6 +24,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+use crate::playback_health::{AudioRecoveryProgress, PlaybackRecovery};
 use crate::screen_recovery::{FrameReceipt, ScreenRecovery, ScreenSource, ScreenViews};
 use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
@@ -148,6 +149,11 @@ const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 const SELF_MUTE_CORRELATION: Duration = Duration::from_millis(300);
+const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
+const STATS_TIMEOUT: Duration = Duration::from_secs(2);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNALING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -241,7 +247,7 @@ pub enum SfuEvent {
 
 enum EngineCommand {
     SetLocalAudio(Option<RtcAudioTrack>),
-    RefreshRemoteAudio(u64),
+    RefreshRemoteAudio(u64, PlaybackRecovery),
     SetLocalCamera(Option<RtcVideoTrack>),
     SetLocalScreen(Option<ScreenTrack>),
     SetMute(bool),
@@ -316,8 +322,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
-    pub(crate) fn refresh_remote_audio(&self, key: u64) {
-        let _ = self.cmd_tx.send(EngineCommand::RefreshRemoteAudio(key));
+    pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
+        let _ = self
+            .cmd_tx
+            .send(EngineCommand::RefreshRemoteAudio(key, recovery));
     }
 
     pub fn close(&self) {
@@ -638,7 +646,7 @@ async fn engine_main(
     let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
     let mut ever_connected = false;
-    let mut retiring = RetiredPeerConnection(None);
+    let mut retiring = ClosingPeerConnection(None);
     let mut first_session = true;
     let mut token_rejected = false;
     let mut auth_rejections = 0u32;
@@ -857,7 +865,7 @@ fn apply_offline_command(
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
         | EngineCommand::ParticipantAction(_)
-        | EngineCommand::RefreshRemoteAudio(_)
+        | EngineCommand::RefreshRemoteAudio(_, _)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
@@ -879,8 +887,8 @@ async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32, rejecte
         return !rejected;
     }
     *refreshes += 1;
-    match refresher.mint().await {
-        Some(fresh) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
+    match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, refresher.mint()).await {
+        Ok(Some(fresh)) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
             config.token = fresh;
             true
         }
@@ -929,9 +937,9 @@ enum SessionOutcome {
     RefreshToken { joined: bool, reason: String },
 }
 
-struct RetiredPeerConnection(Option<PeerConnection>);
+struct ClosingPeerConnection(Option<PeerConnection>);
 
-impl Drop for RetiredPeerConnection {
+impl Drop for ClosingPeerConnection {
     fn drop(&mut self) {
         if let Some(pc) = self.0.take() {
             pc.close();
@@ -951,7 +959,9 @@ async fn run_session(
     attempts: &mut u32,
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
-    let mut pc: Option<PeerConnection> = None;
+    // Close the active transport even if the store cancels this session while
+    // signaling/negotiation is pending. Dropping a PC wrapper alone is not Close.
+    let mut pc = ClosingPeerConnection(None);
     let outcome = session_loop(
         config,
         factory,
@@ -961,16 +971,13 @@ async fn run_session(
         resuming,
         ever_connected,
         attempts,
-        &mut pc,
+        &mut pc.0,
         retiring,
     )
     .await;
     // Each retry starts with fresh SDP/ICE/DTLS. Never retain a failed PC during backoff.
     if let Some(previous) = retiring.take() {
         previous.close();
-    }
-    if let Some(pc) = pc {
-        pc.close();
     }
     outcome
 }
@@ -989,12 +996,20 @@ async fn session_loop(
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
     let url = build_ws_url(&config.ws_url, &config.token);
-    let ws = match connect_async(url.as_str()).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
+    let ws = match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, connect_async(url.as_str()))
+        .await
+    {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
             return SessionOutcome::Dropped {
                 joined: false,
                 reason: format!("websocket connect failed: {e}"),
+            };
+        }
+        Err(_) => {
+            return SessionOutcome::Dropped {
+                joined: false,
+                reason: "websocket connect timed out".into(),
             };
         }
     };
@@ -1015,6 +1030,10 @@ async fn session_loop(
     }
 
     let mut membership = Membership::default();
+    let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
+    // Several silent receivers can request recovery at once. Share one bounded
+    // stats read across them, including failures, to keep signaling responsive.
+    let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
     let mut screen_recovery = ScreenRecovery::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
@@ -1046,6 +1065,8 @@ async fn session_loop(
     let mut announced_connection = false;
     let mut joined_room = config.room.clone();
     let mut joined = false;
+    let session_started = Instant::now();
+    let mut last_signaling_received = session_started;
 
     loop {
         if joined && transport_connected && !announced_connection {
@@ -1114,10 +1135,13 @@ async fn session_loop(
                 let Some(frame) = incoming else {
                     return SessionOutcome::Dropped { joined, reason: "websocket closed".into() };
                 };
+                last_signaling_received = Instant::now();
                 let text = match frame {
                     Ok(Message::Text(text)) => text,
                     Ok(Message::Ping(payload)) => {
-                        let _ = ws_tx.send(Message::Pong(payload)).await;
+                        if send_frame(&mut ws_tx, Message::Pong(payload)).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "websocket pong send failed".into() };
+                        }
                         continue;
                     }
                     Ok(Message::Close(frame)) => {
@@ -1250,6 +1274,7 @@ async fn session_loop(
                             "sfu peer left; retiring only its remote media");
                         for mid in released {
                             let key = remote_frame_key(&mid);
+                            audio_recovery.remove(&key);
                             if membership.live_tracks.remove(&key).is_some() {
                                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
                             }
@@ -1327,12 +1352,41 @@ async fn session_loop(
                         if let Some(pc) = &*pc {
                             pc.close();
                         }
-                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = send_frame(&mut ws_tx, Message::Close(None)).await;
                         return SessionOutcome::Closed;
                     }
-                    EngineCommand::RefreshRemoteAudio(key) => {
+                    EngineCommand::RefreshRemoteAudio(key, recovery) => {
+                        if !recovery.still_stalled() || !membership.live_tracks.contains_key(&key) {
+                            audio_recovery.remove(&key);
+                            continue;
+                        }
                         if let Some(peer_connection) = pc.as_ref() {
-                            sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            if transport_connected {
+                                if recovery_stats.as_ref().is_none_or(|(at, _)| at.elapsed() >= MEDIA_STATS_INTERVAL) {
+                                    let stats = tokio::time::timeout(STATS_TIMEOUT, peer_connection.get_stats())
+                                        .await.ok().and_then(|result| result.ok());
+                                    recovery_stats = Some((Instant::now(), stats));
+                                }
+                                for stat in recovery_stats.as_ref().and_then(|(_, stats)| stats.as_ref()).into_iter().flatten() {
+                                    if let RtcStats::InboundRtp(inbound) = stat
+                                        && inbound.stream.kind == "audio"
+                                        && remote_frame_key(&inbound.inbound.mid) == key
+                                        && audio_recovery.entry(key).or_default().observe(
+                                            &recovery, &inbound.rtc.id, inbound.received.packets_received,
+                                        )
+                                    {
+                                        tracing::warn!(key, attempt = recovery.attempt,
+                                            "audio RTP is arriving without playback callbacks; restarting the sfu session");
+                                        return SessionOutcome::Dropped {
+                                            joined,
+                                            reason: "audio playback stalled despite incoming RTP".into(),
+                                        };
+                                    }
+                                }
+                            }
+                            if recovery.rebind() && recovery.still_stalled() {
+                                sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            }
                         }
                     }
                     EngineCommand::SetLocalAudio(track) => {
@@ -1477,6 +1531,18 @@ async fn session_loop(
                 }
             }
             _ = connect_timer.tick() => {
+                if !joined && session_started.elapsed() >= JOIN_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu join or room snapshot timed out".into(),
+                    };
+                }
+                if last_signaling_received.elapsed() >= SIGNALING_IDLE_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu signaling heartbeat timed out".into(),
+                    };
+                }
                 if let Some(since) = disconnected_since {
                     let waited = since.elapsed();
                     if waited >= TRANSPORT_DISCONNECTED_GRACE {
@@ -1647,7 +1713,7 @@ async fn session_loop(
                     tracing::warn!("sfu offered before the joined response; dropping the offer");
                     continue;
                 };
-                match negotiate(
+                match tokio::time::timeout(NEGOTIATION_TIMEOUT, negotiate(
                     &peer_connection,
                     generation,
                     &offer_sdp,
@@ -1657,8 +1723,10 @@ async fn session_loop(
                     &mut ws_tx,
                     &mut membership,
                     evt_tx,
-                )
+                ))
                 .await
+                .context("sfu negotiation timed out")
+                .and_then(|result| result)
                 {
                     Ok(()) => {
                         tracing::debug!(generation, "sfu answer sent");
@@ -1691,9 +1759,13 @@ type WsSink = futures::stream::SplitSink<
 
 async fn send(ws_tx: &mut WsSink, message: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(message).context("serialize signaling message")?;
-    ws_tx
-        .send(Message::Text(text.into()))
+    send_frame(ws_tx, Message::Text(text.into())).await
+}
+
+async fn send_frame(ws_tx: &mut WsSink, message: Message) -> Result<()> {
+    tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, ws_tx.send(message))
         .await
+        .context("send signaling message timed out")?
         .context("send signaling message")
 }
 
@@ -1837,7 +1909,8 @@ fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
 }
 
 async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
-    let Ok(stats) = pc.get_stats().await else {
+    let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
+        tracing::warn!("sfu media stats unavailable or timed out");
         return None;
     };
 
