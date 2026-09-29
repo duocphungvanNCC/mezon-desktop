@@ -136,6 +136,10 @@ impl MemberListPanel {
 
     fn menu_args(&self, panel: WeakEntity<Self>, cx: &App) -> Option<MemberMenuArgs> {
         let state = self.open_menu.as_ref()?;
+        let permissions = MemberMenuPermissions::resolve(state.user_id, self.active_context, cx);
+        if !member_menu_has_items(self.active_context, permissions) {
+            return None;
+        }
         Some(MemberMenuArgs {
             user_id: state.user_id,
             display_name: state.display_name.clone(),
@@ -145,7 +149,7 @@ impl MemberListPanel {
             settings: self.settings.clone(),
             locale: self.settings.read(cx).language.clone(),
             panel,
-            permissions: MemberMenuPermissions::resolve(state.user_id, self.active_context, cx),
+            permissions,
         })
     }
 
@@ -164,6 +168,23 @@ impl MemberListPanel {
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("user {user_id} is not in the visible member list"))?;
+        self.open_member_menu(user_id, display_name, position, cx);
+        Ok(())
+    }
+
+    fn open_member_menu(
+        &mut self,
+        user_id: UserId,
+        display_name: SharedString,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let permissions = MemberMenuPermissions::resolve(user_id, self.active_context, cx);
+        if !member_menu_has_items(self.active_context, permissions) {
+            self.open_menu = None;
+            cx.notify();
+            return;
+        }
         self.open_menu = Some(MemberMenuState {
             user_id,
             display_name,
@@ -172,7 +193,6 @@ impl MemberListPanel {
         });
         self.ensure_ban_list_loaded(user_id, cx);
         cx.notify();
-        Ok(())
     }
 
     fn probe_close_menu(&mut self, cx: &mut Context<Self>) {
@@ -1182,14 +1202,7 @@ fn render_member(
             move |position, _window, cx| {
                 if let Some(p) = panel.upgrade() {
                     p.update(cx, |this, cx| {
-                        this.open_menu = Some(MemberMenuState {
-                            user_id,
-                            display_name: display_name.clone(),
-                            position,
-                            ban_sub_open: false,
-                        });
-                        this.ensure_ban_list_loaded(user_id, cx);
-                        cx.notify();
+                        this.open_member_menu(user_id, display_name.clone(), position, cx);
                     });
                 }
             }
@@ -1513,8 +1526,10 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
 
     let mut menu = ContextMenu::new()
         .on_submenu_close(close_member_submenus(panel.clone()))
-        .on_dismiss(dismiss)
-        .item(t("contextMenu.member.profile"), {
+        .on_dismiss(dismiss);
+
+    if member_menu_shows_profile(context) {
+        menu = menu.item(t("contextMenu.member.profile"), {
             let panel = panel.clone();
             let settings = settings.clone();
             move |_window: &mut Window, cx: &mut App| {
@@ -1539,6 +1554,7 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
                 });
             }
         });
+    }
 
     if !is_self {
         menu = menu.item(t("contextMenu.member.message"), {
@@ -1753,6 +1769,17 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
     menu
 }
 
+fn member_menu_shows_profile(context: Option<ProfileContext>) -> bool {
+    !matches!(context, Some(ProfileContext::Direct(_)))
+}
+
+fn member_menu_has_items(
+    context: Option<ProfileContext>,
+    permissions: MemberMenuPermissions,
+) -> bool {
+    member_menu_shows_profile(context) || !permissions.is_self
+}
+
 fn can_remove_from_group(
     is_self: bool,
     me: Option<UserId>,
@@ -1794,8 +1821,11 @@ fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &st
 
 #[cfg(test)]
 mod permission_tests {
-    use super::can_remove_from_group;
-    use mezon_store::{DirectKind, UserId};
+    use super::{
+        MemberMenuPermissions, can_remove_from_group, member_menu_has_items,
+        member_menu_shows_profile,
+    };
+    use mezon_store::{ChannelId, ClanId, DirectKind, ProfileContext, UserId};
 
     const ME: Option<UserId> = Some(UserId(1));
 
@@ -1832,6 +1862,39 @@ mod permission_tests {
     #[test]
     fn a_signed_out_reader_never_matches_a_missing_creator() {
         assert!(!can_remove_from_group(false, None, DirectKind::Group, None));
+    }
+
+    #[test]
+    fn group_member_menu_does_not_show_profile() {
+        assert!(!member_menu_shows_profile(Some(ProfileContext::Direct(
+            ChannelId(1)
+        ))));
+    }
+
+    #[test]
+    fn clan_member_menu_still_shows_profile() {
+        assert!(member_menu_shows_profile(Some(ProfileContext::Clan(
+            ClanId(1)
+        ))));
+    }
+
+    #[test]
+    fn group_member_menu_is_not_rendered_when_self_has_no_actions() {
+        assert!(!member_menu_has_items(
+            Some(ProfileContext::Direct(ChannelId(1))),
+            MemberMenuPermissions {
+                is_self: true,
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn group_member_menu_is_still_rendered_for_another_member() {
+        assert!(member_menu_has_items(
+            Some(ProfileContext::Direct(ChannelId(1))),
+            MemberMenuPermissions::default()
+        ));
     }
 }
 
