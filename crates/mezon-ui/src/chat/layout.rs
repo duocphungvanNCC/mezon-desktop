@@ -2056,14 +2056,15 @@ impl ChatLayout {
             );
             return;
         }
-        if mention_input
-            .update(cx, |mention_input, _| mention_input.take_flash_command())
-            .is_some()
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
         {
+            let invocation = command.invocation(&content);
             crate::chat::ChatSending::send_to_bot(
                 content,
                 content_tokens,
                 attachments,
+                invocation,
                 &self.auth_state,
                 cx,
             );
