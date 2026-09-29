@@ -67,6 +67,7 @@ private:
 
     // Adaptive noise floor tracking & VAD state (Zero allocation)
     float noise_floor_ = 0.0005f;
+    float speech_peak_ = 0.015f;
     float vad_state_ = 0.0f;
     int hangover_frames_ = 0;
     int startup_frames_ = 0;

@@ -10,7 +10,7 @@ pub use resample::Mezon48k;
 pub const SAMPLE_RATE: usize = 16000;
 pub const FRAME_SIZE: usize = 160; // 10ms frame at 16kHz
 pub const FRAME_SIZE_48K: usize = 480;
-pub static EMBEDDED_MODEL: &[u8] = include_bytes!("../assets/mezon_ns_music_boost.onnx");
+pub static EMBEDDED_MODEL: &[u8] = include_bytes!("../assets/mezon_ns_asym_babble.onnx");
 
 /// Configuration parameters for Mezon-NS engine.
 #[repr(C)]
@@ -110,7 +110,7 @@ impl MezonNSEngine {
         true
     }
 
-    /// Create engine using the bundled music-boost model (zero filesystem access).
+    /// Create engine using the bundled asym-babble model (zero filesystem access).
     pub fn create_embedded(config: Option<MezonNSConfig>) -> Result<Self, MezonError> {
         Self::create_from_memory(EMBEDDED_MODEL, config)
     }

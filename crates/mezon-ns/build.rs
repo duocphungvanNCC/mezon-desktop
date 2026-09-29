@@ -22,6 +22,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", native.display());
     println!(
         "cargo:rerun-if-changed={}",
-        root.join("assets/mezon_ns_music_boost.onnx").display()
+        root.join("assets/mezon_ns_asym_babble.onnx").display()
     );
 }

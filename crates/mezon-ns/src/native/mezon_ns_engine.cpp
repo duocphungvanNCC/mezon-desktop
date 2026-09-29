@@ -186,6 +186,7 @@ void NoiseSuppressionEngine::reset() {
     std::fill(gru_hidden_state_.begin(), gru_hidden_state_.end(), 0.0f);
     std::fill(conv_state_.begin(), conv_state_.end(), 0.0f);
     noise_floor_ = 0.0005f;
+    speech_peak_ = 0.015f;
     vad_state_ = 0.0f;
     hangover_frames_ = 0;
     startup_frames_ = 0;
@@ -326,7 +327,20 @@ int NoiseSuppressionEngine::process_frame_float(const float* in_frame, float* ou
 
         // 3. SNR tracking with instant attack and hangover
         float snr_ratio = frame_rms / std::max(1e-6f, noise_floor_);
-        bool speech_detected = (snr_ratio > 1.8f) && (frame_rms > 0.001f);
+
+        // 4. Track nearby speech with a fast attack and a slow release.
+        if (frame_rms > speech_peak_) {
+            speech_peak_ = 0.20f * speech_peak_ + 0.80f * frame_rms;
+        } else if (vad_state_ > 0.5f) {
+            speech_peak_ = 0.999f * speech_peak_ + 0.001f * frame_rms;
+        } else if (speech_peak_ > 0.015f) {
+            speech_peak_ = 0.9995f * speech_peak_ + 0.0005f * 0.015f;
+        }
+
+        const float peak_ratio = frame_rms / std::max(1e-5f, speech_peak_);
+        // Reject distant background voices below the recent near-end speech level.
+        bool speech_detected = (snr_ratio > 1.8f) && (frame_rms > 0.001f) &&
+                               (peak_ratio >= 0.18f || frame_rms >= 0.008f);
 
         if (speech_detected) {
             hangover_frames_ = 25; // 250ms hangover
@@ -339,13 +353,13 @@ int NoiseSuppressionEngine::process_frame_float(const float* in_frame, float* ou
                 vad_state_ = 0.85f * vad_state_; // Smooth release
             }
 
-            // 4. Adapt upward ONLY during confirmed silence/pauses
+            // 5. Adapt upward ONLY during confirmed silence/pauses
             if (hangover_frames_ == 0 && vad_state_ < 0.1f) {
                 noise_floor_ = 0.995f * noise_floor_ + 0.005f * frame_rms;
             }
         }
 
-        // 5. Soft floor: clamp between -18 dB (0.125f) and 0 dB (1.0f)
+        // 6. Soft floor: clamp between -18 dB (0.125f) and 0 dB (1.0f)
         gate = 0.125f + 0.875f * vad_state_;
     }
 
