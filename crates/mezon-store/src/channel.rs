@@ -3670,6 +3670,9 @@ impl ChannelList {
                         break;
                     }
                 }
+                if changed && label.is_some() {
+                    self.invalidate_channel_index(clan_id);
+                }
                 if changed {
                     cx.notify();
                 }
@@ -4385,6 +4388,7 @@ impl ChannelList {
     fn resort_thread_block_for(&mut self, clan_id: ClanId, channel_id: ChannelId) {
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             resort_thread_block(categories, channel_id);
+            self.invalidate_channel_index(clan_id);
         }
     }
 
@@ -13554,25 +13558,114 @@ mod tests {
         });
     }
 
+    fn structure_with_threads(threads: &[(i64, &str)]) -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut rows = vec![make_channel(1, "mezon", "1")];
+        for (id, name) in threads {
+            let mut thread = make_channel(*id, name, "1");
+            thread.parent_id = Some(ChannelId(1));
+            rows.push(thread);
+        }
+        build_categories(api_cats, &mut rows)
+    }
+
+    fn found_ids(channels: &ChannelList, ids: &[i64]) -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|id| {
+                channels
+                    .channel(ClanId(1), ChannelId(*id))
+                    .map(|channel| channel.id.get())
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_by_someone_else_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "alpha"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 41,
+                        channel_label: "Zeta".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_on_reactivation_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "events"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(41),
+                    ChannelId(1),
+                    ClanId(1),
+                    "Events".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    true,
+                    None,
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn dragged_threads_keep_their_order_and_new_ones_follow_in_vietnamese_order(
         cx: &mut gpui::TestAppContext,
     ) {
-        let structure = |threads: &[(i64, &str)]| {
-            let api_cats = vec![ApiCategoryDesc {
-                category_id: 1,
-                category_name: "General".into(),
-                clan_id: 1,
-                category_order: 0,
-            }];
-            let mut rows = vec![make_channel(1, "mezon", "1")];
-            for (id, name) in threads {
-                let mut thread = make_channel(*id, name, "1");
-                thread.parent_id = Some(ChannelId(1));
-                rows.push(thread);
-            }
-            build_categories(api_cats, &mut rows)
-        };
+        let structure = structure_with_threads;
         let dragged = [(41, "rules"), (42, "channelmessage"), (43, "Events")];
         cx.update(|cx| {
             let channels = init_channel_list(cx);
