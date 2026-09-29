@@ -30,82 +30,43 @@ pub fn audio_device_snapshot() -> AudioDeviceSnapshot {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        AudioDeviceSnapshot {
-            inputs: enumerate_input_devices(),
-            outputs: enumerate_output_devices(),
-            default_input_name: default_input_device_name(),
-            default_output_name: default_output_device_name(),
-        }
+        non_linux_audio_device_snapshot()
     }
 }
 
-/// Enumerate all available audio input (microphone) devices.
-///
-/// Returns an empty vec on error or when no devices are found.
-pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_audio_device_snapshot().inputs
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let host = cpal::default_host();
-        let Ok(devices) = host.input_devices() else {
-            tracing::warn!("Failed to enumerate input devices");
-            return vec![];
-        };
-        let devices = collect_devices(devices);
-        #[cfg(target_os = "windows")]
-        {
-            let mut devices = devices;
+#[cfg(not(target_os = "linux"))]
+fn non_linux_audio_device_snapshot() -> AudioDeviceSnapshot {
+    let host = cpal::default_host();
+    let inputs = match host.input_devices() {
+        Ok(devices) => {
+            let mut devices = collect_devices(devices);
+            #[cfg(target_os = "windows")]
             append_windows_communications_input(&mut devices);
             devices
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            devices
+        Err(_) => {
+            tracing::warn!("Failed to enumerate input devices");
+            Vec::new()
         }
-    }
-}
-
-/// Enumerate all available audio output (speaker/headphone) devices.
-///
-/// Returns an empty vec on error or when no devices are found.
-pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_audio_device_snapshot().outputs
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let host = cpal::default_host();
-        let Ok(devices) = host.output_devices() else {
+    };
+    let outputs = match host.output_devices() {
+        Ok(devices) => collect_devices(devices),
+        Err(_) => {
             tracing::warn!("Failed to enumerate output devices");
-            return vec![];
-        };
-        collect_devices(devices)
-    }
-}
-
-pub fn default_input_device_name() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_audio_device_snapshot().default_input_name
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        host_default_device_name(true)
-    }
-}
-
-pub fn default_output_device_name() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_audio_device_snapshot().default_output_name
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        host_default_device_name(false)
+            Vec::new()
+        }
+    };
+    AudioDeviceSnapshot {
+        default_input_name: host
+            .default_input_device()
+            .and_then(|device| device.description().ok())
+            .map(|description| os_device_label(&description)),
+        default_output_name: host
+            .default_output_device()
+            .and_then(|device| device.description().ok())
+            .map(|description| os_device_label(&description)),
+        inputs,
+        outputs,
     }
 }
 
@@ -121,18 +82,6 @@ fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDevi
         .collect();
     disambiguate_duplicate_names(&mut devices);
     devices
-}
-
-#[cfg(not(target_os = "linux"))]
-fn host_default_device_name(capture: bool) -> Option<String> {
-    let host = cpal::default_host();
-    let device = if capture {
-        host.default_input_device()?
-    } else {
-        host.default_output_device()?
-    };
-    let description = device.description().ok()?;
-    Some(os_device_label(&description))
 }
 
 #[cfg(any(test, not(target_os = "linux")))]
@@ -154,7 +103,6 @@ fn os_device_label(description: &cpal::DeviceDescription) -> String {
     }
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
 fn is_generic_device_label(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     matches!(
@@ -171,8 +119,10 @@ fn is_generic_device_label(name: &str) -> bool {
             | "headset"
             | "default"
             | "default audio device"
+            | "sysdefault"
+            | "pipewire"
+            | "pulse"
     ) || name.starts_with("usb device ")
-        || name.starts_with("usb device 0x")
 }
 
 #[cfg(any(test, not(target_os = "linux")))]
@@ -274,10 +224,13 @@ fn windows_default_input_device_id(
 }
 
 #[cfg(target_os = "linux")]
+const PW_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(target_os = "linux")]
 struct CardProfile {
     index: u32,
     id: String,
-    model: Option<String>,
+    usb: Option<UsbIdentity>,
     distinguisher: Option<String>,
 }
 
@@ -296,7 +249,8 @@ struct UsbIdentity {
 struct PcmCandidate {
     rank: u8,
     card: u32,
-    dev: u32,
+    dev: Option<u32>,
+    card_token: String,
     id: String,
     alsa_line: String,
     digital: bool,
@@ -321,71 +275,224 @@ struct PwCatalog {
 }
 
 #[cfg(target_os = "linux")]
+type CpalEndpointMap = std::collections::HashMap<(u32, u32), String>;
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct CpalDeviceScan {
+    endpoint_map: CpalEndpointMap,
+    candidates: Vec<PcmCandidate>,
+    cardless: Vec<AudioDeviceInfo>,
+}
+
+#[cfg(target_os = "linux")]
 fn linux_audio_device_snapshot() -> AudioDeviceSnapshot {
     let cards = load_card_profiles();
     let pipewire = load_pipewire_catalog();
+    let mut hwdb_cache = std::collections::HashMap::new();
     let host = cpal::default_host();
-    let inputs = match host.input_devices() {
-        Ok(devices) => name_linux_devices(devices, true, &cards, &pipewire),
-        Err(_) => {
-            tracing::warn!("Failed to enumerate input devices");
-            Vec::new()
-        }
-    };
-    let outputs = match host.output_devices() {
-        Ok(devices) => name_linux_devices(devices, false, &cards, &pipewire),
-        Err(_) => {
-            tracing::warn!("Failed to enumerate output devices");
-            Vec::new()
-        }
-    };
+    let input_scan = host
+        .input_devices()
+        .ok()
+        .map(|devices| scan_cpal_devices(devices, &cards))
+        .unwrap_or_default();
+    let output_scan = host
+        .output_devices()
+        .ok()
+        .map(|devices| scan_cpal_devices(devices, &cards))
+        .unwrap_or_default();
+    let inputs = list_linux_audio_devices(true, &input_scan, &cards, &pipewire, &mut hwdb_cache);
+    let outputs = list_linux_audio_devices(false, &output_scan, &cards, &pipewire, &mut hwdb_cache);
     AudioDeviceSnapshot {
         inputs,
         outputs,
-        default_input_name: pipewire_default_name(&pipewire, true)
-            .or_else(|| host_default_device_name(true)),
-        default_output_name: pipewire_default_name(&pipewire, false)
-            .or_else(|| host_default_device_name(false)),
+        default_input_name: pipewire_default_name(&pipewire, true),
+        default_output_name: pipewire_default_name(&pipewire, false),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn name_linux_devices(
-    devices: impl Iterator<Item = cpal::Device>,
+fn list_linux_audio_devices(
     capture: bool,
+    scan: &CpalDeviceScan,
     cards: &[CardProfile],
     pipewire: &PwCatalog,
+    hwdb_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
 ) -> Vec<AudioDeviceInfo> {
+    if pipewire_has_direction(pipewire, capture) {
+        let from_pipewire = list_from_pipewire(capture, pipewire, &scan.endpoint_map);
+        let pw_endpoints = pipewire_endpoints(pipewire, capture);
+        let supplement =
+            list_from_cpal_supplement(scan, capture, cards, pipewire, hwdb_cache, &pw_endpoints);
+        let mut devices = from_pipewire;
+        for device in supplement {
+            if !devices.iter().any(|existing| existing.id == device.id) {
+                devices.push(device);
+            }
+        }
+        if !devices.is_empty() {
+            return finalize_linux_device_names(devices, cards);
+        }
+    }
+    let fallback = list_from_cpal_scan(scan, capture, cards, pipewire, hwdb_cache);
+    finalize_linux_device_names(fallback, cards)
+}
+
+#[cfg(target_os = "linux")]
+fn pipewire_endpoints(
+    pipewire: &PwCatalog,
+    capture: bool,
+) -> std::collections::HashSet<(u32, u32)> {
+    pipewire
+        .nodes
+        .iter()
+        .filter(|node| node.capture == capture)
+        .map(|node| (node.card, node.device))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn pipewire_has_direction(pipewire: &PwCatalog, capture: bool) -> bool {
+    pipewire.nodes.iter().any(|node| node.capture == capture)
+}
+
+#[cfg(target_os = "linux")]
+fn list_from_pipewire(
+    capture: bool,
+    pipewire: &PwCatalog,
+    endpoint_map: &CpalEndpointMap,
+) -> Vec<AudioDeviceInfo> {
+    let mut devices = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for node in &pipewire.nodes {
+        if node.capture != capture {
+            continue;
+        }
+        let Some(id) = endpoint_map.get(&(node.card, node.device)) else {
+            continue;
+        };
+        if !seen_ids.insert(id.clone()) {
+            continue;
+        }
+        devices.push(AudioDeviceInfo {
+            id: id.clone(),
+            name: node.description.clone(),
+        });
+    }
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn scan_cpal_devices(
+    devices: impl Iterator<Item = cpal::Device>,
+    cards: &[CardProfile],
+) -> CpalDeviceScan {
     let mut candidates = Vec::new();
+    let mut cardless = Vec::new();
     for device in devices {
         let (Ok(id), Ok(description)) = (device.id(), device.description()) else {
             continue;
         };
         let pcm_id = description.driver().unwrap_or("");
         if !pcm_id.contains("CARD=") {
+            cardless.push(AudioDeviceInfo {
+                id: id.to_string(),
+                name: description.name().trim().to_string(),
+            });
             continue;
         }
         let Some(token) = pcm_card_token(pcm_id) else {
             continue;
         };
+        let Some(card) = card_index_for(token, cards) else {
+            continue;
+        };
         candidates.push(PcmCandidate {
             rank: alsa_pcm_rank(pcm_id),
-            card: card_index_for(token, cards),
+            card,
             dev: pcm_dev_index(pcm_id),
+            card_token: token.to_string(),
             id: id.to_string(),
             alsa_line: description.name().trim().to_string(),
             digital: alsa_pcm_is_digital_output(pcm_id),
         });
     }
+    let endpoint_map = select_pcm_candidates(candidates.clone())
+        .into_iter()
+        .filter_map(|item| item.dev.map(|dev| ((item.card, dev), item.id)))
+        .collect();
+    CpalDeviceScan {
+        endpoint_map,
+        candidates,
+        cardless,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn list_from_cpal_scan(
+    scan: &CpalDeviceScan,
+    capture: bool,
+    cards: &[CardProfile],
+    pipewire: &PwCatalog,
+    hwdb_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
+) -> Vec<AudioDeviceInfo> {
+    let candidates = scan.candidates.to_vec();
+    let selected = drop_card_level_sysdefaults(select_pcm_candidates(candidates));
+    let mut named = assign_display_names(&selected, capture, cards, pipewire, hwdb_cache);
+    if named.is_empty() {
+        named = scan.cardless.clone();
+    }
+    named
+}
+
+#[cfg(target_os = "linux")]
+fn list_from_cpal_supplement(
+    scan: &CpalDeviceScan,
+    capture: bool,
+    cards: &[CardProfile],
+    pipewire: &PwCatalog,
+    hwdb_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
+    pw_endpoints: &std::collections::HashSet<(u32, u32)>,
+) -> Vec<AudioDeviceInfo> {
+    let candidates: Vec<PcmCandidate> = scan
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .dev
+                .is_some_and(|dev| !pw_endpoints.contains(&(candidate.card, dev)))
+        })
+        .cloned()
+        .collect();
     let selected = select_pcm_candidates(candidates);
-    let mut named = assign_display_names(&selected, capture, cards, pipewire);
-    named.sort_by(|a, b| {
+    assign_display_names(&selected, capture, cards, pipewire, hwdb_cache)
+}
+
+#[cfg(target_os = "linux")]
+fn drop_card_level_sysdefaults(items: Vec<PcmCandidate>) -> Vec<PcmCandidate> {
+    let cards_with_dev: std::collections::HashSet<u32> = items
+        .iter()
+        .filter_map(|item| item.dev.map(|_| item.card))
+        .collect();
+    items
+        .into_iter()
+        .filter(|item| item.dev.is_some() || !cards_with_dev.contains(&item.card))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn finalize_linux_device_names(
+    mut devices: Vec<AudioDeviceInfo>,
+    cards: &[CardProfile],
+) -> Vec<AudioDeviceInfo> {
+    devices.sort_by(|a, b| {
         a.name
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
             .then(a.id.cmp(&b.id))
     });
-    named
+    disambiguate_linux_device_names(&mut devices, cards);
+    devices
 }
 
 #[cfg(target_os = "linux")]
@@ -416,40 +523,29 @@ fn pcm_card_token(pcm_id: &str) -> Option<&str> {
 }
 
 #[cfg(target_os = "linux")]
-fn pcm_dev_index(pcm_id: &str) -> u32 {
+fn pcm_dev_index(pcm_id: &str) -> Option<u32> {
     pcm_id
         .split_once("DEV=")
         .and_then(|(_, rest)| rest.split([',', ' ', '\n']).next())
         .and_then(|token| token.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 #[cfg(target_os = "linux")]
-fn card_index_for(token: &str, cards: &[CardProfile]) -> u32 {
+fn card_index_for(token: &str, cards: &[CardProfile]) -> Option<u32> {
+    if let Some(card) = cards.iter().find(|card| card.id == token) {
+        return Some(card.index);
+    }
     if let Ok(index) = token.parse::<u32>()
         && cards.iter().any(|card| card.index == index)
     {
-        return index;
+        return Some(index);
     }
-    if let Some(card) = cards.iter().find(|card| card.id == token) {
-        return card.index;
-    }
-    if cards.is_empty()
-        && let Ok(index) = token.parse::<u32>()
-    {
-        return index;
-    }
-    unresolved_card_key(token)
+    None
 }
 
 #[cfg(target_os = "linux")]
-fn unresolved_card_key(token: &str) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in token.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash | 0x8000_0000
+fn card_token_is_numeric(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit())
 }
 
 #[cfg(target_os = "linux")]
@@ -461,9 +557,9 @@ fn select_pcm_candidates(mut items: Vec<PcmCandidate>) -> Vec<PcmCandidate> {
     items.sort_by(|a, b| {
         a.card
             .cmp(&b.card)
-            .then(a.dev.cmp(&b.dev))
+            .then(cmp_dev(a.dev, b.dev))
             .then(a.rank.cmp(&b.rank))
-            .then(a.id.cmp(&b.id))
+            .then(card_token_sort_key(&a.card_token).cmp(&card_token_sort_key(&b.card_token)))
     });
     let mut seen = std::collections::HashSet::new();
     items.retain(|item| seen.insert((item.card, item.dev)));
@@ -471,11 +567,18 @@ fn select_pcm_candidates(mut items: Vec<PcmCandidate>) -> Vec<PcmCandidate> {
 }
 
 #[cfg(target_os = "linux")]
-struct NamedPcm {
-    id: String,
-    card: u32,
-    label: String,
-    distinguisher: Option<String>,
+fn cmp_dev(a: Option<u32>, b: Option<u32>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn card_token_sort_key(token: &str) -> u8 {
+    if card_token_is_numeric(token) { 1 } else { 0 }
 }
 
 #[cfg(target_os = "linux")]
@@ -484,101 +587,100 @@ fn assign_display_names(
     capture: bool,
     cards: &[CardProfile],
     pipewire: &PwCatalog,
+    hwdb_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
 ) -> Vec<AudioDeviceInfo> {
-    let named: Vec<NamedPcm> = items
+    items
         .iter()
-        .map(|item| {
-            let card = cards.iter().find(|card| card.index == item.card);
-            let (label, distinguisher) = display_label(item, capture, card, pipewire);
-            NamedPcm {
-                id: item.id.clone(),
-                card: item.card,
-                label,
-                distinguisher,
-            }
+        .map(|item| AudioDeviceInfo {
+            id: item.id.clone(),
+            name: display_label(item, capture, cards, pipewire, hwdb_cache),
         })
-        .collect();
-    disambiguate_labels(named, cards)
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
 fn display_label(
     item: &PcmCandidate,
     capture: bool,
-    card: Option<&CardProfile>,
+    cards: &[CardProfile],
     pipewire: &PwCatalog,
-) -> (String, Option<String>) {
-    let distinguisher = card.and_then(|card| card.distinguisher.clone());
-    if let Some(node) = pipewire
-        .nodes
-        .iter()
-        .find(|node| node.card == item.card && node.device == item.dev && node.capture == capture)
+    hwdb_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
+) -> String {
+    let card = cards.iter().find(|card| card.index == item.card);
+    if let Some(dev) = item.dev
+        && let Some(node) = pipewire
+            .nodes
+            .iter()
+            .find(|node| node.capture == capture && node.card == item.card && node.device == dev)
     {
-        return (node.description.clone(), distinguisher);
+        return node.description.clone();
     }
     let role = pcm_role(&item.alsa_line).filter(|role| pcm_role_is_useful(role));
     if let Some(device_name) = pipewire.card_descriptions.get(&item.card) {
         if let Some(role) = role {
-            return (format!("{device_name} — {role}"), distinguisher);
+            return format!("{device_name} — {role}");
         }
-        return (device_name.clone(), distinguisher);
+        return device_name.clone();
     }
-    if let Some(model) = card.and_then(|card| card.model.clone()) {
+    if let Some(model) = card.and_then(|card| cached_usb_model(card, hwdb_cache)) {
         if let Some(role) = role.filter(|role| !model.contains(role.as_str())) {
-            return (format!("{model} — {role}"), distinguisher);
+            return format!("{model} — {role}");
         }
-        return (model, distinguisher);
+        return model;
     }
-    let fallback = if item.alsa_line.is_empty() {
-        format!("Card {} device {}", item.card, item.dev)
+    if item.alsa_line.is_empty() {
+        format!(
+            "Card {} device {}",
+            card.map(|card| card.id.as_str()).unwrap_or("unknown"),
+            item.dev
+                .map(|dev| dev.to_string())
+                .unwrap_or_else(|| "default".to_string())
+        )
     } else {
         item.alsa_line.clone()
-    };
-    (fallback, distinguisher)
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn disambiguate_labels(mut named: Vec<NamedPcm>, cards: &[CardProfile]) -> Vec<AudioDeviceInfo> {
-    let mut counts = std::collections::HashMap::<String, usize>::new();
-    for device in &named {
-        *counts.entry(device.label.clone()).or_insert(0) += 1;
+fn disambiguate_linux_device_names(devices: &mut [AudioDeviceInfo], cards: &[CardProfile]) {
+    devices.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut label_counts = std::collections::HashMap::<String, usize>::new();
+    for device in devices.iter() {
+        *label_counts.entry(device.name.clone()).or_insert(0) += 1;
     }
-    for device in &mut named {
-        if counts.get(&device.label).copied().unwrap_or(0) <= 1 {
+    for device in devices.iter_mut() {
+        if label_counts.get(&device.name).copied().unwrap_or(0) <= 1 {
             continue;
         }
-        let extra = device.distinguisher.clone().or_else(|| {
-            cards
-                .iter()
-                .find(|card| card.index == device.card)
-                .map(|card| card.id.clone())
+        let suffix = card_profile_for_device_id(&device.id, cards).and_then(|card| {
+            card.distinguisher
+                .clone()
+                .filter(|value| !value.is_empty())
+                .or_else(|| Some(card.id.clone()))
         });
-        if let Some(extra) =
-            extra.filter(|extra| !extra.is_empty() && !device.label.contains(extra.as_str()))
+        if let Some(suffix) = suffix.filter(|suffix| !device.name.contains(suffix.as_str())) {
+            device.name = format!("{} ({suffix})", device.name);
+            continue;
+        }
+        if let Some(suffix) = device_disambiguation_suffix(&device.id, cards)
+            .filter(|suffix| !device.name.contains(suffix.as_str()))
         {
-            device.label = format!("{} ({extra})", device.label);
+            device.name = format!("{} ({suffix})", device.name);
         }
     }
-    let mut counts = std::collections::HashMap::<String, usize>::new();
-    for device in &named {
-        *counts.entry(device.label.clone()).or_insert(0) += 1;
-    }
-    let mut seen = std::collections::HashMap::<String, usize>::new();
-    named
-        .into_iter()
-        .map(|device| {
-            let mut name = device.label;
-            if counts.get(&name).copied().unwrap_or(0) > 1 {
-                let next = seen.entry(name.clone()).or_insert(0);
-                *next += 1;
-                name = format!("{name} #{next}");
-            }
-            AudioDeviceInfo {
-                id: device.id,
-                name,
-            }
-        })
-        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn card_profile_for_device_id<'a>(id: &str, cards: &'a [CardProfile]) -> Option<&'a CardProfile> {
+    let token = pcm_card_token(id)?;
+    let index = card_index_for(token, cards)?;
+    cards.iter().find(|card| card.index == index)
+}
+
+#[cfg(target_os = "linux")]
+fn device_disambiguation_suffix(id: &str, cards: &[CardProfile]) -> Option<String> {
+    card_profile_for_device_id(id, cards)
+        .and_then(|card| card.distinguisher.clone().filter(|value| !value.is_empty()))
 }
 
 #[cfg(target_os = "linux")]
@@ -591,41 +693,7 @@ fn pcm_role(alsa_line: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn pcm_role_is_useful(role: &str) -> bool {
-    !role.trim().is_empty() && !is_generic_usb_label(role)
-}
-
-#[cfg(target_os = "linux")]
-fn is_generic_usb_label(name: &str) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    name == "usb audio"
-        || name == "usb device"
-        || name.starts_with("usb device ")
-        || name.starts_with("usb device 0x")
-}
-
-#[cfg(target_os = "linux")]
-fn is_placeholder_default_name(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "default" | "default audio device" | "sysdefault" | "pipewire" | "pulse"
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn host_default_device_name(capture: bool) -> Option<String> {
-    let host = cpal::default_host();
-    let device = if capture {
-        host.default_input_device()?
-    } else {
-        host.default_output_device()?
-    };
-    let description = device.description().ok()?;
-    let name = description.name().trim();
-    if name.is_empty() || is_placeholder_default_name(name) {
-        None
-    } else {
-        Some(name.to_string())
-    }
+    !role.trim().is_empty() && !is_generic_device_label(role)
 }
 
 #[cfg(target_os = "linux")]
@@ -649,16 +717,35 @@ fn load_card_profiles() -> Vec<CardProfile> {
         .into_iter()
         .map(|(index, id, _alsa_name)| {
             let usb = usb_identity_for_card(index);
-            let model = usb.as_ref().and_then(usb_model_name);
-            let distinguisher = usb.and_then(|info| info.serial.or(info.port));
+            let distinguisher = usb.as_ref().and_then(|info| {
+                info.serial
+                    .clone()
+                    .filter(|serial| useful_serial(serial))
+                    .or_else(|| info.port.clone())
+            });
             CardProfile {
                 index,
                 id,
-                model,
+                usb,
                 distinguisher,
             }
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn cached_usb_model(
+    card: &CardProfile,
+    cache: &mut std::collections::HashMap<(String, String), Option<String>>,
+) -> Option<String> {
+    let usb = card.usb.as_ref()?;
+    let key = (usb.vendor.clone(), usb.product.clone());
+    if let Some(model) = cache.get(&key) {
+        return model.clone();
+    }
+    let model = usb_model_name(usb);
+    cache.insert(key, model.clone());
+    model
 }
 
 #[cfg(target_os = "linux")]
@@ -739,12 +826,12 @@ fn read_trimmed(path: &std::path::Path) -> Option<String> {
 fn usb_model_name(info: &UsbIdentity) -> Option<String> {
     if let Some((vendor, model)) = query_hwdb(&info.vendor, &info.product) {
         let display = hwdb_display_name(&vendor, &model);
-        if !display.is_empty() && !is_generic_usb_label(&display) {
+        if !display.is_empty() && !is_generic_device_label(&display) {
             return Some(display);
         }
     }
     info.product_string.as_deref().and_then(|product| {
-        if is_generic_usb_label(product) {
+        if is_generic_device_label(product) {
             None
         } else {
             Some(product_display_name(info.manufacturer.as_deref(), product))
@@ -790,7 +877,7 @@ fn query_hwdb(vendor: &str, product: &str) -> Option<(String, String)> {
 #[cfg(target_os = "linux")]
 fn hwdb_display_name(vendor: &str, model: &str) -> String {
     let model = model.trim();
-    if !is_generic_usb_label(model) {
+    if !is_generic_device_label(model) {
         return model.to_string();
     }
     let vendor = strip_company_suffix(vendor);
@@ -854,16 +941,60 @@ fn strip_company_suffix(name: &str) -> &str {
 
 #[cfg(target_os = "linux")]
 fn load_pipewire_catalog() -> PwCatalog {
-    let output = match std::process::Command::new("pw-dump")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return PwCatalog::default(),
+    let Some(stdout) = command_output_timeout("pw-dump", &[], PW_DUMP_TIMEOUT) else {
+        return PwCatalog::default();
     };
-    parse_pw_catalog(&output.stdout)
+    parse_pw_catalog(&stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn command_output_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stdout = stdout;
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = reader.join().ok()?;
+                return status.success().then_some(bytes);
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    tracing::warn!("timed out running {program}");
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = reader.join();
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1185,29 +1316,40 @@ pub enum MicCaptureError {
 #[cfg(all(test, target_os = "linux"))]
 mod linux_device_names {
     use super::{
-        CardProfile, PcmCandidate, PwCatalog, PwNodeLabel, assign_display_names, card_index_for,
-        hwdb_display_name, is_generic_usb_label, is_placeholder_default_name, parse_asound_cards,
-        parse_pw_catalog, pcm_card_token, pcm_dev_index, pipewire_default_name,
-        product_display_name, select_pcm_candidates, strip_company_suffix,
+        CardProfile, PcmCandidate, PwCatalog, PwNodeLabel, UsbIdentity, assign_display_names,
+        card_index_for, card_token_is_numeric, finalize_linux_device_names, hwdb_display_name,
+        is_generic_device_label, parse_asound_cards, parse_pw_catalog, pcm_card_token,
+        pcm_dev_index, pipewire_default_name, product_display_name, select_pcm_candidates,
+        strip_company_suffix,
     };
 
     fn card(index: u32, id: &str, model: Option<&str>, distinguisher: Option<&str>) -> CardProfile {
         CardProfile {
             index,
             id: id.to_string(),
-            model: model.map(str::to_string),
+            usb: model.map(|model| UsbIdentity {
+                vendor: "046d".to_string(),
+                product: "0825".to_string(),
+                product_string: Some(model.to_string()),
+                manufacturer: Some("Logitech".to_string()),
+                serial: distinguisher.map(str::to_string),
+                port: None,
+            }),
             distinguisher: distinguisher.map(str::to_string),
         }
     }
 
-    fn pcm(rank: u8, card_index: u32, dev: u32, id: &str, alsa_line: &str) -> PcmCandidate {
+    fn pcm(rank: u8, card_index: u32, dev: Option<u32>, id: &str, alsa_line: &str) -> PcmCandidate {
+        let pcm_id = id.rsplit(':').next().unwrap_or(id);
+        let token = pcm_card_token(pcm_id).unwrap_or("").to_string();
         PcmCandidate {
             rank,
             card: card_index,
             dev,
+            card_token: token,
             id: id.to_string(),
             alsa_line: alsa_line.to_string(),
-            digital: id.starts_with("hdmi:") || id.starts_with("iec958:"),
+            digital: pcm_id.starts_with("hdmi:") || pcm_id.starts_with("iec958:"),
         }
     }
 
@@ -1234,12 +1376,14 @@ mod linux_device_names {
             card(0, "U0x46d0x825", None, None),
             card(1, "Headset", None, None),
         ];
-        assert_eq!(card_index_for("U0x46d0x825", &cards), 0);
-        assert_eq!(card_index_for("0", &cards), 0);
-        assert_eq!(card_index_for("Headset", &cards), 1);
+        assert_eq!(card_index_for("U0x46d0x825", &cards), Some(0));
+        assert_eq!(card_index_for("0", &cards), Some(0));
+        assert_eq!(card_index_for("Headset", &cards), Some(1));
         assert_eq!(pcm_card_token("sysdefault:CARD=Headset"), Some("Headset"));
-        assert_eq!(pcm_dev_index("sysdefault:CARD=PCH"), 0);
-        assert_eq!(pcm_dev_index("hw:CARD=PCH,DEV=2"), 2);
+        assert_eq!(pcm_dev_index("sysdefault:CARD=PCH"), None);
+        assert_eq!(pcm_dev_index("hw:CARD=PCH,DEV=2"), Some(2));
+        assert!(!card_token_is_numeric("Headset"));
+        assert!(card_token_is_numeric("0"));
     }
 
     #[test]
@@ -1252,28 +1396,38 @@ mod linux_device_names {
             pcm(
                 0,
                 0,
-                0,
+                Some(0),
                 "sysdefault:CARD=CamA",
                 "USB Device 0x46d:0x825, USB Audio",
             ),
             pcm(
                 3,
                 0,
-                0,
+                Some(0),
                 "hw:CARD=CamA,DEV=0",
                 "USB Device 0x46d:0x825, USB Audio",
             ),
             pcm(
                 0,
                 1,
-                0,
+                Some(0),
                 "sysdefault:CARD=CamB",
                 "USB Device 0x46d:0x825, USB Audio",
             ),
         ]);
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].id, "sysdefault:CARD=CamA");
-        let named = assign_display_names(&selected, true, &cards, &PwCatalog::default());
+        let mut hwdb_cache = std::collections::HashMap::new();
+        let named = finalize_linux_device_names(
+            assign_display_names(
+                &selected,
+                true,
+                &cards,
+                &PwCatalog::default(),
+                &mut hwdb_cache,
+            ),
+            &cards,
+        );
         let mut names: Vec<_> = named.into_iter().map(|device| device.name).collect();
         names.sort();
         assert_eq!(
@@ -1303,27 +1457,28 @@ mod linux_device_names {
             pcm(
                 0,
                 2,
-                0,
+                Some(0),
                 "sysdefault:CARD=PCH",
                 "HDA Intel PCH, ALC897 Analog",
             ),
             pcm(
                 3,
                 2,
-                2,
+                Some(2),
                 "hw:CARD=PCH,DEV=2",
                 "HDA Intel PCH, ALC897 Alt Analog",
             ),
             pcm(
                 4,
                 2,
-                0,
+                Some(0),
                 "dsnoop:CARD=PCH,DEV=0",
                 "HDA Intel PCH, ALC897 Analog",
             ),
         ]);
         assert_eq!(selected.len(), 2);
-        let named = assign_display_names(&selected, true, &cards, &pipewire);
+        let mut hwdb_cache = std::collections::HashMap::new();
+        let named = assign_display_names(&selected, true, &cards, &pipewire, &mut hwdb_cache);
         let mut names: Vec<_> = named.into_iter().map(|device| device.name).collect();
         names.sort();
         assert_eq!(
@@ -1365,19 +1520,20 @@ mod linux_device_names {
             pcm(
                 0,
                 0,
-                0,
+                Some(0),
                 "sysdefault:CARD=U0x46d0x825",
                 "USB Device 0x46d:0x825, USB Audio",
             ),
             pcm(
                 0,
                 1,
-                0,
+                Some(0),
                 "sysdefault:CARD=Headset",
                 "Logitech USB Headset, USB Audio",
             ),
         ]);
-        let named = assign_display_names(&selected, true, &cards, &pipewire);
+        let mut hwdb_cache = std::collections::HashMap::new();
+        let named = assign_display_names(&selected, true, &cards, &pipewire, &mut hwdb_cache);
         let mut names: Vec<_> = named.into_iter().map(|device| device.name).collect();
         names.sort();
         assert_eq!(
@@ -1399,20 +1555,89 @@ mod linux_device_names {
             pcm(
                 0,
                 1,
-                0,
+                Some(0),
                 "sysdefault:CARD=Headset",
                 "Logitech USB Headset, USB Audio",
             ),
             pcm(
                 4,
                 1,
-                0,
+                Some(0),
                 "iec958:CARD=Headset,DEV=0",
                 "Logitech USB Headset, USB Audio",
             ),
         ]);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id, "sysdefault:CARD=Headset");
+    }
+
+    #[test]
+    fn prefers_named_card_token_over_numeric_plughw() {
+        let _cards = vec![card(2, "PCH", None, None)];
+        let selected = select_pcm_candidates(vec![
+            pcm(
+                1,
+                2,
+                Some(0),
+                "Alsa:plughw:CARD=2,DEV=0",
+                "HDA Intel PCH, ALC897 Analog",
+            ),
+            pcm(
+                0,
+                2,
+                Some(0),
+                "Alsa:sysdefault:CARD=PCH,DEV=0",
+                "HDA Intel PCH, ALC897 Analog",
+            ),
+        ]);
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].id.contains("PCH"));
+    }
+
+    #[test]
+    fn sysdefault_without_dev_does_not_merge_with_explicit_dev_zero() {
+        let _cards = vec![card(2, "PCH", None, None)];
+        let selected = select_pcm_candidates(vec![
+            pcm(
+                0,
+                2,
+                None,
+                "sysdefault:CARD=PCH",
+                "HDA Intel PCH, ALC897 Analog",
+            ),
+            pcm(
+                3,
+                2,
+                Some(0),
+                "hw:CARD=PCH,DEV=0",
+                "HDA Intel PCH, ALC897 Analog",
+            ),
+            pcm(3, 2, Some(3), "hw:CARD=PCH,DEV=3", "HDA Intel PCH, HDMI 0"),
+        ]);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn numeric_plughw_duplicates_collapse_to_named_card() {
+        let _cards = vec![card(0, "Headset", None, None)];
+        let selected = select_pcm_candidates(vec![
+            pcm(
+                1,
+                0,
+                Some(0),
+                "plughw:CARD=0,DEV=0",
+                "Logitech USB Headset, USB Audio",
+            ),
+            pcm(
+                0,
+                0,
+                Some(0),
+                "sysdefault:CARD=Headset,DEV=0",
+                "Logitech USB Headset, USB Audio",
+            ),
+        ]);
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].id.contains("Headset"));
     }
 
     #[test]
@@ -1433,13 +1658,11 @@ mod linux_device_names {
             catalog.default_source_name.as_deref(),
             Some("alsa_input.webcam")
         );
-        assert!(
-            is_generic_usb_label("USB Device 0x46d:0x825, USB Audio")
-                || is_generic_usb_label("USB Audio")
-        );
-        assert!(is_generic_usb_label("USB Device 0x46d:0x825"));
-        assert!(!is_generic_usb_label("Webcam C270"));
-        assert!(is_placeholder_default_name("Default Audio Device"));
+        assert!(is_generic_device_label("USB Device 0x46d:0x825, USB Audio"));
+        assert!(is_generic_device_label("USB Audio"));
+        assert!(is_generic_device_label("USB Device 0x46d:0x825"));
+        assert!(!is_generic_device_label("Webcam C270"));
+        assert!(is_generic_device_label("Default Audio Device"));
         assert_eq!(
             hwdb_display_name("Logitech, Inc.", "Webcam C270"),
             "Webcam C270"

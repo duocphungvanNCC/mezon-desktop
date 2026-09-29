@@ -4323,7 +4323,7 @@ fn device_row(
                     div()
                         .mt(px(2.))
                         .text_xs()
-                        .whitespace_normal()
+                        .truncate()
                         .text_color(theme.text_muted)
                         .child(active_name),
                 ),
@@ -4397,8 +4397,8 @@ fn device_list_panel(
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(160.))
-                        .whitespace_normal()
+                        .min_w(px(0.))
+                        .truncate()
                         .text_sm()
                         .text_color(text_color)
                         .child(name),
