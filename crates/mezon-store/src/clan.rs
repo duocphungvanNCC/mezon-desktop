@@ -368,9 +368,7 @@ impl ClanOverviewDraft {
 /// Keep the live rail counts across a clan-list refetch.
 ///
 /// `ListClanDescs` carries no badge, so a plain reload would paint every clan
-/// read. `authoritative` says the incoming rows came from `ListClanBadgeCount`
-/// instead — server truth, which also knows about reads made on other devices —
-/// and then it must win, or a reconnect could never correct a stale count.
+/// read.
 fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
     if previous.is_empty() {
         return;
@@ -387,8 +385,6 @@ fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
     }
 }
 
-/// `ListClanBadgeCount` is server truth for every listed clan — one it leaves out has
-/// nothing unread — so it replaces whatever the rail was carrying.
 fn apply_clan_badges(clans: &mut [Clan], counts: Vec<(String, i32, bool)>) {
     let counts: HashMap<String, (i32, bool)> = counts
         .into_iter()
@@ -626,8 +622,6 @@ impl ClanList {
     /// clan to be joined.
     pub fn reload_badges(&mut self, cx: &mut Context<Self>) {
         self.badges_loaded = false;
-        // A count already in flight was asked before whatever made it suspect (a
-        // reconnect, a lagged stream) — its answer must not mark the rail fresh.
         self.badge_generation = self.badge_generation.wrapping_add(1);
         self.reload(cx);
     }
@@ -689,15 +683,11 @@ impl ClanList {
         .detach();
     }
 
-    /// `ListClanBadgeCount` only goes out once the clan list has landed. The socket
-    /// serves it with Valkey round trips per clan on the connection's own thread, so on
-    /// a node far from Valkey everything sent after it waits: sent alongside, it held
-    /// the clan list back until that timed out and `ListClanDescs` was sent again.
     fn fetch_badges(&mut self, cx: &mut Context<Self>) {
-        let generation = self.badge_generation;
-        if self.badges_in_flight == Some(generation) {
+        if self.badges_in_flight.is_some() {
             return;
         }
+        let generation = self.badge_generation;
         self.badges_in_flight = Some(generation);
         let reset_generation = self.reset_generation;
         let api = self.api.clone();
@@ -707,10 +697,11 @@ impl ClanList {
                 if this.reset_generation != reset_generation {
                     return;
                 }
-                if this.badges_in_flight == Some(generation) {
-                    this.badges_in_flight = None;
-                }
+                this.badges_in_flight = None;
                 if this.badge_generation != generation {
+                    if !this.badges_loaded && this.listed && !this.loading {
+                        this.fetch_badges(cx);
+                    }
                     return;
                 }
                 match result {
@@ -1962,8 +1953,6 @@ mod tests {
         let mut rail = clans();
         rail[0].badge_count = 4;
         rail[0].has_unread = true;
-        // Reconnect: ListClanBadgeCount ran, so its rows are server truth and must
-        // land — otherwise a count read on another device could never clear here.
         apply_clan_badges(&mut rail, vec![("1".to_string(), 1, true)]);
         assert_eq!(rail[0].badge_count, 1);
         assert!(rail[0].has_unread);

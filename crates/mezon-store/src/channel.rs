@@ -1782,10 +1782,6 @@ impl ChannelList {
             .unwrap_or_else(|| Task::ready(()).shared())
     }
 
-    /// Builds the cross-clan channel list (Ctrl+K, forward, `#`, webhook targets) from the
-    /// clan structures already loaded; each clan load keeps adding to it through
-    /// `sync_user_channels_from_clan_structure`. `ListChannelByUserId` used to seed it, but
-    /// mezon-api dropped that handler, so a call never resolves.
     fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
         self.sync_user_channels_from_all_loaded_caches(cx);
         self.user_channels_loaded = true;
