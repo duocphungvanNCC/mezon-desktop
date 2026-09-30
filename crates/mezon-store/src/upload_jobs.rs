@@ -93,6 +93,10 @@ pub fn plan_restore(
     plan
 }
 
+pub fn prune(jobs: &mut Vec<UploadJob>, now: i64, is_running: impl Fn(&UploadJob) -> bool) {
+    jobs.retain(|job| job.worth_keeping_at(now) || is_running(job));
+}
+
 fn jobs_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -236,6 +240,19 @@ mod tests {
         assert_eq!(ids(&plan.resume), vec![1]);
         assert_eq!(ids(&plan.keep), vec![3]);
         assert_eq!(plan.replaced, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pruning_drops_jobs_whose_urls_lapsed_unless_still_running() {
+        let now = 10_000;
+        let mut jobs = vec![
+            job_for(7, 1, now - 60),
+            job_for(8, 2, now - PRESIGNED_URL_LIFETIME_SEC),
+            job_for(7, 3, now - PRESIGNED_URL_LIFETIME_SEC - 5),
+        ];
+        prune(&mut jobs, now, |job| job.message_id == 3);
+        let ids: Vec<i64> = jobs.iter().map(|j| j.message_id).collect();
+        assert_eq!(ids, vec![1, 3]);
     }
 
     #[test]

@@ -7957,6 +7957,9 @@ impl MessagesStore {
     }
 
     fn persist_upload_jobs(&mut self, cx: &mut Context<Self>) {
+        upload_jobs::prune(&mut self.upload_jobs, now_unix_seconds(), |job| {
+            job.pending.iter().any(|p| presign::is_uploading(&p.key))
+        });
         self.upload_jobs_generation += 1;
         let generation = self.upload_jobs_generation;
         let snapshot = self.upload_jobs.clone();
