@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -10,6 +11,14 @@ use parking_lot::Mutex;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
+
+fn matroska_codec_id(id: &str) -> &str {
+    id.trim_end_matches('\0')
+}
+
+fn is_vp8_video_track(track: &matroska_demuxer::TrackEntry) -> bool {
+    track.track_type() == TrackType::Video && matroska_codec_id(track.codec_id()) == "V_VP8"
+}
 
 pub(crate) fn is_webm_source(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
@@ -24,12 +33,14 @@ struct DemuxState {
     timestamp_scale: u64,
     vp8: Vp8DecoderState,
     last_frame_ns: u64,
+    last_emitted_ns: Option<u64>,
     cached: Option<VideoFrame>,
     eos: bool,
 }
 
 pub struct WebmPlayerImpl {
     state: Mutex<DemuxState>,
+    bytes: Arc<Vec<u8>>,
     duration_seconds: f64,
     playing: Cell<bool>,
     play_started_at: RefCell<Option<Instant>>,
@@ -45,34 +56,37 @@ impl WebmPlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        let bytes = load_bytes(url)?;
-        let cursor = Cursor::new(bytes);
-        let demuxer = MatroskaFile::open(cursor).map_err(|error| {
-            tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
-            PlayerError::Open
-        })?;
+        Self::open_bytes(load_bytes(url)?, max_size)
+    }
+
+    pub fn open_bytes(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        let bytes = Arc::new(bytes);
+        let mut demuxer = open_demuxer(&bytes)?;
         let video_track = demuxer
             .tracks()
             .iter()
-            .find(|track| track.track_type() == TrackType::Video && track.codec_id() == "V_VP8")
+            .find(|track| is_vp8_video_track(track))
             .map(|track| track.track_number().get())
             .ok_or_else(|| {
                 tracing::warn!(target: "mezon_video", "webm has no VP8 video track");
                 PlayerError::Open
             })?;
         let timestamp_scale = demuxer.info().timestamp_scale().get();
-        let duration_seconds = demuxer
-            .info()
-            .duration()
-            .map(|ns| ns / 1_000_000_000.0)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(0.0);
+        let header_duration = header_duration_seconds(demuxer.info());
+        let duration_seconds = if let Some(duration) = header_duration {
+            duration
+        } else {
+            let duration = video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)?;
+            demuxer = open_demuxer(&bytes)?;
+            duration
+        };
         let mut state = DemuxState {
             demuxer,
             video_track,
             timestamp_scale,
             vp8: Vp8DecoderState::new(),
             last_frame_ns: 0,
+            last_emitted_ns: None,
             cached: None,
             eos: false,
         };
@@ -81,6 +95,7 @@ impl WebmPlayerImpl {
         }
         Ok(Self {
             state: Mutex::new(state),
+            bytes,
             duration_seconds,
             playing: Cell::new(false),
             play_started_at: RefCell::new(None),
@@ -105,7 +120,7 @@ impl WebmPlayerImpl {
         if self.playing.get() && !state.eos {
             let _ = advance_to(&mut state, target_ns, self.max_size);
         }
-        state.cached.clone()
+        take_frame(&mut state)
     }
 
     pub fn play(&self) {
@@ -156,16 +171,12 @@ impl WebmPlayerImpl {
         *self.play_started_at.borrow_mut() = None;
         self.play_offset_ns.set(target_ns);
         let mut state = self.state.lock();
-        state.vp8 = Vp8DecoderState::new();
-        state.last_frame_ns = 0;
-        state.cached = None;
-        state.eos = false;
-        let seek_ts = target_ns / state.timestamp_scale.max(1);
-        if state.demuxer.seek(seek_ts).is_err() {
-            self.failed.store(true, Ordering::SeqCst);
-            return;
-        }
-        if advance_to(&mut state, target_ns, self.max_size).is_err() {
+        if reopen_at(&mut state, &self.bytes, target_ns, self.max_size).is_err() {
+            tracing::warn!(
+                target: "mezon_video",
+                target_ms = target_ns / 1_000_000,
+                "webm seek reopen failed"
+            );
             self.failed.store(true, Ordering::SeqCst);
         }
     }
@@ -205,7 +216,7 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     let video_track = demuxer
         .tracks()
         .iter()
-        .find(|track| track.track_type() == TrackType::Video && track.codec_id() == "V_VP8")?
+        .find(|track| is_vp8_video_track(track))?
         .track_number()
         .get();
     let mut frame = Frame::default();
@@ -247,18 +258,72 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     None
 }
 
+fn open_demuxer(bytes: &Arc<Vec<u8>>) -> Result<MatroskaFile<Cursor<Vec<u8>>>, PlayerError> {
+    MatroskaFile::open(Cursor::new(Vec::clone(bytes))).map_err(|error| {
+        tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
+        PlayerError::Open
+    })
+}
+
+fn clear_frame_cache(state: &mut DemuxState) {
+    state.vp8 = Vp8DecoderState::new();
+    state.last_frame_ns = 0;
+    state.last_emitted_ns = None;
+    state.cached = None;
+    state.eos = false;
+}
+
+fn reopen_at(
+    state: &mut DemuxState,
+    bytes: &Arc<Vec<u8>>,
+    target_ns: u64,
+    max_size: Option<(u32, u32)>,
+) -> Result<(), PlayerError> {
+    state.demuxer = open_demuxer(bytes)?;
+    clear_frame_cache(state);
+    if !decode_until(state, target_ns, max_size)? {
+        return Err(PlayerError::Open);
+    }
+    Ok(())
+}
+
+fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
+    let ticks = info.duration()?;
+    let scale = info.timestamp_scale().get() as f64;
+    let seconds = ticks * scale / 1_000_000_000.0;
+    (seconds.is_finite() && seconds > 0.05).then_some(seconds)
+}
+
+fn video_duration_from_frames(
+    demuxer: &mut MatroskaFile<Cursor<Vec<u8>>>,
+    video_track: u64,
+    timestamp_scale: u64,
+) -> Result<f64, PlayerError> {
+    let mut frame = Frame::default();
+    let mut max_ns = 0u64;
+    while demuxer.next_frame(&mut frame).ok() == Some(true) {
+        if frame.track == video_track {
+            max_ns = max_ns.max(frame.timestamp.saturating_mul(timestamp_scale));
+        }
+    }
+    Ok(if max_ns > 0 {
+        max_ns as f64 / 1_000_000_000.0
+    } else {
+        0.0
+    })
+}
+
 fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let mut response = ureq::get(url).call().map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm download failed");
             PlayerError::Open
         })?;
-        let mut body = Vec::new();
-        response
+        let body = response
             .body_mut()
             .with_config()
-            .limit(MAX_WEBM_BYTES)
-            .read_to_end(&mut body)
+            .limit(MAX_WEBM_BYTES as u64)
+            .read_to_vec()
             .map_err(|_| PlayerError::Open)?;
         Ok(body)
     } else if let Some(path) = url.strip_prefix("file://") {
@@ -276,21 +341,22 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     }
 }
 
+fn take_frame(state: &mut DemuxState) -> Option<VideoFrame> {
+    if state.last_emitted_ns == Some(state.last_frame_ns) {
+        return None;
+    }
+    let frame = state.cached.clone()?;
+    state.last_emitted_ns = Some(state.last_frame_ns);
+    Some(frame)
+}
+
 fn advance_to(
     state: &mut DemuxState,
     target_ns: u64,
     max_size: Option<(u32, u32)>,
 ) -> Result<bool, DemuxError> {
     if state.eos {
-        return Ok(true);
-    }
-    if state.last_frame_ns > target_ns {
-        let seek_ts = target_ns / state.timestamp_scale.max(1);
-        state.demuxer.seek(seek_ts)?;
-        state.vp8 = Vp8DecoderState::new();
-        state.last_frame_ns = 0;
-        state.cached = None;
-        state.eos = false;
+        return Ok(state.cached.is_some());
     }
     while state.last_frame_ns <= target_ns {
         if !decode_next_video_frame(state, max_size)? {
@@ -371,6 +437,11 @@ fn vp8_to_frame(
         };
         crate::render_frame::bgra_to_frame(width, height, bgra)
     }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (decoded, max_size);
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -405,5 +476,11 @@ mod tests {
         assert!(is_webm_source("https://cdn.example/clip.webm"));
         assert!(is_webm_source("https://cdn.example/clip.webm?token=1"));
         assert!(!is_webm_source("https://cdn.example/clip.mp4"));
+    }
+
+    #[test]
+    fn matroska_codec_id_strips_null_suffix() {
+        assert_eq!(matroska_codec_id("V_VP8\0"), "V_VP8");
+        assert_eq!(matroska_codec_id("V_VP8"), "V_VP8");
     }
 }
