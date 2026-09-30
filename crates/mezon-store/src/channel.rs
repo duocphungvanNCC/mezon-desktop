@@ -666,8 +666,6 @@ pub struct ChannelList {
     forgotten_clans: HashSet<ClanId>,
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
-    user_channels_loading: bool,
-    user_channels_generation: u64,
     in_voice: HashMap<UserId, InVoiceInfo>,
     voice_revisions: HashMap<ClanId, u64>,
     user_channels_loaded: bool,
@@ -859,8 +857,6 @@ impl ChannelList {
         self.forgotten_clans.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
-        self.user_channels_loading = false;
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.in_voice.clear();
         self.voice_revisions.clear();
         self.user_channels_loaded = false;
@@ -972,8 +968,6 @@ impl ChannelList {
             forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
-            user_channels_loading: false,
-            user_channels_generation: 0,
             in_voice: HashMap::new(),
             voice_revisions: HashMap::new(),
             user_channels_loaded: false,
@@ -1022,9 +1016,6 @@ impl ChannelList {
         if !self.forgotten_clans.remove(&clan_id) {
             return;
         }
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
-        self.user_channels_loaded = false;
         self.fetch_user_channels(cx);
         let active = self
             .active_clan_id
@@ -1038,8 +1029,6 @@ impl ChannelList {
 
     pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.forgotten_clans.insert(clan_id);
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
         let channel_ids: Vec<ChannelId> = self
             .cache
             .get(&clan_id)
@@ -1793,37 +1782,15 @@ impl ChannelList {
             .unwrap_or_else(|| Task::ready(()).shared())
     }
 
+    /// Builds the cross-clan channel list (Ctrl+K, forward, `#`, webhook targets) from the
+    /// clan structures already loaded; each clan load keeps adding to it through
+    /// `sync_user_channels_from_clan_structure`. `ListChannelByUserId` used to seed it, but
+    /// mezon-api dropped that handler, so a call never resolves.
     fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
-        if self.user_channels_loading {
-            return;
-        }
-        self.user_channels_loading = true;
-        let api = self.api.clone();
-        let reset_generation = self.reset_generation;
-        let user_channels_generation = self.user_channels_generation;
-        cx.spawn(async move |this, cx| {
-            let result = api.list_channel_by_user_id().await;
-            let _ = this.update(cx, |this, cx| {
-                if this.reset_generation != reset_generation
-                    || this.user_channels_generation != user_channels_generation
-                {
-                    return;
-                }
-                this.user_channels_loading = false;
-                match result {
-                    Ok(descs) => {
-                        this.merge_user_channels_from_api_descs(descs, cx);
-                        this.user_channels_loaded = true;
-                        cx.emit(ChannelEvent::UserChannelsLoaded);
-                        cx.notify();
-                    }
-                    Err(e) => {
-                        tracing::warn!("list_channel_by_user_id failed: {e}");
-                    }
-                }
-            });
-        })
-        .detach();
+        self.sync_user_channels_from_all_loaded_caches(cx);
+        self.user_channels_loaded = true;
+        cx.emit(ChannelEvent::UserChannelsLoaded);
+        cx.notify();
     }
 
     pub fn user_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
@@ -1842,7 +1809,7 @@ impl ChannelList {
     }
 
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.user_channels_loaded && !self.user_channels_loading {
+        if !self.user_channels_loaded {
             self.fetch_user_channels(cx);
         }
     }
@@ -2429,7 +2396,8 @@ impl ChannelList {
         }
     }
 
-    fn merge_user_channels_from_api_descs(
+    #[cfg(test)]
+    fn seed_user_channels_for_test(
         &mut self,
         descs: Vec<mezon_client::transport::ApiChannelDesc>,
         cx: &mut Context<Self>,
@@ -2451,7 +2419,12 @@ impl ChannelList {
     }
 
     fn sync_user_channels_from_all_loaded_caches(&mut self, _cx: &mut Context<Self>) {
-        let clan_ids: Vec<ClanId> = self.cache.iter().map(|(id, _)| *id).collect();
+        let clan_ids: Vec<ClanId> = self
+            .cache
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !self.forgotten_clans.contains(id))
+            .collect();
         for clan_id in clan_ids {
             let batch: Vec<Channel> = self
                 .cache
@@ -4066,8 +4039,6 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.loading.clear();
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
         self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
@@ -7131,7 +7102,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.merge_user_channels_from_api_descs(
+                channels.seed_user_channels_for_test(
                     vec![api_desc(2, "alpha", 0), api_desc(6, "zulu", 0)],
                     cx,
                 );
@@ -7199,7 +7170,7 @@ mod tests {
                     cx,
                 );
                 channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
-                channels.merge_user_channels_from_api_descs(vec![api_desc(1, "general", 0)], cx);
+                channels.seed_user_channels_for_test(vec![api_desc(1, "general", 0)], cx);
 
                 let targets = channels.webhook_target_channels_for_clan(ClanId(1));
                 assert!(targets.is_empty());
@@ -8977,7 +8948,6 @@ mod tests {
                 channels.user_channels_loaded,
                 "leave must not reset user_channels_loaded; a palette open would refetch and mark it loaded again"
             );
-            assert!(!channels.user_channels_loading);
             assert!(channels.user_channel(ChannelId(10)).is_none());
         });
     }
@@ -9037,15 +9007,15 @@ mod tests {
                     !channels.forgotten_clans.contains(&ClanId(1)),
                     "ClanEvent::Joined must clear the forgotten guard when the clan list lands"
                 );
-                assert!(
-                    !channels.user_channels_loaded,
-                    "rejoin must reset user_channels_loaded so the new clan is fetched"
-                );
                 channels.load_for_clan(ClanId(1), cx);
                 channels.apply_clan_structure(ClanId(1), categories(), None, cx);
                 assert!(
                     channels.cache.get(&ClanId(1)).is_some(),
                     "joining a clan again must show its channels without restarting the app"
+                );
+                assert!(
+                    channels.user_channels().any(|ch| ch.clan_id == ClanId(1)),
+                    "a rejoined clan's channels must be back in the cross-clan list"
                 );
             });
         });
@@ -9112,7 +9082,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn in_flight_user_channels_after_leave_do_not_restore_the_left_clan(
+    fn rebuilding_user_channels_after_leave_does_not_restore_the_left_clan(
         cx: &mut gpui::TestAppContext,
     ) {
         let channels = cx.update(|cx| {
@@ -9123,8 +9093,8 @@ mod tests {
             channels.update(cx, |channels, cx| {
                 channels.seed_clan_channels_for_test(ClanId(1), categories());
                 channels.apply_clan_structure(ClanId(1), categories(), None, cx);
-                channels.user_channels_loaded = true;
-                channels.user_channels_loading = true;
+                channels.fetch_user_channels(cx);
+                assert!(channels.user_channels().any(|ch| ch.clan_id == ClanId(1)));
             });
             channels
         });
@@ -9143,40 +9113,10 @@ mod tests {
 
         cx.update(|cx| {
             channels.update(cx, |channels, cx| {
-                assert!(!channels.user_channels_loading);
-                assert!(channels.user_channels_loaded);
-                channels.merge_user_channels_from_api_descs(
-                    vec![ApiChannelDesc {
-                        channel_id: 10,
-                        channel_label: "alpha".into(),
-                        channel_type: 1,
-                        clan_id: 1,
-                        category_name: String::new(),
-                        category_id: 0,
-                        channel_private: 0,
-                        count_mess_unread: 0,
-                        member_count: 0,
-                        parent_id: 0,
-                        is_mute: false,
-                        last_seen_message_id: 0,
-                        last_seen_timestamp: 0,
-                        last_sent_message_id: 0,
-                        last_sent_timestamp: 0,
-                        badge_count: 0,
-                        active: CHANNEL_ACTIVE_JOINED,
-                        creator_id: 0,
-                        clan_name: String::new(),
-                        channel_avatar: String::new(),
-                        topic: String::new(),
-                        age_restricted: 0,
-                        e2ee: 0,
-                        app_id: 0,
-                    }],
-                    cx,
-                );
+                channels.fetch_user_channels(cx);
                 assert!(
-                    channels.user_channel(ChannelId(10)).is_none(),
-                    "a list_channel_by_user_id that resolves after leave must not restore the left clan"
+                    channels.user_channels().all(|ch| ch.clan_id != ClanId(1)),
+                    "rebuilding the cross-clan list after leave must not restore the left clan"
                 );
             });
         });
@@ -9402,7 +9342,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn list_channel_by_user_id_merge_keeps_clan_structure_threads(cx: &mut gpui::TestAppContext) {
+    fn user_channels_keep_clan_structure_threads(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
@@ -9416,7 +9356,7 @@ mod tests {
                     thread.private = true;
                 }
                 channels.apply_clan_structure(ClanId(1), structure, None, cx);
-                channels.merge_user_channels_from_api_descs(vec![], cx);
+                channels.fetch_user_channels(cx);
 
                 let thread = channels.user_channel(ChannelId(9)).expect("private thread");
                 assert_eq!(thread.name, "Tes Private thread");
