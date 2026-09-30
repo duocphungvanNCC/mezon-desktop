@@ -100,74 +100,126 @@ fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
-static UPLOADING_KEYS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadState {
+    Uploading,
+    Uploaded,
+    Failed,
+}
+
+#[derive(Default)]
+struct UploadRegistry {
+    states: std::collections::HashMap<String, UploadState>,
+    local_sources: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+static UPLOADS: std::sync::LazyLock<std::sync::Mutex<UploadRegistry>> =
     std::sync::LazyLock::new(Default::default);
 
-fn uploading_keys() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
-    UPLOADING_KEYS
+fn uploads() -> std::sync::MutexGuard<'static, UploadRegistry> {
+    UPLOADS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn begin_uploading<'a>(keys: impl IntoIterator<Item = &'a String>) {
-    uploading_keys().extend(keys.into_iter().cloned());
+    let mut registry = uploads();
+    for key in keys {
+        registry.states.insert(key.clone(), UploadState::Uploading);
+    }
 }
 
-pub fn end_uploading(key: &str) {
-    uploading_keys().remove(key);
+pub fn finish_uploading(key: &str, uploaded: bool) {
+    let state = if uploaded {
+        UploadState::Uploaded
+    } else {
+        UploadState::Failed
+    };
+    uploads().states.insert(key.to_string(), state);
+}
+
+pub fn mark_failed(key: &str) {
+    uploads()
+        .states
+        .insert(key.to_string(), UploadState::Failed);
+}
+
+pub fn settle(key: &str) {
+    let mut registry = uploads();
+    registry.states.remove(key);
+    registry.local_sources.remove(key);
+}
+
+pub fn clear_failed() {
+    let mut registry = uploads();
+    let failed: Vec<String> = registry
+        .states
+        .iter()
+        .filter(|(_, state)| **state == UploadState::Failed)
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in failed {
+        registry.states.remove(&key);
+        registry.local_sources.remove(&key);
+    }
+}
+
+pub fn upload_state(key: &str) -> Option<UploadState> {
+    uploads().states.get(key).copied()
 }
 
 pub fn is_uploading(key: &str) -> bool {
-    uploading_keys().contains(key)
-}
-
-static LOCAL_SOURCES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
-> = std::sync::LazyLock::new(Default::default);
-
-fn local_sources()
--> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::path::PathBuf>> {
-    LOCAL_SOURCES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    upload_state(key) == Some(UploadState::Uploading)
 }
 
 pub fn remember_local_source(key: &str, path: &std::path::Path) {
-    local_sources().insert(key.to_string(), path.to_path_buf());
-}
-
-pub fn forget_local_source(key: &str) {
-    local_sources().remove(key);
+    uploads()
+        .local_sources
+        .insert(key.to_string(), path.to_path_buf());
 }
 
 pub fn local_source(key: &str) -> Option<std::path::PathBuf> {
-    local_sources().get(key).cloned()
+    uploads().local_sources.get(key).cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_local_source_is_known_until_forgotten() {
-        let key = "local-source-test-key";
-        assert_eq!(local_source(key), None);
-        remember_local_source(key, std::path::Path::new("/tmp/photo.png"));
-        assert_eq!(local_source(key), Some("/tmp/photo.png".into()));
-        forget_local_source(key);
-        assert_eq!(local_source(key), None);
-    }
-
     const CDN: &str = "https://cdn.example";
 
     #[test]
-    fn a_key_is_uploading_from_begin_until_end() {
-        let key = "registry-test-key".to_string();
-        assert!(!is_uploading(&key));
-        begin_uploading([&key]);
-        assert!(is_uploading(&key));
-        end_uploading(&key);
-        assert!(!is_uploading(&key));
+    fn a_key_moves_from_uploading_to_uploaded_or_failed_until_settled() {
+        let (done, broken) = ("registry-done".to_string(), "registry-broken".to_string());
+        begin_uploading([&done, &broken]);
+        assert!(is_uploading(&done));
+        finish_uploading(&done, true);
+        finish_uploading(&broken, false);
+        assert_eq!(upload_state(&done), Some(UploadState::Uploaded));
+        assert_eq!(upload_state(&broken), Some(UploadState::Failed));
+        remember_local_source(&done, std::path::Path::new("/tmp/done.png"));
+        settle(&done);
+        assert_eq!(upload_state(&done), None);
+        assert_eq!(local_source(&done), None);
+        settle(&broken);
+    }
+
+    #[test]
+    fn clearing_failed_keys_drops_their_local_sources_but_keeps_running_uploads() {
+        let (failed, running) = (
+            "registry-clear-failed".to_string(),
+            "registry-clear-running".to_string(),
+        );
+        mark_failed(&failed);
+        remember_local_source(&failed, std::path::Path::new("/tmp/failed.png"));
+        begin_uploading([&running]);
+        remember_local_source(&running, std::path::Path::new("/tmp/running.png"));
+        clear_failed();
+        assert_eq!(upload_state(&failed), None);
+        assert_eq!(local_source(&failed), None);
+        assert!(is_uploading(&running));
+        assert!(local_source(&running).is_some());
+        settle(&running);
     }
 
     #[test]

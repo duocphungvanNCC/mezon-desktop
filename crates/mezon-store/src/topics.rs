@@ -1373,6 +1373,7 @@ impl TopicsStore {
                 user_id,
                 clan_id,
                 channel_id: topic_id,
+                parent_channel_id,
                 topic_id,
                 message_id: real_message_id,
                 mode,

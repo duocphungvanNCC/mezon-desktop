@@ -158,6 +158,33 @@ impl ResumableUpload {
             UploadPlan::Single { path, .. } | UploadPlan::Multipart { path, .. } => path,
         }
     }
+
+    pub fn has_urls(&self) -> bool {
+        match &self.plan {
+            UploadPlan::Single { put_url, .. } => !put_url.is_empty(),
+            UploadPlan::Multipart {
+                upload_id,
+                part_urls,
+                ..
+            } => !upload_id.is_empty() || !part_urls.is_empty(),
+        }
+    }
+
+    pub fn without_urls(&self) -> Self {
+        let mut plan = self.plan.clone();
+        match &mut plan {
+            UploadPlan::Single { put_url, .. } => put_url.clear(),
+            UploadPlan::Multipart {
+                upload_id,
+                part_urls,
+                ..
+            } => {
+                upload_id.clear();
+                part_urls.clear();
+            }
+        }
+        Self { plan }
+    }
 }
 
 impl std::fmt::Debug for ResumableUpload {
@@ -2253,7 +2280,7 @@ impl AppApi {
         is_update_msg_topic: bool,
         already_finished: Vec<String>,
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
-    ) {
+    ) -> bool {
         use futures::StreamExt as _;
         let mut stream = futures::stream::iter(
             presigned
@@ -2318,24 +2345,28 @@ impl AppApi {
                 synced = finished.len();
             }
         }
-        if finished.len() > synced {
-            self.sync_presign_finish_with_retry(
-                clan_id,
-                channel_id,
-                message_id,
-                content,
-                &mentions,
-                &hashtags,
-                &emojis,
-                finished,
-                create_time_seconds,
-                mode,
-                is_public,
-                topic_id,
-                is_update_msg_topic,
-            )
-            .await;
+        if finished.len() > synced
+            && self
+                .sync_presign_finish_with_retry(
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    content,
+                    &mentions,
+                    &hashtags,
+                    &emojis,
+                    finished.clone(),
+                    create_time_seconds,
+                    mode,
+                    is_public,
+                    topic_id,
+                    is_update_msg_topic,
+                )
+                .await
+        {
+            synced = finished.len();
         }
+        finished.len() == synced
     }
 
     /// One lost presign_finish patch leaves the attachment loading on EVERY
@@ -3247,6 +3278,12 @@ mod tests {
         })
         .resumable();
         assert_eq!(upload.local_path(), std::path::Path::new("/tmp/clip.mp4"));
+        assert!(upload.has_urls());
+        let stripped = upload.without_urls();
+        assert!(!stripped.has_urls());
+        assert_eq!(stripped.local_path(), std::path::Path::new("/tmp/clip.mp4"));
+        let json = serde_json::to_string(&stripped).expect("serialize");
+        assert!(!json.contains("s3.example"));
         let printed = format!("{upload:?}");
         assert!(!printed.contains("secret"));
         assert!(!printed.contains("s3.example"));
