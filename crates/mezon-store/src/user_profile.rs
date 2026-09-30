@@ -244,9 +244,7 @@ pub fn cached_username(user_id: UserId, cx: &App) -> Option<String> {
             DirectMessageStore::try_global(cx).and_then(|store| {
                 store
                     .read(cx)
-                    .channels()
-                    .iter()
-                    .find(|dm| dm.peer_user_id == Some(user_id))
+                    .dm_with_peer(user_id)
                     .and_then(|dm| non_empty(&dm.peer_username))
             })
         })
@@ -313,9 +311,8 @@ fn resolve_direct(
 }
 
 fn is_current_user(user_id: UserId, cx: &App) -> bool {
-    BadgeService::global(cx)
-        .read(cx)
-        .current_user_id(cx)
+    BadgeService::try_global(cx)
+        .and_then(|badge| badge.read(cx).current_user_id(cx))
         .is_some_and(|me| me == user_id)
 }
 

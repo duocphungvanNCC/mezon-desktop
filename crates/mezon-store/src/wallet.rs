@@ -6,7 +6,7 @@ use mezon_client::RealtimeEvent;
 use mezon_client::transport_runtime::http_client_arc;
 use mmn_client::{
     AddTxResponse, ClaimRedEnvelopeQrRequest, ClaimRedEnvelopeQrResponse, DECIMALS, DongClient,
-    EphemeralKeyPair, ExtraInfo, GetZkProofRequest, IndexerClient, MmnClient,
+    EphemeralKeyPair, ExtraInfo, GetZkProofRequest, IndexerClient, MAX_MEMO_BYTES, MmnClient,
     SendTransactionRequest, Transaction, ZkClient, ZkClientType, ZkProof, address_from_user_id,
     generate_ephemeral_key_pair, is_secure_endpoint, scale_amount_to_decimals,
 };
@@ -119,14 +119,28 @@ impl TransactionCursor {
     }
 }
 
+fn verified_user_id(claimed: Option<String>, wallet_address: &str) -> Option<String> {
+    claimed.filter(|id| !id.is_empty() && address_from_user_id(id) == wallet_address)
+}
+
+fn note_fits_memo_limit(note: Option<&str>) -> bool {
+    note.is_none_or(|note| note.len() <= MAX_MEMO_BYTES)
+}
+
 fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction {
+    let extra_info = serde_json::from_str::<ExtraInfo>(&transaction.extra_info).unwrap_or_default();
+    let sender_user_id = verified_user_id(extra_info.user_sender_id, &transaction.from_address);
+    let sender_username = sender_user_id
+        .as_ref()
+        .and(extra_info.user_sender_username)
+        .filter(|name| !name.is_empty());
+    let receiver_user_id = verified_user_id(extra_info.user_receiver_id, &transaction.to_address);
     let sent = transaction.from_address == address;
     let counterparty = if sent {
         transaction.to_address
     } else {
         transaction.from_address
     };
-    let extra_info = serde_json::from_str::<ExtraInfo>(&transaction.extra_info).ok();
     WalletTransaction {
         sent,
         value: transaction.value,
@@ -134,12 +148,9 @@ fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction
         note: transaction.text_data,
         hash: transaction.hash,
         timestamp: transaction.transaction_timestamp,
-        sender_user_id: extra_info.as_ref().and_then(|e| e.user_sender_id.clone()),
-        sender_username: extra_info
-            .as_ref()
-            .and_then(|e| e.user_sender_username.clone())
-            .filter(|name| !name.is_empty()),
-        receiver_user_id: extra_info.and_then(|e| e.user_receiver_id),
+        sender_user_id,
+        sender_username,
+        receiver_user_id,
     }
 }
 
@@ -621,6 +632,9 @@ impl WalletStore {
         if request.amount <= 0 {
             return Task::ready(Err("Amount must be greater than zero".to_string()));
         }
+        if !note_fits_memo_limit(request.note.as_deref()) {
+            return Task::ready(Err(format!("Note must be at most {MAX_MEMO_BYTES} bytes")));
+        }
         let scaled = match scale_amount_to_decimals(&request.amount.to_string(), DECIMALS) {
             Ok(value) => value,
             Err(error) => return Task::ready(Err(error.to_string())),
@@ -994,8 +1008,8 @@ impl WalletStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        TokenDirection, Transaction, balance_after_delta, map_transaction, should_refresh_balance,
-        token_direction,
+        MAX_MEMO_BYTES, TokenDirection, Transaction, address_from_user_id, balance_after_delta,
+        map_transaction, note_fits_memo_limit, should_refresh_balance, token_direction,
     };
 
     fn transaction(from: &str, to: &str, extra_info: &str) -> Transaction {
@@ -1009,10 +1023,12 @@ mod tests {
         .expect("transaction fixture")
     }
 
+    const TRANSFER: &str = r#"{"type":"transfer_token","UserSenderId":"11","UserReceiverId":"22","UserSenderUsername":"alice"}"#;
+
     #[test]
-    fn a_transaction_carries_the_sender_username_from_extra_info() {
-        let extra = r#"{"type":"transfer_token","UserSenderId":"11","UserReceiverId":"22","UserSenderUsername":"alice"}"#;
-        let tx = map_transaction(transaction("a", "me", extra), "me");
+    fn ids_that_own_the_wallet_addresses_are_kept_with_the_sender_username() {
+        let (alice, me) = (address_from_user_id("11"), address_from_user_id("22"));
+        let tx = map_transaction(transaction(&alice, &me, TRANSFER), &me);
         assert!(!tx.sent);
         assert_eq!(tx.sender_user_id.as_deref(), Some("11"));
         assert_eq!(tx.receiver_user_id.as_deref(), Some("22"));
@@ -1020,16 +1036,45 @@ mod tests {
     }
 
     #[test]
+    fn a_sender_id_that_does_not_own_the_from_address_is_dropped_with_its_username() {
+        let (mallory, me) = (address_from_user_id("99"), address_from_user_id("22"));
+        let tx = map_transaction(transaction(&mallory, &me, TRANSFER), &me);
+        assert_eq!(tx.sender_user_id, None);
+        assert_eq!(tx.sender_username, None);
+        assert_eq!(tx.receiver_user_id.as_deref(), Some("22"));
+    }
+
+    #[test]
+    fn a_receiver_id_that_does_not_own_the_to_address_is_dropped() {
+        let (me, other) = (address_from_user_id("11"), address_from_user_id("33"));
+        let tx = map_transaction(transaction(&me, &other, TRANSFER), &me);
+        assert!(tx.sent);
+        assert_eq!(tx.sender_user_id.as_deref(), Some("11"));
+        assert_eq!(tx.receiver_user_id, None);
+    }
+
+    #[test]
     fn a_blank_or_missing_sender_username_is_none() {
-        let blank = r#"{"type":"transfer_token","UserSenderUsername":""}"#;
+        let me = address_from_user_id("11");
+        let blank = r#"{"type":"transfer_token","UserSenderId":"11","UserSenderUsername":""}"#;
         assert_eq!(
-            map_transaction(transaction("me", "b", blank), "me").sender_username,
+            map_transaction(transaction(&me, "b", blank), &me).sender_username,
             None
         );
-        let tx = map_transaction(transaction("me", "b", ""), "me");
+        let tx = map_transaction(transaction(&me, "b", ""), &me);
         assert!(tx.sent);
         assert_eq!(tx.sender_username, None);
         assert_eq!(tx.sender_user_id, None);
+    }
+
+    #[test]
+    fn the_note_limit_is_the_mmn_memo_limit_in_utf8_bytes() {
+        assert_eq!(MAX_MEMO_BYTES, 512);
+        assert!(note_fits_memo_limit(None));
+        assert!(note_fits_memo_limit(Some(&"a".repeat(512))));
+        assert!(!note_fits_memo_limit(Some(&"a".repeat(513))));
+        assert!(note_fits_memo_limit(Some(&"ệ".repeat(170))));
+        assert!(!note_fits_memo_limit(Some(&"ệ".repeat(171))));
     }
 
     #[test]

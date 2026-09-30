@@ -24,7 +24,8 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, ceil_char_boundary,
+    clip_insert_to_byte_limit, extend_range_for_granularity, floor_char_boundary,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
     range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
@@ -62,6 +63,7 @@ pub struct InputState {
     multi_line: bool,
     embedded: bool,
     validate: Option<ValidateFn>,
+    max_bytes: Option<usize>,
     height: Option<Pixels>,
     radius: Option<Pixels>,
     bg_override: Option<Hsla>,
@@ -115,6 +117,7 @@ impl InputState {
             multi_line: false,
             embedded: false,
             validate: None,
+            max_bytes: None,
             height: None,
             radius: None,
             bg_override: None,
@@ -238,6 +241,11 @@ impl InputState {
         self
     }
 
+    pub fn max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
     }
@@ -295,6 +303,36 @@ impl InputState {
         self.token_bg_ranges.clear();
         self.token_bg_color = None;
         cx.notify();
+    }
+
+    fn clip_abandoned_preedit(
+        &mut self,
+        marked: Range<usize>,
+        max_bytes: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.len() <= max_bytes {
+            return;
+        }
+        let start = floor_char_boundary(&self.content, marked.start);
+        let end = ceil_char_boundary(&self.content, marked.end).max(start);
+        let (next, caret) = {
+            let kept = clip_insert_to_byte_limit(
+                self.content.len(),
+                end - start,
+                &self.content[start..end],
+                max_bytes,
+            );
+            (
+                format!("{}{kept}{}", &self.content[..start], &self.content[end..]),
+                start + kept.len(),
+            )
+        };
+        self.content = next.into();
+        self.selected_range = caret..caret;
+        self.refresh_filter_token_chips(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
     }
 
     fn refresh_filter_token_chips(&mut self, cx: &mut Context<Self>) {
@@ -1021,14 +1059,17 @@ impl EntityInputHandler for InputState {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "linux")]
         if let Some(marked) = self.marked_range.clone() {
             let start = marked.start.min(self.content.len());
             let end = marked.end.min(self.content.len()).max(start);
             self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
         }
-        self.marked_range = None;
+        let marked = self.marked_range.take();
+        if let (Some(marked), Some(max_bytes)) = (marked, self.max_bytes) {
+            self.clip_abandoned_preedit(marked, max_bytes, cx);
+        }
     }
 
     fn replace_text_in_range(
@@ -1052,6 +1093,17 @@ impl EntityInputHandler for InputState {
             ime_replace_range(&self.selected_range, self.marked_range.as_ref())
         };
         let prior_marked = self.marked_range.clone();
+
+        let requested = new_text;
+        let new_text = match self.max_bytes {
+            Some(max_bytes) => {
+                clip_insert_to_byte_limit(self.content.len(), range.len(), new_text, max_bytes)
+            }
+            None => new_text,
+        };
+        if new_text.is_empty() && !requested.is_empty() && range.is_empty() {
+            return;
+        }
 
         let candidate =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];

@@ -195,10 +195,13 @@ impl ClanMembersStore {
     }
 
     pub fn find_user(&self, user_id: UserId) -> Option<&User> {
-        self.cache
-            .iter()
-            .find_map(|(_, bucket)| bucket.by_id.get(&user_id))
-            .map(|member| &member.user)
+        self.cache.iter().find_map(|(_, bucket)| {
+            bucket
+                .by_id
+                .get(&user_id)
+                .map(|member| &member.user)
+                .filter(|user| !user.username.is_empty())
+        })
     }
 
     pub fn members(&self, clan_id: ClanId) -> Vec<&ClanMember> {
