@@ -1130,7 +1130,6 @@ fn build_detail(transaction: &WalletTransaction, locale: &SharedString, cx: &App
         sender: resolve_party(
             transaction.sent,
             transaction.sender_user_id.as_deref(),
-            transaction.sender_username.as_deref(),
             unknown,
             cx,
         )
@@ -1139,7 +1138,6 @@ fn build_detail(transaction: &WalletTransaction, locale: &SharedString, cx: &App
         receiver: resolve_party(
             !transaction.sent,
             transaction.receiver_user_id.as_deref(),
-            None,
             unknown,
             cx,
         )
@@ -1149,19 +1147,12 @@ fn build_detail(transaction: &WalletTransaction, locale: &SharedString, cx: &App
     }
 }
 
-fn resolve_party(
-    is_me: bool,
-    user_id: Option<&str>,
-    recorded_username: Option<&str>,
-    fallback: &'static str,
-    cx: &App,
-) -> String {
+fn resolve_party(is_me: bool, user_id: Option<&str>, fallback: &'static str, cx: &App) -> String {
     let me = is_me
         .then(|| BadgeService::try_global(cx).and_then(|badge| badge.read(cx).current_user_id(cx)))
         .flatten();
     me.or_else(|| user_id.and_then(|id| id.parse::<UserId>().ok()))
         .and_then(|id| cached_username(id, cx))
-        .or_else(|| recorded_username.map(str::to_string))
         .unwrap_or_else(|| fallback.to_string())
 }
 

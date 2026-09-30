@@ -92,7 +92,6 @@ pub struct WalletTransaction {
     pub hash: String,
     pub timestamp: i64,
     pub sender_user_id: Option<String>,
-    pub sender_username: Option<String>,
     pub receiver_user_id: Option<String>,
 }
 
@@ -130,10 +129,6 @@ fn note_fits_memo_limit(note: Option<&str>) -> bool {
 fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction {
     let extra_info = serde_json::from_str::<ExtraInfo>(&transaction.extra_info).unwrap_or_default();
     let sender_user_id = verified_user_id(extra_info.user_sender_id, &transaction.from_address);
-    let sender_username = sender_user_id
-        .as_ref()
-        .and(extra_info.user_sender_username)
-        .filter(|name| !name.is_empty());
     let receiver_user_id = verified_user_id(extra_info.user_receiver_id, &transaction.to_address);
     let sent = transaction.from_address == address;
     let counterparty = if sent {
@@ -149,7 +144,6 @@ fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction
         hash: transaction.hash,
         timestamp: transaction.transaction_timestamp,
         sender_user_id,
-        sender_username,
         receiver_user_id,
     }
 }
@@ -1026,21 +1020,19 @@ mod tests {
     const TRANSFER: &str = r#"{"type":"transfer_token","UserSenderId":"11","UserReceiverId":"22","UserSenderUsername":"alice"}"#;
 
     #[test]
-    fn ids_that_own_the_wallet_addresses_are_kept_with_the_sender_username() {
+    fn ids_that_own_the_wallet_addresses_are_kept() {
         let (alice, me) = (address_from_user_id("11"), address_from_user_id("22"));
         let tx = map_transaction(transaction(&alice, &me, TRANSFER), &me);
         assert!(!tx.sent);
         assert_eq!(tx.sender_user_id.as_deref(), Some("11"));
         assert_eq!(tx.receiver_user_id.as_deref(), Some("22"));
-        assert_eq!(tx.sender_username.as_deref(), Some("alice"));
     }
 
     #[test]
-    fn a_sender_id_that_does_not_own_the_from_address_is_dropped_with_its_username() {
+    fn a_sender_id_that_does_not_own_the_from_address_is_dropped() {
         let (mallory, me) = (address_from_user_id("99"), address_from_user_id("22"));
         let tx = map_transaction(transaction(&mallory, &me, TRANSFER), &me);
         assert_eq!(tx.sender_user_id, None);
-        assert_eq!(tx.sender_username, None);
         assert_eq!(tx.receiver_user_id.as_deref(), Some("22"));
     }
 
@@ -1054,17 +1046,12 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_or_missing_sender_username_is_none() {
+    fn missing_extra_info_leaves_both_parties_unverified() {
         let me = address_from_user_id("11");
-        let blank = r#"{"type":"transfer_token","UserSenderId":"11","UserSenderUsername":""}"#;
-        assert_eq!(
-            map_transaction(transaction(&me, "b", blank), &me).sender_username,
-            None
-        );
         let tx = map_transaction(transaction(&me, "b", ""), &me);
         assert!(tx.sent);
-        assert_eq!(tx.sender_username, None);
         assert_eq!(tx.sender_user_id, None);
+        assert_eq!(tx.receiver_user_id, None);
     }
 
     #[test]
