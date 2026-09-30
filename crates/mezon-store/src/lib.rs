@@ -390,6 +390,23 @@ pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::
 
 pub const DEFAULT_MCP_PORT: u16 = 3179;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityStripDismissal {
+    pub user_id: i64,
+    pub clan_id: i64,
+    pub channel_id: i64,
+    #[serde(default)]
+    pub newest_topic_id: Option<i64>,
+    #[serde(default)]
+    pub pins: Vec<ActivityStripPin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityStripPin {
+    pub message_id: i64,
+    pub create_time: i64,
+}
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -452,6 +469,8 @@ pub struct Settings {
     pub tour_eligible: Option<bool>,
     #[serde(default)]
     pub screen_capture_access_requested: bool,
+    #[serde(default)]
+    pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
 }
 
 impl Default for Settings {
@@ -483,6 +502,7 @@ impl Default for Settings {
             tour_done_tracks: Vec::new(),
             tour_eligible: None,
             screen_capture_access_requested: false,
+            activity_strip_dismissals: Vec::new(),
         }
     }
 }
@@ -685,7 +705,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod settings_tests {
-    use super::Settings;
+    use super::{ActivityStripDismissal, ActivityStripPin, Settings};
 
     #[test]
     fn a_settings_file_written_before_the_tour_existed_still_parses() {
@@ -715,6 +735,29 @@ mod settings_tests {
         let restored: Settings = serde_json::from_str(&json).expect("decode");
         assert_eq!(restored.tour_seen_version, 1);
         assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn activity_strip_dismissal_survives_a_roundtrip() {
+        let settings = Settings {
+            activity_strip_dismissals: vec![ActivityStripDismissal {
+                user_id: 1,
+                clan_id: 2,
+                channel_id: 3,
+                newest_topic_id: Some(4),
+                pins: vec![ActivityStripPin {
+                    message_id: 5,
+                    create_time: 6,
+                }],
+            }],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(
+            restored.activity_strip_dismissals,
+            settings.activity_strip_dismissals
+        );
     }
 
     #[test]
