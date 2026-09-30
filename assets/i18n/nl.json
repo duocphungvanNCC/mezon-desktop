@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Bericht losmaken",
   "message.addAMessage": "Voeg een bericht toe (Optioneel)",
   "message.attachment.uploading": "Aan het uploaden...",
+  "message.attachment.uploadFailed": "Uploaden mislukt",
   "message.attachments.attachment": "Bijlage",
   "message.attachments.audio": "Stembericht",
   "message.attachments.contact": "Contactkaartje",

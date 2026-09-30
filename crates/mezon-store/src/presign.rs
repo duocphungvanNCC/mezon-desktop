@@ -100,11 +100,42 @@ fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+static UPLOADING_KEYS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn uploading_keys() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    UPLOADING_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn begin_uploading<'a>(keys: impl IntoIterator<Item = &'a String>) {
+    uploading_keys().extend(keys.into_iter().cloned());
+}
+
+pub fn end_uploading(key: &str) {
+    uploading_keys().remove(key);
+}
+
+pub fn is_uploading(key: &str) -> bool {
+    uploading_keys().contains(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const CDN: &str = "https://cdn.example";
+
+    #[test]
+    fn a_key_is_uploading_from_begin_until_end() {
+        let key = "registry-test-key".to_string();
+        assert!(!is_uploading(&key));
+        begin_uploading([&key]);
+        assert!(is_uploading(&key));
+        end_uploading(&key);
+        assert!(!is_uploading(&key));
+    }
 
     #[test]
     fn normalize_strips_query_path_and_extension() {

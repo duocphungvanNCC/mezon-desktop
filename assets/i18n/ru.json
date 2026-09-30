@@ -3508,6 +3508,7 @@
   "message.actions.unPinMessage": "Открепить сообщение",
   "message.addAMessage": "Добавить сообщение (опционально)",
   "message.attachment.uploading": "Загрузка...",
+  "message.attachment.uploadFailed": "Не удалось загрузить",
   "message.attachments.attachment": "Вложение",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",

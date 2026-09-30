@@ -2897,7 +2897,7 @@ mod string_or_number {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingMention {
     pub user_id: String,
     pub role_id: String,
@@ -2987,7 +2987,7 @@ pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingHashtag {
     pub channel_id: String,
     pub s: i32,
@@ -3012,7 +3012,7 @@ pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingEmoji {
     pub emoji_id: String,
     pub s: i32,

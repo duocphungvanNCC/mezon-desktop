@@ -910,13 +910,21 @@ fn attachment_sending_overlay(
         )
 }
 
-fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_failed_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
+        .overflow_hidden()
+        .gap_2()
         .child(
             div()
                 .flex()
@@ -930,6 +938,20 @@ fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
                         .size(px(24.))
                         .text_color(theme.danger_text),
                 ),
+        )
+        .when(
+            box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT,
+            |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .rounded_md()
+                        .bg(theme.bg_floating)
+                        .text_size(px(12.))
+                        .text_color(theme.danger_text)
+                        .child(mezon_i18n::t(locale, "message.attachment.uploadFailed")),
+                )
+            },
         )
 }
 
@@ -1136,7 +1158,12 @@ fn render_album(
                 });
         }
         if att.upload_failed {
-            tile_element = tile_element.child(attachment_failed_overlay(theme));
+            tile_element = tile_element.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         } else if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(
                 theme,
@@ -1207,7 +1234,17 @@ fn presign_child(
     // A recipient never sees `uploading` — only `presign_pending` — so without
     // this the whole upload window is a bare spinner on their side while the
     // sender gets a labelled one.
-    if att.thumbnail.is_empty() {
+    if att.upload_failed {
+        if att.thumbnail.is_empty() {
+            parent
+        } else {
+            parent.child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        }
+    } else if att.thumbnail.is_empty() {
         parent.child(attachment_sending_overlay(
             theme, locale, box_width, box_height,
         ))
@@ -1300,7 +1337,12 @@ fn render_photo(
                 }),
         );
         if att.upload_failed {
-            el = el.child(attachment_failed_overlay(theme));
+            el = el.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             el = el.child(attachment_sending_overlay(
                 theme,
@@ -1332,7 +1374,12 @@ fn render_photo(
             att.display_height,
         );
         if att.upload_failed {
-            placeholder = placeholder.child(attachment_failed_overlay(theme));
+            placeholder = placeholder.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             placeholder = placeholder.child(attachment_sending_overlay(
                 theme,
@@ -1413,7 +1460,12 @@ fn render_photo(
             }),
     );
     if att.upload_failed {
-        el = el.child(attachment_failed_overlay(theme));
+        el = el.child(attachment_failed_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        ));
     } else if sending {
         el = el.child(attachment_sending_overlay(
             theme,
@@ -1484,7 +1536,12 @@ fn render_video_poster(
         });
     if att.upload_failed {
         return container
-            .child(attachment_failed_overlay(theme))
+            .child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ))
             .into_any_element();
     }
     if sending {
@@ -1613,8 +1670,8 @@ fn render_file_box(
     // only `presign_pending`, and every button in this box (download, open PDF)
     // hits the object URL directly. React filters pending documents out of the
     // list; the spinner state already disables all of them.
-    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
+    let sending = !failed && (att.uploading || att.presign_pending);
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
@@ -1625,7 +1682,9 @@ fn render_file_box(
     // While the object is not on the CDN yet the size we have is the sender's
     // claim about a file nobody can fetch, so say what is actually happening
     // instead — the spinner alone reads as a stuck row.
-    let size_line = if sending {
+    let size_line = if failed {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploadFailed"))
+    } else if sending {
         SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
     } else {
         SharedString::from(format!("size: {}", att.size_label))

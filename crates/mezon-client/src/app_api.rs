@@ -139,6 +139,41 @@ pub struct PresignedAttachment {
     plan: UploadPlan,
 }
 
+impl PresignedAttachment {
+    pub fn resumable(&self) -> ResumableUpload {
+        ResumableUpload {
+            plan: self.plan.clone(),
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResumableUpload {
+    plan: UploadPlan,
+}
+
+impl std::fmt::Debug for ResumableUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.plan {
+            UploadPlan::Single { .. } => "single",
+            UploadPlan::Multipart { .. } => "multipart",
+        };
+        f.debug_struct("ResumableUpload")
+            .field("plan", &kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<ResumableUpload> for PresignedAttachment {
+    fn from(resumable: ResumableUpload) -> Self {
+        Self {
+            attachment: Default::default(),
+            plan: resumable.plan,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum UploadPlan {
     Single {
         put_url: String,
@@ -2208,6 +2243,7 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        already_finished: Vec<String>,
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
     ) {
         use futures::StreamExt as _;
@@ -2218,7 +2254,7 @@ impl AppApi {
                 .map(|(item, key)| async move { (key, self.execute_upload(item).await) }),
         )
         .buffer_unordered(ATTACHMENT_UPLOAD_CONCURRENCY);
-        let mut finished: Vec<String> = Vec::new();
+        let mut finished = already_finished;
         let mut synced = 0usize;
         while let Some((key, result)) = stream.next().await {
             match result {
@@ -3133,9 +3169,58 @@ impl AppApi {
 #[cfg(test)]
 mod tests {
     use super::{
-        MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges, sanitize_upload_filename,
-        upload_attachment_type,
+        MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan, attachment_cdn_url,
+        multipart_part_ranges, sanitize_upload_filename, upload_attachment_type,
     };
+
+    fn presigned(plan: UploadPlan) -> PresignedAttachment {
+        PresignedAttachment {
+            attachment: Default::default(),
+            plan,
+        }
+    }
+
+    #[test]
+    fn a_resumable_upload_round_trips_both_plans_through_json() {
+        let single = presigned(UploadPlan::Single {
+            put_url: "https://s3.example/put?X-Amz-Signature=abc".into(),
+            path: "/tmp/clip.mp4".into(),
+            content_type: "video/mp4".into(),
+        });
+        let multipart = presigned(UploadPlan::Multipart {
+            upload_id: "up-1".into(),
+            part_urls: vec![
+                "https://s3.example/p1".into(),
+                "https://s3.example/p2".into(),
+            ],
+            ranges: vec![(0, 10), (10, 4)],
+            path: "/tmp/big.mp4".into(),
+            content_type: "video/mp4".into(),
+            filename: "1/2.mp4".into(),
+        });
+        for original in [single, multipart] {
+            let json = serde_json::to_string(&original.resumable()).expect("serialize");
+            let restored: ResumableUpload = serde_json::from_str(&json).expect("deserialize");
+            let back = PresignedAttachment::from(restored);
+            assert_eq!(
+                serde_json::to_string(&back.resumable()).expect("serialize again"),
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumable_upload_never_prints_its_presigned_urls() {
+        let upload = presigned(UploadPlan::Single {
+            put_url: "https://s3.example/put?X-Amz-Signature=secret".into(),
+            path: "/tmp/clip.mp4".into(),
+            content_type: "video/mp4".into(),
+        })
+        .resumable();
+        let printed = format!("{upload:?}");
+        assert!(!printed.contains("secret"));
+        assert!(!printed.contains("s3.example"));
+    }
 
     #[test]
     fn everything_that_is_not_media_uploads_as_a_doc() {

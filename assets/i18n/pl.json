@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Odepnij wiadomość",
   "message.addAMessage": "Dodaj wiadomość (Opcjonalne)",
   "message.attachment.uploading": "Przekazywanie...",
+  "message.attachment.uploadFailed": "Nie udało się przesłać",
   "message.attachments.attachment": "Załącznik",
   "message.attachments.audio": "Wiadomość głosowa",
   "message.attachments.contact": "Karta wizytowa",

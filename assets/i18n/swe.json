@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Avspika meddelande",
   "message.addAMessage": "Lägg till ett meddelande (Valfritt)",
   "message.attachment.uploading": "Laddar upp...",
+  "message.attachment.uploadFailed": "Uppladdningen misslyckades",
   "message.attachments.attachment": "Bilaga",
   "message.attachments.audio": "Röstmeddelande",
   "message.attachments.contact": "Visitekort",

@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Rimuovi fissaggio",
   "message.addAMessage": "Aggiungi un messaggio (opzionale)",
   "message.attachment.uploading": "Caricamento in corso...",
+  "message.attachment.uploadFailed": "Caricamento non riuscito",
   "message.attachments.attachment": "Allegato",
   "message.attachments.audio": "Messaggio vocale",
   "message.attachments.contact": "Contatto",

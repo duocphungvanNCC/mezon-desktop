@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Адмацаваць паведамленне",
   "message.addAMessage": "Дадаць паведамленне (неабавязкова)",
   "message.attachment.uploading": "Загрузка...",
+  "message.attachment.uploadFailed": "Не атрымалася загрузіць",
   "message.attachments.attachment": "Укладанне",
   "message.attachments.audio": "Галасавое паведамленне",
   "message.attachments.contact": "Кантакт",
