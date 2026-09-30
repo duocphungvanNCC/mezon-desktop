@@ -832,7 +832,7 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
-                                buzz: buzz.has_buzz(ch.id),
+                                buzz: buzz.has_buzz(ch.id, ch.last_seen_timestamp),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
@@ -864,7 +864,8 @@ impl ChannelSidebar {
                         let mut parents_with_unread_thread: HashSet<ChannelId> = HashSet::new();
                         for ch in &ch_slice {
                             if let Some(pid) = ch.parent_id
-                                && ((ch.is_unread() && !ch.muted) || buzz.has_buzz(ch.id))
+                                && ((ch.is_unread() && !ch.muted)
+                                    || buzz.has_buzz(ch.id, ch.last_seen_timestamp))
                             {
                                 parents_with_unread_thread.insert(pid);
                             }
@@ -874,7 +875,7 @@ impl ChannelSidebar {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             if is_thread {
                                 if (ch.is_unread() && !ch.muted)
-                                    || buzz.has_buzz(ch.id)
+                                    || buzz.has_buzz(ch.id, ch.last_seen_timestamp)
                                     || active_channel_id == Some(ch.id)
                                 {
                                     kept.push((ch, Vec::new(), true));
@@ -889,7 +890,7 @@ impl ChannelSidebar {
                             let has_members_in_voice =
                                 is_voice_or_streaming && !sidebar_members.is_empty();
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
-                                || buzz.has_buzz(ch.id)
+                                || buzz.has_buzz(ch.id, ch.last_seen_timestamp)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
                                 || parents_with_unread_thread.contains(&ch.id)
@@ -936,7 +937,7 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
-                                buzz: buzz.has_buzz(ch.id),
+                                buzz: buzz.has_buzz(ch.id, ch.last_seen_timestamp),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),

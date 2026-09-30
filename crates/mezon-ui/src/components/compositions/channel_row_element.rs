@@ -416,7 +416,7 @@ impl Element for ChannelRowElement {
                     px(0.)
                 };
                 let text_system = window.text_system().clone();
-                let buzz_pill = (self.buzz && !hovered).then(|| {
+                let buzz_pill = self.buzz.then(|| {
                     let mut buzz_run = window.text_style().to_run(BUZZ_LABEL.len());
                     buzz_run.color = gpui::white();
                     buzz_run.font.weight = FontWeight::BOLD;
@@ -427,11 +427,17 @@ impl Element for ChannelRowElement {
                         None,
                     );
                     let pill_width = buzz_line.width() + BUZZ_HORIZONTAL_PADDING * 2.;
-                    let count_reserve = self
-                        .badge
-                        .as_ref()
-                        .map_or(px(0.), |badge| count_badge_width(badge.count) + BUZZ_GAP);
-                    let pill_x = left + width - BADGE_RIGHT_GAP - count_reserve - pill_width;
+                    let count_reserve = BADGE_RIGHT_GAP
+                        + self
+                            .badge
+                            .as_ref()
+                            .map_or(px(0.), |badge| count_badge_width(badge.count) + BUZZ_GAP);
+                    let gear_reserve = if self.trailing_action.is_some() && !is_thread {
+                        GEAR_RIGHT_GAP + GEAR_SIZE + BUZZ_GAP
+                    } else {
+                        px(0.)
+                    };
+                    let pill_x = left + width - count_reserve.max(gear_reserve) - pill_width;
                     (buzz_line, pill_x, pill_width)
                 });
                 let mut name_max_width =
