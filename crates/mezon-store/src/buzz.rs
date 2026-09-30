@@ -3,12 +3,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use gpui::{App, AppContext, Context, Entity, Global};
 use mezon_client::RealtimeEvent;
 use mezon_proto::api::ChannelMessage;
+use mezon_proto::realtime::MarkAsRead;
 
 use crate::channel::ChannelList;
 use crate::ids::{ChannelId, ClanId, MessageId};
 use crate::message::MessageCode;
-use crate::message_time::unix_now_seconds;
-use crate::messages::{MessagesStore, viewer_user_id};
+use crate::messages::{MessagesStore, snowflake_seq, viewer_user_id};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_PROCESSED_BUZZES: usize = 200;
@@ -16,20 +16,13 @@ const MAX_PROCESSED_BUZZES: usize = 200;
 #[derive(Default)]
 struct BuzzMark {
     clan_id: ClanId,
-    in_channel_at: Option<i64>,
-    topics: HashSet<ChannelId>,
+    in_channel: Option<MessageId>,
+    topics: HashMap<ChannelId, MessageId>,
 }
 
 impl BuzzMark {
     fn is_empty(&self) -> bool {
-        self.in_channel_at.is_none() && self.topics.is_empty()
-    }
-
-    fn is_unseen(&self, last_seen_timestamp: i64) -> bool {
-        !self.topics.is_empty()
-            || self
-                .in_channel_at
-                .is_some_and(|at| at > last_seen_timestamp)
+        self.in_channel.is_none() && self.topics.is_empty()
     }
 }
 
@@ -53,7 +46,11 @@ impl BuzzStore {
     fn new(cx: &mut Context<Self>) -> Self {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [RealtimeKind::ChannelMessage, RealtimeKind::MarkAsRead] {
+            for kind in [
+                RealtimeKind::ChannelMessage,
+                RealtimeKind::MarkAsRead,
+                RealtimeKind::LastSeenUpdated,
+            ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -77,10 +74,8 @@ impl BuzzStore {
         cx.notify();
     }
 
-    pub fn has_buzz(&self, channel_id: ChannelId, last_seen_timestamp: i64) -> bool {
-        self.marks
-            .get(&channel_id)
-            .is_some_and(|mark| mark.is_unseen(last_seen_timestamp))
+    pub fn has_buzz(&self, channel_id: ChannelId) -> bool {
+        self.marks.contains_key(&channel_id)
     }
 
     pub fn clear_opened(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -106,10 +101,11 @@ impl BuzzStore {
             RealtimeEvent::ChannelMessage(m) if self.receive_buzz(m, cx) => {
                 MessagesStore::global(cx).update(cx, |store, cx| store.play_buzz_sound(cx));
             }
-            RealtimeEvent::MarkAsRead(e)
-                if self.unmark_read(ClanId(e.clan_id), e.channel_id, e.category_id, cx) =>
+            RealtimeEvent::MarkAsRead(read) if self.unmark_read(read, cx) => cx.notify(),
+            RealtimeEvent::LastSeenUpdated(seen)
+                if self.unmark_seen(ChannelId(seen.channel_id), MessageId(seen.message_id)) =>
             {
-                cx.notify();
+                cx.notify()
             }
             _ => {}
         }
@@ -123,11 +119,12 @@ impl BuzzStore {
             return false;
         }
         let (channel_id, topic_id) = buzz_target(m);
-        if !self.note_processed(topic_id.unwrap_or(channel_id), MessageId(m.message_id)) {
+        let message_id = MessageId(m.message_id);
+        if !self.note_processed(topic_id.unwrap_or(channel_id), message_id) {
             return false;
         }
         if !is_buzz_on_screen(channel_id, topic_id, cx)
-            && self.mark(ClanId(m.clan_id), channel_id, topic_id, buzz_time(m))
+            && self.mark(ClanId(m.clan_id), channel_id, topic_id, message_id)
         {
             cx.notify();
         }
@@ -156,27 +153,31 @@ impl BuzzStore {
         clan_id: ClanId,
         channel_id: ChannelId,
         topic_id: Option<ChannelId>,
-        at: i64,
+        message_id: MessageId,
     ) -> bool {
         let mark = self.marks.entry(channel_id).or_default();
         mark.clan_id = clan_id;
+        let previous = match topic_id {
+            Some(topic_id) => mark.topics.get(&topic_id).copied(),
+            None => mark.in_channel,
+        };
+        let latest = previous
+            .filter(|previous| snowflake_seq(*previous) > snowflake_seq(message_id))
+            .unwrap_or(message_id);
         match topic_id {
-            Some(topic_id) => mark.topics.insert(topic_id),
-            None => {
-                let later = mark.in_channel_at.is_none_or(|previous| at > previous);
-                if later {
-                    mark.in_channel_at = Some(at);
-                }
-                later
+            Some(topic_id) => {
+                mark.topics.insert(topic_id, latest);
             }
+            None => mark.in_channel = Some(latest),
         }
+        previous.is_none()
     }
 
     fn unmark_channel(&mut self, channel_id: ChannelId) -> bool {
         let Some(mark) = self.marks.get_mut(&channel_id) else {
             return false;
         };
-        if mark.in_channel_at.take().is_none() {
+        if mark.in_channel.take().is_none() {
             return false;
         }
         if mark.is_empty() {
@@ -185,47 +186,65 @@ impl BuzzStore {
         true
     }
 
-    fn unmark_read(
-        &mut self,
-        clan_id: ClanId,
-        channel_id: i64,
-        category_id: i64,
-        cx: &App,
-    ) -> bool {
-        let before = self.marks.len();
-        if channel_id != 0 {
-            self.marks.remove(&ChannelId(channel_id));
-        } else if category_id != 0 {
-            let category = category_id.to_string();
-            let channels = ChannelList::global(cx).read(cx);
-            self.marks.retain(|id, mark| {
-                mark.clan_id != clan_id
-                    || channels
-                        .channel(clan_id, *id)
-                        .and_then(|channel| channel.category_id.as_deref())
-                        != Some(category.as_str())
-            });
-        } else if !clan_id.is_zero() {
-            self.marks.retain(|_, mark| mark.clan_id != clan_id);
-        }
-        self.marks.len() != before
-    }
-
     fn unmark_topic(&mut self, topic_id: ChannelId) -> bool {
         let mut changed = false;
         self.marks.retain(|_, mark| {
-            changed |= mark.topics.remove(&topic_id);
+            changed |= mark.topics.remove(&topic_id).is_some();
             !mark.is_empty()
+        });
+        changed
+    }
+
+    fn unmark_seen(&mut self, channel_id: ChannelId, seen_up_to: MessageId) -> bool {
+        let seen = |buzz: MessageId| snowflake_seq(seen_up_to) >= snowflake_seq(buzz);
+        let mut changed = false;
+        self.marks.retain(|id, mark| {
+            if *id == channel_id && mark.in_channel.is_some_and(seen) {
+                mark.in_channel = None;
+                changed = true;
+            }
+            if mark.topics.get(&channel_id).copied().is_some_and(seen) {
+                mark.topics.remove(&channel_id);
+                changed = true;
+            }
+            !mark.is_empty()
+        });
+        changed
+    }
+
+    fn unmark_read(&mut self, read: &MarkAsRead, cx: &App) -> bool {
+        let clan_id = ClanId(read.clan_id);
+        let read_channel = ChannelId(read.channel_id);
+        let read_category = read.category_id.to_string();
+        let channels = ChannelList::global(cx).read(cx);
+        let mut changed = false;
+        self.marks.retain(|id, mark| {
+            let read_row = if !read_channel.is_zero() {
+                *id == read_channel
+                    || channels
+                        .channel(mark.clan_id, *id)
+                        .is_some_and(|row| row.parent_id == Some(read_channel))
+            } else if read.category_id != 0 {
+                mark.clan_id == clan_id
+                    && category_of(channels, clan_id, *id) == Some(read_category.as_str())
+            } else {
+                !clan_id.is_zero() && mark.clan_id == clan_id
+            };
+            if !read_channel.is_zero() {
+                changed |= mark.topics.remove(&read_channel).is_some();
+            }
+            changed |= read_row;
+            !read_row && !mark.is_empty()
         });
         changed
     }
 }
 
-fn buzz_time(m: &ChannelMessage) -> i64 {
-    if m.create_time_seconds > 0 {
-        i64::from(m.create_time_seconds)
-    } else {
-        unix_now_seconds()
+fn category_of(channels: &ChannelList, clan_id: ClanId, channel_id: ChannelId) -> Option<&str> {
+    let row = channels.channel(clan_id, channel_id)?;
+    match row.parent_id {
+        Some(parent_id) => channels.channel(clan_id, parent_id)?.category_id.as_deref(),
+        None => row.category_id.as_deref(),
     }
 }
 
@@ -249,7 +268,12 @@ fn is_buzz_on_screen(channel_id: ChannelId, topic_id: Option<ChannelId>, cx: &Ap
 mod tests {
     use std::sync::Arc;
 
+    use mezon_client::AppApi;
+    use mezon_proto::realtime::LastSeenMessageEvent;
+
     use super::*;
+    use crate::channel::{CHANNEL_ACTIVE_JOINED, Category, Channel, ChannelType};
+    use crate::ids::UserId;
 
     const VIEWER: i64 = 77;
     const OTHER: i64 = 88;
@@ -260,15 +284,69 @@ mod tests {
     const GROUP_CHANNEL_TYPE: i32 = 2;
     const DM_CHANNEL_TYPE: i32 = 3;
     const CLAN: ClanId = ClanId(1);
-    const BUZZ_AT: i64 = 1_000;
-    const NEVER_SEEN: i64 = 0;
+    const OTHER_CLAN: ClanId = ClanId(2);
+    const DM_SPACE: ClanId = ClanId(0);
+    const GENERAL: i64 = 10;
+    const GENERAL_THREAD: i64 = 11;
+    const DM: i64 = 12;
+    const GROUP: i64 = 13;
+    const OFF_TOPIC: i64 = 30;
+    const OFF_TOPIC_THREAD: i64 = 31;
+    const ELSEWHERE: i64 = 40;
+    const TOPIC: i64 = 99;
+    const TEXT_CATEGORY: i64 = 5;
+    const OTHER_CATEGORY: i64 = 6;
 
     fn channel(id: i64) -> ChannelId {
         ChannelId(id)
     }
 
-    fn init_stores(cx: &mut App) -> (Entity<BuzzStore>, Entity<MessagesStore>) {
-        let api = Arc::new(mezon_client::AppApi::new(
+    fn message(seq: i64) -> MessageId {
+        MessageId(seq << 22)
+    }
+
+    fn row(id: i64, category: i64, parent_id: Option<i64>) -> Channel {
+        Channel {
+            id: channel(id),
+            name: id.to_string(),
+            channel_type: ChannelType::Text,
+            private: false,
+            clan_id: CLAN,
+            clan_name: String::new(),
+            category_name: String::new(),
+            category_id: parent_id.is_none().then(|| category.to_string()),
+            member_count: 0,
+            badge_count: 0,
+            muted: false,
+            parent_id: parent_id.map(channel),
+            last_seen_message_id: MessageId(0),
+            last_seen_timestamp: 0,
+            last_sent_message_id: MessageId(0),
+            last_sent_timestamp: 0,
+            voice_members: Vec::new(),
+            is_favorite: false,
+            creator_id: UserId(0),
+            active: CHANNEL_ACTIVE_JOINED,
+            avatar_url: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        }
+    }
+
+    fn category(id: i64, channels: Vec<Channel>) -> Category {
+        Category {
+            id: id.to_string(),
+            clan_id: CLAN,
+            name: id.to_string(),
+            order: 0,
+            channels,
+        }
+    }
+
+    fn init_stores(cx: &mut App) -> (Entity<BuzzStore>, Entity<MessagesStore>, Arc<AppApi>) {
+        let api = Arc::new(AppApi::new(
             Arc::new(mezon_client::TransportClient::new(String::new())),
             String::new(),
         ));
@@ -281,24 +359,44 @@ mod tests {
         });
         crate::badge::BadgeService::init(auth_state, cx);
         crate::clan::ClanList::init(api.clone(), cx);
-        crate::channel::ChannelList::init(api.clone(), cx);
-        let messages = MessagesStore::init(api, cx);
-        (BuzzStore::init(cx), messages)
+        crate::direct::DirectMessageStore::init(api.clone(), cx);
+        ChannelList::init(api.clone(), cx).update(cx, |channels, _| {
+            channels.seed_clan_channels_for_test(
+                CLAN,
+                vec![
+                    category(
+                        TEXT_CATEGORY,
+                        vec![
+                            row(GENERAL, TEXT_CATEGORY, None),
+                            row(GENERAL_THREAD, TEXT_CATEGORY, Some(GENERAL)),
+                        ],
+                    ),
+                    category(
+                        OTHER_CATEGORY,
+                        vec![
+                            row(OFF_TOPIC, OTHER_CATEGORY, None),
+                            row(OFF_TOPIC_THREAD, OTHER_CATEGORY, Some(OFF_TOPIC)),
+                        ],
+                    ),
+                ],
+            );
+        });
+        let messages = MessagesStore::init(api.clone(), cx);
+        (BuzzStore::init(cx), messages, api)
     }
 
     struct Incoming {
-        clan_id: i64,
+        clan_id: ClanId,
         channel_id: i64,
         topic_id: i64,
         mode: i32,
         code: i32,
         sender_id: i64,
-        message_id: i64,
-        create_time: u32,
+        message_id: MessageId,
     }
 
     impl Incoming {
-        fn buzz(clan_id: i64, channel_id: i64, mode: i32, message_id: i64) -> Self {
+        fn buzz(clan_id: ClanId, channel_id: i64, mode: i32, seq: i64) -> Self {
             Self {
                 clan_id,
                 channel_id,
@@ -306,21 +404,26 @@ mod tests {
                 mode,
                 code: mezon_client::transport::MESSAGE_BUZZ_CODE,
                 sender_id: OTHER,
-                message_id,
-                create_time: BUZZ_AT as u32,
+                message_id: message(seq),
+            }
+        }
+
+        fn in_topic(self) -> Self {
+            Self {
+                topic_id: TOPIC,
+                ..self
             }
         }
 
         fn message(self) -> ChannelMessage {
             ChannelMessage {
-                clan_id: self.clan_id,
+                clan_id: self.clan_id.get(),
                 channel_id: self.channel_id,
                 topic_id: self.topic_id,
                 mode: self.mode,
                 code: self.code,
                 sender_id: self.sender_id,
-                message_id: self.message_id,
-                create_time_seconds: self.create_time,
+                message_id: self.message_id.get(),
                 ..Default::default()
             }
         }
@@ -331,63 +434,103 @@ mod tests {
         store.update(cx, |store, cx| store.receive_buzz(&message, cx))
     }
 
+    fn marked(store: &Entity<BuzzStore>, cx: &gpui::TestAppContext) -> Vec<i64> {
+        cx.read(|cx| {
+            let mut rows: Vec<i64> = store.read(cx).marks.keys().map(|id| id.get()).collect();
+            rows.sort_unstable();
+            rows
+        })
+    }
+
+    fn mark_all(store: &Entity<BuzzStore>, cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            store.update(cx, |store, _| {
+                store.mark(CLAN, channel(GENERAL), None, message(1));
+                store.mark(CLAN, channel(GENERAL_THREAD), None, message(1));
+                store.mark(CLAN, channel(OFF_TOPIC), None, message(1));
+                store.mark(CLAN, channel(OFF_TOPIC_THREAD), None, message(1));
+                store.mark(OTHER_CLAN, channel(ELSEWHERE), None, message(1));
+                store.mark(DM_SPACE, channel(DM), None, message(1));
+            });
+        });
+    }
+
+    fn publish(api: &AppApi, event: RealtimeEvent, cx: &mut gpui::TestAppContext) {
+        api.publish_event(event);
+        cx.run_until_parked();
+    }
+
+    fn mark_as_read(clan_id: ClanId, channel_id: i64, category_id: i64) -> RealtimeEvent {
+        RealtimeEvent::MarkAsRead(MarkAsRead {
+            clan_id: clan_id.get(),
+            channel_id,
+            category_id,
+        })
+    }
+
+    fn last_seen(clan_id: ClanId, channel_id: i64, seq: i64) -> RealtimeEvent {
+        RealtimeEvent::LastSeenUpdated(LastSeenMessageEvent {
+            clan_id: clan_id.get(),
+            channel_id,
+            message_id: message(seq).get(),
+            ..Default::default()
+        })
+    }
+
     #[gpui::test]
     fn a_buzz_from_someone_else_marks_its_row_in_every_stream_mode(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let (store, _) = init_stores(cx);
+            let (store, _, _) = init_stores(cx);
             assert!(deliver(
                 &store,
-                Incoming::buzz(1, 10, STREAM_MODE_CHANNEL, 101),
+                Incoming::buzz(CLAN, GENERAL, STREAM_MODE_CHANNEL, 1),
                 cx
             ));
             assert!(deliver(
                 &store,
-                Incoming::buzz(1, 11, STREAM_MODE_THREAD, 102),
+                Incoming::buzz(CLAN, GENERAL_THREAD, STREAM_MODE_THREAD, 2),
                 cx
             ));
             assert!(deliver(
                 &store,
-                Incoming::buzz(0, 12, STREAM_MODE_DM, 103),
+                Incoming::buzz(DM_SPACE, DM, STREAM_MODE_DM, 3),
                 cx
             ));
             assert!(deliver(
                 &store,
-                Incoming::buzz(0, 13, STREAM_MODE_GROUP, 104),
+                Incoming::buzz(DM_SPACE, GROUP, STREAM_MODE_GROUP, 4),
                 cx
             ));
             assert!(deliver(
                 &store,
-                Incoming {
-                    topic_id: 99,
-                    ..Incoming::buzz(1, 14, STREAM_MODE_CHANNEL, 105)
-                },
-                cx,
+                Incoming::buzz(CLAN, OFF_TOPIC, STREAM_MODE_CHANNEL, 5).in_topic(),
+                cx
             ));
             assert!(!deliver(
                 &store,
-                Incoming::buzz(1, 10, STREAM_MODE_CHANNEL, 101),
+                Incoming::buzz(CLAN, GENERAL, STREAM_MODE_CHANNEL, 1),
                 cx
             ));
             let store = store.read(cx);
-            for row in 10..=14 {
+            for row in [GENERAL, GENERAL_THREAD, DM, GROUP, OFF_TOPIC] {
                 assert!(
-                    store.has_buzz(channel(row), NEVER_SEEN),
+                    store.has_buzz(channel(row)),
                     "row {row} should carry the buzz"
                 );
             }
-            assert!(!store.has_buzz(channel(99), NEVER_SEEN));
+            assert!(!store.has_buzz(channel(TOPIC)));
         });
     }
 
     #[gpui::test]
     fn own_buzzes_and_plain_messages_mark_nothing(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let (store, _) = init_stores(cx);
+            let (store, _, _) = init_stores(cx);
             assert!(!deliver(
                 &store,
                 Incoming {
                     sender_id: VIEWER,
-                    ..Incoming::buzz(0, 12, STREAM_MODE_DM, 201)
+                    ..Incoming::buzz(DM_SPACE, DM, STREAM_MODE_DM, 1)
                 },
                 cx,
             ));
@@ -395,7 +538,7 @@ mod tests {
                 &store,
                 Incoming {
                     code: 0,
-                    ..Incoming::buzz(0, 13, STREAM_MODE_GROUP, 202)
+                    ..Incoming::buzz(DM_SPACE, GROUP, STREAM_MODE_GROUP, 2)
                 },
                 cx,
             ));
@@ -403,7 +546,7 @@ mod tests {
                 &store,
                 Incoming {
                     code: 0,
-                    ..Incoming::buzz(1, 10, STREAM_MODE_CHANNEL, 203)
+                    ..Incoming::buzz(CLAN, GENERAL, STREAM_MODE_CHANNEL, 3)
                 },
                 cx,
             ));
@@ -416,148 +559,160 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let (store, messages) = init_stores(cx);
-            assert!(deliver(
+            let (store, messages, _) = init_stores(cx);
+            deliver(
                 &store,
-                Incoming::buzz(0, 13, STREAM_MODE_GROUP, 301),
-                cx
-            ));
-            assert!(deliver(
-                &store,
-                Incoming::buzz(0, 12, STREAM_MODE_DM, 302),
-                cx
-            ));
+                Incoming::buzz(DM_SPACE, GROUP, STREAM_MODE_GROUP, 1),
+                cx,
+            );
+            deliver(&store, Incoming::buzz(DM_SPACE, DM, STREAM_MODE_DM, 2), cx);
             messages.update(cx, |messages, cx| {
-                messages.open_direct(channel(13), GROUP_CHANNEL_TYPE, cx)
+                messages.open_direct(channel(GROUP), GROUP_CHANNEL_TYPE, cx)
             });
-            assert!(!store.read(cx).has_buzz(channel(13), NEVER_SEEN));
-            assert!(store.read(cx).has_buzz(channel(12), NEVER_SEEN));
+            assert!(!store.read(cx).has_buzz(channel(GROUP)));
+            assert!(store.read(cx).has_buzz(channel(DM)));
 
-            assert!(deliver(
+            deliver(
                 &store,
-                Incoming::buzz(0, 13, STREAM_MODE_GROUP, 303),
-                cx
-            ));
-            assert!(store.read(cx).has_buzz(channel(13), NEVER_SEEN));
+                Incoming::buzz(DM_SPACE, GROUP, STREAM_MODE_GROUP, 3),
+                cx,
+            );
+            assert!(store.read(cx).has_buzz(channel(GROUP)));
             messages.update(cx, |messages, cx| {
-                messages.note_viewport_seen(MessageId(303), 1, false, cx)
+                messages.note_viewport_seen(message(3), 1, false, cx)
             });
-            assert!(store.read(cx).has_buzz(channel(13), NEVER_SEEN));
+            assert!(store.read(cx).has_buzz(channel(GROUP)));
             messages.update(cx, |messages, cx| {
-                messages.note_viewport_seen(MessageId(303), 1, true, cx)
+                messages.note_viewport_seen(message(3), 1, true, cx)
             });
-            assert!(!store.read(cx).has_buzz(channel(13), NEVER_SEEN));
-            assert!(store.read(cx).has_buzz(channel(12), NEVER_SEEN));
+            assert!(!store.read(cx).has_buzz(channel(GROUP)));
+            assert!(store.read(cx).has_buzz(channel(DM)));
         });
     }
 
     #[gpui::test]
     fn seeing_a_topic_clears_the_buzz_it_left_on_its_channel(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let (store, messages) = init_stores(cx);
+            let (store, messages, _) = init_stores(cx);
             messages.update(cx, |messages, cx| {
-                messages.open_direct(channel(12), DM_CHANNEL_TYPE, cx)
+                messages.open_direct(channel(DM), DM_CHANNEL_TYPE, cx)
             });
-            assert!(deliver(
+            deliver(
                 &store,
-                Incoming {
-                    topic_id: 99,
-                    ..Incoming::buzz(1, 14, STREAM_MODE_CHANNEL, 401)
-                },
+                Incoming::buzz(CLAN, OFF_TOPIC, STREAM_MODE_CHANNEL, 1).in_topic(),
                 cx,
-            ));
-            assert!(store.read(cx).has_buzz(channel(14), NEVER_SEEN));
+            );
+            assert!(store.read(cx).has_buzz(channel(OFF_TOPIC)));
             messages.update(cx, |messages, cx| {
-                messages.note_topic_viewport_seen(channel(99), MessageId(401), 1, true, cx)
+                messages.note_topic_viewport_seen(channel(TOPIC), message(1), 1, true, cx)
             });
-            assert!(!store.read(cx).has_buzz(channel(14), NEVER_SEEN));
+            assert!(!store.read(cx).has_buzz(channel(OFF_TOPIC)));
         });
+    }
+
+    #[gpui::test]
+    fn marking_a_channel_read_anywhere_clears_it_and_its_threads(cx: &mut gpui::TestAppContext) {
+        let (store, _, api) = cx.update(init_stores);
+        cx.run_until_parked();
+        mark_all(&store, cx);
+        cx.update(|cx| {
+            store.update(cx, |store, _| {
+                store.mark(CLAN, channel(OFF_TOPIC), Some(channel(TOPIC)), message(1));
+            });
+        });
+        publish(&api, mark_as_read(CLAN, GENERAL, TEXT_CATEGORY), cx);
+        assert_eq!(
+            marked(&store, cx),
+            vec![DM, OFF_TOPIC, OFF_TOPIC_THREAD, ELSEWHERE]
+        );
+        publish(&api, mark_as_read(CLAN, TOPIC, 0), cx);
+        cx.read(|cx| {
+            assert!(store.read(cx).marks[&channel(OFF_TOPIC)].topics.is_empty());
+        });
+        publish(&api, mark_as_read(DM_SPACE, DM, 0), cx);
+        assert_eq!(
+            marked(&store, cx),
+            vec![OFF_TOPIC, OFF_TOPIC_THREAD, ELSEWHERE]
+        );
+    }
+
+    #[gpui::test]
+    fn marking_a_category_or_clan_read_clears_only_its_rows(cx: &mut gpui::TestAppContext) {
+        let (store, _, api) = cx.update(init_stores);
+        cx.run_until_parked();
+        mark_all(&store, cx);
+        publish(&api, mark_as_read(CLAN, 0, OTHER_CATEGORY), cx);
+        assert_eq!(
+            marked(&store, cx),
+            vec![GENERAL, GENERAL_THREAD, DM, ELSEWHERE]
+        );
+        publish(&api, mark_as_read(CLAN, 0, 0), cx);
+        assert_eq!(marked(&store, cx), vec![DM, ELSEWHERE]);
+    }
+
+    #[gpui::test]
+    fn a_read_on_another_session_clears_only_the_buzzes_it_covers(cx: &mut gpui::TestAppContext) {
+        let (store, _, api) = cx.update(init_stores);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            store.update(cx, |store, _| {
+                store.mark(CLAN, channel(GENERAL), None, message(20));
+                store.mark(CLAN, channel(OFF_TOPIC), Some(channel(TOPIC)), message(30));
+                store.mark(DM_SPACE, channel(DM), None, message(40));
+            });
+        });
+        publish(&api, last_seen(CLAN, GENERAL, 19), cx);
+        publish(&api, last_seen(CLAN, TOPIC, 29), cx);
+        publish(&api, last_seen(DM_SPACE, DM, 39), cx);
+        assert_eq!(marked(&store, cx), vec![GENERAL, DM, OFF_TOPIC]);
+        publish(&api, last_seen(CLAN, GENERAL, 20), cx);
+        publish(&api, last_seen(CLAN, TOPIC, 31), cx);
+        publish(&api, last_seen(DM_SPACE, DM, 40), cx);
+        assert!(marked(&store, cx).is_empty());
     }
 
     #[test]
     fn channel_buzz_is_cleared_once_the_channel_tail_is_seen() {
         let mut store = BuzzStore::default();
-        store.mark(CLAN, channel(1), None, BUZZ_AT);
-        assert!(store.has_buzz(channel(1), NEVER_SEEN));
+        store.mark(CLAN, channel(1), None, message(1));
+        assert!(store.has_buzz(channel(1)));
         assert!(store.unmark_channel(channel(1)));
-        assert!(!store.has_buzz(channel(1), NEVER_SEEN));
+        assert!(!store.has_buzz(channel(1)));
     }
 
     #[test]
     fn topic_buzz_marks_its_channel_until_the_topic_is_seen() {
         let mut store = BuzzStore::default();
-        store.mark(CLAN, channel(1), Some(channel(9)), BUZZ_AT);
-        assert!(store.has_buzz(channel(1), NEVER_SEEN));
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1));
+        assert!(store.has_buzz(channel(1)));
         assert!(!store.unmark_channel(channel(1)));
-        assert!(store.has_buzz(channel(1), NEVER_SEEN));
-        assert!(store.unmark_topic(channel(9)));
-        assert!(!store.has_buzz(channel(1), NEVER_SEEN));
+        assert!(store.has_buzz(channel(1)));
+        assert!(store.unmark_topic(channel(TOPIC)));
+        assert!(!store.has_buzz(channel(1)));
     }
 
     #[test]
     fn seeing_the_channel_keeps_a_pending_topic_buzz() {
         let mut store = BuzzStore::default();
-        store.mark(CLAN, channel(1), None, BUZZ_AT);
-        store.mark(CLAN, channel(1), Some(channel(9)), BUZZ_AT);
+        store.mark(CLAN, channel(1), None, message(1));
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2));
         assert!(store.unmark_channel(channel(1)));
-        assert!(store.has_buzz(channel(1), NEVER_SEEN));
+        assert!(store.has_buzz(channel(1)));
         assert!(!store.unmark_topic(channel(8)));
-        assert!(store.unmark_topic(channel(9)));
-        assert!(!store.has_buzz(channel(1), NEVER_SEEN));
+        assert!(store.unmark_topic(channel(TOPIC)));
+        assert!(!store.has_buzz(channel(1)));
     }
 
     #[test]
-    fn a_read_after_the_buzz_hides_it_but_a_later_buzz_shows_again() {
+    fn a_repeated_buzz_notifies_once_and_keeps_the_newest_id() {
         let mut store = BuzzStore::default();
-        store.mark(CLAN, channel(1), None, BUZZ_AT);
-        assert!(store.has_buzz(channel(1), BUZZ_AT - 1));
-        assert!(!store.has_buzz(channel(1), BUZZ_AT));
-        assert!(store.mark(CLAN, channel(1), None, BUZZ_AT + 5));
-        assert!(store.has_buzz(channel(1), BUZZ_AT));
-        store.mark(CLAN, channel(2), Some(channel(9)), BUZZ_AT);
-        assert!(store.has_buzz(channel(2), BUZZ_AT + 60));
-    }
-
-    #[test]
-    fn a_repeated_buzz_leaves_the_mark_unchanged() {
-        let mut store = BuzzStore::default();
-        assert!(store.mark(CLAN, channel(1), None, BUZZ_AT));
-        assert!(!store.mark(CLAN, channel(1), None, BUZZ_AT));
-        assert!(!store.mark(CLAN, channel(1), None, BUZZ_AT - 1));
-        assert!(store.mark(CLAN, channel(1), Some(channel(9)), BUZZ_AT));
-        assert!(!store.mark(CLAN, channel(1), Some(channel(9)), BUZZ_AT));
-    }
-
-    #[gpui::test]
-    fn mark_as_read_clears_a_channel_a_dm_and_a_whole_clan(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let (store, _) = init_stores(cx);
-            let mark_as_read = |clan_id: i64, channel_id: i64, cx: &mut App| {
-                let event = RealtimeEvent::MarkAsRead(mezon_proto::realtime::MarkAsRead {
-                    clan_id,
-                    channel_id,
-                    category_id: 0,
-                });
-                store.update(cx, |store, cx| store.handle_event(&event, cx));
-            };
-            store.update(cx, |store, _| {
-                store.mark(CLAN, channel(10), None, BUZZ_AT);
-                store.mark(CLAN, channel(14), Some(channel(99)), BUZZ_AT);
-                store.mark(ClanId(0), channel(12), None, BUZZ_AT);
-                store.mark(ClanId(2), channel(20), None, BUZZ_AT);
-            });
-
-            mark_as_read(1, 10, cx);
-            assert!(!store.read(cx).has_buzz(channel(10), NEVER_SEEN));
-            assert!(store.read(cx).has_buzz(channel(14), NEVER_SEEN));
-
-            mark_as_read(0, 12, cx);
-            assert!(!store.read(cx).has_buzz(channel(12), NEVER_SEEN));
-
-            mark_as_read(1, 0, cx);
-            assert!(!store.read(cx).has_buzz(channel(14), NEVER_SEEN));
-            assert!(store.read(cx).has_buzz(channel(20), NEVER_SEEN));
-        });
+        assert!(store.mark(CLAN, channel(1), None, message(10)));
+        assert!(!store.mark(CLAN, channel(1), None, message(20)));
+        assert!(!store.mark(CLAN, channel(1), None, message(5)));
+        assert!(!store.unmark_seen(channel(1), message(15)));
+        assert!(store.unmark_seen(channel(1), message(20)));
+        assert!(store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1)));
+        assert!(!store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1)));
     }
 
     #[test]

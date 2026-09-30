@@ -189,7 +189,7 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
             &[
                 ch.kind as u8,
                 u8::from(ch.is_unread()),
-                u8::from(buzz.has_buzz(ch.id, ch.last_seen_timestamp)),
+                u8::from(buzz.has_buzz(ch.id)),
                 dm_presence_badge(ch, presence, own_presence) as u8,
                 dm_voice_badge(ch, channels).map_or(0, |badge| match badge {
                     DmVoiceBadge::InVoice => 1,
@@ -316,7 +316,7 @@ fn build_dm_items(
         .map(|ch| {
             let pinned = store.is_pinned(ch.id);
             let unread = ch.is_unread();
-            let has_buzz = buzz.has_buzz(ch.id, ch.last_seen_timestamp);
+            let has_buzz = buzz.has_buzz(ch.id);
             let presence_badge = dm_presence_badge(ch, presence, own_presence);
             let voice_badge = dm_voice_badge(ch, channels);
             let muted = notifications.is_some_and(|store| store.is_time_muted(ch.id));

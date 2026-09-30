@@ -8023,7 +8023,7 @@ impl MessagesStore {
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 
-fn snowflake_seq(id: MessageId) -> i64 {
+pub(crate) fn snowflake_seq(id: MessageId) -> i64 {
     id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
