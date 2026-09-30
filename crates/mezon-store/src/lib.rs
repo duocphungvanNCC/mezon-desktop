@@ -6,6 +6,7 @@ pub mod audit_log;
 pub mod auto_update;
 pub mod badge;
 pub mod banned_users;
+pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
@@ -105,6 +106,7 @@ pub use banned_users::{
     BAN_LABEL_MINUTE_SECS, BannedEntry, BannedUsersEvent, BannedUsersStore,
     seconds_until_ban_label_changes,
 };
+pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
