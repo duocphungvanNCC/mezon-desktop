@@ -126,10 +126,26 @@ fn note_fits_memo_limit(note: Option<&str>) -> bool {
     note.is_none_or(|note| note.len() <= MAX_MEMO_BYTES)
 }
 
+fn parse_extra_info(raw: &str) -> Option<ExtraInfo> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<ExtraInfo>(raw) {
+        Ok(extra_info) => Some(extra_info),
+        Err(error) => {
+            tracing::debug!(%error, "wallet: transaction extra_info is not readable");
+            None
+        }
+    }
+}
+
 fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction {
-    let extra_info = serde_json::from_str::<ExtraInfo>(&transaction.extra_info).unwrap_or_default();
-    let sender_user_id = verified_user_id(extra_info.user_sender_id, &transaction.from_address);
-    let receiver_user_id = verified_user_id(extra_info.user_receiver_id, &transaction.to_address);
+    let (claimed_sender, claimed_receiver) = parse_extra_info(&transaction.extra_info)
+        .map_or((None, None), |extra_info| {
+            (extra_info.user_sender_id, extra_info.user_receiver_id)
+        });
+    let sender_user_id = verified_user_id(claimed_sender, &transaction.from_address);
+    let receiver_user_id = verified_user_id(claimed_receiver, &transaction.to_address);
     let sent = transaction.from_address == address;
     let counterparty = if sent {
         transaction.to_address
@@ -1042,6 +1058,14 @@ mod tests {
         let tx = map_transaction(transaction(&me, &other, TRANSFER), &me);
         assert!(tx.sent);
         assert_eq!(tx.sender_user_id.as_deref(), Some("11"));
+        assert_eq!(tx.receiver_user_id, None);
+    }
+
+    #[test]
+    fn unreadable_extra_info_leaves_both_parties_unverified() {
+        let (me, other) = (address_from_user_id("11"), address_from_user_id("22"));
+        let tx = map_transaction(transaction(&me, &other, "{not json"), &me);
+        assert_eq!(tx.sender_user_id, None);
         assert_eq!(tx.receiver_user_id, None);
     }
 

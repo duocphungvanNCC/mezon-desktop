@@ -179,17 +179,13 @@ impl TransactionHistoryModal {
             );
         }
         if let Some(store) = ClanMembersStore::try_global(cx) {
-            subs.push(
-                cx.subscribe(&store, |this, _, event: &ClanMembersEvent, cx| {
-                    if matches!(event, ClanMembersEvent::Changed { .. }) {
-                        this.refresh_detail_names(cx);
-                    }
-                }),
-            );
+            subs.push(cx.subscribe(&store, |this, _, _: &ClanMembersEvent, cx| {
+                this.refresh_detail_names(cx);
+            }));
         }
         if let Some(store) = DirectMessageStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, event: &DirectEvent, cx| {
-                if matches!(event, DirectEvent::Changed { channel_id: None }) {
+                if matches!(event, DirectEvent::Changed { .. }) {
                     this.refresh_detail_names(cx);
                 }
             }));

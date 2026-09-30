@@ -387,6 +387,10 @@ pub fn clip_insert_to_byte_limit(
     &new_text[..floor_char_boundary(new_text, budget)]
 }
 
+pub fn clipped_edit_is_rejected(requested: &str, clipped: &str, composing: bool) -> bool {
+    clipped.is_empty() && !requested.is_empty() && !composing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +418,14 @@ mod tests {
             clip_insert_to_byte_limit(14, 14, &"a".repeat(600), 512).len(),
             512
         );
+    }
+
+    #[test]
+    fn an_edit_with_nothing_left_to_insert_is_rejected_unless_it_commits_a_preedit() {
+        assert!(clipped_edit_is_rejected("ê", "", false));
+        assert!(!clipped_edit_is_rejected("ê", "", true));
+        assert!(!clipped_edit_is_rejected("ê", "ê", false));
+        assert!(!clipped_edit_is_rejected("", "", false));
     }
 
     #[test]
