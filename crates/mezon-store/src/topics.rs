@@ -19,7 +19,7 @@ use crate::messages::{
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
+use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
@@ -536,7 +536,7 @@ impl TopicsStore {
     pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(draft) = MessagesStore::global(cx)
             .read(cx)
-            .reply_draft_for(message_id)
+            .reply_draft_for_with_config(message_id, AppConfig::try_global(cx))
         else {
             return;
         };

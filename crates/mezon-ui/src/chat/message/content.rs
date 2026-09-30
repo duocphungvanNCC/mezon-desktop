@@ -729,7 +729,7 @@ fn render_selectable_segmented_spans(
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
                 row = row.child(SelectableRegion::new(
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base),
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, Some(base)),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -1782,7 +1782,13 @@ fn append_span(
             let key = *span_key;
             *span_key += 1;
             row.child(render_emoji_span(
-                name, emoji_id, src, body_color, ctx, emoji_size, key,
+                name,
+                emoji_id,
+                src,
+                body_color,
+                ctx,
+                emoji_size,
+                Some(key),
             ))
         }
         MessageSpan::Canvas { title, .. } => row.child(render_canvas_chip(title.clone())),
@@ -2037,14 +2043,14 @@ fn render_social_link_card(
         .into_any_element()
 }
 
-fn render_emoji_span(
+pub(super) fn render_emoji_span(
     name: &SharedString,
     emoji_id: &str,
     precomputed_src: &SharedString,
     body_color: gpui::Rgba,
     ctx: &RowCtx,
     size: Pixels,
-    key: usize,
+    animation_key: Option<usize>,
 ) -> AnyElement {
     let src: SharedString = if precomputed_src.is_empty() {
         crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
@@ -2057,20 +2063,30 @@ fn render_emoji_span(
             .child(name.clone())
             .into_any_element();
     }
+    let image = match animation_key {
+        Some(key) => img(src)
+            .id(("msg-emoji-frames", key))
+            .size(size)
+            .object_fit(ObjectFit::Contain)
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
+        None => img(src)
+            .size(size)
+            .object_fit(ObjectFit::Contain)
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
+    };
     div()
         .flex_none()
         .size(size)
         .image_cache(ctx.icon_cache.clone())
-        .child(
-            img(src)
-                .id(("msg-emoji-frames", key))
-                .size(size)
-                .object_fit(ObjectFit::Contain)
-                .with_fallback(super::reaction_detail::emoji_error_fallback(
-                    size,
-                    ctx.theme.text_muted,
-                )),
-        )
+        .child(image)
         .into_any_element()
 }
 

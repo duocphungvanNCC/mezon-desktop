@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
-    SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
+    Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
+    ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
@@ -21,11 +21,12 @@ use super::audio_player::{
     preview_seek_track,
 };
 use super::content::{
-    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip, profile_popover_trigger,
+    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip,
+    profile_popover_trigger, render_emoji_span,
 };
 use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RecentEmojiCell, RowCtx};
 use super::gif_video::GifVideoView;
-use super::inline_content::{IconOverlay, InlineContent, StyledRun};
+use super::inline_content::{IconOverlay, ImageOverlay, InlineContent, StyledRun};
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
@@ -37,8 +38,6 @@ use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
-const REPLY_EMOJI_SIZE: f32 = 16.;
-const REPLY_EMOJI_SOURCE_PX: u32 = 32;
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -665,75 +664,12 @@ fn render_reply_preview_spans(
     spans: &[MessageSpan],
     ctx: &RowCtx,
 ) -> AnyElement {
-    if spans
-        .iter()
-        .any(|span| matches!(span, MessageSpan::Emoji { .. }))
-    {
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden();
-        for (index, span) in spans.iter().enumerate() {
-            row = match span {
-                MessageSpan::Emoji {
-                    name,
-                    emoji_id,
-                    src,
-                } => {
-                    let source: SharedString = if src.is_empty() {
-                        crate::util::imgproxy::emoji_url_sized(
-                            ctx.app,
-                            emoji_id,
-                            REPLY_EMOJI_SOURCE_PX,
-                        )
-                        .into()
-                    } else {
-                        src.clone()
-                    };
-                    if source.is_empty() {
-                        row.child(name.clone())
-                    } else {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .size(px(REPLY_EMOJI_SIZE))
-                                .image_cache(ctx.icon_cache.clone())
-                                .child(
-                                    img(source)
-                                        .id(("reply-emoji-frames", index))
-                                        .size(px(REPLY_EMOJI_SIZE))
-                                        .object_fit(ObjectFit::Contain)
-                                        .with_fallback(emoji_error_fallback(
-                                            px(REPLY_EMOJI_SIZE),
-                                            ctx.theme.text_muted,
-                                        )),
-                                ),
-                        )
-                    }
-                }
-                _ => row.child(render_reply_text_spans(
-                    reference,
-                    index,
-                    std::slice::from_ref(span),
-                    true,
-                    ctx,
-                )),
-            };
-        }
-        return row.into_any_element();
-    }
-    render_reply_text_spans(reference, 0, spans, false, ctx)
+    render_reply_text_spans(reference, spans, ctx)
 }
 
 fn render_reply_text_spans(
     reference: &MessageReference,
-    segment: usize,
     spans: &[MessageSpan],
-    compact: bool,
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
@@ -743,6 +679,7 @@ fn render_reply_text_spans(
     let mut text = String::new();
     let mut runs: Vec<StyledRun> = Vec::new();
     let mut icons: Vec<IconOverlay> = Vec::new();
+    let mut images: Vec<ImageOverlay> = Vec::new();
     for span in spans {
         match span {
             MessageSpan::Hashtag {
@@ -750,9 +687,6 @@ fn render_reply_text_spans(
                 channel_id,
             } => {
                 let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
-                if !text.is_empty() && !text.ends_with(' ') {
-                    text.push(' ');
-                }
                 let icon_index = text.len();
                 text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
@@ -778,30 +712,59 @@ fn render_reply_text_spans(
                     icon: chip.icon,
                     color: mention_color,
                 });
-                text.push(' ');
             }
             MessageSpan::Text(chunk) => text.push_str(chunk),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => {
+                let byte_index = text.len();
+                text.push(INLINE_ICON_RESERVE);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: byte_index..end,
+                    color: None,
+                    background: None,
+                    font_weight: Some(FontWeight::NORMAL),
+                    fade_out: Some(1.),
+                });
+                images.push(ImageOverlay {
+                    byte_index,
+                    size: px(16.),
+                    prepainted: false,
+                    element: render_emoji_span(
+                        name,
+                        emoji_id,
+                        src,
+                        ctx.theme.tokens.text_theme_message,
+                        ctx,
+                        px(16.),
+                        None,
+                    ),
+                });
+            }
             _ => {}
         }
     }
     div()
-        .when(!compact, |preview| preview.flex_1())
-        .when(compact, |preview| preview.flex_none())
+        .flex_1()
         .min_w_0()
         .truncate()
-        .child(InlineContent::new(
-            SharedString::from(format!(
-                "reply-preview-{}-{segment}",
-                reference.message_ref_id.0
-            )),
-            text.into(),
-            runs,
-            icons,
-            Vec::new(),
-            body,
-            None,
-            ctx.selection.clone(),
-        ))
+        .child(
+            InlineContent::new(
+                ("reply-preview", reference.message_ref_id.0 as usize),
+                text.into(),
+                runs,
+                icons,
+                Vec::new(),
+                body,
+                None,
+                ctx.selection.clone(),
+            )
+            .image_overlays(images)
+            .cursor_style(CursorStyle::PointingHand),
+        )
         .into_any_element()
 }
 

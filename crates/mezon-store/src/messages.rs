@@ -2327,28 +2327,37 @@ impl MessagesStore {
     }
 
     pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(draft) = self.reply_draft_for(message_id) else {
+        let Some(draft) = self.reply_draft_for_with_config(message_id, AppConfig::try_global(cx))
+        else {
             return;
         };
         self.set_reply(draft, cx);
     }
 
-    pub fn reply_draft_for(&self, message_id: MessageId) -> Option<ReplyDraft> {
+    pub fn reply_draft_for_with_config(
+        &self,
+        message_id: MessageId,
+        cfg: Option<&AppConfig>,
+    ) -> Option<ReplyDraft> {
         let storage_id = self.reaction_storage_channel(message_id);
         self.cache
             .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
-            .map(|msg| ReplyDraft {
-                message_ref_id: msg.id,
-                sender_id: msg.sender_user_id.unwrap_or_default(),
-                sender_name: msg.sender_name.to_string(),
-                sender_avatar: msg.avatar_url.to_string(),
-                content_preview: msg.content.clone(),
-                content_raw: reply_reference_content(msg),
-                preview_spans: crate::message::reply_preview_spans(&msg.spans),
-                has_attachment: !msg.attachments.is_empty(),
-                has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
-                is_poll: msg.poll.is_some(),
+            .map(|msg| {
+                let mut preview_spans = crate::message::reply_preview_spans(&msg.spans);
+                crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
+                ReplyDraft {
+                    message_ref_id: msg.id,
+                    sender_id: msg.sender_user_id.unwrap_or_default(),
+                    sender_name: msg.sender_name.to_string(),
+                    sender_avatar: msg.avatar_url.to_string(),
+                    content_preview: msg.content.clone(),
+                    content_raw: reply_reference_content(msg),
+                    preview_spans,
+                    has_attachment: !msg.attachments.is_empty(),
+                    has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
+                    is_poll: msg.poll.is_some(),
+                }
             })
     }
 
@@ -2512,7 +2521,13 @@ impl MessagesStore {
         if !channel.messages.contains_id(message_id) {
             return;
         }
-        patch_reply_previews_after_update(&mut channel.messages, message_id, &content, &spans);
+        patch_reply_previews_after_update(
+            &mut channel.messages,
+            message_id,
+            &content,
+            &spans,
+            AppConfig::try_global(cx),
+        );
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
@@ -5528,7 +5543,7 @@ impl MessagesStore {
         reply_to: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.reply_draft_for(reply_to);
+        let reply = self.reply_draft_for_with_config(reply_to, AppConfig::try_global(cx));
         self.send_url_attachment(
             url,
             filename,
@@ -6391,6 +6406,7 @@ impl MessagesStore {
             message_id,
             &preview,
             &preview_spans,
+            AppConfig::try_global(cx),
         );
         if arms_expiry {
             self.schedule_presign_expiry(cx);
@@ -7840,8 +7856,10 @@ fn patch_reply_previews_after_update(
     updated_id: MessageId,
     new_content: &str,
     new_spans: &[MessageSpan],
+    cfg: Option<&AppConfig>,
 ) {
-    let preview_spans = crate::message::reply_preview_spans(new_spans);
+    let mut preview_spans = crate::message::reply_preview_spans(new_spans);
+    crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
     for msg in messages.items.iter_mut() {
         for reference in msg.references.iter_mut() {
             if reference.message_ref_id == updated_id {
@@ -9609,8 +9627,11 @@ fn message_reference_from_api(
     let content_preview = crate::message::reply_preview_line(&content).into();
     let preview_spans = parsed
         .as_ref()
-        .filter(|c| !c.hg.is_empty() || !c.ej.is_empty())
-        .map(|c| crate::message::reply_preview_spans(&parse_spans(c)))
+        .map(|content| {
+            let mut spans = parse_spans(content);
+            crate::message::fill_reply_emoji_sources(&mut spans, cfg);
+            crate::message::reply_preview_spans(&spans)
+        })
         .unwrap_or_default();
     MessageReference {
         message_ref_id: MessageId(r.message_ref_id),
@@ -12489,7 +12510,7 @@ mod tests {
         assert_eq!(
             mapped.preview_spans,
             vec![
-                MessageSpan::Text("yoyohohoh".into()),
+                MessageSpan::Text("yoyohohoh ".into()),
                 MessageSpan::Emoji {
                     name: ":melon:".into(),
                     emoji_id: "123".into(),
@@ -12497,6 +12518,26 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn api_reply_reference_resolves_reply_sized_emoji_source_once() {
+        let reference = mezon_client::transport::ApiMessageRef {
+            message_ref_id: 9,
+            content: r#"{"t":":melon:","ej":[{"s":0,"e":7,"emojiid":"123"}]}"#.into(),
+            ..Default::default()
+        };
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.example.com".into(),
+            ..AppConfig::dev_defaults()
+        };
+
+        let mapped = message_reference_from_api(&reference, Some(&cfg));
+
+        assert!(matches!(
+            mapped.preview_spans.as_slice(),
+            [MessageSpan::Emoji { src, .. }] if !src.is_empty()
+        ));
     }
 
     #[test]
