@@ -8,7 +8,9 @@ use gpui::{
     Window, div, ease_in_out, img, linear_color_stop, linear_gradient, list, percentage,
     prelude::*, px, relative, rgb, rgba,
 };
-use mezon_store::{TransactionCursor, UserId, UsersByUserStore, WalletStore, WalletTransaction};
+use mezon_store::{
+    BadgeService, TransactionCursor, UserId, WalletStore, WalletTransaction, cached_username,
+};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::Shell;
@@ -1048,21 +1050,41 @@ fn build_detail(transaction: &WalletTransaction, locale: &SharedString, cx: &App
     };
     TxDetail {
         hash: transaction.hash.clone().into(),
-        sender: resolve_username(transaction.sender_user_id.as_deref(), unknown, cx).into(),
+        sender: resolve_party(
+            transaction.sent,
+            transaction.sender_user_id.as_deref(),
+            transaction.sender_username.as_deref(),
+            unknown,
+            cx,
+        )
+        .into(),
         amount: format!("{} {symbol}", format_amount(&transaction.value)).into(),
-        receiver: resolve_username(transaction.receiver_user_id.as_deref(), unknown, cx).into(),
+        receiver: resolve_party(
+            !transaction.sent,
+            transaction.receiver_user_id.as_deref(),
+            None,
+            unknown,
+            cx,
+        )
+        .into(),
         note: note.into(),
         created: format_date(transaction.timestamp).into(),
     }
 }
 
-fn resolve_username(user_id: Option<&str>, fallback: &'static str, cx: &App) -> String {
-    let Some(store) = UsersByUserStore::try_global(cx) else {
-        return fallback.to_string();
-    };
-    user_id
-        .and_then(|id| id.parse::<UserId>().ok())
-        .and_then(|id| store.read(cx).user(id).map(|user| user.username.clone()))
+fn resolve_party(
+    is_me: bool,
+    user_id: Option<&str>,
+    recorded_username: Option<&str>,
+    fallback: &'static str,
+    cx: &App,
+) -> String {
+    let me = is_me
+        .then(|| BadgeService::try_global(cx).and_then(|badge| badge.read(cx).current_user_id(cx)))
+        .flatten();
+    me.or_else(|| user_id.and_then(|id| id.parse::<UserId>().ok()))
+        .and_then(|id| cached_username(id, cx))
+        .or_else(|| recorded_username.map(str::to_string))
         .unwrap_or_else(|| fallback.to_string())
 }
 

@@ -201,7 +201,10 @@ pub use mezon_client::{
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 pub use mezon_voice::{MediaDevice, MediaPermission};
-pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use mmn_client::{
+    DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
+    MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
+};
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
     is_valid_name_content, prepare_display_name_for_update,
@@ -251,8 +254,8 @@ pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
-    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
-    resolve_user_profile,
+    ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
+    resolve_avatar_url, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]

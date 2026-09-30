@@ -92,6 +92,7 @@ pub struct WalletTransaction {
     pub hash: String,
     pub timestamp: i64,
     pub sender_user_id: Option<String>,
+    pub sender_username: Option<String>,
     pub receiver_user_id: Option<String>,
 }
 
@@ -134,6 +135,10 @@ fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction
         hash: transaction.hash,
         timestamp: transaction.transaction_timestamp,
         sender_user_id: extra_info.as_ref().and_then(|e| e.user_sender_id.clone()),
+        sender_username: extra_info
+            .as_ref()
+            .and_then(|e| e.user_sender_username.clone())
+            .filter(|name| !name.is_empty()),
         receiver_user_id: extra_info.and_then(|e| e.user_receiver_id),
     }
 }
@@ -988,7 +993,44 @@ impl WalletStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{TokenDirection, balance_after_delta, should_refresh_balance, token_direction};
+    use super::{
+        TokenDirection, Transaction, balance_after_delta, map_transaction, should_refresh_balance,
+        token_direction,
+    };
+
+    fn transaction(from: &str, to: &str, extra_info: &str) -> Transaction {
+        serde_json::from_value(serde_json::json!({
+            "hash": "h1",
+            "from_address": from,
+            "to_address": to,
+            "value": "1000000",
+            "extra_info": extra_info,
+        }))
+        .expect("transaction fixture")
+    }
+
+    #[test]
+    fn a_transaction_carries_the_sender_username_from_extra_info() {
+        let extra = r#"{"type":"transfer_token","UserSenderId":"11","UserReceiverId":"22","UserSenderUsername":"alice"}"#;
+        let tx = map_transaction(transaction("a", "me", extra), "me");
+        assert!(!tx.sent);
+        assert_eq!(tx.sender_user_id.as_deref(), Some("11"));
+        assert_eq!(tx.receiver_user_id.as_deref(), Some("22"));
+        assert_eq!(tx.sender_username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn a_blank_or_missing_sender_username_is_none() {
+        let blank = r#"{"type":"transfer_token","UserSenderUsername":""}"#;
+        assert_eq!(
+            map_transaction(transaction("me", "b", blank), "me").sender_username,
+            None
+        );
+        let tx = map_transaction(transaction("me", "b", ""), "me");
+        assert!(tx.sent);
+        assert_eq!(tx.sender_username, None);
+        assert_eq!(tx.sender_user_id, None);
+    }
 
     #[test]
     fn a_transfer_is_classified_from_the_signed_in_user() {

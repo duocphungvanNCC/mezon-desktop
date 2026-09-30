@@ -7,8 +7,8 @@ use gpui::{
     div, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
-    AccountStore, BadgeService, DirectMessageStore, FriendStore, UserId, UsersByUserEvent,
-    UsersByUserStore, WalletStore,
+    AccountStore, BadgeService, DirectMessageStore, FriendStore, TOKEN_NOTE_MAX_BYTES, UserId,
+    UsersByUserEvent, UsersByUserStore, WalletStore,
 };
 
 use crate::app::shell::Shell;
@@ -97,9 +97,11 @@ impl SendTokenModal {
                     .validate(|candidate, _| digit_count(candidate) <= MAX_AMOUNT_DIGITS)
             });
             let note = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr(
-                    "userProfile.statusProfile.sendTokenModal.placeholders.notePlaceholder",
-                ))
+                InputState::new(window, cx)
+                    .placeholder(tr(
+                        "userProfile.statusProfile.sendTokenModal.placeholders.notePlaceholder",
+                    ))
+                    .validate(|candidate, _| note_fits(candidate))
             });
             let default_note = tr("common.transferFunds");
             let search_sub = cx.subscribe(
@@ -712,6 +714,10 @@ impl Render for SendTokenModal {
     }
 }
 
+fn note_fits(note: &str) -> bool {
+    note.len() <= TOKEN_NOTE_MAX_BYTES
+}
+
 fn digit_count(raw: &str) -> usize {
     raw.chars().filter(|c| c.is_ascii_digit()).count()
 }
@@ -848,10 +854,25 @@ fn order_visible(candidates: &Candidates, needle: &str, hits: &HashSet<String>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Candidates, DECIMAL_FACTOR, HashSet, MAX_AMOUNT_DIGITS, SharedString, UserId,
-        amount_exceeds_balance, amount_reformat_target, digit_count, format_amount_input,
-        format_thousands, fresh_hits, order_visible, parse_whole_token_amount,
+        Candidate, Candidates, DECIMAL_FACTOR, HashSet, MAX_AMOUNT_DIGITS, SharedString,
+        TOKEN_NOTE_MAX_BYTES, UserId, amount_exceeds_balance, amount_reformat_target, digit_count,
+        format_amount_input, format_thousands, fresh_hits, note_fits, order_visible,
+        parse_whole_token_amount,
     };
+
+    #[test]
+    fn the_note_cap_matches_the_mmn_memo_limit_in_bytes() {
+        assert_eq!(TOKEN_NOTE_MAX_BYTES, 512);
+        assert!(note_fits(""));
+        assert!(note_fits(&"a".repeat(512)));
+        assert!(!note_fits(&"a".repeat(513)));
+    }
+
+    #[test]
+    fn a_vietnamese_note_is_capped_by_its_utf8_length() {
+        assert!(note_fits(&"ệ".repeat(170)));
+        assert!(!note_fits(&"ệ".repeat(171)));
+    }
 
     #[test]
     fn keeps_digits_like_the_react_handler() {

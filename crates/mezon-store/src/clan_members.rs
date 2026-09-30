@@ -194,6 +194,13 @@ impl ClanMembersStore {
         self.cache.get(&clan_id)?.by_id.get(&user_id)
     }
 
+    pub fn find_user(&self, user_id: UserId) -> Option<&User> {
+        self.cache
+            .iter()
+            .find_map(|(_, bucket)| bucket.by_id.get(&user_id))
+            .map(|member| &member.user)
+    }
+
     pub fn members(&self, clan_id: ClanId) -> Vec<&ClanMember> {
         match self.cache.get(&clan_id) {
             Some(bucket) => bucket

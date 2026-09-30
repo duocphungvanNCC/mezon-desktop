@@ -6,6 +6,7 @@ use crate::badge::BadgeService;
 use crate::clan::ClanList;
 use crate::clan_members::{ClanMember, ClanMembersStore, User};
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
+use crate::friend::FriendStore;
 use crate::group_members::{GroupMember, GroupMembersStore};
 use crate::ids::{ChannelId, ClanId, RoleId, UserId};
 use crate::presence::PresenceStore;
@@ -201,6 +202,54 @@ pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) ->
             }
         }
     }
+}
+
+pub fn cached_username(user_id: UserId, cx: &App) -> Option<String> {
+    let non_empty = |name: &str| (!name.is_empty()).then(|| name.to_string());
+    if is_current_user(user_id, cx)
+        && let Some(name) = AccountStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .account
+                .as_ref()
+                .and_then(|me| non_empty(&me.username))
+        })
+    {
+        return Some(name);
+    }
+    UsersByUserStore::try_global(cx)
+        .and_then(|store| {
+            store
+                .read(cx)
+                .user(user_id)
+                .and_then(|u| non_empty(&u.username))
+        })
+        .or_else(|| {
+            FriendStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .friend(user_id)
+                    .and_then(|f| non_empty(&f.username))
+            })
+        })
+        .or_else(|| {
+            ClanMembersStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .find_user(user_id)
+                    .and_then(|u| non_empty(&u.username))
+            })
+        })
+        .or_else(|| {
+            DirectMessageStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .channels()
+                    .iter()
+                    .find(|dm| dm.peer_user_id == Some(user_id))
+                    .and_then(|dm| non_empty(&dm.peer_username))
+            })
+        })
 }
 
 fn resolve_direct(
