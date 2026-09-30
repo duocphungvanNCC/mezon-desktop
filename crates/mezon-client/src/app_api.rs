@@ -152,6 +152,14 @@ pub struct ResumableUpload {
     plan: UploadPlan,
 }
 
+impl ResumableUpload {
+    pub fn local_path(&self) -> &Path {
+        match &self.plan {
+            UploadPlan::Single { path, .. } | UploadPlan::Multipart { path, .. } => path,
+        }
+    }
+}
+
 impl std::fmt::Debug for ResumableUpload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self.plan {
@@ -2256,6 +2264,27 @@ impl AppApi {
         .buffer_unordered(ATTACHMENT_UPLOAD_CONCURRENCY);
         let mut finished = already_finished;
         let mut synced = 0usize;
+        if !finished.is_empty()
+            && self
+                .sync_presign_finish_with_retry(
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    content,
+                    &mentions,
+                    &hashtags,
+                    &emojis,
+                    finished.clone(),
+                    create_time_seconds,
+                    mode,
+                    is_public,
+                    topic_id,
+                    is_update_msg_topic,
+                )
+                .await
+        {
+            synced = finished.len();
+        }
         while let Some((key, result)) = stream.next().await {
             match result {
                 Ok(()) => {
@@ -3217,6 +3246,7 @@ mod tests {
             content_type: "video/mp4".into(),
         })
         .resumable();
+        assert_eq!(upload.local_path(), std::path::Path::new("/tmp/clip.mp4"));
         let printed = format!("{upload:?}");
         assert!(!printed.contains("secret"));
         assert!(!printed.contains("s3.example"));

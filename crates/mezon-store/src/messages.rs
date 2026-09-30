@@ -59,7 +59,7 @@ use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
 use crate::topic_badges::TopicBadgeStore;
 use crate::topics::TopicsStore;
-use crate::upload_jobs::{self, PendingUpload, UploadJob};
+use crate::upload_jobs::{self, FailedUpload, PendingUpload, SavedUploads, UploadJob};
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
@@ -680,6 +680,7 @@ pub struct MessagesStore {
     forward_in_flight: bool,
     presign_expiry_task: Option<Task<()>>,
     upload_jobs: Vec<UploadJob>,
+    failed_uploads: Vec<FailedUpload>,
     upload_jobs_generation: u64,
     upload_jobs_restored: bool,
     /// Per-attachment-url backoff for the CDN existence probe. Keyed by url
@@ -1167,6 +1168,7 @@ impl MessagesStore {
             forward_task: None,
             presign_expiry_task: None,
             upload_jobs: Vec::new(),
+            failed_uploads: Vec::new(),
             upload_jobs_generation: 0,
             upload_jobs_restored: false,
             presign_probe: HashMap::new(),
@@ -7921,11 +7923,19 @@ impl MessagesStore {
             AttachmentUploadOutcome::Uploaded(key) | AttachmentUploadOutcome::Failed(key) => key,
         };
         presign::end_uploading(key);
+        if let AttachmentUploadOutcome::Uploaded(key) = &outcome {
+            presign::forget_local_source(key);
+        }
         if let Some(job) = self
             .upload_jobs
             .iter_mut()
             .find(|job| job.message_id == message_id)
         {
+            if let AttachmentUploadOutcome::Failed(key) = &outcome
+                && let Some(failed) = job.failed_upload(key, now_unix_seconds())
+            {
+                self.failed_uploads.push(failed);
+            }
             job.record(&outcome);
             self.persist_upload_jobs(cx);
         }
@@ -7957,12 +7967,17 @@ impl MessagesStore {
     }
 
     fn persist_upload_jobs(&mut self, cx: &mut Context<Self>) {
-        upload_jobs::prune(&mut self.upload_jobs, now_unix_seconds(), |job| {
+        let now = now_unix_seconds();
+        upload_jobs::prune(&mut self.upload_jobs, now, |job| {
             job.pending.iter().any(|p| presign::is_uploading(&p.key))
         });
+        upload_jobs::prune_failed(&mut self.failed_uploads, now);
         self.upload_jobs_generation += 1;
         let generation = self.upload_jobs_generation;
-        let snapshot = self.upload_jobs.clone();
+        let snapshot = SavedUploads {
+            jobs: self.upload_jobs.clone(),
+            failed: self.failed_uploads.clone(),
+        };
         cx.background_executor()
             .spawn(async move { upload_jobs::save(&snapshot, generation) })
             .detach();
@@ -7986,20 +8001,38 @@ impl MessagesStore {
         .detach();
     }
 
-    fn resume_upload_jobs(
-        &mut self,
-        user_id: UserId,
-        saved: Vec<UploadJob>,
-        cx: &mut Context<Self>,
-    ) {
-        let plan = upload_jobs::plan_restore(saved, user_id, now_unix_seconds(), |job| {
+    fn resume_upload_jobs(&mut self, user_id: UserId, saved: SavedUploads, cx: &mut Context<Self>) {
+        let now = now_unix_seconds();
+        for failed in saved.failed {
+            if !self.failed_uploads.iter().any(|f| f.key == failed.key) {
+                self.failed_uploads.push(failed);
+            }
+        }
+        let plan = upload_jobs::plan_restore(saved.jobs, user_id, now, |job| {
             job.pending.iter().any(|p| presign::is_uploading(&p.key))
         });
         self.upload_jobs
             .retain(|job| !plan.replaced.contains(&job.message_id));
         self.upload_jobs.extend(plan.keep);
+        for job in &plan.expired {
+            self.failed_uploads.extend(
+                job.pending
+                    .iter()
+                    .filter_map(|p| job.failed_upload(&p.key, now)),
+            );
+        }
+        for failed in self.failed_uploads.iter().filter(|f| f.user_id == user_id) {
+            presign::remember_local_source(&failed.key, &failed.path);
+        }
         self.persist_upload_jobs(cx);
         for job in plan.resume {
+            self.resume_upload_job(job, cx);
+        }
+        for mut job in plan.expired {
+            if job.finished.is_empty() {
+                continue;
+            }
+            job.pending.clear();
             self.resume_upload_job(job, cx);
         }
     }
@@ -8762,6 +8795,9 @@ pub(crate) async fn run_upload_job(
     let bucket = job.channel_id;
     let is_topic = job.is_topic();
     let keys = job.pending_keys();
+    for (key, path) in job.local_sources() {
+        presign::remember_local_source(key, path);
+    }
     presign::begin_uploading(&keys);
     let registered = job.clone();
     cx.update(|cx| {
@@ -9078,9 +9114,15 @@ fn apply_presign_gate_at(
             a.presign_pending = presign::presign_pending(&a.url, Some(keys), base_img);
             if !a.presign_pending {
                 a.upload_failed = false;
-            } else if presign::is_uploading(&presign::normalize_presign_key(&a.url)) {
+                continue;
+            }
+            let key = presign::normalize_presign_key(&a.url);
+            if presign::is_uploading(&key) {
                 a.uploading = true;
                 a.upload_failed = false;
+            }
+            if a.local_source.is_none() && a.is_image() {
+                a.local_source = presign::local_source(&key);
             }
         }
         let expired = |a: &MessageAttachment| {
@@ -14774,6 +14816,36 @@ mod tests {
         assert!(!attachments[0].presign_pending);
         assert!(!attachments[0].upload_failed);
         assert!(attachments[1].upload_failed);
+    }
+
+    #[test]
+    fn presign_gate_restores_the_local_preview_of_an_own_pending_image() {
+        let key = "gate-local-preview";
+        presign::remember_local_source(key, std::path::Path::new("/tmp/gate-local-preview.png"));
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/uploads/gate-local-preview.png"),
+            cdn_attachment("https://cdn.example/uploads/gate-local-preview-clip.mp4"),
+        ];
+        presign::remember_local_source(
+            "gate-local-preview-clip",
+            std::path::Path::new("/tmp/clip.mp4"),
+        );
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+            true,
+        );
+        presign::forget_local_source(key);
+        presign::forget_local_source("gate-local-preview-clip");
+        assert_eq!(
+            attachments[0].local_source.as_deref(),
+            Some(std::path::Path::new("/tmp/gate-local-preview.png"))
+        );
+        assert!(attachments[0].upload_failed);
+        assert_eq!(attachments[1].local_source, None);
     }
 
     #[test]

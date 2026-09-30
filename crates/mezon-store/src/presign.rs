@@ -121,9 +121,42 @@ pub fn is_uploading(key: &str) -> bool {
     uploading_keys().contains(key)
 }
 
+static LOCAL_SOURCES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn local_sources()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::path::PathBuf>> {
+    LOCAL_SOURCES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn remember_local_source(key: &str, path: &std::path::Path) {
+    local_sources().insert(key.to_string(), path.to_path_buf());
+}
+
+pub fn forget_local_source(key: &str) {
+    local_sources().remove(key);
+}
+
+pub fn local_source(key: &str) -> Option<std::path::PathBuf> {
+    local_sources().get(key).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_source_is_known_until_forgotten() {
+        let key = "local-source-test-key";
+        assert_eq!(local_source(key), None);
+        remember_local_source(key, std::path::Path::new("/tmp/photo.png"));
+        assert_eq!(local_source(key), Some("/tmp/photo.png".into()));
+        forget_local_source(key);
+        assert_eq!(local_source(key), None);
+    }
 
     const CDN: &str = "https://cdn.example";
 
