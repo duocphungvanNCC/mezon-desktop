@@ -460,6 +460,12 @@ impl CallStore {
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
             return;
         };
+        tracing::info!(
+            peer = ?self.peer.as_ref().map(|peer| peer.user_id),
+            pending_remote_ice = self.pending_remote_ice.len(),
+            video,
+            "call: accepting incoming offer"
+        );
         MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
         self.self_id = self_id;
         self.self_name = self_name;
@@ -1292,6 +1298,15 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
+                let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
+                if is_sdp {
+                    tracing::info!(
+                        data_type,
+                        receiver_id,
+                        channel_id,
+                        "call: forwarding local SDP"
+                    );
+                }
                 if let Err(e) = api
                     .forward_webrtc_signaling(
                         receiver_id,
@@ -1304,6 +1319,13 @@ impl CallStore {
                 {
                     tracing::warn!(
                         "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                    );
+                } else if is_sdp {
+                    tracing::info!(
+                        data_type,
+                        receiver_id,
+                        channel_id,
+                        "call: local SDP acknowledged by signaling server"
                     );
                 }
             })

@@ -145,6 +145,7 @@ pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     } else {
         img(crate::util::imgproxy::role_icon_url(cx, &row.icon))
             .size(px(20.0))
+            .aspect_square()
             .flex_shrink_0()
             .rounded(px(4.0))
             .image_cache(&crate::image_cache::shared_role_icon_cache(cx))
@@ -208,8 +209,20 @@ impl PermissionsTab {
         ChannelUsersStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(channel_id, cx);
         });
+        // Only the member who adds or removes a role updates its channel list
+        // here; every other member keeps the list fetched at startup for hours.
+        // Ask the server which roles reach a private channel each time the tab
+        // opens, so a member granted access through a role sees that role.
+        let private = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .is_some_and(|channel| channel.private);
         RolesStore::global(cx).update(cx, |store, cx| {
-            store.ensure_loaded(clan_id, cx);
+            if private {
+                store.reload(clan_id, cx);
+            } else {
+                store.ensure_loaded(clan_id, cx);
+            }
         });
         ClanMembersStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, cx);

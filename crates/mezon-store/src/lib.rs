@@ -6,6 +6,7 @@ pub mod audit_log;
 pub mod auto_update;
 pub mod badge;
 pub mod banned_users;
+pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
@@ -105,6 +106,7 @@ pub use banned_users::{
     BAN_LABEL_MINUTE_SECS, BannedEntry, BannedUsersEvent, BannedUsersStore,
     seconds_until_ban_label_changes,
 };
+pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
@@ -199,7 +201,10 @@ pub use mezon_client::{
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 pub use mezon_voice::{MediaDevice, MediaPermission};
-pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use mmn_client::{
+    DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
+    MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
+};
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
     is_valid_name_content, prepare_display_name_for_update,
@@ -249,8 +254,8 @@ pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
-    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
-    resolve_user_profile,
+    ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
+    resolve_avatar_url, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]
@@ -259,8 +264,8 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, PickedScreen, RecordingState, RecordingToast, RemovalCause,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
+    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,

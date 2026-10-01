@@ -5865,23 +5865,6 @@ impl MezonTransport {
             .collect())
     }
 
-    /// List channels by user ID.
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
-        let cid = self.generate_cid();
-        let (code, response) = self
-            .send_api_request(cid, "ListChannelByUserId", Vec::new())
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        let channel_list = api::ChannelDescList::decode(response.as_slice())?;
-        Ok(channel_list
-            .channeldesc
-            .into_iter()
-            .map(Self::channel_desc_from_proto)
-            .collect())
-    }
-
     /// Get notification settings for a clan.
     pub async fn get_notification_clan(&self, clan_id: i64) -> Result<i32> {
         let cid = self.generate_cid();
@@ -9380,9 +9363,24 @@ impl MezonTransport {
             metadata: metadata.to_string(),
         }
         .encode_to_vec();
-        let (code, response) = self
-            .send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
-            .await?;
+        // Keep token issuance on the same HTTP route as the web voice client.
+        let has_http_session = self.http_fallback.read().is_some();
+        let (code, response) = if has_http_session {
+            match self
+                .send_api_request_over_http("GenerateMeetToken", body.clone())
+                .await
+            {
+                Ok(response) => (0, response),
+                Err(error) => {
+                    tracing::warn!(target: "socket", "GenerateMeetToken HTTP request failed; using socket fallback: {error:#}");
+                    self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
+                        .await?
+                }
+            }
+        } else {
+            self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
+                .await?
+        };
         let token = meet_token_from_raw_body(code, &response)?;
         Ok(api::GenerateMeetTokenResponse { token })
     }

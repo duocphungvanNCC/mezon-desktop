@@ -1,6 +1,102 @@
+use std::collections::VecDeque;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Correlate a self peer update with the mute acknowledgement. A later unmute
+/// supersedes the earlier update; repeated mute updates must not postpone it.
+fn update_pending_self_mute(
+    deadline: &mut Option<Instant>,
+    remote_muted: bool,
+    local_muted: bool,
+    now: Instant,
+) {
+    if remote_muted && !local_muted {
+        deadline.get_or_insert(now + Duration::from_millis(300));
+    } else {
+        *deadline = None;
+    }
+}
+
+struct PendingMute {
+    muted: bool,
+    revision: u64,
+    sent_at: Instant,
+}
+
+/// State for one WebSocket session. `peer_updated` may precede a local command's
+/// `mute_changed` reply by seconds, so silence from the server is not moderation.
+#[derive(Default)]
+pub(crate) struct MuteSync {
+    pending: VecDeque<PendingMute>,
+    forced_mute_deadline: Option<Instant>,
+}
+
+impl MuteSync {
+    pub(crate) fn sent(&mut self, muted: bool, revision: u64, now: Instant) {
+        self.cancel_inference();
+        self.pending.push_back(PendingMute {
+            muted,
+            revision,
+            sent_at: now,
+        });
+    }
+
+    pub(crate) fn acknowledge(&mut self, muted: bool) -> Option<u64> {
+        // No wire revision exists yet. Match ordered replies to the ordered
+        // writes on this socket; a mismatched/unsolicited ACK proves nothing.
+        if self
+            .pending
+            .front()
+            .is_some_and(|request| request.muted == muted)
+        {
+            let revision = self.pending.pop_front().map(|request| request.revision);
+            self.cancel_inference();
+            revision
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn observe_self(&mut self, remote_muted: bool, local_muted: bool, now: Instant) {
+        if self.pending.is_empty() {
+            update_pending_self_mute(
+                &mut self.forced_mute_deadline,
+                remote_muted,
+                local_muted,
+                now,
+            );
+        } else {
+            self.cancel_inference();
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.forced_mute_deadline
+    }
+
+    pub(crate) fn cancel_inference(&mut self) {
+        self.forced_mute_deadline = None;
+    }
+
+    pub(crate) fn take_forced_mute(&mut self, now: Instant) -> bool {
+        if self.pending.is_empty() && self.forced_mute_deadline.is_some_and(|at| now >= at) {
+            self.cancel_inference();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn timed_out_revision(&self, now: Instant) -> Option<u64> {
+        self.pending
+            .front()
+            .filter(|request| {
+                now.saturating_duration_since(request.sent_at) >= Duration::from_secs(10)
+            })
+            .map(|request| request.revision)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuCloseAction {
