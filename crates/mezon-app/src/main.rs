@@ -963,6 +963,7 @@ fn open_main_window(
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::BuzzStore::init(cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);

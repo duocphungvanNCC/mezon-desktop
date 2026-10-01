@@ -255,10 +255,6 @@ impl AppApi {
         self.transport.list_channel_descs(clan_id).await
     }
 
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
-        self.transport.list_channel_by_user_id().await
-    }
-
     pub async fn list_channel_detail(&self, channel_id: i64) -> Result<ApiChannelDesc> {
         self.transport.list_channel_detail(channel_id).await
     }

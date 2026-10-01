@@ -388,6 +388,13 @@ impl DirectMessageStore {
         self.channels.as_slice()
     }
 
+    pub fn dm_with_peer(&self, user_id: UserId) -> Option<&DirectChannel> {
+        self.channels
+            .as_slice()
+            .iter()
+            .find(|channel| channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id))
+    }
+
     pub fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
         self.channels.find(id)
     }
@@ -526,12 +533,7 @@ impl DirectMessageStore {
         let api = self.api.clone();
         let existing = existing_channel.or_else(|| {
             user_id.and_then(|user_id| {
-                self.channels
-                    .as_slice()
-                    .iter()
-                    .find(|channel| {
-                        channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id)
-                    })
+                self.dm_with_peer(user_id)
                     .map(|channel| (channel.id, channel.kind.stream_mode()))
             })
         });

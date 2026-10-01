@@ -16,3 +16,6 @@ ort-sys = { version = "=2.0.0-rc.10", default-features = false, features = ["dir
 
 [build-dependencies]
 cc = "1.2"
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }

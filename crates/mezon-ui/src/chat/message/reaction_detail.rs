@@ -107,6 +107,7 @@ impl Render for UserReactionPanel {
                 .image_cache(&emoji_cache)
                 .id("reaction-panel-emoji-frames")
                 .size(px(20.))
+                .aspect_square()
                 .object_fit(ObjectFit::ScaleDown)
                 .with_fallback(emoji_error_fallback(px(20.), theme.text_muted))
                 .into_any_element()

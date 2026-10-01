@@ -5865,23 +5865,6 @@ impl MezonTransport {
             .collect())
     }
 
-    /// List channels by user ID.
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
-        let cid = self.generate_cid();
-        let (code, response) = self
-            .send_api_request(cid, "ListChannelByUserId", Vec::new())
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        let channel_list = api::ChannelDescList::decode(response.as_slice())?;
-        Ok(channel_list
-            .channeldesc
-            .into_iter()
-            .map(Self::channel_desc_from_proto)
-            .collect())
-    }
-
     /// Get notification settings for a clan.
     pub async fn get_notification_clan(&self, clan_id: i64) -> Result<i32> {
         let cid = self.generate_cid();

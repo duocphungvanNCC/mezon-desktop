@@ -2736,6 +2736,7 @@ impl MentionInput {
                                 .image_cache(&self.emoji_cache)
                                 .id("suggestion-emoji-frames")
                                 .size(px(22.))
+                                .aspect_square()
                                 .into_any_element(),
                         )
                     };

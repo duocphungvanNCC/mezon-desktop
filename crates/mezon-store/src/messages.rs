@@ -33,6 +33,7 @@ use crate::Settings;
 use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
+use crate::buzz::BuzzStore;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
@@ -1471,6 +1472,9 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        if let Some(buzz) = BuzzStore::try_global(cx) {
+            buzz.update(cx, |buzz, cx| buzz.clear_seen(channel_id, cx));
+        }
         self.pending_below_by_channel.remove(&channel_id);
         if !should_write_last_seen(
             self.known_last_seen_id(channel_id, cx),
@@ -1523,6 +1527,9 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        if let Some(buzz) = BuzzStore::try_global(cx) {
+            buzz.update(cx, |buzz, cx| buzz.clear_topic_seen(topic_id, cx));
+        }
         let topic_key = topic_id.get().to_string();
         let live_badge = TopicBadgeStore::try_global(cx)
             .map(|store| store.read(cx).topic_badge_count(&topic_key))
@@ -1839,6 +1846,10 @@ impl MessagesStore {
 
     pub fn active_clan_id(&self) -> Option<ClanId> {
         self.active_clan_id
+    }
+
+    pub fn active_topic_id(&self) -> Option<ChannelId> {
+        self.active_topic_id
     }
 
     /// Stream mode of the active channel (`STREAM_MODE_CHANNEL` / `STREAM_MODE_THREAD`).
@@ -6387,6 +6398,9 @@ impl MessagesStore {
     ) {
         let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
+        if let Some(buzz) = BuzzStore::try_global(cx) {
+            buzz.update(cx, |buzz, cx| buzz.clear_opened(channel_id, cx));
+        }
         if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
         }
@@ -6704,7 +6718,6 @@ impl MessagesStore {
         let is_active = self.active_channel_id == Some(storage_id);
         let is_active_topic = self.active_topic_id == Some(storage_id);
         let incoming_id = msg.id;
-        let is_buzz = msg.code == MessageCode::MessageBuzz;
         self.note_command_response(storage_id, &msg, cx);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             self.set_last_message(storage_id, msg.id);
@@ -6751,9 +6764,6 @@ impl MessagesStore {
         if arms_expiry {
             self.schedule_presign_expiry(cx);
             self.schedule_presign_probe(cx);
-        }
-        if is_buzz && appended {
-            self.play_buzz_sound(cx);
         }
         if is_active {
             if appended {
@@ -8013,7 +8023,7 @@ impl MessagesStore {
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 
-fn snowflake_seq(id: MessageId) -> i64 {
+pub(crate) fn snowflake_seq(id: MessageId) -> i64 {
     id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 

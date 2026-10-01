@@ -581,17 +581,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::debug!("TransportClient::list_channel_by_user_id() called");
-
-        let transport = self.inner.clone();
-
-        runtime()
-            .spawn(async move { transport.list_channel_by_user_id().await })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
     pub async fn list_dm_channel_descs(
         &self,
         page: i32,

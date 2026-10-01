@@ -1362,7 +1362,9 @@ impl CallStore {
                 let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
                 if is_sdp {
                     tracing::info!(
-                        data_type, receiver_id, channel_id,
+                        data_type,
+                        receiver_id,
+                        channel_id,
                         "call: forwarding local SDP"
                     );
                 }
@@ -1381,7 +1383,9 @@ impl CallStore {
                     );
                 } else if is_sdp {
                     tracing::info!(
-                        data_type, receiver_id, channel_id,
+                        data_type,
+                        receiver_id,
+                        channel_id,
                         "call: local SDP acknowledged by signaling server"
                     );
                 }
