@@ -808,7 +808,8 @@ impl DirectMessageStore {
             let (result, badges) = loop {
                 let pair = listing_then_badges(
                     listing_first,
-                    || api.list_dm_channels(1),
+                    attempt < DM_FETCH_MAX_ATTEMPTS,
+                    api.list_dm_channels(1),
                     || api.list_channel_badge_counts(0),
                 )
                 .await;
@@ -837,10 +838,10 @@ impl DirectMessageStore {
                     return;
                 }
                 this.loading = false;
-                this.first_listing_done = true;
                 match result {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
+                        this.first_listing_done = true;
                         // The gateway has just served this user's clan-0 channel
                         // listing, so its cache is warm and the join can fan out.
                         this.join_dm_space(cx);
@@ -1217,17 +1218,20 @@ struct DmBadgeInfo {
     last_seen_timestamp: i64,
 }
 
-async fn listing_then_badges<L: Future, B: Future>(
+async fn listing_then_badges<T, U: Default, E, B: Future<Output = Result<U, E>>>(
     sequential: bool,
-    listing: impl FnOnce() -> L,
+    listing_retry_left: bool,
+    listing: impl Future<Output = Result<T, E>>,
     badges: impl FnOnce() -> B,
-) -> (L::Output, B::Output) {
-    if sequential {
-        let listed = listing().await;
-        (listed, badges().await)
-    } else {
-        tokio::join!(listing(), badges())
+) -> (Result<T, E>, Result<U, E>) {
+    if !sequential {
+        return tokio::join!(listing, badges());
     }
+    let listed = listing.await;
+    if listed.is_err() && listing_retry_left {
+        return (listed, Ok(U::default()));
+    }
+    (listed, badges().await)
 }
 
 fn badge_map_from_descs(
@@ -2485,51 +2489,62 @@ mod tests {
         cx.new(|cx| DirectMessageStore::new(api, cx))
     }
 
-    async fn yield_once() {
-        let mut yielded = false;
-        std::future::poll_fn(|cx| {
-            if yielded {
-                std::task::Poll::Ready(())
-            } else {
-                yielded = true;
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-        })
-        .await
-    }
-
-    fn listing_and_badge_order(sequential: bool) -> Vec<&'static str> {
+    fn run_listing_then_badges(
+        sequential: bool,
+        listing_ok: bool,
+        listing_retry_left: bool,
+    ) -> (Vec<&'static str>, Result<Vec<u32>, ()>) {
         let log = std::cell::RefCell::new(Vec::new());
-        futures::executor::block_on(listing_then_badges(
+        let (_, badges) = futures::executor::block_on(listing_then_badges(
             sequential,
-            || async {
-                log.borrow_mut().push("listing-start");
-                yield_once().await;
-                log.borrow_mut().push("listing-done");
+            listing_retry_left,
+            async {
+                log.borrow_mut().push("listing-sent");
+                tokio::task::yield_now().await;
+                log.borrow_mut().push("listing-answered");
+                if listing_ok { Ok(()) } else { Err(()) }
             },
-            || {
-                log.borrow_mut().push("badges-requested");
-                async {}
+            || async {
+                log.borrow_mut().push("badges-sent");
+                Ok(vec![7])
             },
         ));
-        log.into_inner()
+        (log.into_inner(), badges)
+    }
+
+    fn position(events: &[&str], event: &str) -> usize {
+        events
+            .iter()
+            .position(|logged| *logged == event)
+            .unwrap_or(usize::MAX)
     }
 
     #[test]
-    fn the_first_listing_lands_before_the_badges_are_requested() {
-        assert_eq!(
-            listing_and_badge_order(true),
-            ["listing-start", "listing-done", "badges-requested"]
-        );
+    fn the_first_listing_is_answered_before_the_badges_are_sent() {
+        let (events, badges) = run_listing_then_badges(true, true, true);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
     }
 
     #[test]
-    fn later_listings_request_the_badges_alongside() {
-        assert_eq!(
-            listing_and_badge_order(false),
-            ["badges-requested", "listing-start", "listing-done"]
-        );
+    fn later_listings_send_the_badges_before_the_listing_is_answered() {
+        let (events, badges) = run_listing_then_badges(false, true, true);
+        assert!(position(&events, "badges-sent") < position(&events, "listing-answered"));
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[test]
+    fn a_first_listing_that_will_be_retried_skips_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, true);
+        assert!(!events.contains(&"badges-sent"));
+        assert_eq!(badges, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_first_listing_that_failed_for_good_still_asks_for_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, false);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
     }
 
     #[gpui::test]
