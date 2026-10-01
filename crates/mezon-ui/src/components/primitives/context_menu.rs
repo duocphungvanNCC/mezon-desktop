@@ -382,6 +382,10 @@ pub struct ContextMenuProbeItem {
 }
 
 impl ContextMenu {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.quick_reactions.is_empty()
+    }
+
     pub fn probe_items(&self) -> Vec<ContextMenuProbeItem> {
         self.items
             .iter()
