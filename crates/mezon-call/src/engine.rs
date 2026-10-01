@@ -22,13 +22,15 @@ use libwebrtc::rtp_parameters::DegradationPreference;
 use libwebrtc::rtp_sender::RtpSender;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_frame::VideoRotation;
 use libwebrtc::video_source::VideoResolution;
 use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use mezon_voice::{
     AudioFormat, AudioIo, CameraController, IceServerConfig, MicResampler, PlaybackMixer,
-    RecordTaps, VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
+    RecordTaps, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+    start_camera_into,
 };
 use parking_lot::Mutex;
 
@@ -733,6 +735,7 @@ fn set_camera(
 
 async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore>) {
     let mut bgra: Vec<u8> = Vec::new();
+    let mut unrotated: Vec<u8> = Vec::new();
     let mut stream = NativeVideoStream::new(video_track);
     let mut logged_first = false;
     while let Some(frame) = stream.next().await {
@@ -743,12 +746,14 @@ async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore
             logged_first = true;
             tracing::info!("call: remote video first frame {width}x{height}");
         }
+        let upright = frame.rotation == VideoRotation::VideoRotation0;
         let (stride_y, stride_u, stride_v) = buffer.strides();
         let (y, u, v) = buffer.data();
-        bgra.clear();
-        bgra.resize(width as usize * height as usize * 4, 0);
+        let converted = if upright { &mut bgra } else { &mut unrotated };
+        converted.clear();
+        converted.resize(width as usize * height as usize * 4, 0);
         i420_to_bgra_into(
-            &mut bgra,
+            converted,
             y,
             u,
             v,
@@ -758,6 +763,11 @@ async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore
             width as usize,
             height as usize,
         );
+        let (width, height) = if upright {
+            (width, height)
+        } else {
+            rotate_bgra_into(&mut bgra, &unrotated, width, height, frame.rotation)
+        };
         if let Some(recycled) =
             frame_store.publish(REMOTE_FRAME_KEY, width, height, std::mem::take(&mut bgra))
         {
