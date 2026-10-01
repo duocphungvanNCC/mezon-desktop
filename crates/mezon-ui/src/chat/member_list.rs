@@ -11,9 +11,10 @@ use mezon_store::{
     BannedUsersStore, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
     ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
     DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
-    PermissionStore, PresenceEvent, PresenceStore, ProfileContext, RolesEvent, RolesStore,
-    Settings, UserId, current_user_presence, current_user_status, split_members_by_status,
+    GroupMembersEvent, GroupMembersStore, InVoiceInfo, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore, ProfileContext,
+    RolesEvent, RolesStore, Settings, UserId, current_user_presence, current_user_status,
+    split_members_by_status,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -23,6 +24,7 @@ use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::chat::role_style::{role_color_in, role_fallback_color};
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::chat::user_profile_popover::UserProfilePopover;
+use crate::components::compositions::DmVoiceBadge;
 use crate::components::primitives::{
     Avatar, ContextMenu, IconName, SubmenuOption, context_menu_at,
 };
@@ -67,7 +69,7 @@ struct MemberRow {
     online: bool,
     presence: DmAvatarPresence,
     user_status: SharedString,
-    in_voice: bool,
+    voice_badge: Option<DmVoiceBadge>,
     is_owner: bool,
     role_color: Option<Hsla>,
     rcm_id: SharedString,
@@ -80,7 +82,7 @@ struct RawMember {
     online: bool,
     presence: DmAvatarPresence,
     user_status: String,
-    in_voice: bool,
+    voice_badge: Option<DmVoiceBadge>,
     role_color: Option<Hsla>,
 }
 
@@ -700,13 +702,26 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                         || presence.user_status(member.id()).unwrap_or("").to_string(),
                         |status| status.custom_status.clone(),
                     ),
-                    in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
+                    voice_badge: member_voice_badge(
+                        is_online,
+                        channels.in_voice_status(member.id()),
+                    ),
                     role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
                 }
             })
             .collect()
     };
     (to_raw(&online_ids, true), to_raw(&offline_ids, false))
+}
+
+fn member_voice_badge(is_online: bool, info: Option<InVoiceInfo>) -> Option<DmVoiceBadge> {
+    is_online.then_some(info).flatten().map(|info| {
+        if info.sharing_screen {
+            DmVoiceBadge::SharingScreen
+        } else {
+            DmVoiceBadge::InVoice
+        }
+    })
 }
 
 fn raw_member_json(member: &RawMember) -> serde_json::Value {
@@ -716,7 +731,8 @@ fn raw_member_json(member: &RawMember) -> serde_json::Value {
         "online": member.online,
         "presence": format!("{:?}", member.presence),
         "user_status": member.user_status,
-        "in_voice": member.in_voice,
+        "in_voice": member.voice_badge.is_some(),
+        "sharing_screen": member.voice_badge == Some(DmVoiceBadge::SharingScreen),
     })
 }
 
@@ -890,7 +906,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
                     || presence.user_status(member.id()).unwrap_or("").to_string(),
                     |status| status.custom_status.clone(),
                 ),
-                in_voice: false,
+                voice_badge: None,
                 role_color: None,
             }
         })
@@ -1107,7 +1123,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         online: raw.online,
         presence: raw.presence,
         user_status: single_line(raw.user_status).into(),
-        in_voice: raw.in_voice,
+        voice_badge: raw.voice_badge,
         is_owner: owner_id == Some(raw.user_id),
         role_color: raw.role_color,
     })
@@ -1164,6 +1180,7 @@ fn render_member(
     theme: &Theme,
     member: &MemberRow,
     in_voice_label: &SharedString,
+    share_screen_label: &SharedString,
     avatar_image_cache: &Entity<LruImageCache>,
     small_avatar_image_cache: &Entity<LruImageCache>,
     context: Option<ProfileContext>,
@@ -1210,14 +1227,22 @@ fn render_member(
         color.a *= 0.6;
         color
     };
-    let status = if member.in_voice {
-        Some((in_voice_label.clone(), status_color))
+    let status = if let Some(voice_badge) = member.voice_badge {
+        let label = match voice_badge {
+            DmVoiceBadge::InVoice => in_voice_label.clone(),
+            DmVoiceBadge::SharingScreen => share_screen_label.clone(),
+        };
+        Some((label, status_color))
     } else {
         (!member.user_status.is_empty()).then(|| (member.user_status.clone(), dim(status_color)))
     };
-    let status_icon = member.in_voice.then(|| {
+    let status_icon = member.voice_badge.map(|voice_badge| {
+        let icon = match voice_badge {
+            DmVoiceBadge::InVoice => IconName::Speaker,
+            DmVoiceBadge::SharingScreen => IconName::VoiceScreenShareIcon,
+        };
         (
-            IconName::Speaker,
+            icon,
             crate::util::user_status::in_voice_icon_color(theme).into(),
         )
     });
@@ -1321,6 +1346,8 @@ impl Render for MemberListPanel {
             .map(|state| (state.popover.clone(), state.position));
 
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
+        let share_screen_label: SharedString =
+            mezon_i18n::t(&locale, "memberPage.shareScreen").into();
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
             let locale = locale.clone();
@@ -1334,6 +1361,7 @@ impl Render for MemberListPanel {
                         &theme,
                         member,
                         &in_voice_label,
+                        &share_screen_label,
                         &avatar_image_cache,
                         &small_avatar_image_cache,
                         context,
@@ -1840,6 +1868,34 @@ fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &st
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod voice_status_tests {
+    use super::member_voice_badge;
+    use crate::components::compositions::DmVoiceBadge;
+    use mezon_store::{ChannelId, ClanId, InVoiceInfo};
+
+    fn voice_info(sharing_screen: bool) -> InVoiceInfo {
+        InVoiceInfo {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            sharing_screen,
+        }
+    }
+
+    #[test]
+    fn member_voice_badge_distinguishes_screen_share() {
+        assert_eq!(
+            member_voice_badge(true, Some(voice_info(false))),
+            Some(DmVoiceBadge::InVoice)
+        );
+        assert_eq!(
+            member_voice_badge(true, Some(voice_info(true))),
+            Some(DmVoiceBadge::SharingScreen)
+        );
+        assert_eq!(member_voice_badge(false, Some(voice_info(true))), None);
+    }
 }
 
 #[cfg(test)]
