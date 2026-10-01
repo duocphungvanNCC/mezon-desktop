@@ -164,11 +164,6 @@ impl Element for InlineContent {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        for overlay in &mut self.images {
-            overlay
-                .element
-                .layout_as_root(size(overlay.size, overlay.size).into(), window, cx);
-        }
         self.styled.request_layout(None, inspector_id, window, cx)
     }
 
@@ -199,8 +194,9 @@ impl Element for InlineContent {
                     (line_height - ascent - descent) / 2. + ascent
                 })
                 .unwrap_or(line_height);
-            overlay.element.prepaint_at(
+            overlay.element.prepaint_as_root(
                 point(position.x, position.y + baseline - image_size),
+                size(image_size, image_size).into(),
                 window,
                 cx,
             );

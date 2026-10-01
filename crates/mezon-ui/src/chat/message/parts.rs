@@ -38,6 +38,7 @@ use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
+const REPLY_TEXT_SIZE: f32 = 14.;
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -517,7 +518,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
             .h(px(24.))
             .pl(px(super::context::REPLY_INSET))
             .pr(px(super::context::CONTENT_RIGHT_PAD))
-            .text_size(px(14.))
+            .text_size(px(REPLY_TEXT_SIZE))
             .child(
                 Icon::new(IconName::ReplyCorner)
                     .size_4()
@@ -586,7 +587,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
         .h(px(24.))
         .pl(px(super::context::REPLY_INSET))
         .pr(px(super::context::CONTENT_RIGHT_PAD))
-        .text_size(px(14.))
+        .text_size(px(REPLY_TEXT_SIZE))
         .cursor_pointer()
         .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
@@ -732,7 +733,7 @@ fn render_reply_text_spans(
                 });
                 images.push(ImageOverlay {
                     byte_index,
-                    size: px(16.),
+                    size: px(REPLY_TEXT_SIZE),
                     prepainted: false,
                     element: render_emoji_span(
                         name,
@@ -740,7 +741,7 @@ fn render_reply_text_spans(
                         src,
                         ctx.theme.tokens.text_theme_message,
                         ctx,
-                        px(16.),
+                        px(REPLY_TEXT_SIZE),
                         None,
                     )
                     .into_any_element(),

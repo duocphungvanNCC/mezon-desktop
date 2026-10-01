@@ -10088,10 +10088,12 @@ fn message_reference_from_api(
     let content_preview = crate::message::reply_preview_line(&content).into();
     let preview_spans = parsed
         .as_ref()
+        .filter(|content| !content.hg.is_empty() || !content.ej.is_empty())
         .map(|content| {
-            let mut spans = parse_spans(content);
-            crate::message::fill_reply_emoji_sources(&mut spans, cfg);
-            crate::message::reply_preview_spans(&spans)
+            let spans = parse_spans(content);
+            let mut preview_spans = crate::message::reply_preview_spans(&spans);
+            crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
+            preview_spans
         })
         .unwrap_or_default();
     MessageReference {
