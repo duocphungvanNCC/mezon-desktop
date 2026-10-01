@@ -145,6 +145,7 @@ pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     } else {
         img(crate::util::imgproxy::role_icon_url(cx, &row.icon))
             .size(px(20.0))
+            .aspect_square()
             .flex_shrink_0()
             .rounded(px(4.0))
             .image_cache(&crate::image_cache::shared_role_icon_cache(cx))
