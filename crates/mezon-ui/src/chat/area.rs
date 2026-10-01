@@ -1,5 +1,4 @@
 use crate::app::shell::Shell;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,12 +7,12 @@ use gpui::{
     StyleRefinement, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ActivityStripDismissal, ActivityStripPin, BadgeService, BannedUsersStore, ChannelId,
-    ChannelList, ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind,
-    DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessageId, MessagesEvent,
-    MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore, ProfileContext,
-    Settings, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UserId,
-    resolve_user_profile, schedule_settings_save,
+    ActivityStripDismissal, BadgeService, BannedUsersStore, ChannelId, ChannelList,
+    ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind, DirectMessageStore,
+    FriendEvent, FriendStore, InVoiceInfo, MessageId, MessagesEvent, MessagesStore,
+    OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore, ProfileContext, Settings,
+    TopicBadgeStore, TopicDiscussion, TopicsStore, UserId, resolve_user_profile,
+    schedule_settings_save,
 };
 use ui::{PopoverMenuHandle, Tooltip};
 
@@ -309,13 +308,16 @@ struct ActivityStripContext {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ActivityStripGeneration {
     newest_topic_id: Option<i64>,
-    pins: Vec<ActivityStripPin>,
+    pin_record_ids: Vec<i64>,
 }
 
 impl ActivityStripGeneration {
     fn has_new_activity_since(&self, previous: &Self) -> bool {
         self.newest_topic_id > previous.newest_topic_id
-            || self.pins.iter().any(|pin| !previous.pins.contains(pin))
+            || self
+                .pin_record_ids
+                .iter()
+                .any(|record_id| !previous.pin_record_ids.contains(record_id))
     }
 }
 
@@ -331,12 +333,12 @@ fn persisted_activity_strip_generation(
                 && dismissal.clan_id == context.clan_id.get()
                 && dismissal.channel_id == context.channel_id.get()
         })?;
-    let mut pins = dismissal.pins.clone();
-    pins.sort_unstable_by_key(|pin| (pin.message_id, pin.create_time));
-    pins.dedup();
+    let mut pin_record_ids = dismissal.pin_record_ids.clone();
+    pin_record_ids.sort_unstable();
+    pin_record_ids.dedup();
     Some(ActivityStripGeneration {
         newest_topic_id: dismissal.newest_topic_id,
-        pins,
+        pin_record_ids,
     })
 }
 
@@ -349,7 +351,7 @@ fn persisted_activity_strip_dismissal(
         clan_id: context.clan_id.get(),
         channel_id: context.channel_id.get(),
         newest_topic_id: generation.newest_topic_id,
-        pins: generation.pins.clone(),
+        pin_record_ids: generation.pin_record_ids.clone(),
     }
 }
 
@@ -361,10 +363,7 @@ mod activity_strip_generation_tests {
     fn unchanged_generation_stays_dismissed() {
         let generation = ActivityStripGeneration {
             newest_topic_id: Some(10),
-            pins: vec![ActivityStripPin {
-                message_id: 30,
-                create_time: 40,
-            }],
+            pin_record_ids: vec![30],
         };
         assert!(!generation.has_new_activity_since(&generation));
     }
@@ -373,11 +372,11 @@ mod activity_strip_generation_tests {
     fn reply_in_existing_topic_does_not_restore_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(10),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         let after_reply = ActivityStripGeneration {
             newest_topic_id: Some(10),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         assert!(!after_reply.has_new_activity_since(&dismissed));
     }
@@ -386,11 +385,11 @@ mod activity_strip_generation_tests {
     fn new_topic_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(20),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         let current = ActivityStripGeneration {
             newest_topic_id: Some(21),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         assert!(current.has_new_activity_since(&dismissed));
     }
@@ -399,23 +398,11 @@ mod activity_strip_generation_tests {
     fn new_pin_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: None,
-            pins: vec![ActivityStripPin {
-                message_id: 30,
-                create_time: 40,
-            }],
+            pin_record_ids: vec![30],
         };
         let current = ActivityStripGeneration {
             newest_topic_id: None,
-            pins: vec![
-                ActivityStripPin {
-                    message_id: 5,
-                    create_time: 10,
-                },
-                ActivityStripPin {
-                    message_id: 30,
-                    create_time: 40,
-                },
-            ],
+            pin_record_ids: vec![5, 30],
         };
         assert!(current.has_new_activity_since(&dismissed));
     }
@@ -424,44 +411,48 @@ mod activity_strip_generation_tests {
     fn topic_created_from_an_older_message_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(300),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         let current = ActivityStripGeneration {
             newest_topic_id: Some(301),
-            pins: Vec::new(),
+            pin_record_ids: Vec::new(),
         };
         assert!(current.has_new_activity_since(&dismissed));
     }
 
     #[test]
-    fn repinning_the_same_message_restores_strip() {
+    fn refetching_the_same_pin_does_not_restore_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: None,
-            pins: vec![ActivityStripPin {
-                message_id: 30,
-                create_time: 40,
-            }],
+            pin_record_ids: vec![30],
         };
         let current = ActivityStripGeneration {
             newest_topic_id: None,
-            pins: vec![ActivityStripPin {
-                message_id: 30,
-                create_time: 50,
-            }],
+            pin_record_ids: vec![30],
         };
-        assert!(current.has_new_activity_since(&dismissed));
+        assert!(!current.has_new_activity_since(&dismissed));
     }
 
     #[test]
     fn removing_activity_does_not_restore_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(10),
-            pins: vec![ActivityStripPin {
-                message_id: 30,
-                create_time: 40,
-            }],
+            pin_record_ids: vec![30],
         };
         assert!(!ActivityStripGeneration::default().has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn repinning_the_same_message_restores_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![30],
+        };
+        let repinned = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![31],
+        };
+        assert!(repinned.has_new_activity_since(&dismissed));
     }
 
     #[test]
@@ -473,10 +464,7 @@ mod activity_strip_generation_tests {
         };
         let generation = ActivityStripGeneration {
             newest_topic_id: Some(10),
-            pins: vec![ActivityStripPin {
-                message_id: 20,
-                create_time: 30,
-            }],
+            pin_record_ids: vec![20],
         };
         let mut settings = Settings::default();
         settings
@@ -515,12 +503,20 @@ fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
     })
 }
 
-fn activity_strip_generation(context: ActivityStripContext, cx: &App) -> ActivityStripGeneration {
+fn activity_strip_generation(
+    context: ActivityStripContext,
+    cx: &App,
+) -> Option<ActivityStripGeneration> {
     let clan_id = context.clan_id.to_string();
     let channel_id = context.channel_id.to_string();
     let topics = TopicsStore::global(cx).read(cx);
     let messages = MessagesStore::global(cx).read(cx);
     let pinned = PinnedMessagesStore::global(cx).read(cx);
+
+    if !topics.is_ready_for(&clan_id) || !pinned.is_loaded_for(context.clan_id, context.channel_id)
+    {
+        return None;
+    }
 
     let stored_topic_id = topics
         .topics_for(&clan_id)
@@ -539,28 +535,24 @@ fn activity_strip_generation(context: ActivityStripContext, cx: &App) -> Activit
             .max()
     })
     .flatten();
-    let mut pins = (pinned.clan_id() == Some(context.clan_id)
-        && pinned.channel_id() == Some(context.channel_id))
-    .then(|| {
+    let mut pin_record_ids = if pinned.clan_id() == Some(context.clan_id)
+        && pinned.channel_id() == Some(context.channel_id)
+    {
         pinned
             .pinned()
             .iter()
-            .filter_map(|pin| {
-                Some(ActivityStripPin {
-                    message_id: pin.message_id.parse().ok()?,
-                    create_time: pin.create_time,
-                })
-            })
+            .filter_map(|pin| pin.id.parse().ok())
             .collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
-    pins.sort_unstable_by_key(|pin| (pin.message_id, pin.create_time));
-    pins.dedup();
+    } else {
+        Vec::new()
+    };
+    pin_record_ids.sort_unstable();
+    pin_record_ids.dedup();
 
-    ActivityStripGeneration {
+    Some(ActivityStripGeneration {
         newest_topic_id: stored_topic_id.max(buffered_topic_id),
-        pins,
-    }
+        pin_record_ids,
+    })
 }
 
 /// Compact activity rail owned by the message column (never the member/topic sidebars).
@@ -1212,9 +1204,16 @@ fn latest_activity_strip(
         .into_any_element()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityStripSnapshot {
+    context: ActivityStripContext,
+    generation: ActivityStripGeneration,
+    visible: bool,
+}
+
 struct LatestActivityStripView {
     settings: Entity<Settings>,
-    dismissed_channels: HashMap<ActivityStripContext, ActivityStripGeneration>,
+    snapshot: Option<ActivityStripSnapshot>,
     _topics_sub: Subscription,
     _pinned_sub: Subscription,
     _messages_sub: Subscription,
@@ -1224,45 +1223,85 @@ struct LatestActivityStripView {
 
 impl LatestActivityStripView {
     fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
-            if matches!(event, TopicsEvent::Updated) {
-                cx.notify();
-            }
+        let topics_sub = cx.observe(&TopicsStore::global(cx), |this, _, cx| {
+            this.refresh_snapshot(cx)
         });
-        let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
-            if matches!(event, mezon_store::PinnedEvent::Updated) {
-                cx.notify();
-            }
+        let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
+            this.refresh_snapshot(cx)
         });
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |_, _, event, cx| {
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
             if matches!(
                 event,
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
             ) {
-                cx.notify();
+                this.refresh_snapshot(cx);
             }
         });
-        let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
-        let badge_sub =
-            BadgeService::try_global(cx).map(|badge| cx.observe(&badge, |_, _, cx| cx.notify()));
-        Self {
+        let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
+        let badge_sub = BadgeService::try_global(cx)
+            .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
+        let mut view = Self {
             settings,
-            dismissed_channels: HashMap::new(),
+            snapshot: None,
             _topics_sub: topics_sub,
             _pinned_sub: pinned_sub,
             _messages_sub: messages_sub,
             _settings_sub: settings_sub,
             _badge_sub: badge_sub,
+        };
+        view.refresh_snapshot(cx);
+        view
+    }
+
+    fn refresh_snapshot(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = active_activity_strip_context(cx) else {
+            if self.snapshot.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let Some(generation) = activity_strip_generation(context, cx) else {
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.context != context)
+            {
+                self.snapshot = None;
+                cx.notify();
+            }
+            return;
+        };
+        let persisted = persisted_activity_strip_generation(self.settings.read(cx), context);
+        let visible = match persisted {
+            Some(previous) if generation.has_new_activity_since(&previous) => {
+                self.clear_dismissal(context, cx);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        };
+        let next = Some(ActivityStripSnapshot {
+            context,
+            generation,
+            visible,
+        });
+        if self.snapshot != next {
+            self.snapshot = next;
+            cx.notify();
         }
     }
 
-    fn dismiss(
+    fn dismiss_if_current(
         &mut self,
         context: ActivityStripContext,
         generation: ActivityStripGeneration,
         cx: &mut Context<Self>,
-    ) {
-        self.dismissed_channels.insert(context, generation.clone());
+    ) -> bool {
+        if !self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.context == context && snapshot.generation == generation && snapshot.visible
+        }) {
+            return false;
+        }
         self.settings.update(cx, |settings, _| {
             settings.activity_strip_dismissals.retain(|dismissal| {
                 dismissal.user_id != context.user_id.get()
@@ -1274,11 +1313,14 @@ impl LatestActivityStripView {
                 .push(persisted_activity_strip_dismissal(context, &generation));
         });
         schedule_settings_save(&self.settings, cx);
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.visible = false;
+        }
         cx.notify();
+        true
     }
 
     fn clear_dismissal(&mut self, context: ActivityStripContext, cx: &mut Context<Self>) {
-        self.dismissed_channels.remove(&context);
         let mut removed = false;
         self.settings.update(cx, |settings, _| {
             let before = settings.activity_strip_dismissals.len();
@@ -1298,31 +1340,38 @@ impl LatestActivityStripView {
 impl Render for LatestActivityStripView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
-        let Some(context) = active_activity_strip_context(cx) else {
+        let Some(snapshot) = self.snapshot.clone() else {
             return div().hidden().into_any_element();
         };
-        let generation = activity_strip_generation(context, cx);
-        if !self.dismissed_channels.contains_key(&context)
-            && let Some(persisted) =
-                persisted_activity_strip_generation(self.settings.read(cx), context)
-        {
-            self.dismissed_channels.insert(context, persisted);
-        }
-        if let Some(dismissed_generation) = self.dismissed_channels.get(&context) {
-            if !generation.has_new_activity_since(dismissed_generation) {
-                return div().hidden().into_any_element();
-            }
-            self.clear_dismissal(context, cx);
+        if !snapshot.visible {
+            return div().hidden().into_any_element();
         }
         latest_activity_strip(
             &locale,
-            &context.clan_id.to_string(),
-            context,
-            generation,
+            &snapshot.context.clan_id.to_string(),
+            snapshot.context,
+            snapshot.generation,
             cx.weak_entity(),
             cx,
         )
     }
+}
+
+fn activity_strip_snapshot_matches(
+    strip: &WeakEntity<LatestActivityStripView>,
+    context: ActivityStripContext,
+    generation: &ActivityStripGeneration,
+    cx: &App,
+) -> bool {
+    strip
+        .read_with(cx, |strip, _| {
+            strip.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.context == context
+                    && snapshot.generation == *generation
+                    && snapshot.visible
+            })
+        })
+        .unwrap_or(false)
 }
 
 struct HideActivityStripModal {
@@ -1353,34 +1402,32 @@ impl HideActivityStripModal {
                 event,
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
             ) && (active_activity_strip_context(cx) != Some(this.context)
-                || activity_strip_generation(this.context, cx) != this.generation)
+                || !activity_strip_snapshot_matches(
+                    &this.strip,
+                    this.context,
+                    &this.generation,
+                    cx,
+                ))
             {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.close_modal_if_current(owner, cx);
                 });
             }
         });
-        let topics_sub = cx.subscribe(&TopicsStore::global(cx), move |this, _, event, cx| {
-            if matches!(event, TopicsEvent::Updated)
-                && activity_strip_generation(this.context, cx) != this.generation
-            {
+        let topics_sub = cx.observe(&TopicsStore::global(cx), move |this, _, cx| {
+            if !activity_strip_snapshot_matches(&this.strip, this.context, &this.generation, cx) {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.close_modal_if_current(owner, cx);
                 });
             }
         });
-        let pinned_sub = cx.subscribe(
-            &PinnedMessagesStore::global(cx),
-            move |this, _, event, cx| {
-                if matches!(event, mezon_store::PinnedEvent::Updated)
-                    && activity_strip_generation(this.context, cx) != this.generation
-                {
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.close_modal_if_current(owner, cx);
-                    });
-                }
-            },
-        );
+        let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), move |this, _, cx| {
+            if !activity_strip_snapshot_matches(&this.strip, this.context, &this.generation, cx) {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.close_modal_if_current(owner, cx);
+                });
+            }
+        });
         let hide_label: SharedString =
             mezon_i18n::t(locale, "chat.activityStrip.hideConfirm.title").into();
         Self {
@@ -1403,15 +1450,11 @@ impl HideActivityStripModal {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut App) {
-        // A new pin/topic arriving while the dialog is open must never be swallowed by an old
-        // confirmation. The snapshot is accepted only in the channel that opened the dialog.
-        if active_activity_strip_context(cx) == Some(self.context)
-            && activity_strip_generation(self.context, cx) == self.generation
-        {
+        if activity_strip_snapshot_matches(&self.strip, self.context, &self.generation, cx) {
             let context = self.context;
             let generation = self.generation.clone();
             let _ = self.strip.update(cx, |strip, cx| {
-                strip.dismiss(context, generation, cx);
+                strip.dismiss_if_current(context, generation, cx);
             });
         }
         Self::close(window, cx);
@@ -1494,9 +1537,7 @@ fn open_hide_activity_strip_modal(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if active_activity_strip_context(cx) != Some(context)
-        || activity_strip_generation(context, cx) != generation
-    {
+    if !activity_strip_snapshot_matches(&strip, context, &generation, cx) {
         return;
     }
     let modal = cx.new(|cx| HideActivityStripModal::new(strip, context, generation, &locale, cx));

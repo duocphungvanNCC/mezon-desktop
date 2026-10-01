@@ -1794,6 +1794,11 @@ impl TopicsStore {
         self.loading
     }
 
+    pub fn is_ready_for(&self, clan_id: &str) -> bool {
+        self.clan_id.as_deref() == Some(clan_id)
+            && (self.fetched_at.is_some() || self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES)
+    }
+
     pub fn has_more(&self) -> bool {
         self.has_more
     }

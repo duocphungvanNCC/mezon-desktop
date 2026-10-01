@@ -398,13 +398,7 @@ pub struct ActivityStripDismissal {
     #[serde(default)]
     pub newest_topic_id: Option<i64>,
     #[serde(default)]
-    pub pins: Vec<ActivityStripPin>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActivityStripPin {
-    pub message_id: i64,
-    pub create_time: i64,
+    pub pin_record_ids: Vec<i64>,
 }
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
@@ -705,7 +699,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod settings_tests {
-    use super::{ActivityStripDismissal, ActivityStripPin, Settings};
+    use super::{ActivityStripDismissal, Settings};
 
     #[test]
     fn a_settings_file_written_before_the_tour_existed_still_parses() {
@@ -745,10 +739,7 @@ mod settings_tests {
                 clan_id: 2,
                 channel_id: 3,
                 newest_topic_id: Some(4),
-                pins: vec![ActivityStripPin {
-                    message_id: 5,
-                    create_time: 6,
-                }],
+                pin_record_ids: vec![5, 6],
             }],
             ..Settings::default()
         };
