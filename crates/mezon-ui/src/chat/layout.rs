@@ -2427,6 +2427,21 @@ impl ChatLayout {
         self.direct_store.read(cx).find(direct_id).cloned()
     }
 
+    fn with_call_panel(&self, dm_chat: gpui::AnyElement) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(self.call_panel.clone())
+            .child(dm_chat)
+            .into_any_element()
+    }
+
     fn is_dm_route(&self, cx: &Context<Self>) -> bool {
         matches!(
             Router::global(cx).read(cx).route(),
@@ -2840,24 +2855,13 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
-                return div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .w_full()
-                    .h_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.call_panel.clone())
-                    .child(dm_chat)
-                    .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             if matches!(
                 Router::global(cx).read(cx).route(),
                 Route::DirectMessage { .. }
             ) {
-                return self
+                let dm_chat = self
                     .chat_area
                     .render(
                         &locale,
@@ -2888,6 +2892,7 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             return self.friends_page.clone().into_any_element();
         }

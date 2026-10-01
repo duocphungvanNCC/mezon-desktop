@@ -17,10 +17,9 @@ use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
 use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
-use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
+use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, VideoBuffer};
 use libwebrtc::rtp_parameters::DegradationPreference;
 use libwebrtc::rtp_sender::RtpSender;
-use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
 use libwebrtc::video_source::VideoResolution;
@@ -157,16 +156,12 @@ impl Drop for CallEngine {
     }
 }
 
-fn attach_camera(sender: &RtpSender, track: &RtcVideoTrack) -> Result<()> {
-    sender
-        .set_track(Some(MediaStreamTrack::from(track.clone())))
-        .context("attach video track failed")?;
+fn prefer_camera_framerate(sender: &RtpSender) {
     let mut parameters = sender.parameters();
     parameters.set_degradation_preference(DegradationPreference::MaintainFramerate);
     if let Err(e) = sender.set_parameters(parameters) {
         tracing::warn!("call: camera degradation preference rejected: {e}");
     }
-    Ok(())
 }
 
 async fn run_engine(
@@ -309,9 +304,6 @@ async fn run_engine(
         *input_fmt.lock()
     );
 
-    let video_transceiver = pc
-        .add_transceiver_for_media(MediaType::Video, sendrecv_init())
-        .context("add video transceiver failed")?;
     let video_source = NativeVideoSource::new(
         VideoResolution {
             width: VIDEO_SOURCE_WIDTH,
@@ -320,7 +312,13 @@ async fn run_engine(
         false,
     );
     let video_track = factory.create_video_track("call-camera", video_source.clone());
-    attach_camera(&video_transceiver.sender(), &video_track)?;
+    let video_sender = pc
+        .add_track(
+            MediaStreamTrack::from(video_track.clone()),
+            &[CALL_STREAM_ID.to_string()],
+        )
+        .context("add video track failed")?;
+    prefer_camera_framerate(&video_sender);
 
     let mic_enabled = Arc::new(AtomicBool::new(true));
     let mic_task = handle.spawn(mic_capture(
@@ -397,39 +395,22 @@ async fn run_engine(
                             tracing::warn!("ignoring remote offer during local negotiation (glare)");
                             continue;
                         }
-                        tracing::info!(
-                            sdp_bytes = sdp.len(),
-                            embedded_candidates = sdp.lines().filter(|line| line.starts_with("a=candidate:")).count(),
-                            "call: applying remote offer"
-                        );
-                        let offer = SessionDescription::parse(&sdp, SdpType::Offer)
-                            .map_err(|e| anyhow!("offer parse: {} {}", e.line, e.description))?;
-                        pc.set_remote_description(offer)
-                            .await
-                            .context("set remote (offer) failed")?;
-                        tracing::info!(pending_ice = pending_ice.len(), "call: remote offer applied");
-                        remote_set = true;
-                        drain_ice(&pc, &mut pending_ice).await;
-                        let answer = pc
-                            .create_answer(AnswerOptions::default())
-                            .await
-                            .context("create answer failed")?;
-                        tracing::info!("call: local answer created");
-                        pc.set_local_description(answer.clone())
-                            .await
-                            .context("set local (answer) failed")?;
-                        tracing::info!("call: local answer applied -> signaling");
-                        let _ = event_tx.send(EngineEvent::LocalAnswer(answer.to_string()));
+                        match answer_remote_offer(&pc, &sdp, &mut pending_ice, &event_tx).await {
+                            Ok(()) => remote_set = true,
+                            Err(e) if remote_set => {
+                                tracing::warn!("call: renegotiation offer failed: {e:#}");
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     EngineCommand::ApplyRemoteAnswer(sdp) => {
-                        let answer = SessionDescription::parse(&sdp, SdpType::Answer)
-                            .map_err(|e| anyhow!("answer parse: {} {}", e.line, e.description))?;
-                        pc.set_remote_description(answer)
-                            .await
-                            .context("set remote (answer) failed")?;
-                        tracing::info!(pending_ice = pending_ice.len(), "call: remote answer applied");
-                        remote_set = true;
-                        drain_ice(&pc, &mut pending_ice).await;
+                        match apply_remote_answer(&pc, &sdp, &mut pending_ice).await {
+                            Ok(()) => remote_set = true,
+                            Err(e) if remote_set => {
+                                tracing::warn!("call: remote answer ignored: {e:#}");
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     EngineCommand::AddRemoteIce(ice) => {
                         if remote_set {
@@ -476,19 +457,11 @@ async fn run_engine(
     }
     pc.close();
     drop(audio_sender);
-    drop(video_transceiver);
+    drop(video_sender);
     drop(pc);
     drop(video_track);
     drop(video_source);
     Ok(())
-}
-
-fn sendrecv_init() -> RtpTransceiverInit {
-    RtpTransceiverInit {
-        direction: RtpTransceiverDirection::SendRecv,
-        stream_ids: vec![CALL_STREAM_ID.to_string()],
-        send_encodings: vec![],
-    }
 }
 
 fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
@@ -512,6 +485,55 @@ async fn drain_ice(pc: &PeerConnection, pending: &mut Vec<IcePayload>) {
     for ice in std::mem::take(pending) {
         add_ice(pc, &ice).await;
     }
+}
+
+async fn answer_remote_offer(
+    pc: &PeerConnection,
+    sdp: &str,
+    pending_ice: &mut Vec<IcePayload>,
+    event_tx: &Sender<EngineEvent>,
+) -> Result<()> {
+    tracing::info!(
+        sdp_bytes = sdp.len(),
+        embedded_candidates = sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .count(),
+        "call: applying remote offer"
+    );
+    let offer = SessionDescription::parse(sdp, SdpType::Offer)
+        .map_err(|e| anyhow!("offer parse: {} {}", e.line, e.description))?;
+    pc.set_remote_description(offer)
+        .await
+        .context("set remote (offer) failed")?;
+    tracing::info!(pending_ice = pending_ice.len(), "call: remote offer applied");
+    drain_ice(pc, pending_ice).await;
+    let answer = pc
+        .create_answer(AnswerOptions::default())
+        .await
+        .context("create answer failed")?;
+    tracing::info!("call: local answer created");
+    pc.set_local_description(answer.clone())
+        .await
+        .context("set local (answer) failed")?;
+    tracing::info!("call: local answer applied -> signaling");
+    let _ = event_tx.send(EngineEvent::LocalAnswer(answer.to_string()));
+    Ok(())
+}
+
+async fn apply_remote_answer(
+    pc: &PeerConnection,
+    sdp: &str,
+    pending_ice: &mut Vec<IcePayload>,
+) -> Result<()> {
+    let answer = SessionDescription::parse(sdp, SdpType::Answer)
+        .map_err(|e| anyhow!("answer parse: {} {}", e.line, e.description))?;
+    pc.set_remote_description(answer)
+        .await
+        .context("set remote (answer) failed")?;
+    tracing::info!(pending_ice = pending_ice.len(), "call: remote answer applied");
+    drain_ice(pc, pending_ice).await;
+    Ok(())
 }
 
 async fn log_media_stats(pc: &PeerConnection) {
