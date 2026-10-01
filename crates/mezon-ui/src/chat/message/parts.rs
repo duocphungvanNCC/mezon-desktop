@@ -460,6 +460,7 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
         name = name.flex().flex_row().items_center().child(
             img(crate::util::imgproxy::role_icon_url(ctx.app, &icon))
                 .size(px(20.))
+                .aspect_square()
                 .ml(px(4.))
                 .flex_none()
                 .image_cache(&ctx.icon_cache),
@@ -2007,6 +2008,7 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
                 img(src)
                     .id("reaction-emoji-frames")
                     .size(px(REACTION_EMOJI_PX))
+                    .aspect_square()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(emoji_error_fallback(
                         px(REACTION_EMOJI_PX),
@@ -2109,6 +2111,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 cell = cell.child(
                     img(emoji.src.clone())
                         .size(px(RECENT_EMOJI_PX))
+                        .aspect_square()
                         .object_fit(ObjectFit::ScaleDown)
                         .image_cache(&ctx.icon_cache)
                         .id("recent-emoji-frames")

@@ -593,6 +593,7 @@ impl RenderOnce for ContextMenu {
                         img(SharedString::from(src))
                             .id("quick-reaction-emoji-frames")
                             .size(px(QUICK_REACTION_EMOJI_PX))
+                            .aspect_square()
                             .with_fallback(move || {
                                 div()
                                     .size(px(QUICK_REACTION_EMOJI_PX))
@@ -950,6 +951,7 @@ impl RenderOnce for ContextMenu {
                                     img(SharedString::from(src))
                                         .id("reaction-sub-emoji-frames")
                                         .size(px(QUICK_REACTION_EMOJI_PX))
+                                        .aspect_square()
                                         .flex_none()
                                         .with_fallback(move || {
                                             div()

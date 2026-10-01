@@ -2424,7 +2424,12 @@ fn render_banner_and_events(
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
                 div()
                     .image_cache(icon_cache.clone())
-                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
+                    .child(
+                        gpui::img(logo.clone())
+                            .w(px(24.))
+                            .h(px(24.))
+                            .aspect_square(),
+                    )
                     .into_any_element()
             } else {
                 gpui::svg()
