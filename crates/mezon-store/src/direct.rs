@@ -262,6 +262,7 @@ pub struct DirectMessageStore {
     pending_changed: Vec<ChannelId>,
     changed_notify_task: Option<Task<()>>,
     dm_space_joined: bool,
+    first_listing_done: bool,
     /// Bumped when the socket comes back. A listing issued on the socket that
     /// died carries the old value and drops its result, so the reconnect can
     /// clear `loading` and re-issue without the dead fetch clearing the flag —
@@ -308,6 +309,7 @@ impl DirectMessageStore {
         self.pending_changed.clear();
         self.changed_notify_task = None;
         self.dm_space_joined = false;
+        self.first_listing_done = false;
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -326,6 +328,7 @@ impl DirectMessageStore {
             pending_changed: Vec::new(),
             changed_notify_task: None,
             dm_space_joined: false,
+            first_listing_done: false,
             socket_generation: 0,
             api,
             _conn_watch: conn_watch,
@@ -795,6 +798,7 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         let socket_generation = self.socket_generation;
+        let listing_first = !self.first_listing_done;
         let timer = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             // Retried, because a failure here does more than leave the list stale:
@@ -802,7 +806,13 @@ impl DirectMessageStore {
             // else re-triggers it while the socket stays up.
             let mut attempt = 1u32;
             let (result, badges) = loop {
-                let pair = tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0));
+                let pair = listing_then_badges(
+                    listing_first,
+                    attempt < DM_FETCH_MAX_ATTEMPTS,
+                    api.list_dm_channels(1),
+                    || api.list_channel_badge_counts(0),
+                )
+                .await;
                 if pair.0.is_ok() || attempt >= DM_FETCH_MAX_ATTEMPTS {
                     break pair;
                 }
@@ -831,6 +841,7 @@ impl DirectMessageStore {
                 match result {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
+                        this.first_listing_done = true;
                         // The gateway has just served this user's clan-0 channel
                         // listing, so its cache is warm and the join can fan out.
                         this.join_dm_space(cx);
@@ -1205,6 +1216,22 @@ struct DmBadgeInfo {
     badge_count: i32,
     last_sent_timestamp: i64,
     last_seen_timestamp: i64,
+}
+
+async fn listing_then_badges<T, U: Default, E, B: Future<Output = Result<U, E>>>(
+    sequential: bool,
+    listing_retry_left: bool,
+    listing: impl Future<Output = Result<T, E>>,
+    badges: impl FnOnce() -> B,
+) -> (Result<T, E>, Result<U, E>) {
+    if !sequential {
+        return tokio::join!(listing, badges());
+    }
+    let listed = listing.await;
+    if listed.is_err() && listing_retry_left {
+        return (listed, Ok(U::default()));
+    }
+    (listed, badges().await)
 }
 
 fn badge_map_from_descs(
@@ -2460,6 +2487,77 @@ mod tests {
         ));
         crate::realtime::RealtimeDispatch::init(api.clone(), cx);
         cx.new(|cx| DirectMessageStore::new(api, cx))
+    }
+
+    fn run_listing_then_badges(
+        sequential: bool,
+        listing_ok: bool,
+        listing_retry_left: bool,
+    ) -> (Vec<&'static str>, Result<Vec<u32>, ()>) {
+        let log = std::cell::RefCell::new(Vec::new());
+        let (_, badges) = futures::executor::block_on(listing_then_badges(
+            sequential,
+            listing_retry_left,
+            async {
+                log.borrow_mut().push("listing-sent");
+                tokio::task::yield_now().await;
+                log.borrow_mut().push("listing-answered");
+                if listing_ok { Ok(()) } else { Err(()) }
+            },
+            || async {
+                log.borrow_mut().push("badges-sent");
+                Ok(vec![7])
+            },
+        ));
+        (log.into_inner(), badges)
+    }
+
+    fn position(events: &[&str], event: &str) -> usize {
+        events
+            .iter()
+            .position(|logged| *logged == event)
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn the_first_listing_is_answered_before_the_badges_are_sent() {
+        let (events, badges) = run_listing_then_badges(true, true, true);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[test]
+    fn later_listings_send_the_badges_before_the_listing_is_answered() {
+        let (events, badges) = run_listing_then_badges(false, true, true);
+        assert!(position(&events, "badges-sent") < position(&events, "listing-answered"));
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[test]
+    fn a_first_listing_that_will_be_retried_skips_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, true);
+        assert!(!events.contains(&"badges-sent"));
+        assert_eq!(badges, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_first_listing_that_failed_for_good_still_asks_for_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, false);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[gpui::test]
+    fn a_new_session_lists_before_asking_for_badges_again(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                assert!(!store.first_listing_done);
+                store.first_listing_done = true;
+                store.reset(cx);
+                assert!(!store.first_listing_done);
+            });
+        });
     }
 
     fn conversation(id: i64, ts: i64) -> DirectChannel {
