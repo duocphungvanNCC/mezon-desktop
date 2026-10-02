@@ -2941,7 +2941,7 @@ mod string_or_number {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingMention {
     pub user_id: String,
     pub role_id: String,
@@ -3031,7 +3031,7 @@ pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingHashtag {
     pub channel_id: String,
     pub s: i32,
@@ -3056,7 +3056,7 @@ pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingEmoji {
     pub emoji_id: String,
     pub s: i32,
@@ -3552,7 +3552,7 @@ fn with_presign_finish(content_json: String, keys: &[String]) -> String {
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
-fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+pub fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return content_json;
     }
@@ -9684,51 +9684,39 @@ impl MezonTransport {
         hide_editted: bool,
         create_time_seconds: u32,
     ) -> Result<()> {
-        self.update_channel_message_with_code(
+        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        self.update_channel_message_content(
             clan_id,
             channel_id,
             message_id,
-            content,
-            mentions,
-            hashtags,
-            emojis,
+            with_create_time_seconds(sent.json, create_time_seconds),
+            &sent.mentions,
             mode,
             is_public,
             topic_id,
             is_update_msg_topic,
             hide_editted,
             create_time_seconds,
-            0,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_code(
+    pub async fn update_channel_message_content(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
-        content: &str,
-        mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
-        emojis: Vec<OutgoingEmoji>,
+        content_json: String,
+        mentions: &[OutgoingMention],
         mode: i32,
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
         hide_editted: bool,
         create_time_seconds: u32,
-        message_code: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let sent =
-            build_send_content_with_code(content, &mentions, &hashtags, &emojis, message_code);
-        let mut content_json = sent.json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let mentions = sent.mentions;
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -9753,40 +9741,6 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            mode,
-            is_public: false,
-            hide_editted: true,
-            create_time_seconds,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!(
-                "update_channel_message_structured error: code={}",
-                code
-            ));
         }
         Ok(())
     }
@@ -10335,27 +10289,29 @@ fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     Ok(())
 }
 
+const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
+
 fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
     if code != 0 {
         tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
         return Err(api_status_error(code))
             .context(format!("GenerateMeetToken failed (code={code})"));
     }
-    if body.is_empty() {
+    let Some(&first_byte) = body.first() else {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
-    }
-    if let Some(jwt) = bare_jwt(body) {
-        return Ok(jwt);
-    }
-    if let Ok(wrapped) = api::GenerateMeetTokenResponse::decode(body)
-        && !wrapped.token.is_empty()
-    {
-        return Ok(wrapped.token);
-    }
-    tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
-    Err(anyhow::anyhow!(
-        "GenerateMeetToken failed: response is not a JWT (code=0)"
-    ))
+    };
+    let token = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+        api::GenerateMeetTokenResponse::decode(body)
+            .ok()
+            .map(|response| response.token)
+            .filter(|token| !token.is_empty())
+    } else {
+        bare_jwt(body)
+    };
+    token.ok_or_else(|| {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+        anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
+    })
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -12315,15 +12271,44 @@ mod tests {
     }
 
     #[test]
-    fn a_protobuf_token_wrapper_is_unwrapped_as_a_fallback() {
+    fn a_protobuf_body_is_decoded_by_its_leading_tag() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
             token: jwt.to_owned(),
             ..Default::default()
         }
         .encode_to_vec();
-        assert_eq!(bare_jwt(&encoded), None);
+        assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
         assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_protobuf_body_with_an_sfu_url_still_yields_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let url = "wss://sfu.mezon.vn/ws";
+        let mut encoded = vec![MEET_TOKEN_PROTOBUF_TAG, jwt.len() as u8];
+        encoded.extend_from_slice(jwt.as_bytes());
+        encoded.extend_from_slice(&[0x12, url.len() as u8]);
+        encoded.extend_from_slice(url.as_bytes());
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_malformed_protobuf_body_is_rejected() {
+        let truncated = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x05, b'e']);
+        assert!(
+            truncated
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
+        let empty_token = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x00]);
+        assert!(
+            empty_token
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
     }
 
     #[test]

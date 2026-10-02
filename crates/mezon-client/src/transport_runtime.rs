@@ -1022,33 +1022,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .update_channel_message_structured(
-                        clan_id,
-                        channel_id,
-                        message_id,
-                        content_json,
-                        mode,
-                        create_time_seconds,
-                    )
-                    .await
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
     pub async fn write_voice_interactive_event(
         &self,
         clan_id: i64,
@@ -1900,43 +1873,36 @@ impl TransportClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_code(
+    pub async fn update_channel_message_content(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
-        content: &str,
+        content_json: String,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
-        emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
         hide_editted: bool,
         create_time_seconds: u32,
-        message_code: i32,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let content = content.to_string();
         runtime()
             .spawn(async move {
                 transport
-                    .update_channel_message_with_code(
+                    .update_channel_message_content(
                         clan_id,
                         channel_id,
                         message_id,
-                        &content,
-                        mentions,
-                        hashtags,
-                        emojis,
+                        content_json,
+                        &mentions,
                         mode,
                         is_public,
                         topic_id,
                         is_update_msg_topic,
                         hide_editted,
                         create_time_seconds,
-                        message_code,
                     )
                     .await
             })

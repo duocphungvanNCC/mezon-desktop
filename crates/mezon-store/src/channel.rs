@@ -4311,7 +4311,12 @@ impl ChannelList {
             return Some(clan_id);
         }
         let clan_id = self.active_clan_id?;
-        let parent_id = self.active_channel_id?;
+        let active_channel_id = self.active_channel_id?;
+        let parent_id = self
+            .channel(clan_id, active_channel_id)
+            .filter(|viewed| viewed.channel_type == ChannelType::Thread)
+            .and_then(|viewed| viewed.parent_id)
+            .unwrap_or(active_channel_id);
         let channel = thread_channel_from_context(
             thread_id,
             label,
@@ -12966,6 +12971,43 @@ mod tests {
                 assert_eq!(
                     thread_names_in_clan(channels, ClanId(1)),
                     vec!["parent", "mike", "zulu", "zzz"]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn ensure_thread_channel_files_a_thread_opened_from_a_sibling_under_the_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+                channels.active_clan_id = Some(ClanId(1));
+                channels.active_channel_id = Some(ChannelId(8));
+
+                channels.ensure_thread_channel_with_active(
+                    ChannelId(20),
+                    "lima".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    false,
+                    None,
+                    cx,
+                );
+
+                let created = channels
+                    .channel(ClanId(1), ChannelId(20))
+                    .expect("new thread is in the sidebar");
+                assert_eq!(created.parent_id, Some(ChannelId(1)));
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "alpha", "lima", "mike", "zulu"]
                 );
             });
         });

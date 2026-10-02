@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(target_os = "linux", test))]
+mod hang_probe;
 mod mcp;
 
 use anyhow::Result;
@@ -489,7 +491,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn capture_hang_sample(stalled_secs: u64) {
+    for line in hang_probe::report(stalled_secs) {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
