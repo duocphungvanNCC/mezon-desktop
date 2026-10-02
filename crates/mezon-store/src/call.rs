@@ -1266,12 +1266,17 @@ impl CallStore {
         cx.background_executor()
             .spawn(async move {
                 let _ = api
-                    .update_channel_message_structured(
+                    .update_channel_message_content(
                         0,
                         channel_id,
                         message_id,
                         content,
+                        Vec::new(),
                         DM_STREAM_MODE,
+                        false,
+                        0,
+                        false,
+                        true,
                         create_time,
                     )
                     .await;

@@ -47,7 +47,7 @@ pub fn render_user_message(
     let command = msg.command.as_deref();
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
-    let is_me = ctx.current_user_id == msg.sender_id.as_str();
+    let is_me = msg.is_sent_by(ctx.current_user_id);
     let needs_composite_selection = msg.call_log.is_some()
         || msg.code == MessageCode::SendToken
         || msg.poll.is_some()

@@ -982,6 +982,7 @@ fn open_main_window(
     mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
+    mezon_store::MentionSearchStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::EventsStore::init(api.clone(), cx);

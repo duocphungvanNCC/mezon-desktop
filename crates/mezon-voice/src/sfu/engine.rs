@@ -461,7 +461,7 @@ impl Membership {
                     audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
                     camera: (m.camera_active && m.mid_video != 0)
                         .then(|| remote_frame_key(&camera_mid)),
-                    screenshare: (m.screen_active && m.mid_screen != 0)
+                    screenshare: (m.is_sharing_screen() && m.mid_screen != 0)
                         .then(|| remote_frame_key(&screen_mid)),
                 }
             })
@@ -1085,7 +1085,7 @@ async fn session_loop(
             .filter_map(|member| {
                 if member.peer_id == 0
                     || member.peer_id == membership.self_peer_id
-                    || !member.screen_active
+                    || !member.is_sharing_screen()
                     || member.mid_screen == 0
                 {
                     return None;
@@ -2731,6 +2731,7 @@ mod tests {
             role: "speaker".to_owned(),
             is_mute: false,
             camera_active: false,
+            screen_requested: None,
             screen_active: false,
             mid_audio: mids[0],
             mid_video: mids[1],

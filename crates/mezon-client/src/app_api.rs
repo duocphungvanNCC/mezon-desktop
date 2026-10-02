@@ -508,6 +508,17 @@ impl AppApi {
         self.transport.search_ctrl_k(text, search_type).await
     }
 
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<mezon_proto::api::SearchMentionUsersResponse> {
+        self.transport
+            .search_mention_users(clan_id, channel_id, text)
+            .await
+    }
+
     pub async fn check_duplicate_thread_name(
         &self,
         name: &str,
@@ -702,6 +713,38 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
+                mode,
+                is_public,
+                topic_id,
+                is_update_msg_topic,
+                hide_editted,
+                create_time_seconds,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_message_content(
+                clan_id,
+                channel_id,
+                message_id,
+                content_json,
+                mentions,
                 mode,
                 is_public,
                 topic_id,
@@ -2962,27 +3005,6 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .make_call_push(receiver_id, json_data, channel_id, caller_id)
-            .await
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        self.transport
-            .update_channel_message_structured(
-                clan_id,
-                channel_id,
-                message_id,
-                content_json,
-                mode,
-                create_time_seconds,
-            )
             .await
     }
 

@@ -190,13 +190,14 @@ pub(crate) fn edit_message_allowed(
         && !is_forwarded
         && code != MessageCode::SendToken
         && code != MessageCode::Poll
+        && code != MessageCode::Topic
         && code.is_user_timeline()
 }
 
 pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool {
     msg.command.is_none()
         && edit_message_allowed(
-            current_user_id == msg.sender_id.as_str(),
+            msg.is_sent_by(current_user_id),
             msg.code,
             msg.is_forwarded,
             msg.send_failed,
@@ -958,6 +959,7 @@ mod edit_permission_tests {
         for code in [
             MessageCode::SendToken,
             MessageCode::Poll,
+            MessageCode::Topic,
             MessageCode::Welcome,
             MessageCode::AuditLog,
             MessageCode::CreateThread,

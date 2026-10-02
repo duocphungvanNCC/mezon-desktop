@@ -1288,10 +1288,14 @@ impl ChatArea {
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
-                    if matches!(event, MessagesEvent::SendFailedWithoutRow) {
+                    let failure_key = match event {
+                        MessagesEvent::SendFailedWithoutRow => Some("message.toast.sendFailed"),
+                        MessagesEvent::OgpRemoveFailed => Some("message.toast.closeOgpFailed"),
+                        _ => None,
+                    };
+                    if let Some(key) = failure_key {
                         let locale = this.chat_area.settings.read(cx).language.clone();
-                        let message =
-                            SharedString::from(mezon_i18n::t(&locale, "message.toast.sendFailed"));
+                        let message = SharedString::from(mezon_i18n::t(&locale, key));
                         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                         return;
                     }
