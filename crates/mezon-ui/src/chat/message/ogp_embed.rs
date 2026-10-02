@@ -1,5 +1,5 @@
 use gpui::{AnyElement, Entity, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
-use mezon_store::{Message, MessageId, MessagesStore, OgpPreview};
+use mezon_store::{ChannelId, Message, MessageCode, MessageId, MessagesStore, OgpPreview};
 
 use crate::image_cache::LruImageCache;
 
@@ -27,11 +27,13 @@ pub fn render_ogp_embed(
     )
 }
 
-fn ogp_remove_target(msg: &Message, current_user_id: &str) -> Option<MessageId> {
-    (!current_user_id.is_empty()
-        && msg.sender_id.as_str() == current_user_id
-        && !msg.id.is_optimistic())
-    .then_some(msg.id)
+fn ogp_remove_target(msg: &Message, current_user_id: &str) -> Option<(ChannelId, MessageId)> {
+    (msg.is_sent_by(current_user_id)
+        && !msg.id.is_optimistic()
+        && msg.raw_content.is_some()
+        && msg.code != MessageCode::Topic
+        && msg.channel_id != ChannelId(0))
+    .then_some((msg.channel_id, msg.id))
 }
 
 pub fn render_ogp_preview(
@@ -47,7 +49,7 @@ fn render_ogp_preview_impl(
     ogp: &OgpPreview,
     message_id: MessageId,
     theme: &Theme,
-    remove_target: Option<MessageId>,
+    remove_target: Option<(ChannelId, MessageId)>,
     og_cache: Entity<LruImageCache>,
     selectable: Option<(
         usize,
@@ -157,14 +159,14 @@ fn render_ogp_preview_impl(
                     .when_some(text_block, |d, block| d.child(block))
                     .child(image_box),
             )
-            .when_some(remove_target, |card, remove_target| {
-                card.child(ogp_remove_button(remove_target, theme))
+            .when_some(remove_target, |card, (bucket, remove_id)| {
+                card.child(ogp_remove_button(bucket, remove_id, theme))
             })
             .into_any_element(),
     )
 }
 
-fn ogp_remove_button(message_id: MessageId, theme: &Theme) -> AnyElement {
+fn ogp_remove_button(bucket: ChannelId, message_id: MessageId, theme: &Theme) -> AnyElement {
     div()
         .id("ogp-remove")
         .absolute()
@@ -186,7 +188,7 @@ fn ogp_remove_button(message_id: MessageId, theme: &Theme) -> AnyElement {
         )
         .on_click(move |_, _, cx| {
             MessagesStore::global(cx).update(cx, |store, cx| {
-                store.remove_message_ogp(message_id, cx);
+                store.remove_message_ogp(bucket, message_id, cx);
             });
         })
         .into_any_element()
@@ -231,30 +233,55 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, MessageId, ogp_remove_target};
+    use super::{ChannelId, Message, MessageCode, MessageId, ogp_remove_target};
 
-    #[test]
-    fn remove_targets_the_server_id_of_an_acked_row() {
-        let optimistic = MessageId::next_optimistic();
-        let mut acked = Message::new(MessageId(99), "https://example.com", "42", "Me", 100);
-        acked.row_anchor_id = optimistic;
+    const RAW: &str = r#"{"t":"https://example.com","mk":[{"type":"lk_ogp","s":19,"e":20}]}"#;
 
-        assert_eq!(ogp_remove_target(&acked, "42"), Some(MessageId(99)));
+    fn own_link(id: MessageId) -> Message {
+        let mut msg =
+            Message::new(id, "https://example.com", "42", "Me", 100).with_raw_content(RAW);
+        msg.channel_id = ChannelId(7);
+        msg
     }
 
     #[test]
-    fn no_remove_target_for_others_or_unacked_rows() {
-        let theirs = Message::new(MessageId(99), "https://example.com", "7", "Them", 100);
-        assert_eq!(ogp_remove_target(&theirs, "42"), None);
-        assert_eq!(ogp_remove_target(&theirs, ""), None);
+    fn remove_targets_the_bucket_and_server_id_of_an_acked_row() {
+        let mut acked = own_link(MessageId(99));
+        acked.row_anchor_id = MessageId::next_optimistic();
 
-        let pending = Message::new(
-            MessageId::next_optimistic(),
-            "https://example.com",
-            "42",
-            "Me",
-            100,
+        assert_eq!(
+            ogp_remove_target(&acked, "42"),
+            Some((ChannelId(7), MessageId(99)))
         );
+    }
+
+    #[test]
+    fn no_remove_target_for_someone_else() {
+        let msg = own_link(MessageId(99));
+        assert_eq!(ogp_remove_target(&msg, "7"), None);
+
+        let mut unknown_sender = own_link(MessageId(99));
+        unknown_sender.sender_id = String::new();
+        assert_eq!(ogp_remove_target(&unknown_sender, ""), None);
+    }
+
+    #[test]
+    fn no_remove_target_until_the_server_copy_is_in() {
+        let pending = own_link(MessageId::next_optimistic());
         assert_eq!(ogp_remove_target(&pending, "42"), None);
+
+        let mut acked_only = own_link(MessageId(99));
+        acked_only.raw_content = None;
+        assert_eq!(ogp_remove_target(&acked_only, "42"), None);
+
+        let mut unbucketed = own_link(MessageId(99));
+        unbucketed.channel_id = ChannelId(0);
+        assert_eq!(ogp_remove_target(&unbucketed, "42"), None);
+    }
+
+    #[test]
+    fn no_remove_target_on_a_topic_origin() {
+        let origin = own_link(MessageId(99)).with_code(MessageCode::Topic);
+        assert_eq!(ogp_remove_target(&origin, "42"), None);
     }
 }

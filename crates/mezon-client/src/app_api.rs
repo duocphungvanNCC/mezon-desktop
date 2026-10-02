@@ -723,6 +723,38 @@ impl AppApi {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_message_content(
+                clan_id,
+                channel_id,
+                message_id,
+                content_json,
+                mentions,
+                mode,
+                is_public,
+                topic_id,
+                is_update_msg_topic,
+                hide_editted,
+                create_time_seconds,
+            )
+            .await
+    }
+
     pub async fn create_poll(
         &self,
         channel_id: i64,

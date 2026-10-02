@@ -9653,13 +9653,42 @@ impl MezonTransport {
         hide_editted: bool,
         create_time_seconds: u32,
     ) -> Result<()> {
-        let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let mut content_json = sent.json;
+        self.update_channel_message_content(
+            clan_id,
+            channel_id,
+            message_id,
+            sent.json,
+            &sent.mentions,
+            mode,
+            is_public,
+            topic_id,
+            is_update_msg_topic,
+            hide_editted,
+            create_time_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mut content_json: String,
+        mentions: &[OutgoingMention],
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
         if create_time_seconds > 0 {
             content_json = with_create_time_seconds(content_json, create_time_seconds);
         }
-        let mentions = sent.mentions;
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)

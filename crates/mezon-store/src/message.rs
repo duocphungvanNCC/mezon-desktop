@@ -1853,6 +1853,10 @@ impl Message {
         self
     }
 
+    pub fn is_sent_by(&self, user_id: &str) -> bool {
+        !user_id.is_empty() && self.sender_id == user_id
+    }
+
     pub fn is_sending(&self) -> bool {
         (self.id.is_optimistic() || self.attachments.iter().any(|a| a.uploading))
             && !self.send_failed

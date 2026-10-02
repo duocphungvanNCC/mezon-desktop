@@ -833,17 +833,33 @@ fn content_json_mentions(content_raw: &str) -> Vec<TransportMention> {
         .collect()
 }
 
+fn message_mentions(msg: &Message) -> Vec<TransportMention> {
+    let proto = forward_mentions(&msg.mention_targets);
+    if proto.is_empty() {
+        content_json_mentions(msg.raw_content.as_deref().unwrap_or_default())
+    } else {
+        proto
+    }
+}
+
+fn content_json_without_ogp(raw: &str, internal_domain: Option<&str>) -> Option<String> {
+    let mut content: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mk = content.get_mut("mk")?.as_array_mut()?;
+    let before = mk.len();
+    mk.retain(|token| {
+        token.get("type").and_then(serde_json::Value::as_str) != Some("lk_ogp")
+            || token
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|url| is_clan_invite_url(url, internal_domain))
+    });
+    (mk.len() < before).then(|| content.to_string())
+}
+
 fn forward_source(msg: &Message) -> ForwardSource {
     let content_raw = msg.raw_content.as_deref().unwrap_or_default().to_string();
     ForwardSource {
-        mentions: {
-            let proto = forward_mentions(&msg.mention_targets);
-            if proto.is_empty() {
-                content_json_mentions(&content_raw)
-            } else {
-                proto
-            }
-        },
+        mentions: message_mentions(msg),
         content_raw,
         text: msg.content.clone(),
         attachments: msg.attachments.iter().map(attachment_to_api).collect(),
@@ -2616,81 +2632,59 @@ impl MessagesStore {
     /// Remove the OGP link preview from a message (author only), mirroring the
     /// React `DeleteOgpButton`: drop it locally and re-send the message content
     /// without the `lk_ogp` token so it is gone for everyone.
-    pub fn remove_message_ogp(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn remove_message_ogp(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let internal_domain = AppConfig::try_global(cx).map(|c| c.domain_url.clone());
         let mode = self.mode;
         let is_public = self.is_public;
-        let Some(channel) = self.cache.get_mut(&storage_id) else {
+        let Some(msg) = self
+            .cache
+            .get_mut(&bucket)
+            .and_then(|channel| channel.messages.get_mut_by_id(message_id))
+        else {
             return;
         };
-        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
+        let Some(ogp) = msg.ogp.take() else {
             return;
         };
-        if msg.ogp.is_none() {
-            return;
-        }
+        let content_json = msg
+            .raw_content
+            .as_deref()
+            .and_then(|raw| content_json_without_ogp(raw, internal_domain.as_deref()));
+        let mentions = message_mentions(msg);
         let create_time_seconds = if msg.attachments.is_empty() {
             0
         } else {
             msg.create_time.max(0) as u32
         };
-        msg.ogp = None;
-        let content = msg.content.clone();
-        let outgoing = msg
-            .raw_content
-            .as_deref()
-            .and_then(outgoing_content_from_raw)
-            .unwrap_or_default();
-        if self.active_topic_id == Some(storage_id) {
-            cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: storage_id.get(),
-            });
-        } else {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
-        }
-        cx.notify();
+        self.notify_bucket_row(bucket, message_id, cx);
+        let Some(content_json) = content_json else {
+            return;
+        };
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let message_num = message_id.get();
         let (api_channel_id, api_topic_id, is_update_msg_topic) =
-            if self.active_topic_id == Some(storage_id) {
-                (parent_channel_id.get(), storage_id.get(), true)
+            if self.active_topic_id == Some(bucket) {
+                (parent_channel_id.get(), bucket.get(), true)
             } else {
-                (storage_id.get(), 0, false)
+                (bucket.get(), 0, false)
             };
-        let OutgoingContent {
-            mentions,
-            hashtags,
-            emojis,
-        } = outgoing;
-        let transport_mentions = mentions
-            .into_iter()
-            .map(OutgoingMention::into_transport)
-            .collect();
-        let transport_hashtags = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
-        let transport_emojis = emojis
-            .into_iter()
-            .map(OutgoingEmoji::into_transport)
-            .collect();
-        cx.spawn(async move |_this, _cx| {
+        cx.spawn(async move |this, cx| {
             if let Err(e) = api
-                .update_channel_message(
+                .update_channel_message_content(
                     clan_id,
                     api_channel_id,
-                    message_num,
-                    &content,
-                    transport_mentions,
-                    transport_hashtags,
-                    transport_emojis,
+                    message_id.get(),
+                    content_json,
+                    mentions,
                     mode,
                     is_public,
                     api_topic_id,
@@ -2701,9 +2695,49 @@ impl MessagesStore {
                 .await
             {
                 tracing::error!("remove ogp update failed: {e}");
+                let _ = this.update(cx, |store, cx| {
+                    store.restore_message_ogp(bucket, message_id, ogp, cx);
+                });
             }
         })
         .detach();
+    }
+
+    fn restore_message_ogp(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        ogp: Box<OgpPreview>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(msg) = self
+            .cache
+            .get_mut(&bucket)
+            .and_then(|channel| channel.messages.get_mut_by_id(message_id))
+        else {
+            return;
+        };
+        if msg.ogp.is_some() {
+            return;
+        }
+        msg.ogp = Some(ogp);
+        self.notify_bucket_row(bucket, message_id, cx);
+    }
+
+    fn notify_bucket_row(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_topic_id == Some(bucket) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: bucket.get(),
+            });
+            cx.notify();
+        } else {
+            self.notify_message_row(message_id, cx);
+        }
     }
 
     /// Remove a message locally, then send the delete to the server.
@@ -9193,45 +9227,6 @@ fn resolve_poll_voter(
     }
 }
 
-fn outgoing_content_from_raw(raw: &str) -> Option<OutgoingContent> {
-    let content: ApiMessageContent = serde_json::from_str(raw).ok()?;
-    let to_i32 = |value: Option<i64>| i32::try_from(value.unwrap_or(0)).unwrap_or(0);
-    let mentions = content
-        .mentions
-        .iter()
-        .map(|token| OutgoingMention {
-            user_id: token.user_id.clone().unwrap_or_default(),
-            role_id: token.role_id.clone().unwrap_or_default(),
-            display: token.username.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    let hashtags = content
-        .hg
-        .iter()
-        .map(|token| OutgoingHashtag {
-            channel_id: token.channel_id.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    let emojis = content
-        .ej
-        .iter()
-        .map(|token| OutgoingEmoji {
-            emoji_id: token.emojiid.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    Some(OutgoingContent {
-        mentions,
-        hashtags,
-        emojis,
-    })
-}
-
 pub(crate) fn build_ogp_preview(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
@@ -10284,6 +10279,62 @@ mod tests {
         let ogp = build_ogp_preview(&content, Some(&cfg)).expect("ogp embed");
         assert_eq!(ogp.title.as_ref(), "MEKNOW");
         assert_eq!(ogp.url, "https://meknow.mezon.vn/invite/MZ-3TKK-2D4DZS5N");
+    }
+
+    #[test]
+    fn removing_the_ogp_keeps_every_other_content_token() {
+        let raw = r#"{"t":"read this https://x.com","mk":[{"type":"b","s":0,"e":4},{"type":"lk","s":10,"e":23},{"type":"lk_ogp","s":23,"e":24,"url":"https://x.com","title":"X"}],"hg":[{"channelid":"5","s":0,"e":1}],"ej":[{"emojiid":"9","s":2,"e":3}],"cvtt":{"a":"b"}}"#;
+
+        let updated =
+            content_json_without_ogp(raw, Some("https://mezon.ai")).expect("ogp token removed");
+        let value: serde_json::Value = serde_json::from_str(&updated).expect("valid json");
+        let original: serde_json::Value = serde_json::from_str(raw).expect("valid json");
+
+        let kinds: Vec<&str> = value["mk"]
+            .as_array()
+            .expect("mk array")
+            .iter()
+            .filter_map(|token| token["type"].as_str())
+            .collect();
+        assert_eq!(kinds, ["b", "lk"]);
+        assert_eq!(value["t"], original["t"]);
+        assert_eq!(value["hg"], original["hg"]);
+        assert_eq!(value["ej"], original["ej"]);
+        assert_eq!(value["cvtt"], original["cvtt"]);
+    }
+
+    #[test]
+    fn removing_the_ogp_leaves_a_clan_invite_card_alone() {
+        let invite = r#"{"t":"https://mezon.ai/invite/1840670747886882816","mk":[{"type":"lk_ogp","s":0,"e":1,"url":"https://mezon.ai/invite/1840670747886882816"}]}"#;
+        assert_eq!(
+            content_json_without_ogp(invite, Some("https://mezon.ai")),
+            None
+        );
+        assert_eq!(content_json_without_ogp("not json", None), None);
+        assert_eq!(content_json_without_ogp(r#"{"t":"hi"}"#, None), None);
+    }
+
+    #[test]
+    fn message_mentions_come_from_the_proto_targets_first() {
+        let raw = r#"{"t":"@bob hi","mentions":[{"user_id":"2","s":0,"e":4}]}"#;
+        let with_targets = Message::new(MessageId(1), "@bob hi", "42", "Me", 0)
+            .with_raw_content(raw)
+            .with_mention_targets(vec![MentionTarget {
+                user_id: Some("1".into()),
+                role_id: None,
+                username: "bob".into(),
+                s: 0,
+                e: 4,
+            }]);
+        let mentions = message_mentions(&with_targets);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].user_id, "1");
+
+        let content_only =
+            Message::new(MessageId(1), "@bob hi", "42", "Me", 0).with_raw_content(raw);
+        let mentions = message_mentions(&content_only);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].user_id, "2");
     }
 
     #[test]
