@@ -3490,6 +3490,26 @@ pub fn build_send_content(
     }
 }
 
+pub fn build_send_content_with_code(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &[OutgoingHashtag],
+    emojis: &[OutgoingEmoji],
+    message_code: i32,
+) -> SendContent {
+    if message_code != MESSAGE_BUZZ_CODE {
+        return build_send_content(text, mentions, hashtags, emojis);
+    }
+    SendContent {
+        json: build_message_content_json(text, mentions, hashtags, emojis, &[]),
+        text: text.to_string(),
+        mentions: mentions.to_vec(),
+        hashtags: hashtags.to_vec(),
+        emojis: emojis.to_vec(),
+        markdowns: Vec::new(),
+    }
+}
+
 fn build_presign_finish_content(
     content: &str,
     mentions: &[OutgoingMention],
@@ -5606,7 +5626,7 @@ impl MezonTransport {
                 markdowns: Vec::new(),
             }
         } else {
-            build_send_content(content, &mentions, &hashtags, &emojis)
+            build_send_content_with_code(content, &mentions, &hashtags, &emojis, flags.message_code)
         };
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
@@ -10639,6 +10659,25 @@ mod tests {
             parsed.mentions[0].user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
+    }
+
+    #[test]
+    fn buzz_content_keeps_markdown_markers_as_plain_text() {
+        let sent = build_send_content_with_code("```jb```", &[], &[], &[], MESSAGE_BUZZ_CODE);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "```jb```");
+        assert_eq!(parsed.t, "```jb```");
+        assert!(parsed.mk.is_empty());
+    }
+
+    #[test]
+    fn regular_content_still_parses_markdown() {
+        let sent = build_send_content_with_code("```jb```", &[], &[], &[], 0);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "jb");
+        assert!(!parsed.mk.is_empty());
     }
 
     #[test]

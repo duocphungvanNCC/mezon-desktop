@@ -16,9 +16,9 @@ use mezon_client::transport::{
     ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
     OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
-    SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
-    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
-    mention_content_tokens,
+    SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    build_share_contact_content_json, detect_markdown, emoji_content_tokens,
+    hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -5585,11 +5585,12 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingEmoji::into_transport)
             .collect();
-        let sent = build_send_content(
+        let sent = build_send_content_with_code(
             &content,
             &transport_mentions,
             &transport_hashtags,
             &transport_emojis,
+            message_code,
         );
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
@@ -8994,7 +8995,16 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
+    let code = MessageCode::from_raw(m.code);
     let mut spans = parse_spans(&m.content_tokens);
+    let content = if code == MessageCode::MessageBuzz {
+        let content = crate::message::markdown_edit_source(&m.content, &spans)
+            .unwrap_or_else(|| m.content.clone());
+        spans = vec![MessageSpan::Text(content.clone().into())];
+        content
+    } else {
+        m.content.clone()
+    };
     crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
@@ -9030,7 +9040,6 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
     let ogp = build_ogp_preview(&m.content_tokens, cfg);
-    let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     let call_log = build_call_log(&m.content_tokens);
     let token_transaction = (code == MessageCode::SendToken)
@@ -9059,7 +9068,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(UserId);
     Message::new(
         MessageId(m.message_id),
-        m.content,
+        content,
         m.sender_id.to_string(),
         m.sender_name,
         m.create_time,
@@ -12917,6 +12926,32 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].code, MessageCode::MessageBuzz);
         assert!(rows[0].code.is_user_timeline());
+    }
+
+    #[test]
+    fn buzz_message_restores_legacy_markdown_as_literal_text() {
+        let mut message = plain_api_message(MESSAGE_BUZZ_CODE, vec![]);
+        message.content = "jb".into();
+        message.content_tokens =
+            serde_json::from_str(r#"{"t":"jb","mk":[{"s":0,"e":2,"type":"pre"}]}"#)
+                .expect("buzz content");
+        let rows = prepare_messages(vec![message], None, None);
+        assert_eq!(rows[0].content, "```jb```");
+        assert!(
+            matches!(rows[0].spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+        );
+    }
+
+    #[test]
+    fn web_buzz_literal_markers_remain_literal_text() {
+        let mut message = plain_api_message(MESSAGE_BUZZ_CODE, vec![]);
+        message.content = "```jb```".into();
+        message.content_tokens.t = "```jb```".into();
+        let rows = prepare_messages(vec![message], None, None);
+        assert_eq!(rows[0].content, "```jb```");
+        assert!(
+            matches!(rows[0].spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+        );
     }
 
     #[test]
