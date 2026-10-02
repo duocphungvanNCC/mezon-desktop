@@ -10258,27 +10258,29 @@ fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     Ok(())
 }
 
+const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
+
 fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
     if code != 0 {
         tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
         return Err(api_status_error(code))
             .context(format!("GenerateMeetToken failed (code={code})"));
     }
-    if body.is_empty() {
+    let Some(&first_byte) = body.first() else {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
-    }
-    if let Some(jwt) = bare_jwt(body) {
-        return Ok(jwt);
-    }
-    if let Ok(wrapped) = api::GenerateMeetTokenResponse::decode(body)
-        && !wrapped.token.is_empty()
-    {
-        return Ok(wrapped.token);
-    }
-    tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
-    Err(anyhow::anyhow!(
-        "GenerateMeetToken failed: response is not a JWT (code=0)"
-    ))
+    };
+    let token = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+        api::GenerateMeetTokenResponse::decode(body)
+            .ok()
+            .map(|response| response.token)
+            .filter(|token| !token.is_empty())
+    } else {
+        bare_jwt(body)
+    };
+    token.ok_or_else(|| {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+        anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
+    })
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -12202,15 +12204,34 @@ mod tests {
     }
 
     #[test]
-    fn a_protobuf_token_wrapper_is_unwrapped_as_a_fallback() {
+    fn a_protobuf_body_is_decoded_by_its_leading_tag() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
             token: jwt.to_owned(),
             ..Default::default()
         }
         .encode_to_vec();
-        assert_eq!(bare_jwt(&encoded), None);
+        assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
         assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_protobuf_body_with_an_sfu_url_still_yields_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let url = "wss://sfu.mezon.vn/ws";
+        let mut encoded = vec![MEET_TOKEN_PROTOBUF_TAG, jwt.len() as u8];
+        encoded.extend_from_slice(jwt.as_bytes());
+        encoded.extend_from_slice(&[0x12, url.len() as u8]);
+        encoded.extend_from_slice(url.as_bytes());
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_malformed_protobuf_body_is_rejected() {
+        let truncated = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x05, b'e']);
+        assert!(truncated.unwrap_err().to_string().contains("response is not a JWT"));
+        let empty_token = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x00]);
+        assert!(empty_token.unwrap_err().to_string().contains("response is not a JWT"));
     }
 
     #[test]
