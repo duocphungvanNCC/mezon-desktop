@@ -1057,7 +1057,7 @@ fn send_attachment(
     let reply_draft = (reply_to != 0)
         .then(|| {
             store.read(cx).reply_draft_for_with_config(
-                mezon_store::MessageId(reply_to),
+                mezon_store::MessageRef::unbucketed(mezon_store::MessageId(reply_to)),
                 mezon_store::AppConfig::try_global(cx),
             )
         })
