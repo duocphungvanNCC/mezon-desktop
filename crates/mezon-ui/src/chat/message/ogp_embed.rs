@@ -17,16 +17,21 @@ pub fn render_ogp_embed(
     base: usize,
     selection_context: &super::content::SelectableTextContext,
 ) -> Option<AnyElement> {
-    let can_remove =
-        !ctx.current_user_id.is_empty() && msg.sender_id.as_str() == ctx.current_user_id;
     render_ogp_preview_impl(
         msg.ogp.as_deref()?,
         msg.row_anchor_id,
         ctx.theme,
-        can_remove,
+        ogp_remove_target(msg, ctx.current_user_id),
         ctx.ogp_cache.clone(),
         Some((base, selection_context, ctx.selection.clone())),
     )
+}
+
+fn ogp_remove_target(msg: &Message, current_user_id: &str) -> Option<MessageId> {
+    (!current_user_id.is_empty()
+        && msg.sender_id.as_str() == current_user_id
+        && !msg.id.is_optimistic())
+    .then_some(msg.id)
 }
 
 pub fn render_ogp_preview(
@@ -35,14 +40,14 @@ pub fn render_ogp_preview(
     theme: &Theme,
     ogp_cache: Entity<LruImageCache>,
 ) -> Option<AnyElement> {
-    render_ogp_preview_impl(ogp, message_id, theme, false, ogp_cache, None)
+    render_ogp_preview_impl(ogp, message_id, theme, None, ogp_cache, None)
 }
 
 fn render_ogp_preview_impl(
     ogp: &OgpPreview,
     message_id: MessageId,
     theme: &Theme,
-    can_remove: bool,
+    remove_target: Option<MessageId>,
     og_cache: Entity<LruImageCache>,
     selectable: Option<(
         usize,
@@ -152,8 +157,8 @@ fn render_ogp_preview_impl(
                     .when_some(text_block, |d, block| d.child(block))
                     .child(image_box),
             )
-            .when(can_remove, |card| {
-                card.child(ogp_remove_button(message_id, theme))
+            .when_some(remove_target, |card, remove_target| {
+                card.child(ogp_remove_button(remove_target, theme))
             })
             .into_any_element(),
     )
@@ -222,4 +227,34 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
                 .text_color(fallback_fg),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Message, MessageId, ogp_remove_target};
+
+    #[test]
+    fn remove_targets_the_server_id_of_an_acked_row() {
+        let optimistic = MessageId::next_optimistic();
+        let mut acked = Message::new(MessageId(99), "https://example.com", "42", "Me", 100);
+        acked.row_anchor_id = optimistic;
+
+        assert_eq!(ogp_remove_target(&acked, "42"), Some(MessageId(99)));
+    }
+
+    #[test]
+    fn no_remove_target_for_others_or_unacked_rows() {
+        let theirs = Message::new(MessageId(99), "https://example.com", "7", "Them", 100);
+        assert_eq!(ogp_remove_target(&theirs, "42"), None);
+        assert_eq!(ogp_remove_target(&theirs, ""), None);
+
+        let pending = Message::new(
+            MessageId::next_optimistic(),
+            "https://example.com",
+            "42",
+            "Me",
+            100,
+        );
+        assert_eq!(ogp_remove_target(&pending, "42"), None);
+    }
 }
