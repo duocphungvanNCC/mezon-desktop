@@ -2145,6 +2145,7 @@ impl ChatLayout {
         clan_id: &str,
         parent_id: &str,
         label: &str,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
         let Ok(channel_id) = channel_id.parse::<ChannelId>() else {
@@ -2169,7 +2170,8 @@ impl ChatLayout {
             ),
             None => (CHANNEL_ACTIVE_JOINED, false),
         };
-        let private = threads.thread_channel_private(&channel_key).map(|p| p != 0);
+        let private =
+            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2207,9 +2209,12 @@ impl ChatLayout {
             ThreadsEvent::ThreadCreated {
                 channel_id,
                 clan_id,
+                parent_id,
+                name,
+                private,
             } => {
                 self.close_create_thread(cx);
-                self.navigate_to_thread(channel_id, clan_id, "", "", cx);
+                self.navigate_to_thread(channel_id, clan_id, parent_id, name, Some(*private), cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
             ThreadsEvent::CreateFailed { .. } | ThreadsEvent::LeaveFailed => {}
