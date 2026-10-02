@@ -65,6 +65,7 @@ pub mod threads;
 pub mod topic_badges;
 pub mod topics;
 pub mod ui_state;
+pub mod upload_jobs;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;

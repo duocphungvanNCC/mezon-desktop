@@ -59,6 +59,9 @@ use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
 use crate::topic_badges::TopicBadgeStore;
 use crate::topics::TopicsStore;
+use crate::upload_jobs::{
+    self, FailedUpload, MessagePresence, PendingUpload, SavedUploads, UploadJob, UploadJobId,
+};
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
@@ -679,6 +682,11 @@ pub struct MessagesStore {
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
     presign_expiry_task: Option<Task<()>>,
+    upload_jobs: Vec<Arc<UploadJob>>,
+    running_upload_jobs: HashSet<UploadJobId>,
+    failed_uploads: Vec<FailedUpload>,
+    upload_jobs_generation: u64,
+    upload_jobs_restored: bool,
     /// Per-attachment-url backoff for the CDN existence probe. Keyed by url
     /// because that is what uniquely identifies an object across the message
     /// copies the caches may hold.
@@ -1115,6 +1123,8 @@ impl MessagesStore {
         self.presign_probe_task = None;
         self.presign_probe_running = false;
         self.presign_expiry_task = None;
+        self.upload_jobs_restored = false;
+        presign::clear_failed();
         cx.notify();
     }
 
@@ -1181,6 +1191,11 @@ impl MessagesStore {
             embed_form: HashMap::new(),
             forward_task: None,
             presign_expiry_task: None,
+            upload_jobs: Vec::new(),
+            running_upload_jobs: HashSet::new(),
+            failed_uploads: Vec::new(),
+            upload_jobs_generation: 0,
+            upload_jobs_restored: false,
             presign_probe: HashMap::new(),
             presign_probe_task: None,
             presign_probe_running: false,
@@ -1227,6 +1242,7 @@ impl MessagesStore {
                         .update(cx, |this, cx| {
                             this.resync(cx);
                             this.flush_queued_last_seen(cx);
+                            this.restore_upload_jobs(cx);
                         })
                         .is_err()
                     {
@@ -4304,7 +4320,7 @@ impl MessagesStore {
     fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
         let now = now_unix_seconds();
-        let mut changed = false;
+        let mut rows = Vec::new();
         for channel in self.cache.values_mut() {
             for message in channel.messages.items.iter_mut() {
                 if !message.attachments.iter().any(|a| a.presign_pending) {
@@ -4322,8 +4338,14 @@ impl MessagesStore {
                 {
                     continue;
                 }
+                let mut changed = false;
+                for att in message.attachments.iter_mut() {
+                    changed |= apply_upload_registry(att);
+                }
                 let before = message.attachments.len();
-                message.attachments.retain(|a| !a.presign_pending);
+                message
+                    .attachments
+                    .retain(|a| !a.presign_pending || a.uploading || a.upload_failed);
                 if message.attachments.len() != before {
                     // The album layout and the viewer list are built from the
                     // attachments, so dropping one leaves them describing tiles
@@ -4334,13 +4356,17 @@ impl MessagesStore {
                     message.viewer_media = viewer_media;
                     changed = true;
                 }
+                if changed {
+                    rows.push((message.channel_id, message.id));
+                }
             }
         }
-        if changed {
-            cx.notify();
+        if rows.is_empty() {
+            self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
+        } else {
+            self.emit_upload_row_updates(rows, cx);
         }
-        self.schedule_presign_expiry(cx);
-        self.schedule_presign_probe(cx);
     }
 
     /// Buckets a probe may look at: whatever the user is actually looking at.
@@ -5863,40 +5889,27 @@ impl MessagesStore {
                     MessageId(real_message_id),
                     cx,
                 );
-                let (on_complete, mut completions) =
-                    tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
-                let drain_this = this.clone();
-                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                    while let Some(outcome) = completions.recv().await {
-                        let _ = drain_this.update(cx, |this, cx| {
-                            this.mark_channel_attachment_outcome(
-                                channel_id,
-                                MessageId(real_message_id),
-                                outcome,
-                                cx,
-                            );
-                        });
-                    }
-                })
-                .detach();
-                api.upload_presigned_and_patch(
-                    clan_id.get(),
-                    channel_id.get(),
-                    real_message_id,
-                    &content,
-                    update_mentions,
-                    update_hashtags,
-                    update_emojis,
-                    create_time_seconds,
-                    presigned,
-                    keys,
+                let user_id = cx.update(|cx| viewer_user_id(cx)).unwrap_or(UserId(0));
+                let job = UploadJob {
+                    user_id,
+                    clan_id: clan_id.get(),
+                    channel_id: channel_id.get(),
+                    parent_channel_id: channel_id.get(),
+                    topic_id: 0,
+                    message_id: real_message_id,
                     mode,
                     is_public,
-                    0,
-                    false,
-                    on_complete,
-                )
-                .await;
+                    content: content.clone(),
+                    mentions: update_mentions,
+                    hashtags: update_hashtags,
+                    emojis: update_emojis,
+                    create_time_seconds,
+                    started_at: now_unix_seconds(),
+                    finished: Vec::new(),
+                    pending: upload_job_files(&presigned, &keys),
+                    sync_failures: 0,
+                };
+                run_upload_job(api.clone(), job, presigned, cx).await;
             } else {
                 let result = if let Some(reply_ref) = reply_ref {
                     api.send_channel_message_reply(
@@ -7906,10 +7919,13 @@ impl MessagesStore {
         };
         let mut changed = false;
         for att in message.attachments.iter_mut() {
-            if att.uploading && presign::normalize_presign_key(&att.url) == key {
+            if (att.uploading || att.presign_pending)
+                && presign::normalize_presign_key(&att.url) == key
+            {
                 att.uploading = false;
-                if failed {
-                    att.upload_failed = true;
+                att.upload_failed = failed;
+                if !failed {
+                    att.presign_pending = false;
                 }
                 changed = true;
             }
@@ -7935,6 +7951,7 @@ impl MessagesStore {
         // Our own upload just finished, so the row is now pending on nothing but the
         // presign_finish patch — which is exactly what can go missing.
         self.schedule_presign_probe(cx);
+        self.schedule_presign_expiry(cx);
     }
 
     pub fn apply_topic_attachment_outcome(
@@ -7951,6 +7968,271 @@ impl MessagesStore {
             cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
+        self.schedule_presign_probe(cx);
+        self.schedule_presign_expiry(cx);
+    }
+
+    fn apply_upload_job_outcome(
+        &mut self,
+        job_id: UploadJobId,
+        is_topic: bool,
+        outcome: AttachmentUploadOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let (key, uploaded) = match &outcome {
+            AttachmentUploadOutcome::Uploaded(key) => (key, true),
+            AttachmentUploadOutcome::Failed(key) => (key, false),
+        };
+        presign::finish_uploading(key, uploaded);
+        if let Some(job) = self.upload_jobs.iter_mut().find(|job| job.id() == job_id) {
+            let job = Arc::make_mut(job);
+            if !uploaded && let Some(failed) = job.failed_upload(key, now_unix_seconds()) {
+                self.failed_uploads.push(failed);
+            }
+            job.record(&outcome);
+            self.persist_upload_jobs(cx);
+        }
+        let (bucket, message_id) = job_id;
+        if is_topic {
+            self.apply_topic_attachment_outcome(bucket, MessageId(message_id), outcome, cx);
+        } else {
+            self.mark_channel_attachment_outcome(
+                ChannelId(bucket),
+                MessageId(message_id),
+                outcome,
+                cx,
+            );
+        }
+    }
+
+    fn register_upload_job(&mut self, job: UploadJob, cx: &mut Context<Self>) {
+        let id = job.id();
+        self.running_upload_jobs.insert(id);
+        self.upload_jobs.retain(|existing| existing.id() != id);
+        self.upload_jobs.push(Arc::new(job));
+        self.persist_upload_jobs(cx);
+    }
+
+    fn complete_upload_job(&mut self, job_id: UploadJobId, synced: bool, cx: &mut Context<Self>) {
+        self.running_upload_jobs.remove(&job_id);
+        let Some(index) = self.upload_jobs.iter().position(|job| job.id() == job_id) else {
+            return;
+        };
+        if synced {
+            let job = self.upload_jobs.remove(index);
+            for key in &job.finished {
+                presign::settle(key);
+            }
+        } else if Arc::make_mut(&mut self.upload_jobs[index]).note_sync_failure() {
+            tracing::warn!(
+                message_id = job_id.1,
+                "presign_finish did not reach the server; keeping the upload to retry"
+            );
+        } else {
+            tracing::warn!(
+                message_id = job_id.1,
+                "presign_finish keeps failing; giving up on this upload"
+            );
+            let job = self.upload_jobs.remove(index);
+            for key in job
+                .finished
+                .iter()
+                .chain(job.pending.iter().map(|p| &p.key))
+            {
+                presign::settle(key);
+            }
+        }
+        self.persist_upload_jobs(cx);
+    }
+
+    fn discard_upload_job(&mut self, job_id: UploadJobId, cx: &mut Context<Self>) {
+        self.running_upload_jobs.remove(&job_id);
+        let Some(index) = self.upload_jobs.iter().position(|job| job.id() == job_id) else {
+            return;
+        };
+        let job = self.upload_jobs.remove(index);
+        for key in job
+            .finished
+            .iter()
+            .chain(job.pending.iter().map(|p| &p.key))
+        {
+            presign::settle(key);
+        }
+        self.persist_upload_jobs(cx);
+    }
+
+    fn persist_upload_jobs(&mut self, cx: &mut Context<Self>) {
+        let now = now_unix_seconds();
+        let running = &self.running_upload_jobs;
+        upload_jobs::prune(&mut self.upload_jobs, now, |job| {
+            running.contains(&job.id())
+        });
+        for key in upload_jobs::prune_failed(&mut self.failed_uploads, now) {
+            if presign::upload_state(&key) == Some(presign::UploadState::Failed) {
+                presign::settle(&key);
+            }
+        }
+        self.upload_jobs_generation += 1;
+        let generation = self.upload_jobs_generation;
+        let jobs = self.upload_jobs.clone();
+        let failed = self.failed_uploads.clone();
+        cx.background_executor()
+            .spawn(async move { upload_jobs::save(&jobs, &failed, generation) })
+            .detach();
+    }
+
+    fn restore_upload_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.upload_jobs_restored {
+            self.retry_unsynced_upload_jobs(cx);
+            return;
+        }
+        let Some(user_id) = viewer_user_id(cx) else {
+            return;
+        };
+        self.upload_jobs_restored = true;
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async { upload_jobs::load() })
+                .await;
+            let _ = this.update(cx, |this, cx| this.resume_upload_jobs(user_id, saved, cx));
+        })
+        .detach();
+    }
+
+    fn retry_unsynced_upload_jobs(&mut self, cx: &mut Context<Self>) {
+        let Some(user_id) = viewer_user_id(cx) else {
+            return;
+        };
+        let retry: Vec<UploadJob> = self
+            .upload_jobs
+            .iter()
+            .filter(|job| {
+                job.user_id == user_id
+                    && job.pending.is_empty()
+                    && !job.finished.is_empty()
+                    && !self.running_upload_jobs.contains(&job.id())
+            })
+            .map(|job| UploadJob::clone(job))
+            .collect();
+        for job in retry {
+            self.start_upload_job(job, cx);
+        }
+    }
+
+    fn resume_upload_jobs(&mut self, user_id: UserId, saved: SavedUploads, cx: &mut Context<Self>) {
+        let now = now_unix_seconds();
+        for failed in saved.failed {
+            if !self.failed_uploads.iter().any(|f| f.key == failed.key) {
+                self.failed_uploads.push(failed);
+            }
+        }
+        let running = self.running_upload_jobs.clone();
+        let plan =
+            upload_jobs::plan_restore(saved.jobs, user_id, now, |job| running.contains(&job.id()));
+        self.upload_jobs
+            .retain(|job| !plan.replaced.contains(&job.id()));
+        self.upload_jobs.extend(plan.keep.into_iter().map(Arc::new));
+        for job in &plan.expired {
+            self.failed_uploads.extend(
+                job.pending
+                    .iter()
+                    .filter_map(|p| job.failed_upload(&p.key, now)),
+            );
+        }
+        for failed in self.failed_uploads.iter().filter(|f| f.user_id == user_id) {
+            presign::mark_failed(&failed.key);
+            presign::remember_local_source(&failed.key, &failed.path);
+        }
+        for job in &plan.resume {
+            presign::begin_uploading(&job.pending_keys());
+            for (key, path) in job.local_sources() {
+                presign::remember_local_source(key, path);
+            }
+        }
+        self.refresh_upload_rows(cx);
+        self.persist_upload_jobs(cx);
+        for job in plan.resume {
+            self.start_upload_job(job, cx);
+        }
+        for mut job in plan.expired {
+            if job.finished.is_empty() {
+                continue;
+            }
+            job.pending.clear();
+            self.start_upload_job(job, cx);
+        }
+    }
+
+    fn start_upload_job(&mut self, job: UploadJob, cx: &mut Context<Self>) {
+        let id = job.id();
+        if !self.running_upload_jobs.insert(id) {
+            return;
+        }
+        tracing::info!(
+            message_id = job.message_id,
+            files = job.pending.len(),
+            finished = job.finished.len(),
+            "resuming an attachment upload left unfinished"
+        );
+        let presigned: Vec<PresignedAttachment> = job
+            .pending
+            .iter()
+            .map(|pending| PresignedAttachment::from(pending.upload.clone()))
+            .collect();
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let job = match current_upload_job(&api, job).await {
+                Some(job) => job,
+                None => {
+                    tracing::info!(
+                        message_id = id.1,
+                        "dropping the upload of a deleted message"
+                    );
+                    let _ = this.update(cx, |this, cx| this.discard_upload_job(id, cx));
+                    return;
+                }
+            };
+            run_upload_job(api, job, presigned, cx).await;
+        })
+        .detach();
+    }
+
+    fn refresh_upload_rows(&mut self, cx: &mut Context<Self>) {
+        let mut rows = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                let mut changed = false;
+                for att in message.attachments.iter_mut() {
+                    changed |= apply_upload_registry(att);
+                }
+                if changed {
+                    rows.push((message.channel_id, message.id));
+                }
+            }
+        }
+        self.emit_upload_row_updates(rows, cx);
+    }
+
+    fn emit_upload_row_updates(
+        &mut self,
+        rows: Vec<(ChannelId, MessageId)>,
+        cx: &mut Context<Self>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        for (bucket, message_id) in rows {
+            if self.active_channel_id == Some(bucket) {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            } else if self.active_topic_id == Some(bucket) {
+                cx.emit(MessagesEvent::TopicUpdated { topic_id: bucket.0 });
+            }
+        }
+        cx.notify();
+        self.schedule_presign_expiry(cx);
         self.schedule_presign_probe(cx);
     }
 
@@ -8636,6 +8918,118 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
     }
 }
 
+pub(crate) fn upload_job_files(
+    presigned: &[PresignedAttachment],
+    keys: &[String],
+) -> Vec<PendingUpload> {
+    presigned
+        .iter()
+        .zip(keys)
+        .map(|(item, key)| PendingUpload {
+            key: key.clone(),
+            upload: item.resumable(),
+        })
+        .collect()
+}
+
+pub(crate) async fn run_upload_job(
+    api: Arc<AppApi>,
+    job: UploadJob,
+    presigned: Vec<PresignedAttachment>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let id = job.id();
+    let is_topic = job.is_topic();
+    let keys = job.pending_keys();
+    for (key, path) in job.local_sources() {
+        presign::remember_local_source(key, path);
+    }
+    presign::begin_uploading(&keys);
+    let registered = job.clone();
+    cx.update(|cx| {
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.register_upload_job(registered, cx);
+        });
+    });
+    let (on_complete, mut completions) =
+        tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
+    let drain = cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        while let Some(outcome) = completions.recv().await {
+            cx.update(|cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.apply_upload_job_outcome(id, is_topic, outcome, cx);
+                });
+            });
+        }
+    });
+    let synced = api
+        .upload_presigned_and_patch(
+            job.clan_id,
+            job.channel_id,
+            job.message_id,
+            &job.content,
+            job.mentions,
+            job.hashtags,
+            job.emojis,
+            job.create_time_seconds,
+            presigned,
+            keys,
+            job.mode,
+            job.is_public,
+            job.topic_id,
+            is_topic,
+            job.finished,
+            on_complete,
+        )
+        .await;
+    drain.await;
+    cx.update(|cx| {
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.complete_upload_job(id, synced, cx);
+        });
+    });
+}
+
+async fn current_upload_job(api: &AppApi, mut job: UploadJob) -> Option<UploadJob> {
+    let page = if job.is_topic() {
+        api.list_topic_messages(
+            job.clan_id,
+            job.parent_channel_id,
+            job.topic_id,
+            job.message_id,
+            DIRECTION_AROUND,
+            MESSAGE_PAGE_LIMIT,
+        )
+        .await
+    } else {
+        api.list_channel_messages(
+            job.clan_id,
+            job.channel_id,
+            job.message_id,
+            DIRECTION_AROUND,
+            MESSAGE_PAGE_LIMIT,
+        )
+        .await
+    };
+    let messages = match page {
+        Ok(page) => page.messages,
+        Err(error) => {
+            tracing::warn!(%error, "could not re-read a message before resuming its upload");
+            return Some(job);
+        }
+    };
+    match upload_jobs::message_presence(job.message_id, &messages) {
+        MessagePresence::Deleted => None,
+        MessagePresence::Present => {
+            if let Some(message) = messages.iter().find(|m| m.message_id == job.message_id) {
+                job.adopt_current_message(message);
+            }
+            Some(job)
+        }
+        MessagePresence::Unknown => Some(job),
+    }
+}
+
 struct AnonymousAttachmentSend<'a> {
     clan_id: ClanId,
     channel_id: ChannelId,
@@ -8852,7 +9246,7 @@ fn presign_probe_url(url: &str, nonce: u64) -> String {
 /// row's `content` is display text, so a parse here answers None for every
 /// message and the timer is never armed at all.
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
-    if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
+    if message.create_time <= 0 || !message.attachments.iter().any(awaits_presign_expiry) {
         return None;
     }
     Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
@@ -8867,6 +9261,47 @@ fn next_presign_expiry_in(
     deadlines
         .min()
         .map(|deadline| std::time::Duration::from_secs((deadline - now).max(0) as u64))
+}
+
+fn awaits_presign_expiry(att: &MessageAttachment) -> bool {
+    att.presign_pending
+        && !att.uploading
+        && !att.upload_failed
+        && presign::upload_state(&presign::normalize_presign_key(&att.url)).is_none()
+}
+
+fn apply_upload_registry(att: &mut MessageAttachment) -> bool {
+    if !att.presign_pending {
+        return false;
+    }
+    let key = presign::normalize_presign_key(&att.url);
+    let before = (att.presign_pending, att.uploading, att.upload_failed);
+    match presign::upload_state(&key) {
+        Some(presign::UploadState::Uploaded) => {
+            att.presign_pending = false;
+            att.uploading = false;
+            att.upload_failed = false;
+        }
+        Some(presign::UploadState::Uploading) => {
+            att.uploading = true;
+            att.upload_failed = false;
+        }
+        Some(presign::UploadState::Failed) => {
+            att.uploading = false;
+            att.upload_failed = true;
+        }
+        None => {}
+    }
+    let mut changed = before != (att.presign_pending, att.uploading, att.upload_failed);
+    if att.presign_pending
+        && att.local_source.is_none()
+        && att.is_image()
+        && let Some(path) = presign::local_source(&key)
+    {
+        att.local_source = Some(path);
+        changed = true;
+    }
+    changed
 }
 
 fn apply_presign_gate_at(
@@ -8884,14 +9319,28 @@ fn apply_presign_gate_at(
     if all_finished {
         for a in attachments.iter_mut() {
             a.presign_pending = false;
+            a.upload_failed = false;
         }
     } else {
-        attachments.retain(|a| {
-            !presign::is_expired_presign_attachment(&a.url, Some(keys), base_img, create_time, now)
-        });
         for a in attachments.iter_mut() {
             a.presign_pending = presign::presign_pending(&a.url, Some(keys), base_img);
+            if !a.presign_pending {
+                a.upload_failed = false;
+                continue;
+            }
+            apply_upload_registry(a);
         }
+        attachments.retain(|a| {
+            a.uploading
+                || a.upload_failed
+                || !presign::is_expired_presign_attachment(
+                    &a.url,
+                    Some(keys),
+                    base_img,
+                    create_time,
+                    now,
+                )
+        });
     }
 
     #[cfg(debug_assertions)]
@@ -14504,6 +14953,154 @@ mod tests {
     }
 
     #[test]
+    fn presign_gate_keeps_a_stale_attachment_this_client_knows_failed() {
+        let key = "gate-known-failed";
+        presign::mark_failed(key);
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/uploads/gate-known-failed.mp4"),
+            cdn_attachment("https://cdn.example/uploads/gate-sent-elsewhere.mp4"),
+        ];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        presign::settle(key);
+        assert_eq!(
+            attachments.len(),
+            1,
+            "an upload this client never tracked is still dropped"
+        );
+        assert!(attachments[0].url.contains("gate-known-failed"));
+        assert!(attachments[0].upload_failed);
+        assert!(!awaits_presign_expiry(&attachments[0]));
+    }
+
+    #[test]
+    fn presign_gate_shows_a_known_failure_before_the_window_ends() {
+        let key = "gate-failed-early";
+        presign::mark_failed(key);
+        let mut attachments = vec![cdn_attachment(
+            "https://cdn.example/uploads/gate-failed-early.mp4",
+        )];
+        apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1100);
+        presign::settle(key);
+        assert!(attachments[0].presign_pending);
+        assert!(attachments[0].upload_failed);
+    }
+
+    #[test]
+    fn presign_gate_marks_an_attachment_this_client_is_still_uploading() {
+        let key = "gate-still-uploading".to_string();
+        presign::begin_uploading([&key]);
+        let mut attachments = vec![cdn_attachment(
+            "https://cdn.example/uploads/gate-still-uploading.mp4",
+        )];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        let waits = awaits_presign_expiry(&attachments[0]);
+        presign::settle(&key);
+        assert!(attachments[0].uploading);
+        assert!(!attachments[0].upload_failed);
+        assert!(!waits);
+    }
+
+    #[test]
+    fn presign_gate_does_not_bring_back_the_spinner_of_a_landed_upload() {
+        let key = "gate-landed".to_string();
+        presign::begin_uploading([&key]);
+        presign::finish_uploading(&key, true);
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/uploads/other-1.mp4"),
+            cdn_attachment("https://cdn.example/uploads/gate-landed.mp4"),
+        ];
+        apply_presign_gate_at(
+            &mut attachments,
+            &["other-1".to_string()],
+            TEST_CDN,
+            1000,
+            1100,
+        );
+        presign::settle(&key);
+        assert!(!attachments[1].presign_pending);
+        assert!(!attachments[1].uploading);
+    }
+
+    #[test]
+    fn presign_gate_clears_the_failed_mark_once_the_key_finishes() {
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/uploads/late.mp4"),
+            cdn_attachment("https://cdn.example/uploads/other.mp4"),
+        ];
+        attachments[0].upload_failed = true;
+        attachments[1].upload_failed = true;
+        apply_presign_gate_at(
+            &mut attachments,
+            &["late".to_string()],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        assert!(!attachments[0].presign_pending);
+        assert!(!attachments[0].upload_failed);
+        assert!(attachments[1].upload_failed);
+    }
+
+    #[test]
+    fn presign_gate_restores_the_local_preview_of_a_pending_image() {
+        let (image, clip) = ("gate-local-preview", "gate-local-preview-clip");
+        presign::remember_local_source(image, std::path::Path::new("/tmp/gate-local-preview.png"));
+        presign::remember_local_source(clip, std::path::Path::new("/tmp/clip.mp4"));
+        presign::mark_failed(image);
+        presign::mark_failed(clip);
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/uploads/gate-local-preview.png"),
+            cdn_attachment("https://cdn.example/uploads/gate-local-preview-clip.mp4"),
+        ];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        presign::settle(image);
+        presign::settle(clip);
+        assert_eq!(
+            attachments[0].local_source.as_deref(),
+            Some(std::path::Path::new("/tmp/gate-local-preview.png"))
+        );
+        assert!(attachments[0].upload_failed);
+        assert_eq!(attachments[1].local_source, None);
+    }
+
+    #[test]
+    fn a_failed_or_uploading_attachment_does_not_arm_the_expiry_timer() {
+        let mut msg = Message::new(
+            MessageId(3),
+            "clip".to_string(),
+            "5".to_string(),
+            "me",
+            1000,
+        );
+        msg.create_time = 1000;
+        msg.attachments = vec![cdn_attachment("https://cdn.example/uploads/clip.mp4")];
+        msg.attachments[0].presign_pending = true;
+        msg.attachments[0].upload_failed = true;
+        assert_eq!(presign_expiry_deadline(&msg), None);
+        msg.attachments[0].upload_failed = false;
+        msg.attachments[0].uploading = true;
+        assert_eq!(presign_expiry_deadline(&msg), None);
+    }
+
+    #[test]
     fn expiry_is_scheduled_for_the_earliest_pending_message() {
         let now = 1000;
         let max = presign::PRESIGN_PENDING_MAX_AGE_SEC;
@@ -15204,6 +15801,220 @@ mod tests {
                 assert_eq!(command_status(store, channel, 100), None);
             });
         });
+    }
+
+    fn channel_with_pending_clip(
+        store: &mut MessagesStore,
+        channel: ChannelId,
+        message_id: MessageId,
+        key: &str,
+    ) {
+        let mut msg = Message::new(message_id, "clip".to_string(), "5".to_string(), "me", 1000);
+        msg.create_time = 1000;
+        msg.attachments = vec![cdn_attachment(&format!(
+            "https://cdn.example/uploads/{key}.mp4"
+        ))];
+        msg.attachments[0].presign_pending = true;
+        store.active_channel_id = Some(channel);
+        store.cache.insert(
+            channel,
+            ChannelMessages {
+                messages: MessageList::from_messages(channel, vec![msg]),
+                has_more: false,
+                gap_bottom: false,
+            },
+            None,
+        );
+    }
+
+    fn resumed_job(channel: ChannelId, message_id: MessageId, key: &str) -> UploadJob {
+        let upload = serde_json::from_str(
+            r#"{"plan":{"Single":{"put_url":"u","path":"/p","content_type":"video/mp4"}}}"#,
+        )
+        .expect("plan");
+        UploadJob {
+            user_id: UserId(5),
+            clan_id: 1,
+            channel_id: channel.0,
+            parent_channel_id: channel.0,
+            topic_id: 0,
+            message_id: message_id.0,
+            mode: 2,
+            is_public: true,
+            content: "clip".into(),
+            mentions: Vec::new(),
+            hashtags: Vec::new(),
+            emojis: Vec::new(),
+            create_time_seconds: 0,
+            started_at: now_unix_seconds(),
+            finished: Vec::new(),
+            pending: vec![PendingUpload {
+                key: key.into(),
+                upload,
+            }],
+            sync_failures: 0,
+        }
+    }
+
+    fn first_attachment(store: &MessagesStore, channel: ChannelId) -> MessageAttachment {
+        store.cache.get(&channel).expect("channel").messages.items[0].attachments[0].clone()
+    }
+
+    #[gpui::test]
+    fn a_resumed_upload_marks_the_loaded_row_and_settles_it_when_the_bytes_land(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let (channel, id, key) = (ChannelId(600), MessageId(61), "resumed-clip");
+                channel_with_pending_clip(store, channel, id, key);
+                presign::begin_uploading([&key.to_string()]);
+                store.refresh_upload_rows(cx);
+                assert!(first_attachment(store, channel).uploading);
+
+                store.register_upload_job(resumed_job(channel, id, key), cx);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Uploaded(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(!att.uploading);
+                assert!(!att.presign_pending);
+                assert!(!att.upload_failed);
+                assert_eq!(
+                    presign::upload_state(key),
+                    Some(presign::UploadState::Uploaded)
+                );
+
+                store.complete_upload_job((channel.0, id.0), true, cx);
+                assert!(store.upload_jobs.is_empty());
+                assert!(store.running_upload_jobs.is_empty());
+                assert_eq!(presign::upload_state(key), None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_row_rebuilt_from_the_server_still_takes_a_failed_outcome(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let (channel, id, key) = (ChannelId(601), MessageId(62), "rebuilt-clip");
+                channel_with_pending_clip(store, channel, id, key);
+                store.register_upload_job(resumed_job(channel, id, key), cx);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Failed(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(att.upload_failed);
+                assert!(att.presign_pending);
+                assert!(!awaits_presign_expiry(&att));
+                assert_eq!(store.failed_uploads.len(), 1);
+                assert_eq!(store.failed_uploads[0].key, key);
+                presign::settle(key);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn jobs_for_the_same_message_id_in_two_buckets_do_not_evict_each_other(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let id = MessageId(70);
+                store.register_upload_job(resumed_job(ChannelId(700), id, "bucket-a"), cx);
+                store.register_upload_job(resumed_job(ChannelId(701), id, "bucket-b"), cx);
+                assert_eq!(store.upload_jobs.len(), 2);
+
+                store.apply_upload_job_outcome(
+                    (700, id.0),
+                    false,
+                    AttachmentUploadOutcome::Uploaded("bucket-a".into()),
+                    cx,
+                );
+                let job_b = store
+                    .upload_jobs
+                    .iter()
+                    .find(|job| job.channel_id == 701)
+                    .expect("job b");
+                assert!(job_b.finished.is_empty());
+                assert_eq!(job_b.pending.len(), 1);
+                presign::settle("bucket-a");
+                presign::settle("bucket-b");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unsynced_upload_is_kept_to_retry_and_no_longer_counts_as_running(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let (channel, id) = (ChannelId(710), MessageId(71));
+                store.register_upload_job(resumed_job(channel, id, "unsynced"), cx);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Uploaded("unsynced".into()),
+                    cx,
+                );
+                store.complete_upload_job((channel.0, id.0), false, cx);
+                assert_eq!(store.upload_jobs.len(), 1);
+                assert_eq!(store.upload_jobs[0].finished, vec!["unsynced".to_string()]);
+                assert!(store.running_upload_jobs.is_empty());
+                assert_eq!(
+                    presign::upload_state("unsynced"),
+                    Some(presign::UploadState::Uploaded)
+                );
+
+                store.complete_upload_job((channel.0, id.0), false, cx);
+                assert_eq!(store.upload_jobs.len(), 1);
+                store.complete_upload_job((channel.0, id.0), false, cx);
+                assert!(
+                    store.upload_jobs.is_empty(),
+                    "a patch that keeps failing is given up"
+                );
+                assert_eq!(presign::upload_state("unsynced"), None);
+
+                store.register_upload_job(resumed_job(channel, id, "discarded"), cx);
+                store.discard_upload_job((channel.0, id.0), cx);
+                assert!(store.upload_jobs.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn the_sweep_redraws_a_row_it_marks_failed(cx: &mut gpui::TestAppContext) {
+        let updated = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = updated.clone();
+        cx.update(|cx| {
+            let store = test_store(cx);
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if let MessagesEvent::Updated { message_id } = event {
+                    sink.borrow_mut().push(*message_id);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                let (channel, id, key) = (ChannelId(720), MessageId(72), "swept-clip");
+                channel_with_pending_clip(store, channel, id, key);
+                presign::mark_failed(key);
+                store.sweep_expired_presign(cx);
+                assert!(first_attachment(store, channel).upload_failed);
+                presign::settle(key);
+            });
+        });
+        assert!(updated.borrow().contains(&Some(MessageId(72))));
     }
 
     const OGP_RAW: &str = r#"{"t":"**hi** https://x.com","mk":[{"type":"b","s":0,"e":2},{"type":"lk_ogp","s":17,"e":18,"url":"https://x.com","title":"X"}]}"#;

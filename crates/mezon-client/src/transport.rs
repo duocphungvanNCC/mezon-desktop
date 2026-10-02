@@ -2941,7 +2941,7 @@ mod string_or_number {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingMention {
     pub user_id: String,
     pub role_id: String,
@@ -3031,7 +3031,7 @@ pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingHashtag {
     pub channel_id: String,
     pub s: i32,
@@ -3056,7 +3056,7 @@ pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingEmoji {
     pub emoji_id: String,
     pub s: i32,
@@ -12229,9 +12229,19 @@ mod tests {
     #[test]
     fn a_malformed_protobuf_body_is_rejected() {
         let truncated = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x05, b'e']);
-        assert!(truncated.unwrap_err().to_string().contains("response is not a JWT"));
+        assert!(
+            truncated
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
         let empty_token = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x00]);
-        assert!(empty_token.unwrap_err().to_string().contains("response is not a JWT"));
+        assert!(
+            empty_token
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
     }
 
     #[test]

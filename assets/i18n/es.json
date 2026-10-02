@@ -3303,6 +3303,7 @@
   "message.addAMessage": "Añadir un mensaje (Opcional)",
   "message.addReaction": "Añadir reacción",
   "message.attachment.uploading": "Subiendo...",
+  "message.attachment.uploadFailed": "Error al subir",
   "message.attachments.attachment": "Adjunto",
   "message.attachments.audio": "Voz",
   "message.attachments.contact": "Contacto",

@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Anpinnen aufheben",
   "message.addAMessage": "Eine Nachricht hinzufügen (optional)",
   "message.attachment.uploading": "Wird hochgeladen...",
+  "message.attachment.uploadFailed": "Hochladen fehlgeschlagen",
   "message.attachments.attachment": "Anhang",
   "message.attachments.audio": "Sprachnachricht",
   "message.attachments.contact": "Visitenkarte",

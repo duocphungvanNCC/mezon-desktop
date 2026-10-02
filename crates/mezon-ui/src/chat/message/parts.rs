@@ -911,28 +911,67 @@ fn attachment_sending_overlay(
         )
 }
 
-fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_failed_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
+    let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
+    let icon = Icon::new(IconName::TriangleAlert)
+        .size(px(16.))
+        .text_color(theme.danger_text);
+    let badge = if fits_label {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_3()
+            .py_1p5()
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::white())
+                    .child(mezon_i18n::t(locale, "message.attachment.uploadFailed")),
+            )
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(32.))
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+    };
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(40.))
-                .rounded_full()
-                .bg(theme.bg_floating)
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(24.))
-                        .text_color(theme.danger_text),
-                ),
-        )
+        .bg(MEDIA_FAILED_SCRIM)
+        .child(badge)
 }
+
+const MEDIA_FAILED_SCRIM: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.45,
+};
+
+const MEDIA_BADGE_BG: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.65,
+};
 
 fn render_audio(
     msg_id: MessageId,
@@ -1137,7 +1176,12 @@ fn render_album(
                 });
         }
         if att.upload_failed {
-            tile_element = tile_element.child(attachment_failed_overlay(theme));
+            tile_element = tile_element.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         } else if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(
                 theme,
@@ -1208,7 +1252,17 @@ fn presign_child(
     // A recipient never sees `uploading` — only `presign_pending` — so without
     // this the whole upload window is a bare spinner on their side while the
     // sender gets a labelled one.
-    if att.thumbnail.is_empty() {
+    if att.upload_failed {
+        if att.thumbnail.is_empty() {
+            parent
+        } else {
+            parent.child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        }
+    } else if att.thumbnail.is_empty() {
         parent.child(attachment_sending_overlay(
             theme, locale, box_width, box_height,
         ))
@@ -1301,7 +1355,12 @@ fn render_photo(
                 }),
         );
         if att.upload_failed {
-            el = el.child(attachment_failed_overlay(theme));
+            el = el.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             el = el.child(attachment_sending_overlay(
                 theme,
@@ -1333,7 +1392,12 @@ fn render_photo(
             att.display_height,
         );
         if att.upload_failed {
-            placeholder = placeholder.child(attachment_failed_overlay(theme));
+            placeholder = placeholder.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             placeholder = placeholder.child(attachment_sending_overlay(
                 theme,
@@ -1414,7 +1478,12 @@ fn render_photo(
             }),
     );
     if att.upload_failed {
-        el = el.child(attachment_failed_overlay(theme));
+        el = el.child(attachment_failed_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        ));
     } else if sending {
         el = el.child(attachment_sending_overlay(
             theme,
@@ -1455,7 +1524,7 @@ fn render_video_poster(
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
     let thumbnail = if att.presign_pending {
-        SharedString::default()
+        SharedString::from(att.thumbnail.clone())
     } else {
         att.thumbnail_proxied.clone()
     };
@@ -1485,10 +1554,15 @@ fn render_video_poster(
         });
     if att.upload_failed {
         return container
-            .child(attachment_failed_overlay(theme))
+            .child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ))
             .into_any_element();
     }
-    if sending {
+    if sending || att.presign_pending {
         return container
             .child(attachment_sending_overlay(
                 theme,
@@ -1497,17 +1571,6 @@ fn render_video_poster(
                 att.display_height,
             ))
             .into_any_element();
-    }
-    if att.presign_pending {
-        return presign_child(
-            container,
-            att,
-            theme,
-            ctx.locale,
-            att.display_width,
-            att.display_height,
-        )
-        .into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1614,8 +1677,8 @@ fn render_file_box(
     // only `presign_pending`, and every button in this box (download, open PDF)
     // hits the object URL directly. React filters pending documents out of the
     // list; the spinner state already disables all of them.
-    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
+    let sending = !failed && (att.uploading || att.presign_pending);
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
@@ -1626,7 +1689,9 @@ fn render_file_box(
     // While the object is not on the CDN yet the size we have is the sender's
     // claim about a file nobody can fetch, so say what is actually happening
     // instead — the spinner alone reads as a stuck row.
-    let size_line = if sending {
+    let size_line = if failed {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploadFailed"))
+    } else if sending {
         SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
     } else {
         SharedString::from(format!("size: {}", att.size_label))
@@ -1738,7 +1803,11 @@ fn render_file_box(
                 .child(
                     div()
                         .text_size(px(14.))
-                        .text_color(theme.tokens.text_theme_primary)
+                        .text_color(if failed {
+                            theme.danger_text
+                        } else {
+                            theme.tokens.text_theme_primary
+                        })
                         .child(size_line),
                 ),
         )

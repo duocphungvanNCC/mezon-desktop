@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Désépingler le message",
   "message.addAMessage": "Ajouter un message (facultatif)",
   "message.attachment.uploading": "Téléchargement en cours...",
+  "message.attachment.uploadFailed": "Échec du téléchargement",
   "message.attachments.attachment": "Pièce jointe",
   "message.attachments.audio": "Message vocal",
   "message.attachments.contact": "Carte de visite",

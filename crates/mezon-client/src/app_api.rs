@@ -139,6 +139,76 @@ pub struct PresignedAttachment {
     plan: UploadPlan,
 }
 
+impl PresignedAttachment {
+    pub fn resumable(&self) -> ResumableUpload {
+        ResumableUpload {
+            plan: self.plan.clone(),
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResumableUpload {
+    plan: UploadPlan,
+}
+
+impl ResumableUpload {
+    pub fn local_path(&self) -> &Path {
+        match &self.plan {
+            UploadPlan::Single { path, .. } | UploadPlan::Multipart { path, .. } => path,
+        }
+    }
+
+    pub fn has_urls(&self) -> bool {
+        match &self.plan {
+            UploadPlan::Single { put_url, .. } => !put_url.is_empty(),
+            UploadPlan::Multipart {
+                upload_id,
+                part_urls,
+                ..
+            } => !upload_id.is_empty() || !part_urls.is_empty(),
+        }
+    }
+
+    pub fn without_urls(&self) -> Self {
+        let mut plan = self.plan.clone();
+        match &mut plan {
+            UploadPlan::Single { put_url, .. } => put_url.clear(),
+            UploadPlan::Multipart {
+                upload_id,
+                part_urls,
+                ..
+            } => {
+                upload_id.clear();
+                part_urls.clear();
+            }
+        }
+        Self { plan }
+    }
+}
+
+impl std::fmt::Debug for ResumableUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.plan {
+            UploadPlan::Single { .. } => "single",
+            UploadPlan::Multipart { .. } => "multipart",
+        };
+        f.debug_struct("ResumableUpload")
+            .field("plan", &kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<ResumableUpload> for PresignedAttachment {
+    fn from(resumable: ResumableUpload) -> Self {
+        Self {
+            attachment: Default::default(),
+            plan: resumable.plan,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum UploadPlan {
     Single {
         put_url: String,
@@ -2251,8 +2321,9 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        already_finished: Vec<String>,
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
-    ) {
+    ) -> bool {
         use futures::StreamExt as _;
         let mut stream = futures::stream::iter(
             presigned
@@ -2261,8 +2332,29 @@ impl AppApi {
                 .map(|(item, key)| async move { (key, self.execute_upload(item).await) }),
         )
         .buffer_unordered(ATTACHMENT_UPLOAD_CONCURRENCY);
-        let mut finished: Vec<String> = Vec::new();
+        let mut finished = already_finished;
         let mut synced = 0usize;
+        if !finished.is_empty()
+            && self
+                .sync_presign_finish_with_retry(
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    content,
+                    &mentions,
+                    &hashtags,
+                    &emojis,
+                    finished.clone(),
+                    create_time_seconds,
+                    mode,
+                    is_public,
+                    topic_id,
+                    is_update_msg_topic,
+                )
+                .await
+        {
+            synced = finished.len();
+        }
         while let Some((key, result)) = stream.next().await {
             match result {
                 Ok(()) => {
@@ -2296,24 +2388,28 @@ impl AppApi {
                 synced = finished.len();
             }
         }
-        if finished.len() > synced {
-            self.sync_presign_finish_with_retry(
-                clan_id,
-                channel_id,
-                message_id,
-                content,
-                &mentions,
-                &hashtags,
-                &emojis,
-                finished,
-                create_time_seconds,
-                mode,
-                is_public,
-                topic_id,
-                is_update_msg_topic,
-            )
-            .await;
+        if finished.len() > synced
+            && self
+                .sync_presign_finish_with_retry(
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    content,
+                    &mentions,
+                    &hashtags,
+                    &emojis,
+                    finished.clone(),
+                    create_time_seconds,
+                    mode,
+                    is_public,
+                    topic_id,
+                    is_update_msg_topic,
+                )
+                .await
+        {
+            synced = finished.len();
         }
+        finished.len() == synced
     }
 
     /// One lost presign_finish patch leaves the attachment loading on EVERY
@@ -3155,9 +3251,65 @@ impl AppApi {
 #[cfg(test)]
 mod tests {
     use super::{
-        MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges, sanitize_upload_filename,
-        upload_attachment_type,
+        MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan, attachment_cdn_url,
+        multipart_part_ranges, sanitize_upload_filename, upload_attachment_type,
     };
+
+    fn presigned(plan: UploadPlan) -> PresignedAttachment {
+        PresignedAttachment {
+            attachment: Default::default(),
+            plan,
+        }
+    }
+
+    #[test]
+    fn a_resumable_upload_round_trips_both_plans_through_json() {
+        let single = presigned(UploadPlan::Single {
+            put_url: "https://s3.example/put?X-Amz-Signature=abc".into(),
+            path: "/tmp/clip.mp4".into(),
+            content_type: "video/mp4".into(),
+        });
+        let multipart = presigned(UploadPlan::Multipart {
+            upload_id: "up-1".into(),
+            part_urls: vec![
+                "https://s3.example/p1".into(),
+                "https://s3.example/p2".into(),
+            ],
+            ranges: vec![(0, 10), (10, 4)],
+            path: "/tmp/big.mp4".into(),
+            content_type: "video/mp4".into(),
+            filename: "1/2.mp4".into(),
+        });
+        for original in [single, multipart] {
+            let json = serde_json::to_string(&original.resumable()).expect("serialize");
+            let restored: ResumableUpload = serde_json::from_str(&json).expect("deserialize");
+            let back = PresignedAttachment::from(restored);
+            assert_eq!(
+                serde_json::to_string(&back.resumable()).expect("serialize again"),
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumable_upload_never_prints_its_presigned_urls() {
+        let upload = presigned(UploadPlan::Single {
+            put_url: "https://s3.example/put?X-Amz-Signature=secret".into(),
+            path: "/tmp/clip.mp4".into(),
+            content_type: "video/mp4".into(),
+        })
+        .resumable();
+        assert_eq!(upload.local_path(), std::path::Path::new("/tmp/clip.mp4"));
+        assert!(upload.has_urls());
+        let stripped = upload.without_urls();
+        assert!(!stripped.has_urls());
+        assert_eq!(stripped.local_path(), std::path::Path::new("/tmp/clip.mp4"));
+        let json = serde_json::to_string(&stripped).expect("serialize");
+        assert!(!json.contains("s3.example"));
+        let printed = format!("{upload:?}");
+        assert!(!printed.contains("secret"));
+        assert!(!printed.contains("s3.example"));
+    }
 
     #[test]
     fn everything_that_is_not_media_uploads_as_a_doc() {

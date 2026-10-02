@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Відкріпити повідомлення",
   "message.addAMessage": "Додати повідомлення (необов'язково)",
   "message.attachment.uploading": "Завантаження...",
+  "message.attachment.uploadFailed": "Не вдалося завантажити",
   "message.attachments.attachment": "Вкладення",
   "message.attachments.audio": "Голосове повідомлення",
   "message.attachments.contact": "Контакт",
