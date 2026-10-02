@@ -2543,9 +2543,20 @@ impl MessagesStore {
             .cache
             .get(&storage_id)
             .and_then(|channel| channel.messages.get_by_id(message_id))
-            .map(|msg| (!msg.attachments.is_empty(), msg.create_time.max(0) as u32));
+            .map(|msg| {
+                (
+                    !msg.attachments.is_empty(),
+                    msg.create_time.max(0) as u32,
+                    if msg.code == MessageCode::MessageBuzz {
+                        MESSAGE_BUZZ_CODE
+                    } else {
+                        0
+                    },
+                )
+            });
+        let message_code = edit_meta.map_or(0, |(_, _, message_code)| message_code);
         let (spans, transport_mentions, transport_hashtags, transport_emojis, raw_content) =
-            edit_content_spans(&content, content_tokens);
+            edit_content_spans(&content, content_tokens, message_code);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -2585,12 +2596,12 @@ impl MessagesStore {
                 (storage_id.get(), 0, false)
             };
         let create_time_seconds = edit_meta
-            .filter(|(has_attachments, _)| *has_attachments)
-            .map(|(_, ts)| ts)
+            .filter(|(has_attachments, _, _)| *has_attachments)
+            .map(|(_, ts, _)| ts)
             .unwrap_or(0);
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .update_channel_message(
+                .update_channel_message_with_code(
                     clan_id,
                     api_channel_id,
                     message_num,
@@ -2604,6 +2615,7 @@ impl MessagesStore {
                     is_update_msg_topic,
                     false,
                     create_time_seconds,
+                    message_code,
                 )
                 .await
             {
@@ -2636,6 +2648,11 @@ impl MessagesStore {
             0
         } else {
             msg.create_time.max(0) as u32
+        };
+        let message_code = if msg.code == MessageCode::MessageBuzz {
+            MESSAGE_BUZZ_CODE
+        } else {
+            0
         };
         msg.ogp = None;
         let content = msg.content.clone();
@@ -2683,7 +2700,7 @@ impl MessagesStore {
             .collect();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .update_channel_message(
+                .update_channel_message_with_code(
                     clan_id,
                     api_channel_id,
                     message_num,
@@ -2697,6 +2714,7 @@ impl MessagesStore {
                     is_update_msg_topic,
                     false,
                     create_time_seconds,
+                    message_code,
                 )
                 .await
             {
@@ -2846,6 +2864,11 @@ impl MessagesStore {
         }
         self.apply_message_remove(storage_id, message_id, cx);
         let anonymous = is_anonymous_sender_id(&failed.sender_id, cx);
+        let message_code = if failed.code == MessageCode::MessageBuzz {
+            MESSAGE_BUZZ_CODE
+        } else {
+            0
+        };
         self.send_message_with_payload(
             content,
             failed.sender_id.clone(),
@@ -2855,7 +2878,7 @@ impl MessagesStore {
             None,
             None,
             anonymous,
-            0,
+            message_code,
             cx,
         );
     }
@@ -8220,6 +8243,7 @@ pub(crate) fn message_from_channel_proto(
 }
 
 fn merge_message_update(existing: &mut Message, incoming: &Message) {
+    let prior_code = existing.code;
     existing.content = incoming.content.clone();
     existing.spans = incoming.spans.clone();
     existing.rich_layout = incoming.rich_layout.clone();
@@ -8264,6 +8288,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     }
     existing.code = if existing.poll.is_some() {
         MessageCode::Poll
+    } else if prior_code == MessageCode::MessageBuzz {
+        MessageCode::MessageBuzz
     } else {
         MessageCode::Chat
     };
@@ -8995,16 +9021,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
-    let code = MessageCode::from_raw(m.code);
     let mut spans = parse_spans(&m.content_tokens);
-    let content = if code == MessageCode::MessageBuzz {
-        let content = crate::message::markdown_edit_source(&m.content, &spans)
-            .unwrap_or_else(|| m.content.clone());
-        spans = vec![MessageSpan::Text(content.clone().into())];
-        content
-    } else {
-        m.content.clone()
-    };
     crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
@@ -9040,6 +9057,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
     let ogp = build_ogp_preview(&m.content_tokens, cfg);
+    let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     let call_log = build_call_log(&m.content_tokens);
     let token_transaction = (code == MessageCode::SendToken)
@@ -9068,7 +9086,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(UserId);
     Message::new(
         MessageId(m.message_id),
-        content,
+        m.content,
         m.sender_id.to_string(),
         m.sender_name,
         m.create_time,
@@ -9395,7 +9413,11 @@ type EditTransportTokens = (
     String,
 );
 
-fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTransportTokens {
+fn edit_content_spans(
+    content: &str,
+    content_tokens: OutgoingContent,
+    message_code: i32,
+) -> EditTransportTokens {
     let OutgoingContent {
         mentions,
         hashtags,
@@ -9413,17 +9435,16 @@ fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTra
         .into_iter()
         .map(OutgoingEmoji::into_transport)
         .collect();
-    let markdowns = detect_markdown(content);
-    let tokens = ApiMessageContent {
-        t: content.to_string(),
-        mentions: mention_content_tokens(&transport_mentions),
-        hg: hashtag_content_tokens(&transport_hashtags),
-        ej: emoji_content_tokens(&transport_emojis),
-        mk: markdown_content_tokens(&markdowns),
-        ..Default::default()
-    };
+    let sent = build_send_content_with_code(
+        content,
+        &transport_mentions,
+        &transport_hashtags,
+        &transport_emojis,
+        message_code,
+    );
+    let raw_content = sent.json;
+    let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
-    let raw_content = serde_json::to_string(&tokens).unwrap_or_default();
     (
         spans,
         transport_mentions,
@@ -12572,7 +12593,7 @@ mod tests {
             emojis: Vec::new(),
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans("@bob hi", content_tokens);
+            edit_content_spans("@bob hi", content_tokens, 0);
 
         assert!(
             transport_mentions.iter().any(|m| m.user_id == "42"),
@@ -12598,6 +12619,62 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].user_id.as_deref(), Some("42"));
         assert_eq!(targets[0].role_id, None);
+    }
+
+    #[test]
+    fn buzz_edit_keeps_markers_links_and_mentions() {
+        let content = "```jb``` https://a.com @bob #room :wave:";
+        let content_tokens = OutgoingContent {
+            mentions: vec![OutgoingMention {
+                user_id: "42".into(),
+                role_id: String::new(),
+                display: "@bob".into(),
+                s: 23,
+                e: 27,
+            }],
+            hashtags: vec![OutgoingHashtag {
+                channel_id: "7".into(),
+                s: 28,
+                e: 33,
+            }],
+            emojis: vec![OutgoingEmoji {
+                emoji_id: "9".into(),
+                s: 34,
+                e: 40,
+            }],
+        };
+        let (spans, transport_mentions, _, _, raw_content) =
+            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
+
+        assert_eq!(parsed.t, content);
+        assert!(
+            spans
+                .iter()
+                .all(|span| !matches!(span, MessageSpan::CodeBlock { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Link { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Mention { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Emoji { .. }))
+        );
+        assert_eq!(transport_mentions[0].user_id, "42");
     }
 
     #[test]
@@ -12929,16 +13006,33 @@ mod tests {
     }
 
     #[test]
-    fn buzz_message_restores_legacy_markdown_as_literal_text() {
+    fn chat_update_keeps_buzz_semantic_type() {
+        let mut existing =
+            Message::new(MessageId(1), "old", "3", "Bob", 100).with_code(MessageCode::MessageBuzz);
+        let incoming = Message::new(MessageId(1), "```jb```", "3", "Bob", 101)
+            .with_code(MessageCode::ChatUpdate)
+            .with_spans(vec![MessageSpan::Text("```jb```".into())]);
+
+        merge_message_update(&mut existing, &incoming);
+
+        assert_eq!(existing.code, MessageCode::MessageBuzz);
+        assert_eq!(existing.content, "```jb```");
+        assert!(
+            matches!(existing.spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+        );
+    }
+
+    #[test]
+    fn buzz_message_ingest_keeps_canonical_server_content() {
         let mut message = plain_api_message(MESSAGE_BUZZ_CODE, vec![]);
         message.content = "jb".into();
         message.content_tokens =
             serde_json::from_str(r#"{"t":"jb","mk":[{"s":0,"e":2,"type":"pre"}]}"#)
                 .expect("buzz content");
         let rows = prepare_messages(vec![message], None, None);
-        assert_eq!(rows[0].content, "```jb```");
+        assert_eq!(rows[0].content, "jb");
         assert!(
-            matches!(rows[0].spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+            matches!(rows[0].spans.as_slice(), [MessageSpan::CodeBlock { text, .. }] if text == "jb")
         );
     }
 
@@ -15289,6 +15383,38 @@ mod tests {
                         .is_some_and(|c| c.messages.contains_id(MessageId(1))),
                     "a row with nothing left to replay must stay instead of sending empty"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resend_fallback_keeps_buzz_message_code(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(7);
+            store.update(cx, |store, cx| {
+                let mut failed = Message::new(MessageId(1), "```jb```", "5", "Bob", 100)
+                    .with_code(MessageCode::MessageBuzz);
+                failed.send_failed = true;
+                store.set_channel(channel, vec![failed]);
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+
+                store.resend_message(MessageId(1), cx);
+
+                assert!(
+                    store
+                        .pending_send_payloads
+                        .values()
+                        .any(|payload| payload.message_code == MESSAGE_BUZZ_CODE)
+                );
+                assert!(store.cache.get(&channel).is_some_and(|cached| {
+                    cached
+                        .messages
+                        .as_slice()
+                        .iter()
+                        .any(|message| message.code == MessageCode::MessageBuzz)
+                }));
             });
         });
     }

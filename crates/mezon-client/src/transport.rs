@@ -3500,13 +3500,24 @@ pub fn build_send_content_with_code(
     if message_code != MESSAGE_BUZZ_CODE {
         return build_send_content(text, mentions, hashtags, emojis);
     }
+    let markdowns: Vec<OutgoingMarkdown> = detect_markdown(text)
+        .into_iter()
+        .filter(|token| is_link_markdown_kind(&token.kind))
+        .collect();
+    let json = build_message_content_json(text, mentions, hashtags, emojis, &markdowns);
+    let cvtt = canvas_titles_for_text(text);
+    let json = if cvtt.is_empty() {
+        json
+    } else {
+        with_cvtt(json, &cvtt)
+    };
     SendContent {
-        json: build_message_content_json(text, mentions, hashtags, emojis, &[]),
+        json,
         text: text.to_string(),
         mentions: mentions.to_vec(),
         hashtags: hashtags.to_vec(),
         emojis: emojis.to_vec(),
-        markdowns: Vec::new(),
+        markdowns,
     }
 }
 
@@ -9673,8 +9684,46 @@ impl MezonTransport {
         hide_editted: bool,
         create_time_seconds: u32,
     ) -> Result<()> {
+        self.update_channel_message_with_code(
+            clan_id,
+            channel_id,
+            message_id,
+            content,
+            mentions,
+            hashtags,
+            emojis,
+            mode,
+            is_public,
+            topic_id,
+            is_update_msg_topic,
+            hide_editted,
+            create_time_seconds,
+            0,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_with_code(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+        message_code: i32,
+    ) -> Result<()> {
         let cid = self.generate_cid();
-        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        let sent =
+            build_send_content_with_code(content, &mentions, &hashtags, &emojis, message_code);
         let mut content_json = sent.json;
         if create_time_seconds > 0 {
             content_json = with_create_time_seconds(content_json, create_time_seconds);
@@ -10669,6 +10718,23 @@ mod tests {
         assert_eq!(sent.text, "```jb```");
         assert_eq!(parsed.t, "```jb```");
         assert!(parsed.mk.is_empty());
+    }
+
+    #[test]
+    fn buzz_content_keeps_links_and_canvas_titles() {
+        let text = "```jb``` https://mezon.ai/chat/clans/1/channels/2/canvas/abc";
+        let sent = build_send_content_with_code(text, &[], &[], &[], MESSAGE_BUZZ_CODE);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.t, text);
+        assert_eq!(parsed.mk.len(), 1);
+        assert!(
+            parsed.mk[0]
+                .kind
+                .as_deref()
+                .is_some_and(is_link_markdown_kind)
+        );
+        assert_eq!(parsed.cvtt.get("abc").map(String::as_str), Some("Untitled"));
     }
 
     #[test]
