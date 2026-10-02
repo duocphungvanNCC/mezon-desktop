@@ -249,7 +249,7 @@ impl PermissionsTab {
                     ChannelUsersEvent::MembershipChanged { channel_id }
                         if *channel_id == this.channel_id =>
                     {
-                        this.reload_private_roles(cx);
+                        this.reload_access_lists(cx);
                     }
                     _ => {}
                 },
@@ -439,7 +439,11 @@ impl PermissionsTab {
         self.member_search = Some(input);
     }
 
-    fn reload_private_roles(&self, cx: &mut Context<Self>) {
+    fn reload_access_lists(&self, cx: &mut Context<Self>) {
+        let channel_id = self.channel_id;
+        ChannelUsersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(channel_id, cx);
+        });
         if !self.persisted_private(cx) {
             return;
         }

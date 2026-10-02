@@ -244,11 +244,8 @@ impl ChannelUsersStore {
     }
 
     fn apply_membership_change(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        let in_flight = self.loading.remove(&channel_id).is_some();
-        if in_flight || self.cache.contains(&channel_id) {
-            self.cache.mark_stale(&channel_id);
-            self.ensure_loaded(channel_id, cx);
-        }
+        self.loading.remove(&channel_id);
+        self.cache.mark_stale(&channel_id);
         cx.emit(ChannelUsersEvent::MembershipChanged { channel_id });
     }
 
@@ -381,7 +378,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_membership_event_refetches_a_cached_member_list(cx: &mut gpui::TestAppContext) {
+    fn a_membership_event_marks_a_cached_member_list_stale(cx: &mut gpui::TestAppContext) {
         let store = cx.update(init_store);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let _sub = cx.update(|cx| {
@@ -396,8 +393,10 @@ mod tests {
             store.update(cx, |store, cx| {
                 store.seed_users_for_test(ChannelId(1), &[UserId(5)]);
                 store.handle_realtime(&user_added(1), cx);
-                assert!(store.is_loading(ChannelId(1)));
+                assert!(!store.is_loading(ChannelId(1)));
                 assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5)]);
+                store.ensure_loaded(ChannelId(1), cx);
+                assert!(store.is_loading(ChannelId(1)));
             });
         });
         cx.update(|cx| {
@@ -406,6 +405,7 @@ mod tests {
                 store.finish_fetch(ChannelId(1), fetch, Ok(listing(&[5, 6])), cx);
                 assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5), UserId(6)]);
                 store.handle_realtime(&user_removed(1), cx);
+                store.ensure_loaded(ChannelId(1), cx);
                 assert!(store.is_loading(ChannelId(1)));
             });
         });
@@ -413,17 +413,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_membership_event_restarts_a_fetch_already_in_flight(cx: &mut gpui::TestAppContext) {
+    fn a_membership_event_discards_a_fetch_already_in_flight(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = init_store(cx);
             store.update(cx, |store, cx| {
                 store.ensure_loaded(ChannelId(1), cx);
                 let stale_fetch = store.loading[&ChannelId(1)];
                 store.handle_realtime(&user_added(1), cx);
-                let fresh_fetch = store.loading[&ChannelId(1)];
-                assert_ne!(stale_fetch, fresh_fetch);
+                assert!(!store.is_loading(ChannelId(1)));
                 store.finish_fetch(ChannelId(1), stale_fetch, Ok(listing(&[5])), cx);
                 assert!(!store.is_loaded(ChannelId(1)));
+                store.ensure_loaded(ChannelId(1), cx);
+                let fresh_fetch = store.loading[&ChannelId(1)];
+                assert_ne!(stale_fetch, fresh_fetch);
                 store.finish_fetch(ChannelId(1), fresh_fetch, Ok(listing(&[5, 9])), cx);
                 assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5), UserId(9)]);
             });
