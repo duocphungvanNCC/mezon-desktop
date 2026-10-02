@@ -1716,7 +1716,8 @@ impl ChannelMessages {
                 | MessagesEvent::ForwardFinished { .. }
                 | MessagesEvent::ShareContactFinished { .. }
                 | MessagesEvent::AnonymousModeChanged
-                | MessagesEvent::SendFailedWithoutRow => return,
+                | MessagesEvent::SendFailedWithoutRow
+                | MessagesEvent::OgpRemoveFailed => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
