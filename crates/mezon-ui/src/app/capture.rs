@@ -339,6 +339,8 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         // What the next submit will answer, if anything.
         "reply_target": reply_target,
         "popup_open": popup_open,
+        "searching": composer.probe_searching(),
+        "stale": composer.probe_holding_stale(),
         "selected": selected,
         "suggestions": suggestions,
         "panel": composer.active_panel(cx).map(|tab| match tab {

@@ -1779,6 +1779,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<mezon_proto::api::SearchMentionUsersResponse> {
+        let transport = self.inner.clone();
+        let text = text.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .search_mention_users(clan_id, channel_id, &text)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,

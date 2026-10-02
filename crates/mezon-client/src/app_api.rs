@@ -508,6 +508,17 @@ impl AppApi {
         self.transport.search_ctrl_k(text, search_type).await
     }
 
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<mezon_proto::api::SearchMentionUsersResponse> {
+        self.transport
+            .search_mention_users(clan_id, channel_id, text)
+            .await
+    }
+
     pub async fn check_duplicate_thread_name(
         &self,
         name: &str,

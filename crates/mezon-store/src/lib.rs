@@ -39,6 +39,7 @@ pub mod inbox;
 pub mod invite;
 pub mod login;
 pub mod media_permission;
+pub mod mention_search;
 pub mod message;
 pub mod message_search;
 pub mod message_time;
@@ -77,6 +78,7 @@ use dirs::config_dir;
 pub use mezon_client::Session;
 pub use mezon_client::data_image;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
+pub use mezon_client::{MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS};
 pub use mezon_client::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
@@ -179,6 +181,7 @@ pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
+pub use mention_search::{MentionSearchEvent, MentionSearchKey, MentionSearchStore};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,

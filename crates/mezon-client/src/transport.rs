@@ -102,6 +102,50 @@ fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
 }
 
+#[derive(Debug)]
+struct EnvelopeStatus {
+    api_name: String,
+    message: String,
+    code: i32,
+}
+
+impl std::fmt::Display for EnvelopeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} failed: {} (code={})",
+            self.api_name, self.message, self.code
+        )
+    }
+}
+
+const ENVELOPE_NOT_FOUND: i32 = 404;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
+    anyhow::Error::new(ApiStatusError {
+        code: ApiStatusError::NOT_FOUND,
+    })
+    .context(EnvelopeStatus {
+        api_name: api_name.to_string(),
+        message: "Not found.".to_string(),
+        code: ENVELOPE_NOT_FOUND,
+    })
+}
+
+pub fn is_unknown_api_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<EnvelopeStatus>()
+        .is_some_and(|status| status.code == ENVELOPE_NOT_FOUND)
+}
+
+pub const MENTION_SEARCH_MIN_CHARS: usize = 2;
+pub const MENTION_SEARCH_MAX_CHARS: usize = 64;
+
+pub fn mention_search_text_accepted(text: &str) -> bool {
+    let chars = text.trim().chars().filter(|c| !c.is_control()).count();
+    (MENTION_SEARCH_MIN_CHARS..=MENTION_SEARCH_MAX_CHARS).contains(&chars)
+}
+
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
@@ -3928,11 +3972,11 @@ impl MezonTransport {
                 error.message.trim()
             );
             let grpc_code = grpc_code_from_envelope_status(error.code);
-            return Err(api_status_error(grpc_code)).context(format!(
-                "{api_name} failed: {} (code={})",
-                error.message.trim(),
-                error.code
-            ));
+            return Err(api_status_error(grpc_code)).context(EnvelopeStatus {
+                api_name: api_name.to_string(),
+                message: error.message.trim().to_string(),
+                code: error.code,
+            });
         }
         self.log_api_ok(api_name, cid, code, response.len(), args, started);
         Ok((code, response))
@@ -4618,6 +4662,7 @@ impl MezonTransport {
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
+            "SearchMentionUsers" => 211,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6950,6 +6995,36 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<api::SearchMentionUsersResponse> {
+        let text = text.trim();
+        if !mention_search_text_accepted(text) {
+            anyhow::bail!(
+                "SearchMentionUsers text must be {MENTION_SEARCH_MIN_CHARS} to {MENTION_SEARCH_MAX_CHARS} characters"
+            );
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchMentionUsersRequest {
+            clan_id,
+            channel_id,
+            text: text.to_string(),
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "SearchMentionUsers", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchMentionUsersResponse::decode(
+            response.as_slice(),
+        )?)
     }
 
     /// Search threads by label within a parent channel.
@@ -9382,7 +9457,10 @@ impl MezonTransport {
                 .await?
         };
         let token = meet_token_from_raw_body(code, &response)?;
-        Ok(api::GenerateMeetTokenResponse { token })
+        Ok(api::GenerateMeetTokenResponse {
+            token,
+            ..Default::default()
+        })
     }
 
     pub async fn remove_participant_mezon_meet(
@@ -11742,6 +11820,42 @@ mod tests {
     }
 
     #[test]
+    fn only_a_socket_404_marks_an_api_the_server_does_not_know() {
+        let unknown: anyhow::Error = Err::<(), _>(api_status_error(ApiStatusError::NOT_FOUND))
+            .context(EnvelopeStatus {
+                api_name: "SearchMentionUsers".to_string(),
+                message: "Not found.".to_string(),
+                code: 404,
+            })
+            .unwrap_err();
+        assert!(is_unknown_api_error(&unknown));
+        assert!(is_unknown_api_error(&unknown_api_error(
+            "SearchMentionUsers"
+        )));
+        assert_eq!(
+            unknown.to_string(),
+            "SearchMentionUsers failed: Not found. (code=404)"
+        );
+        assert_eq!(
+            api_status_from_error(&unknown).map(|status| status.code),
+            Some(ApiStatusError::NOT_FOUND)
+        );
+        let handler_not_found = api_status_error(ApiStatusError::NOT_FOUND);
+        assert!(!is_unknown_api_error(&handler_not_found));
+    }
+
+    #[test]
+    fn mention_search_text_matches_server_rune_bounds() {
+        assert!(!mention_search_text_accepted(""));
+        assert!(!mention_search_text_accepted("a"));
+        assert!(!mention_search_text_accepted("  a  "));
+        assert!(mention_search_text_accepted("ab"));
+        assert!(mention_search_text_accepted("đă"));
+        assert!(mention_search_text_accepted(&"ư".repeat(64)));
+        assert!(!mention_search_text_accepted(&"a".repeat(65)));
+    }
+
+    #[test]
     fn api_index_pins_known_names_and_rejects_unknown() {
         let t = transport(true);
         assert_eq!(t.get_api_index("ListChannelDescs"), Some(0));
@@ -11749,6 +11863,8 @@ mod tests {
         assert_eq!(t.get_api_index("ListClanDescs"), Some(2));
         assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
+        assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
+        assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -12098,6 +12214,7 @@ mod tests {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
             token: jwt.to_owned(),
+            ..Default::default()
         }
         .encode_to_vec();
         assert_eq!(bare_jwt(&encoded), None);
