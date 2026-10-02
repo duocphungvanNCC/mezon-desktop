@@ -24,7 +24,6 @@ use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::chat::role_style::{role_color_in, role_fallback_color};
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::compositions::DmVoiceBadge;
 use crate::components::primitives::{
     Avatar, ContextMenu, IconName, SubmenuOption, context_menu_at,
 };
@@ -33,6 +32,7 @@ use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
 use crate::util::text_utils::normalize_search_string;
+use crate::util::user_status::VoiceActivityBadge;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemberSource {
@@ -69,7 +69,7 @@ struct MemberRow {
     online: bool,
     presence: DmAvatarPresence,
     user_status: SharedString,
-    voice_badge: Option<DmVoiceBadge>,
+    voice_badge: Option<VoiceActivityBadge>,
     is_owner: bool,
     role_color: Option<Hsla>,
     rcm_id: SharedString,
@@ -82,7 +82,7 @@ struct RawMember {
     online: bool,
     presence: DmAvatarPresence,
     user_status: String,
-    voice_badge: Option<DmVoiceBadge>,
+    voice_badge: Option<VoiceActivityBadge>,
     role_color: Option<Hsla>,
 }
 
@@ -714,14 +714,8 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
     (to_raw(&online_ids, true), to_raw(&offline_ids, false))
 }
 
-fn member_voice_badge(is_online: bool, info: Option<InVoiceInfo>) -> Option<DmVoiceBadge> {
-    is_online.then_some(info).flatten().map(|info| {
-        if info.sharing_screen {
-            DmVoiceBadge::SharingScreen
-        } else {
-            DmVoiceBadge::InVoice
-        }
-    })
+fn member_voice_badge(is_online: bool, info: Option<InVoiceInfo>) -> Option<VoiceActivityBadge> {
+    is_online.then_some(info).flatten().map(Into::into)
 }
 
 fn raw_member_json(member: &RawMember) -> serde_json::Value {
@@ -732,7 +726,7 @@ fn raw_member_json(member: &RawMember) -> serde_json::Value {
         "presence": format!("{:?}", member.presence),
         "user_status": member.user_status,
         "in_voice": member.voice_badge.is_some(),
-        "sharing_screen": member.voice_badge == Some(DmVoiceBadge::SharingScreen),
+        "sharing_screen": member.voice_badge == Some(VoiceActivityBadge::SharingScreen),
     })
 }
 
@@ -1244,21 +1238,16 @@ fn render_member(
         color
     };
     let status = if let Some(voice_badge) = member.voice_badge {
-        let label = match voice_badge {
-            DmVoiceBadge::InVoice => in_voice_label.clone(),
-            DmVoiceBadge::SharingScreen => share_screen_label.clone(),
-        };
+        let label = voice_badge
+            .member_label(in_voice_label, share_screen_label)
+            .clone();
         Some((label, status_color))
     } else {
         (!member.user_status.is_empty()).then(|| (member.user_status.clone(), dim(status_color)))
     };
     let status_icon = member.voice_badge.map(|voice_badge| {
-        let icon = match voice_badge {
-            DmVoiceBadge::InVoice => IconName::Speaker,
-            DmVoiceBadge::SharingScreen => IconName::VoiceScreenShareIcon,
-        };
         (
-            icon,
+            voice_badge.icon(),
             crate::util::user_status::in_voice_icon_color(theme).into(),
         )
     });
@@ -1889,7 +1878,7 @@ fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &st
 #[cfg(test)]
 mod voice_status_tests {
     use super::member_voice_badge;
-    use crate::components::compositions::DmVoiceBadge;
+    use crate::util::user_status::VoiceActivityBadge;
     use mezon_store::{ChannelId, ClanId, InVoiceInfo};
 
     fn voice_info(sharing_screen: bool) -> InVoiceInfo {
@@ -1904,11 +1893,11 @@ mod voice_status_tests {
     fn member_voice_badge_distinguishes_screen_share() {
         assert_eq!(
             member_voice_badge(true, Some(voice_info(false))),
-            Some(DmVoiceBadge::InVoice)
+            Some(VoiceActivityBadge::InVoice)
         );
         assert_eq!(
             member_voice_badge(true, Some(voice_info(true))),
-            Some(DmVoiceBadge::SharingScreen)
+            Some(VoiceActivityBadge::SharingScreen)
         );
         assert_eq!(member_voice_badge(false, Some(voice_info(true))), None);
     }
