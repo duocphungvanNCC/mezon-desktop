@@ -1,4 +1,4 @@
-use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, MessageRef, UserId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1288,11 +1288,12 @@ impl MessagesStore {
 
     pub fn reaction_view(
         &self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: &str,
         emoji: &str,
     ) -> Option<(u32, Vec<(String, u32)>)> {
-        let storage_id = self.reaction_storage_channel(message_id);
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         let msg = self
             .cache
             .get(&storage_id)?
@@ -2386,15 +2387,16 @@ impl MessagesStore {
         cx.notify();
     }
 
-    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(draft) = self.reply_draft_for(message_id) else {
+    pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let Some(draft) = self.reply_draft_for(target) else {
             return;
         };
         self.set_reply(draft, cx);
     }
 
-    pub fn reply_draft_for(&self, message_id: MessageId) -> Option<ReplyDraft> {
-        let storage_id = self.reaction_storage_channel(message_id);
+    pub fn reply_draft_for(&self, target: MessageRef) -> Option<ReplyDraft> {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         self.cache
             .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
@@ -2548,15 +2550,16 @@ impl MessagesStore {
     /// No rollback on network failure — a channel refresh reconciles true failures.
     pub fn edit_message(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         content: String,
         content_tokens: OutgoingContent,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let mode = self.mode;
         let is_public = self.is_public;
         let edit_meta = self
@@ -2749,11 +2752,12 @@ impl MessagesStore {
 
     /// Remove a message locally, then send the delete to the server.
     /// No rollback on network failure — a channel refresh reconciles true failures.
-    pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn delete_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let deleted = self
             .cache
             .get(&storage_id)
@@ -2797,11 +2801,12 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn remove_failed_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn remove_failed_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         if self.active_channel_id.is_none() {
             return;
         }
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let is_failed = self
             .cache
             .get(&storage_id)
@@ -2817,11 +2822,12 @@ impl MessagesStore {
         self.apply_message_remove(storage_id, message_id, cx);
     }
 
-    pub fn resend_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn resend_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         if self.active_channel_id.is_none() {
             return;
         }
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let snapshot = self
             .cache
             .get(&storage_id)
@@ -3006,7 +3012,8 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn give_coffee_reaction(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn give_coffee_reaction(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let wallet = WalletStore::try_global(cx);
         let wallet_available = wallet
             .as_ref()
@@ -3015,7 +3022,7 @@ impl MessagesStore {
 
         if !wallet_available {
             self.add_reaction(
-                message_id,
+                target,
                 GIVE_COFFEE_EMOJI_ID.to_string(),
                 GIVE_COFFEE_EMOJI.to_string(),
                 cx,
@@ -3107,7 +3114,7 @@ impl MessagesStore {
                         return;
                     }
                     this.add_reaction(
-                        message_id,
+                        target,
                         GIVE_COFFEE_EMOJI_ID.to_string(),
                         GIVE_COFFEE_EMOJI.to_string(),
                         cx,
@@ -3139,16 +3146,17 @@ impl MessagesStore {
     pub fn execute_quick_menu(
         &mut self,
         menu_name: &str,
-        message_id: MessageId,
+        target: MessageRef,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let Some(msg) = self
             .cache
             .get(&storage_id)
@@ -3321,8 +3329,9 @@ impl MessagesStore {
         .detach();
     }
 
-    fn inbox_source_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
-        let storage_id = self.reaction_storage_channel(message_id);
+    fn inbox_source_message(&self, target: MessageRef, cx: &App) -> Option<Message> {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         if let Some(msg) = self
             .cache
             .get(&storage_id)
@@ -3390,14 +3399,15 @@ impl MessagesStore {
         })
     }
 
-    pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn add_to_inbox(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let channel_type = self.mode;
-        let Some(msg) = self.inbox_source_message(message_id, cx) else {
+        let Some(msg) = self.inbox_source_message(target, cx) else {
             tracing::warn!(
                 message_id = message_id.get(),
                 storage_id = storage_id.get(),
@@ -4226,24 +4236,20 @@ impl MessagesStore {
     /// / `ForwardFinished` are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
-        message_ids: Vec<MessageId>,
+        messages: Vec<MessageRef>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if message_ids.is_empty() || targets.is_empty() || self.forward_in_flight {
+        if messages.is_empty() || targets.is_empty() || self.forward_in_flight {
             return false;
         }
         let Some(source_channel_id) = self.active_channel_id else {
             return false;
         };
-        let storage_id = self.reaction_storage_channel(message_ids[0]);
-        let Some(channel) = self.cache.get(&storage_id) else {
-            return false;
-        };
-        let sources: Vec<ForwardSource> = message_ids
+        let sources: Vec<ForwardSource> = messages
             .iter()
-            .filter_map(|id| channel.messages.get_by_id(*id))
+            .filter_map(|target| self.message_in_channel(self.bucket_of(*target), target.id))
             .map(forward_source)
             .collect();
         if sources.is_empty() {
@@ -5475,8 +5481,9 @@ impl MessagesStore {
         );
     }
 
-    pub fn dismiss_local_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let storage_id = self.reaction_storage_channel(message_id);
+    pub fn dismiss_local_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         let is_local = self
             .cache
             .get(&storage_id)
@@ -5993,7 +6000,7 @@ impl MessagesStore {
         reply_to: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.reply_draft_for(reply_to);
+        let reply = self.reply_draft_for(MessageRef::unbucketed(reply_to));
         self.send_url_attachment(
             url,
             filename,
@@ -6985,36 +6992,37 @@ impl MessagesStore {
 
     pub fn add_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_reaction(message_id, emoji_id, emoji, false, cx);
+        self.send_reaction(target, emoji_id, emoji, false, cx);
     }
 
     pub fn remove_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_reaction(message_id, emoji_id, emoji, true, cx);
+        self.send_reaction(target, emoji_id, emoji, true, cx);
     }
 
     fn send_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         remove: bool,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
             return;
         };
@@ -7118,6 +7126,14 @@ impl MessagesStore {
         self.cache
             .get(&bucket)
             .is_some_and(|c| c.messages.contains_id(message_id))
+    }
+
+    fn bucket_of(&self, target: MessageRef) -> ChannelId {
+        if target.bucket != ChannelId(0) && self.bucket_contains(target.bucket, target.id) {
+            target.bucket
+        } else {
+            self.reaction_storage_channel(target.id)
+        }
     }
 
     fn reaction_storage_channel(&self, message_id: MessageId) -> ChannelId {
@@ -10927,7 +10943,7 @@ mod tests {
                 );
 
                 store.activate(ClanId(0), dm, false, true, 3, 4, cx);
-                store.set_reply_to(dm_message, cx);
+                store.set_reply_to(MessageRef::unbucketed(dm_message), cx);
                 assert_eq!(
                     store.reply_target().map(|draft| draft.message_ref_id),
                     Some(dm_message)
@@ -10936,7 +10952,7 @@ mod tests {
                 store.close(cx);
                 store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
                 assert!(store.reply_target().is_none());
-                store.set_reply_to(clan_message, cx);
+                store.set_reply_to(MessageRef::unbucketed(clan_message), cx);
 
                 store.close(cx);
                 store.activate(ClanId(0), dm, false, true, 3, 4, cx);
@@ -14740,8 +14756,8 @@ mod tests {
                 let plain = Message::new(MessageId(101), "hello", "2", "you", 101);
                 store.apply_incoming_message(channel, plain, cx);
 
-                store.dismiss_local_message(MessageId(101), cx);
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(101)), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
 
                 let left: Vec<i64> = store
                     .cache
@@ -15162,7 +15178,7 @@ mod tests {
                     Some(CommandStatus::Answered(MessageId(102)))
                 );
 
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
                 store.resolve_pending_commands(channel, cx);
 
                 assert_eq!(
@@ -15182,7 +15198,7 @@ mod tests {
                 open_command_channel(store, channel);
                 send_command(store, channel, 100, 9, cx);
 
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
 
                 assert!(store.pending_commands.is_empty());
                 assert_eq!(command_status(store, channel, 100), None);
@@ -15350,6 +15366,47 @@ mod tests {
         assert_eq!(value["t"], "**hi** https://x.com");
     }
 
+    #[gpui::test]
+    fn a_row_action_resolves_to_the_bucket_it_came_from(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    parent,
+                    vec![Message::new(MessageId(5), "parent row", "6", "Eve", 100)],
+                );
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "topic reply", "6", "Eve", 110)],
+                );
+                store.active_channel_id = Some(parent);
+                store.set_active_topic(Some(topic.get()), cx);
+
+                let from_parent = MessageRef::new(parent, MessageId(5));
+                let from_topic = MessageRef::new(topic, MessageId(5));
+                assert_eq!(store.bucket_of(from_parent), parent);
+                assert_eq!(store.bucket_of(from_topic), topic);
+                assert_eq!(
+                    store.bucket_of(MessageRef::unbucketed(MessageId(5))),
+                    topic,
+                    "an id with no bucket keeps the old topic-first guess"
+                );
+                assert_eq!(
+                    store.bucket_of(MessageRef::new(ChannelId(99), MessageId(5))),
+                    topic,
+                    "a bucket that does not hold the id falls back to the guess"
+                );
+
+                let draft = store.reply_draft_for(from_parent).expect("parent draft");
+                assert_eq!(draft.content_preview, "parent row");
+                let draft = store.reply_draft_for(from_topic).expect("topic draft");
+                assert_eq!(draft.content_preview, "topic reply");
+            });
+        });
+    }
+
     fn test_store(cx: &mut App) -> Entity<MessagesStore> {
         let api = Arc::new(mezon_client::AppApi::new(
             Arc::new(mezon_client::TransportClient::new(String::new())),
@@ -15464,7 +15521,7 @@ mod tests {
                 store.active_channel_id = Some(channel);
                 store.active_clan_id = Some(ClanId(1));
 
-                store.resend_message(MessageId(1), cx);
+                store.resend_message(MessageRef::unbucketed(MessageId(1)), cx);
 
                 assert!(
                     store
@@ -15519,7 +15576,7 @@ mod tests {
                 );
                 store.active_channel_id = Some(channel);
                 store.active_clan_id = Some(ClanId(1));
-                store.set_reply_to(target, cx);
+                store.set_reply_to(MessageRef::unbucketed(target), cx);
 
                 store.send_sticker(
                     "https://cdn.example/sticker.webp".to_string(),

@@ -10,9 +10,9 @@ use gpui::{
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
-    MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia,
-    resolve_avatar_url, resolve_user_profile,
+    MessageCode, MessageId, MessageRef, MessageReference, MessageSpan, MessagesStore,
+    ProfileContext, Reaction, STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId,
+    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -1837,7 +1837,7 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     }
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for reaction in msg.reactions.iter() {
-        row = row.child(reaction_pill(reaction, msg.id, ctx));
+        row = row.child(reaction_pill(reaction, msg.message_ref(), ctx));
     }
     row = row.child(add_reaction_button(msg.id, ctx));
     Some(row.into_any_element())
@@ -1923,7 +1923,7 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
     src
 }
 
-fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
+fn reaction_pill(reaction: &Reaction, target: MessageRef, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
@@ -1957,18 +1957,13 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.add_reaction(
-                        message_id,
-                        add_emoji_id.to_string(),
-                        add_emoji.to_string(),
-                        cx,
-                    );
+                    store.add_reaction(target, add_emoji_id.to_string(), add_emoji.to_string(), cx);
                 });
             })
             .hoverable_tooltip(move |_window, cx| {
                 cx.new(|cx| {
                     UserReactionPanel::new(
-                        message_id,
+                        target,
                         panel_emoji_id.clone(),
                         panel_emoji.clone(),
                         avatar_cache.clone(),
@@ -2055,7 +2050,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         0.
     };
 
-    let reply_id = msg.id;
+    let reply_target = msg.message_ref();
     let react_id = msg.id;
     let react_host = ctx.video_host.clone();
 
@@ -2085,6 +2080,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
     let show_coffee = !is_own_message && sender_is_real;
 
     let msg_id = msg.id;
+    let target = msg.message_ref();
     let edit_host = ctx.video_host.clone();
     let option_host = ctx.video_host.clone();
 
@@ -2104,7 +2100,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 .hover(move |s| s.bg(bg_hover))
                 .on_click(move |_, _, cx| {
                     MessagesStore::global(cx).update(cx, |store, cx| {
-                        store.add_reaction(msg_id, emoji_id.to_string(), shortname.to_string(), cx);
+                        store.add_reaction(target, emoji_id.to_string(), shortname.to_string(), cx);
                     });
                 });
             if !emoji.src.is_empty() {
@@ -2184,10 +2180,10 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
                     if is_topic {
                         TopicsStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     } else {
                         MessagesStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     }
                 }),
             )
@@ -2209,12 +2205,12 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
             )
         })
         .when(show_coffee, |d| {
-            let message_id = msg.id;
+            let target = msg.message_ref();
             d.child(
                 action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
                     move |_, _, cx| {
                         MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.give_coffee_reaction(message_id, cx);
+                            store.give_coffee_reaction(target, cx);
                         });
                     },
                 ),

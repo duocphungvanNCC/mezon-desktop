@@ -9,7 +9,7 @@ use mezon_client::transport::{
 
 use crate::album_layout::AlbumLayout;
 use crate::config::AppConfig;
-use crate::ids::{ChannelId, MessageId, UserId};
+use crate::ids::{ChannelId, MessageId, MessageRef, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -1857,6 +1857,10 @@ impl Message {
 
     pub fn is_sent_by(&self, user_id: &str) -> bool {
         !user_id.is_empty() && self.sender_id == user_id
+    }
+
+    pub fn message_ref(&self) -> MessageRef {
+        MessageRef::new(self.channel_id, self.id)
     }
 
     pub fn is_sending(&self) -> bool {
