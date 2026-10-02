@@ -2062,7 +2062,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
     let is_topic_msg = msg.code == MessageCode::Topic;
     let is_poll_msg = msg.code == MessageCode::Poll;
     let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
-    let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
+    let is_own_message = msg.is_sent_by(ctx.current_user_id);
 
     let show_topic = !ctx.is_topic_box
         && ctx.can_send_message

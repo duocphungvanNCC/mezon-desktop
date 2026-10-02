@@ -3008,27 +3008,6 @@ impl AppApi {
             .await
     }
 
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        self.transport
-            .update_channel_message_structured(
-                clan_id,
-                channel_id,
-                message_id,
-                content_json,
-                mode,
-                create_time_seconds,
-            )
-            .await
-    }
-
     pub async fn write_voice_interactive_event(
         &self,
         clan_id: i64,

@@ -1,5 +1,5 @@
 use gpui::{AnyElement, Entity, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
-use mezon_store::{ChannelId, Message, MessageCode, MessageId, MessagesStore, OgpPreview};
+use mezon_store::{ChannelId, Message, MessageId, MessagesStore, OgpPreview};
 
 use crate::image_cache::LruImageCache;
 
@@ -28,10 +28,9 @@ pub fn render_ogp_embed(
 }
 
 fn ogp_remove_target(msg: &Message, current_user_id: &str) -> Option<(ChannelId, MessageId)> {
-    (msg.is_sent_by(current_user_id)
+    (super::message_context_menu::message_is_editable(msg, current_user_id)
         && !msg.id.is_optimistic()
         && msg.raw_content.is_some()
-        && msg.code != MessageCode::Topic
         && msg.channel_id != ChannelId(0))
     .then_some((msg.channel_id, msg.id))
 }
@@ -233,7 +232,8 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelId, Message, MessageCode, MessageId, ogp_remove_target};
+    use super::{ChannelId, Message, MessageId, ogp_remove_target};
+    use mezon_store::MessageCode;
 
     const RAW: &str = r#"{"t":"https://example.com","mk":[{"type":"lk_ogp","s":19,"e":20}]}"#;
 
@@ -280,8 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn no_remove_target_on_a_topic_origin() {
+    fn no_remove_target_where_edit_is_refused() {
         let origin = own_link(MessageId(99)).with_code(MessageCode::Topic);
         assert_eq!(ogp_remove_target(&origin, "42"), None);
+
+        let forwarded = own_link(MessageId(99)).with_forwarded(true);
+        assert_eq!(ogp_remove_target(&forwarded, "42"), None);
     }
 }

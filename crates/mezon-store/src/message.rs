@@ -760,6 +760,7 @@ pub struct Message {
     pub local_date: Option<chrono::NaiveDate>,
     pub code: MessageCode,
     pub is_edited: bool,
+    pub hide_editted: bool,
     pub is_forwarded: bool,
     pub show_forwarded_label: bool,
     pub combined_with_prev: bool,
@@ -1808,6 +1809,7 @@ impl Message {
             local_date: local_datetime(create_time).map(|dt| dt.date_naive()),
             code: MessageCode::Chat,
             is_edited: false,
+            hide_editted: false,
             is_forwarded: false,
             show_forwarded_label: false,
             combined_with_prev: false,
@@ -1934,6 +1936,7 @@ impl Message {
 
     pub fn with_edited(mut self, update_time: i64, hide_editted: bool) -> Self {
         self.update_time = update_time;
+        self.hide_editted = hide_editted;
         self.is_edited = update_time > 0 && update_time > self.create_time && !hide_editted;
         self
     }

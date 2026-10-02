@@ -3521,7 +3521,7 @@ fn with_presign_finish(content_json: String, keys: &[String]) -> String {
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
-fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+pub fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return content_json;
     }
@@ -9658,7 +9658,7 @@ impl MezonTransport {
             clan_id,
             channel_id,
             message_id,
-            sent.json,
+            with_create_time_seconds(sent.json, create_time_seconds),
             &sent.mentions,
             mode,
             is_public,
@@ -9676,7 +9676,7 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
-        mut content_json: String,
+        content_json: String,
         mentions: &[OutgoingMention],
         mode: i32,
         is_public: bool,
@@ -9686,9 +9686,6 @@ impl MezonTransport {
         create_time_seconds: u32,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -9713,40 +9710,6 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            mode,
-            is_public: false,
-            hide_editted: true,
-            create_time_seconds,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!(
-                "update_channel_message_structured error: code={}",
-                code
-            ));
         }
         Ok(())
     }
