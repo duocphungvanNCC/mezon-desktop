@@ -20,7 +20,7 @@ use crate::messages::{
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::upload_jobs::UploadJob;
-use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
+use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
@@ -534,11 +534,8 @@ impl TopicsStore {
         self.reply_target.as_ref()
     }
 
-    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(draft) = MessagesStore::global(cx)
-            .read(cx)
-            .reply_draft_for(message_id)
-        else {
+    pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let Some(draft) = MessagesStore::global(cx).read(cx).reply_draft_for(target) else {
             return;
         };
         self.reply_target = Some(draft);
@@ -1777,6 +1774,11 @@ impl TopicsStore {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    pub fn is_ready_for(&self, clan_id: &str) -> bool {
+        self.clan_id.as_deref() == Some(clan_id)
+            && (self.fetched_at.is_some() || self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES)
     }
 
     pub fn has_more(&self) -> bool {

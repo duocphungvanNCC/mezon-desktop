@@ -39,6 +39,7 @@ pub mod inbox;
 pub mod invite;
 pub mod login;
 pub mod media_permission;
+pub mod mention_search;
 pub mod message;
 pub mod message_search;
 pub mod message_time;
@@ -78,6 +79,7 @@ use dirs::config_dir;
 pub use mezon_client::Session;
 pub use mezon_client::data_image;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
+pub use mezon_client::{MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS};
 pub use mezon_client::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
@@ -175,11 +177,12 @@ pub use gifts::{
 pub use group_members::{
     AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
 };
-pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
+pub use ids::{ChannelId, ClanId, MessageId, MessageRef, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
+pub use mention_search::{MentionSearchEvent, MentionSearchKey, MentionSearchStore};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
@@ -396,6 +399,17 @@ pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::
 
 pub const DEFAULT_MCP_PORT: u16 = 3179;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityStripDismissal {
+    pub user_id: i64,
+    pub clan_id: i64,
+    pub channel_id: i64,
+    #[serde(default)]
+    pub newest_topic_id: Option<i64>,
+    #[serde(default)]
+    pub pin_record_ids: Vec<i64>,
+}
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -458,6 +472,8 @@ pub struct Settings {
     pub tour_eligible: Option<bool>,
     #[serde(default)]
     pub screen_capture_access_requested: bool,
+    #[serde(default)]
+    pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
 }
 
 impl Default for Settings {
@@ -489,6 +505,7 @@ impl Default for Settings {
             tour_done_tracks: Vec::new(),
             tour_eligible: None,
             screen_capture_access_requested: false,
+            activity_strip_dismissals: Vec::new(),
         }
     }
 }
@@ -691,7 +708,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod settings_tests {
-    use super::Settings;
+    use super::{ActivityStripDismissal, Settings};
 
     #[test]
     fn a_settings_file_written_before_the_tour_existed_still_parses() {
@@ -721,6 +738,26 @@ mod settings_tests {
         let restored: Settings = serde_json::from_str(&json).expect("decode");
         assert_eq!(restored.tour_seen_version, 1);
         assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn activity_strip_dismissal_survives_a_roundtrip() {
+        let settings = Settings {
+            activity_strip_dismissals: vec![ActivityStripDismissal {
+                user_id: 1,
+                clan_id: 2,
+                channel_id: 3,
+                newest_topic_id: Some(4),
+                pin_record_ids: vec![5, 6],
+            }],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(
+            restored.activity_strip_dismissals,
+            settings.activity_strip_dismissals
+        );
     }
 
     #[test]

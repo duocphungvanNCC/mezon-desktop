@@ -4776,5 +4776,8 @@
   "screenShare.modeVideoDescription": "Video più fluido; la nitidezza può ridursi con una connessione lenta.",
   "chat.activityStrip.latestPin": "Ultimo messaggio fissato",
   "chat.activityStrip.latestTopicMessage": "Ultimo messaggio nell'argomento",
-  "chat.activityStrip.messageFrom": "Messaggio da {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Messaggio da {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Nascondi barra dei pin e topic",
+  "chat.activityStrip.hideConfirm.title": "Nascondi barra dei pin e topic",
+  "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic."
 }

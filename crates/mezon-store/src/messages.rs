@@ -1,4 +1,4 @@
-use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, MessageRef, UserId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use mezon_client::transport::{
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
     emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
-    mention_content_tokens,
+    mention_content_tokens, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -144,6 +144,7 @@ pub enum MessagesEvent {
     /// A send failed with no row to mark (the channel's first page had not landed,
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
+    OgpRemoveFailed,
     /// The whole viewport was replaced (channel switch / fetch). `count` is the
     /// new row count.
     Reset {
@@ -841,17 +842,36 @@ fn content_json_mentions(content_raw: &str) -> Vec<TransportMention> {
         .collect()
 }
 
+fn message_mentions(msg: &Message) -> Vec<TransportMention> {
+    let proto = forward_mentions(&msg.mention_targets);
+    if proto.is_empty() {
+        content_json_mentions(msg.raw_content.as_deref().unwrap_or_default())
+    } else {
+        proto
+    }
+}
+
+fn content_json_without_ogp(raw: &str, internal_domain: Option<&str>) -> Option<String> {
+    let mut content: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    if let serde_json::Value::String(inner) = &content {
+        content = serde_json::from_str(inner.trim()).ok()?;
+    }
+    let mk = content.get_mut("mk")?.as_array_mut()?;
+    let before = mk.len();
+    mk.retain(|token| {
+        token.get("type").and_then(serde_json::Value::as_str) != Some("lk_ogp")
+            || token
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|url| is_clan_invite_url(url, internal_domain))
+    });
+    (mk.len() < before).then(|| content.to_string())
+}
+
 fn forward_source(msg: &Message) -> ForwardSource {
     let content_raw = msg.raw_content.as_deref().unwrap_or_default().to_string();
     ForwardSource {
-        mentions: {
-            let proto = forward_mentions(&msg.mention_targets);
-            if proto.is_empty() {
-                content_json_mentions(&content_raw)
-            } else {
-                proto
-            }
-        },
+        mentions: message_mentions(msg),
         content_raw,
         text: msg.content.clone(),
         attachments: msg.attachments.iter().map(attachment_to_api).collect(),
@@ -1284,11 +1304,12 @@ impl MessagesStore {
 
     pub fn reaction_view(
         &self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: &str,
         emoji: &str,
     ) -> Option<(u32, Vec<(String, u32)>)> {
-        let storage_id = self.reaction_storage_channel(message_id);
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         let msg = self
             .cache
             .get(&storage_id)?
@@ -2382,15 +2403,16 @@ impl MessagesStore {
         cx.notify();
     }
 
-    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(draft) = self.reply_draft_for(message_id) else {
+    pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let Some(draft) = self.reply_draft_for(target) else {
             return;
         };
         self.set_reply(draft, cx);
     }
 
-    pub fn reply_draft_for(&self, message_id: MessageId) -> Option<ReplyDraft> {
-        let storage_id = self.reaction_storage_channel(message_id);
+    pub fn reply_draft_for(&self, target: MessageRef) -> Option<ReplyDraft> {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         self.cache
             .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
@@ -2544,15 +2566,16 @@ impl MessagesStore {
     /// No rollback on network failure — a channel refresh reconciles true failures.
     pub fn edit_message(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         content: String,
         content_tokens: OutgoingContent,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let mode = self.mode;
         let is_public = self.is_public;
         let edit_meta = self
@@ -2580,16 +2603,7 @@ impl MessagesStore {
         msg.raw_content = (!raw_content.is_empty()).then(|| Arc::from(raw_content.as_str()));
         msg.mention_targets = edited_mention_targets(&transport_mentions);
         self.editing = None;
-        if self.active_topic_id == Some(storage_id) {
-            cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: storage_id.get(),
-            });
-        } else {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
-        }
-        cx.notify();
+        self.notify_bucket_row(storage_id, message_id, cx);
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
@@ -2632,103 +2646,134 @@ impl MessagesStore {
     /// Remove the OGP link preview from a message (author only), mirroring the
     /// React `DeleteOgpButton`: drop it locally and re-send the message content
     /// without the `lk_ogp` token so it is gone for everyone.
-    pub fn remove_message_ogp(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn remove_message_ogp(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let internal_domain = AppConfig::try_global(cx).map(|c| c.domain_url.clone());
         let mode = self.mode;
         let is_public = self.is_public;
-        let Some(channel) = self.cache.get_mut(&storage_id) else {
-            return;
-        };
-        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
+        let Some(msg) = self.row_mut(bucket, message_id) else {
             return;
         };
         if msg.ogp.is_none() {
             return;
         }
+        let raw_before = msg.raw_content.clone();
+        let Some(content_json) = raw_before
+            .as_deref()
+            .and_then(|raw| content_json_without_ogp(raw, internal_domain.as_deref()))
+        else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                "remove ogp: stored content has no removable lk_ogp token"
+            );
+            return;
+        };
+        let Some(ogp) = msg.ogp.take() else {
+            return;
+        };
+        let mentions = message_mentions(msg);
+        let hide_editted = msg.hide_editted;
         let create_time_seconds = if msg.attachments.is_empty() {
             0
         } else {
             msg.create_time.max(0) as u32
         };
-        msg.ogp = None;
-        let content = msg.content.clone();
-        let outgoing = msg
-            .raw_content
-            .as_deref()
-            .and_then(outgoing_content_from_raw)
-            .unwrap_or_default();
-        if self.active_topic_id == Some(storage_id) {
-            cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: storage_id.get(),
-            });
-        } else {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
-        }
-        cx.notify();
+        let content_json = with_create_time_seconds(content_json, create_time_seconds);
+        self.notify_bucket_row(bucket, message_id, cx);
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let message_num = message_id.get();
         let (api_channel_id, api_topic_id, is_update_msg_topic) =
-            if self.active_topic_id == Some(storage_id) {
-                (parent_channel_id.get(), storage_id.get(), true)
+            if self.active_topic_id == Some(bucket) {
+                (parent_channel_id.get(), bucket.get(), true)
             } else {
-                (storage_id.get(), 0, false)
+                (bucket.get(), 0, false)
             };
-        let OutgoingContent {
-            mentions,
-            hashtags,
-            emojis,
-        } = outgoing;
-        let transport_mentions = mentions
-            .into_iter()
-            .map(OutgoingMention::into_transport)
-            .collect();
-        let transport_hashtags = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
-        let transport_emojis = emojis
-            .into_iter()
-            .map(OutgoingEmoji::into_transport)
-            .collect();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .update_channel_message(
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .update_channel_message_content(
                     clan_id,
                     api_channel_id,
-                    message_num,
-                    &content,
-                    transport_mentions,
-                    transport_hashtags,
-                    transport_emojis,
+                    message_id.get(),
+                    content_json,
+                    mentions,
                     mode,
                     is_public,
                     api_topic_id,
                     is_update_msg_topic,
-                    false,
+                    hide_editted,
                     create_time_seconds,
                 )
-                .await
-            {
-                tracing::error!("remove ogp update failed: {e}");
-            }
+                .await;
+            let _ = this.update(cx, |store, cx| {
+                store.finish_ogp_removal(bucket, message_id, ogp, raw_before, result, cx);
+            });
         })
         .detach();
     }
 
+    fn finish_ogp_removal(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        ogp: Box<OgpPreview>,
+        raw_before: Option<Arc<str>>,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let Err(e) = result else {
+            return;
+        };
+        tracing::error!("remove ogp update failed: {e}");
+        let Some(msg) = self.row_mut(bucket, message_id) else {
+            return;
+        };
+        if msg.ogp.is_some() || msg.raw_content != raw_before {
+            return;
+        }
+        msg.ogp = Some(ogp);
+        self.notify_bucket_row(bucket, message_id, cx);
+        cx.emit(MessagesEvent::OgpRemoveFailed);
+    }
+
+    fn row_mut(&mut self, bucket: ChannelId, message_id: MessageId) -> Option<&mut Message> {
+        self.cache
+            .get_mut(&bucket)?
+            .messages
+            .get_mut_by_id(message_id)
+    }
+
+    fn notify_bucket_row(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_topic_id == Some(bucket) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: bucket.get(),
+            });
+            cx.notify();
+        } else {
+            self.notify_message_row(message_id, cx);
+        }
+    }
+
     /// Remove a message locally, then send the delete to the server.
     /// No rollback on network failure — a channel refresh reconciles true failures.
-    pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn delete_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let deleted = self
             .cache
             .get(&storage_id)
@@ -2772,11 +2817,12 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn remove_failed_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn remove_failed_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         if self.active_channel_id.is_none() {
             return;
         }
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let is_failed = self
             .cache
             .get(&storage_id)
@@ -2792,11 +2838,12 @@ impl MessagesStore {
         self.apply_message_remove(storage_id, message_id, cx);
     }
 
-    pub fn resend_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn resend_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         if self.active_channel_id.is_none() {
             return;
         }
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let snapshot = self
             .cache
             .get(&storage_id)
@@ -2981,7 +3028,8 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn give_coffee_reaction(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn give_coffee_reaction(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let wallet = WalletStore::try_global(cx);
         let wallet_available = wallet
             .as_ref()
@@ -2990,7 +3038,7 @@ impl MessagesStore {
 
         if !wallet_available {
             self.add_reaction(
-                message_id,
+                target,
                 GIVE_COFFEE_EMOJI_ID.to_string(),
                 GIVE_COFFEE_EMOJI.to_string(),
                 cx,
@@ -3082,7 +3130,7 @@ impl MessagesStore {
                         return;
                     }
                     this.add_reaction(
-                        message_id,
+                        target,
                         GIVE_COFFEE_EMOJI_ID.to_string(),
                         GIVE_COFFEE_EMOJI.to_string(),
                         cx,
@@ -3114,16 +3162,17 @@ impl MessagesStore {
     pub fn execute_quick_menu(
         &mut self,
         menu_name: &str,
-        message_id: MessageId,
+        target: MessageRef,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let Some(msg) = self
             .cache
             .get(&storage_id)
@@ -3296,8 +3345,9 @@ impl MessagesStore {
         .detach();
     }
 
-    fn inbox_source_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
-        let storage_id = self.reaction_storage_channel(message_id);
+    fn inbox_source_message(&self, target: MessageRef, cx: &App) -> Option<Message> {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         if let Some(msg) = self
             .cache
             .get(&storage_id)
@@ -3365,14 +3415,15 @@ impl MessagesStore {
         })
     }
 
-    pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn add_to_inbox(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let channel_type = self.mode;
-        let Some(msg) = self.inbox_source_message(message_id, cx) else {
+        let Some(msg) = self.inbox_source_message(target, cx) else {
             tracing::warn!(
                 message_id = message_id.get(),
                 storage_id = storage_id.get(),
@@ -4201,24 +4252,20 @@ impl MessagesStore {
     /// / `ForwardFinished` are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
-        message_ids: Vec<MessageId>,
+        messages: Vec<MessageRef>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if message_ids.is_empty() || targets.is_empty() || self.forward_in_flight {
+        if messages.is_empty() || targets.is_empty() || self.forward_in_flight {
             return false;
         }
         let Some(source_channel_id) = self.active_channel_id else {
             return false;
         };
-        let storage_id = self.reaction_storage_channel(message_ids[0]);
-        let Some(channel) = self.cache.get(&storage_id) else {
-            return false;
-        };
-        let sources: Vec<ForwardSource> = message_ids
+        let sources: Vec<ForwardSource> = messages
             .iter()
-            .filter_map(|id| channel.messages.get_by_id(*id))
+            .filter_map(|target| self.message_in_channel(self.bucket_of(*target), target.id))
             .map(forward_source)
             .collect();
         if sources.is_empty() {
@@ -5460,8 +5507,9 @@ impl MessagesStore {
         );
     }
 
-    pub fn dismiss_local_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let storage_id = self.reaction_storage_channel(message_id);
+    pub fn dismiss_local_message(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let message_id = target.id;
+        let storage_id = self.bucket_of(target);
         let is_local = self
             .cache
             .get(&storage_id)
@@ -5965,7 +6013,7 @@ impl MessagesStore {
         reply_to: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.reply_draft_for(reply_to);
+        let reply = self.reply_draft_for(MessageRef::unbucketed(reply_to));
         self.send_url_attachment(
             url,
             filename,
@@ -6957,36 +7005,37 @@ impl MessagesStore {
 
     pub fn add_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_reaction(message_id, emoji_id, emoji, false, cx);
+        self.send_reaction(target, emoji_id, emoji, false, cx);
     }
 
     pub fn remove_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_reaction(message_id, emoji_id, emoji, true, cx);
+        self.send_reaction(target, emoji_id, emoji, true, cx);
     }
 
     fn send_reaction(
         &mut self,
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: String,
         emoji: String,
         remove: bool,
         cx: &mut Context<Self>,
     ) {
+        let message_id = target.id;
         let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
-        let storage_id = self.reaction_storage_channel(message_id);
+        let storage_id = self.bucket_of(target);
         let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
             return;
         };
@@ -7090,6 +7139,14 @@ impl MessagesStore {
         self.cache
             .get(&bucket)
             .is_some_and(|c| c.messages.contains_id(message_id))
+    }
+
+    fn bucket_of(&self, target: MessageRef) -> ChannelId {
+        if target.bucket != ChannelId(0) && self.bucket_contains(target.bucket, target.id) {
+            target.bucket
+        } else {
+            self.reaction_storage_channel(target.id)
+        }
     }
 
     fn reaction_storage_channel(&self, message_id: MessageId) -> ChannelId {
@@ -8526,6 +8583,7 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     }
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
+    existing.hide_editted = incoming.hide_editted;
     existing.ogp = incoming.ogp.clone();
     existing.embeds = incoming.embeds.clone();
     existing.components = incoming.components.clone();
@@ -8543,11 +8601,11 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     if incoming.poll.is_some() {
         existing.poll = incoming.poll.clone();
     }
-    existing.code = if existing.poll.is_some() {
-        MessageCode::Poll
-    } else {
-        MessageCode::Chat
-    };
+    if existing.poll.is_some() {
+        existing.code = MessageCode::Poll;
+    } else if !existing.code.is_user_timeline() {
+        existing.code = MessageCode::Chat;
+    }
 }
 
 fn patch_reply_previews_after_update(
@@ -9642,45 +9700,6 @@ fn resolve_poll_voter(
     }
 }
 
-fn outgoing_content_from_raw(raw: &str) -> Option<OutgoingContent> {
-    let content: ApiMessageContent = serde_json::from_str(raw).ok()?;
-    let to_i32 = |value: Option<i64>| i32::try_from(value.unwrap_or(0)).unwrap_or(0);
-    let mentions = content
-        .mentions
-        .iter()
-        .map(|token| OutgoingMention {
-            user_id: token.user_id.clone().unwrap_or_default(),
-            role_id: token.role_id.clone().unwrap_or_default(),
-            display: token.username.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    let hashtags = content
-        .hg
-        .iter()
-        .map(|token| OutgoingHashtag {
-            channel_id: token.channel_id.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    let emojis = content
-        .ej
-        .iter()
-        .map(|token| OutgoingEmoji {
-            emoji_id: token.emojiid.clone().unwrap_or_default(),
-            s: to_i32(token.s),
-            e: to_i32(token.e),
-        })
-        .collect();
-    Some(OutgoingContent {
-        mentions,
-        hashtags,
-        emojis,
-    })
-}
-
 pub(crate) fn build_ogp_preview(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
@@ -10736,6 +10755,62 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_ogp_keeps_every_other_content_token() {
+        let raw = r#"{"t":"read this https://x.com","mk":[{"type":"b","s":0,"e":4},{"type":"lk","s":10,"e":23},{"type":"lk_ogp","s":23,"e":24,"url":"https://x.com","title":"X"}],"hg":[{"channelid":"5","s":0,"e":1}],"ej":[{"emojiid":"9","s":2,"e":3}],"cvtt":{"a":"b"}}"#;
+
+        let updated =
+            content_json_without_ogp(raw, Some("https://mezon.ai")).expect("ogp token removed");
+        let value: serde_json::Value = serde_json::from_str(&updated).expect("valid json");
+        let original: serde_json::Value = serde_json::from_str(raw).expect("valid json");
+
+        let kinds: Vec<&str> = value["mk"]
+            .as_array()
+            .expect("mk array")
+            .iter()
+            .filter_map(|token| token["type"].as_str())
+            .collect();
+        assert_eq!(kinds, ["b", "lk"]);
+        assert_eq!(value["t"], original["t"]);
+        assert_eq!(value["hg"], original["hg"]);
+        assert_eq!(value["ej"], original["ej"]);
+        assert_eq!(value["cvtt"], original["cvtt"]);
+    }
+
+    #[test]
+    fn removing_the_ogp_leaves_a_clan_invite_card_alone() {
+        let invite = r#"{"t":"https://mezon.ai/invite/1840670747886882816","mk":[{"type":"lk_ogp","s":0,"e":1,"url":"https://mezon.ai/invite/1840670747886882816"}]}"#;
+        assert_eq!(
+            content_json_without_ogp(invite, Some("https://mezon.ai")),
+            None
+        );
+        assert_eq!(content_json_without_ogp("not json", None), None);
+        assert_eq!(content_json_without_ogp(r#"{"t":"hi"}"#, None), None);
+    }
+
+    #[test]
+    fn message_mentions_come_from_the_proto_targets_first() {
+        let raw = r#"{"t":"@bob hi","mentions":[{"user_id":"2","s":0,"e":4}]}"#;
+        let with_targets = Message::new(MessageId(1), "@bob hi", "42", "Me", 0)
+            .with_raw_content(raw)
+            .with_mention_targets(vec![MentionTarget {
+                user_id: Some("1".into()),
+                role_id: None,
+                username: "bob".into(),
+                s: 0,
+                e: 4,
+            }]);
+        let mentions = message_mentions(&with_targets);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].user_id, "1");
+
+        let content_only =
+            Message::new(MessageId(1), "@bob hi", "42", "Me", 0).with_raw_content(raw);
+        let mentions = message_mentions(&content_only);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].user_id, "2");
+    }
+
+    #[test]
     fn a_clan_invite_link_is_a_join_card_not_an_ogp_embed() {
         let cfg = AppConfig {
             domain_url: "https://mezon.ai".into(),
@@ -11317,7 +11392,7 @@ mod tests {
                 );
 
                 store.activate(ClanId(0), dm, false, true, 3, 4, cx);
-                store.set_reply_to(dm_message, cx);
+                store.set_reply_to(MessageRef::unbucketed(dm_message), cx);
                 assert_eq!(
                     store.reply_target().map(|draft| draft.message_ref_id),
                     Some(dm_message)
@@ -11326,7 +11401,7 @@ mod tests {
                 store.close(cx);
                 store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
                 assert!(store.reply_target().is_none());
-                store.set_reply_to(clan_message, cx);
+                store.set_reply_to(MessageRef::unbucketed(clan_message), cx);
 
                 store.close(cx);
                 store.activate(ClanId(0), dm, false, true, 3, 4, cx);
@@ -15278,8 +15353,8 @@ mod tests {
                 let plain = Message::new(MessageId(101), "hello", "2", "you", 101);
                 store.apply_incoming_message(channel, plain, cx);
 
-                store.dismiss_local_message(MessageId(101), cx);
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(101)), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
 
                 let left: Vec<i64> = store
                     .cache
@@ -15700,7 +15775,7 @@ mod tests {
                     Some(CommandStatus::Answered(MessageId(102)))
                 );
 
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
                 store.resolve_pending_commands(channel, cx);
 
                 assert_eq!(
@@ -15720,7 +15795,7 @@ mod tests {
                 open_command_channel(store, channel);
                 send_command(store, channel, 100, 9, cx);
 
-                store.dismiss_local_message(MessageId(100), cx);
+                store.dismiss_local_message(MessageRef::unbucketed(MessageId(100)), cx);
 
                 assert!(store.pending_commands.is_empty());
                 assert_eq!(command_status(store, channel, 100), None);
@@ -15942,6 +16017,207 @@ mod tests {
         assert!(updated.borrow().contains(&Some(MessageId(72))));
     }
 
+    const OGP_RAW: &str = r#"{"t":"**hi** https://x.com","mk":[{"type":"b","s":0,"e":2},{"type":"lk_ogp","s":17,"e":18,"url":"https://x.com","title":"X"}]}"#;
+
+    fn ogp_preview() -> Box<OgpPreview> {
+        Box::new(OgpPreview {
+            url: "https://x.com".into(),
+            title: "X".into(),
+            description: SharedString::default(),
+            description_collapsed: SharedString::default(),
+            image_proxied: SharedString::default(),
+        })
+    }
+
+    fn own_ogp_message(id: i64) -> Message {
+        Message::new(MessageId(id), "hi https://x.com", "42", "Me", 100)
+            .with_raw_content(OGP_RAW)
+            .with_ogp(Some(ogp_preview()))
+    }
+
+    fn row_ogp(store: &MessagesStore, bucket: ChannelId, id: i64) -> Option<Box<OgpPreview>> {
+        store
+            .message_in_channel(bucket, MessageId(id))
+            .and_then(|msg| msg.ogp.clone())
+    }
+
+    #[gpui::test]
+    fn removing_an_ogp_touches_only_the_row_in_the_given_bucket(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            store.update(cx, |store, cx| {
+                store.set_channel(parent, vec![own_ogp_message(5)]);
+                store.set_channel(topic, vec![own_ogp_message(5)]);
+                store.active_channel_id = Some(parent);
+                store.set_active_topic(Some(topic.get()), cx);
+
+                store.remove_message_ogp(parent, MessageId(5), cx);
+
+                assert_eq!(row_ogp(store, parent, 5), None);
+                assert_eq!(row_ogp(store, topic, 5), Some(ogp_preview()));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_ogp_that_cannot_be_rewritten_is_left_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(10);
+            store.update(cx, |store, cx| {
+                let stray = own_ogp_message(5).with_raw_content(r#"{"t":"hi https://x.com"}"#);
+                store.set_channel(channel, vec![stray]);
+                store.active_channel_id = Some(channel);
+
+                store.remove_message_ogp(channel, MessageId(5), cx);
+
+                assert_eq!(row_ogp(store, channel, 5), Some(ogp_preview()));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_refused_ogp_removal_restores_the_preview_and_reports_it(cx: &mut gpui::TestAppContext) {
+        let failures = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sink = failures.clone();
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(10);
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if matches!(event, MessagesEvent::OgpRemoveFailed) {
+                    sink.set(sink.get() + 1);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                store.set_channel(channel, vec![own_ogp_message(5)]);
+                store.active_channel_id = Some(channel);
+                store.remove_message_ogp(channel, MessageId(5), cx);
+                assert_eq!(row_ogp(store, channel, 5), None);
+
+                store.finish_ogp_removal(
+                    channel,
+                    MessageId(5),
+                    ogp_preview(),
+                    Some(Arc::from(OGP_RAW)),
+                    Err(anyhow::anyhow!("permission denied")),
+                    cx,
+                );
+
+                assert_eq!(row_ogp(store, channel, 5), Some(ogp_preview()));
+            });
+        });
+        assert_eq!(failures.get(), 1);
+    }
+
+    #[gpui::test]
+    fn a_lost_reply_after_the_server_echo_keeps_the_preview_gone(cx: &mut gpui::TestAppContext) {
+        let failures = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sink = failures.clone();
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(10);
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if matches!(event, MessagesEvent::OgpRemoveFailed) {
+                    sink.set(sink.get() + 1);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                store.set_channel(channel, vec![own_ogp_message(5)]);
+                store.active_channel_id = Some(channel);
+                store.remove_message_ogp(channel, MessageId(5), cx);
+                let echo = Message::new(MessageId(5), "hi https://x.com", "42", "Me", 100)
+                    .with_raw_content(
+                        r#"{"t":"**hi** https://x.com","mk":[{"type":"b","s":0,"e":2}]}"#,
+                    );
+                store.apply_message_update(channel, MessageId(5), echo, None, cx);
+
+                store.finish_ogp_removal(
+                    channel,
+                    MessageId(5),
+                    ogp_preview(),
+                    Some(Arc::from(OGP_RAW)),
+                    Err(anyhow::anyhow!("reply lost")),
+                    cx,
+                );
+
+                assert_eq!(row_ogp(store, channel, 5), None);
+            });
+        });
+        assert_eq!(failures.get(), 0);
+    }
+
+    #[test]
+    fn an_update_keeps_a_buzz_or_location_code() {
+        for code in [MessageCode::MessageBuzz, MessageCode::Location] {
+            let mut existing = Message::new(MessageId(1), "hi", "42", "Me", 100).with_code(code);
+            let incoming = Message::new(MessageId(1), "hi", "42", "Me", 100)
+                .with_code(MessageCode::ChatUpdate);
+            merge_message_update(&mut existing, &incoming);
+            assert_eq!(existing.code, code);
+        }
+        let mut transient =
+            Message::new(MessageId(1), "hi", "42", "Me", 100).with_code(MessageCode::ChatUpdate);
+        merge_message_update(
+            &mut transient,
+            &Message::new(MessageId(1), "hi", "42", "Me", 100),
+        );
+        assert_eq!(transient.code, MessageCode::Chat);
+    }
+
+    #[test]
+    fn removing_the_ogp_unwraps_a_string_encoded_body() {
+        let wrapped = serde_json::to_string(OGP_RAW).expect("encode");
+        let updated = content_json_without_ogp(&wrapped, None).expect("ogp token removed");
+        let value: serde_json::Value = serde_json::from_str(&updated).expect("object json");
+        assert_eq!(value["mk"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["t"], "**hi** https://x.com");
+    }
+
+    #[gpui::test]
+    fn a_row_action_resolves_to_the_bucket_it_came_from(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    parent,
+                    vec![Message::new(MessageId(5), "parent row", "6", "Eve", 100)],
+                );
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "topic reply", "6", "Eve", 110)],
+                );
+                store.active_channel_id = Some(parent);
+                store.set_active_topic(Some(topic.get()), cx);
+
+                let from_parent = MessageRef::new(parent, MessageId(5));
+                let from_topic = MessageRef::new(topic, MessageId(5));
+                assert_eq!(store.bucket_of(from_parent), parent);
+                assert_eq!(store.bucket_of(from_topic), topic);
+                assert_eq!(
+                    store.bucket_of(MessageRef::unbucketed(MessageId(5))),
+                    topic,
+                    "an id with no bucket keeps the old topic-first guess"
+                );
+                assert_eq!(
+                    store.bucket_of(MessageRef::new(ChannelId(99), MessageId(5))),
+                    topic,
+                    "a bucket that does not hold the id falls back to the guess"
+                );
+
+                let draft = store.reply_draft_for(from_parent).expect("parent draft");
+                assert_eq!(draft.content_preview, "parent row");
+                let draft = store.reply_draft_for(from_topic).expect("topic draft");
+                assert_eq!(draft.content_preview, "topic reply");
+            });
+        });
+    }
+
     fn test_store(cx: &mut App) -> Entity<MessagesStore> {
         let api = Arc::new(mezon_client::AppApi::new(
             Arc::new(mezon_client::TransportClient::new(String::new())),
@@ -16056,7 +16332,7 @@ mod tests {
                 store.active_channel_id = Some(channel);
                 store.active_clan_id = Some(ClanId(1));
 
-                store.resend_message(MessageId(1), cx);
+                store.resend_message(MessageRef::unbucketed(MessageId(1)), cx);
 
                 assert!(
                     store
@@ -16111,7 +16387,7 @@ mod tests {
                 );
                 store.active_channel_id = Some(channel);
                 store.active_clan_id = Some(ClanId(1));
-                store.set_reply_to(target, cx);
+                store.set_reply_to(MessageRef::unbucketed(target), cx);
 
                 store.send_sticker(
                     "https://cdn.example/sticker.webp".to_string(),
