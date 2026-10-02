@@ -373,7 +373,7 @@ impl Shell {
     /// user clears an inline edit to empty, or picks Delete from the message context menu.
     pub fn confirm_delete_message(
         &mut self,
-        message_id: mezon_store::MessageId,
+        target: mezon_store::MessageRef,
         locale: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -395,7 +395,7 @@ impl Shell {
             .into();
         let view = cx.new(|cx| ConfirmDeleteMessageModal {
             focus_handle: cx.focus_handle(),
-            message_id,
+            target,
             title,
             description,
             cancel_label,

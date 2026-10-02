@@ -176,7 +176,7 @@ pub use gifts::{
 pub use group_members::{
     AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
 };
-pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
+pub use ids::{ChannelId, ClanId, MessageId, MessageRef, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};

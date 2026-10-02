@@ -327,7 +327,7 @@ pub fn render_user_message(
 }
 
 fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
-    let message_id = msg.id;
+    let target = msg.message_ref();
     div()
         .flex()
         .items_center()
@@ -355,7 +355,7 @@ fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(mezon_i18n::t(ctx.locale, "message.dismissMessage"))
                 .on_click(move |_, _, cx| {
                     mezon_store::MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.dismiss_local_message(message_id, cx));
+                        .update(cx, |store, cx| store.dismiss_local_message(target, cx));
                 }),
         )
         .into_any_element()
