@@ -5859,6 +5859,7 @@ impl MessagesStore {
                     started_at: now_unix_seconds(),
                     finished: Vec::new(),
                     pending: upload_job_files(&presigned, &keys),
+                    sync_failures: 0,
                 };
                 run_upload_job(api.clone(), job, presigned, cx).await;
             } else {
@@ -7965,11 +7966,24 @@ impl MessagesStore {
             for key in &job.finished {
                 presign::settle(key);
             }
-        } else {
+        } else if Arc::make_mut(&mut self.upload_jobs[index]).note_sync_failure() {
             tracing::warn!(
                 message_id = job_id.1,
                 "presign_finish did not reach the server; keeping the upload to retry"
             );
+        } else {
+            tracing::warn!(
+                message_id = job_id.1,
+                "presign_finish keeps failing; giving up on this upload"
+            );
+            let job = self.upload_jobs.remove(index);
+            for key in job
+                .finished
+                .iter()
+                .chain(job.pending.iter().map(|p| &p.key))
+            {
+                presign::settle(key);
+            }
         }
         self.persist_upload_jobs(cx);
     }
@@ -15763,6 +15777,7 @@ mod tests {
                 key: key.into(),
                 upload,
             }],
+            sync_failures: 0,
         }
     }
 
@@ -15887,9 +15902,18 @@ mod tests {
                     Some(presign::UploadState::Uploaded)
                 );
 
+                store.complete_upload_job((channel.0, id.0), false, cx);
+                assert_eq!(store.upload_jobs.len(), 1);
+                store.complete_upload_job((channel.0, id.0), false, cx);
+                assert!(
+                    store.upload_jobs.is_empty(),
+                    "a patch that keeps failing is given up"
+                );
+                assert_eq!(presign::upload_state("unsynced"), None);
+
+                store.register_upload_job(resumed_job(channel, id, "discarded"), cx);
                 store.discard_upload_job((channel.0, id.0), cx);
                 assert!(store.upload_jobs.is_empty());
-                assert_eq!(presign::upload_state("unsynced"), None);
             });
         });
     }

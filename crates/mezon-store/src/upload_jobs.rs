@@ -13,6 +13,7 @@ use crate::presign::PRESIGN_PENDING_MAX_AGE_SEC;
 const PRESIGNED_URL_LIFETIME_SEC: i64 = 15 * 60;
 const RETENTION_SEC: i64 = 7 * 24 * 60 * 60;
 const MAX_FAILED_UPLOADS: usize = 200;
+const MAX_SYNC_FAILURES: u32 = 3;
 const FILE_NAME: &str = "upload_jobs.json";
 
 pub type UploadJobId = (i64, i64);
@@ -35,6 +36,8 @@ pub struct UploadJob {
     pub started_at: i64,
     pub finished: Vec<String>,
     pub pending: Vec<PendingUpload>,
+    #[serde(default)]
+    pub sync_failures: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,11 @@ impl UploadJob {
 
     pub fn worth_keeping_at(&self, now: i64) -> bool {
         now - self.started_at < RETENTION_SEC
+    }
+
+    pub fn note_sync_failure(&mut self) -> bool {
+        self.sync_failures += 1;
+        self.sync_failures < MAX_SYNC_FAILURES
     }
 
     pub fn has_upload_urls(&self) -> bool {
@@ -361,6 +369,7 @@ mod tests {
             started_at,
             finished: vec!["a".into()],
             pending: Vec::new(),
+            sync_failures: 0,
         }
     }
 
@@ -406,6 +415,14 @@ mod tests {
         other_channel.channel_id = 9;
         assert_ne!(job(0).id(), other_channel.id());
         assert_eq!(job(0).id(), (2, 3));
+    }
+
+    #[test]
+    fn a_job_stops_retrying_its_patch_after_three_failures() {
+        let mut job = job(0);
+        assert!(job.note_sync_failure());
+        assert!(job.note_sync_failure());
+        assert!(!job.note_sync_failure());
     }
 
     #[test]

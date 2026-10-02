@@ -1386,6 +1386,7 @@ impl TopicsStore {
                 started_at: unix_now_seconds(),
                 finished: Vec::new(),
                 pending: crate::messages::upload_job_files(&presigned, &keys),
+                sync_failures: 0,
             };
             crate::messages::run_upload_job(api.clone(), job, presigned, cx).await;
         })
