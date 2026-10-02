@@ -242,11 +242,16 @@ impl PermissionsTab {
             }),
             cx.subscribe(
                 &ChannelUsersStore::global(cx),
-                |this, _, event: &ChannelUsersEvent, cx| {
-                    let ChannelUsersEvent::Changed { channel_id } = event;
-                    if *channel_id == this.channel_id {
+                |this, _, event: &ChannelUsersEvent, cx| match event {
+                    ChannelUsersEvent::Changed { channel_id } if *channel_id == this.channel_id => {
                         this.refresh(cx);
                     }
+                    ChannelUsersEvent::MembershipChanged { channel_id }
+                        if *channel_id == this.channel_id =>
+                    {
+                        this.reload_access_lists(cx);
+                    }
+                    _ => {}
                 },
             ),
             cx.observe(&RolesStore::global(cx), |this, _, cx| this.refresh(cx)),
@@ -432,6 +437,18 @@ impl PermissionsTab {
                 cx.notify();
             }));
         self.member_search = Some(input);
+    }
+
+    fn reload_access_lists(&self, cx: &mut Context<Self>) {
+        let channel_id = self.channel_id;
+        ChannelUsersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(channel_id, cx);
+        });
+        if !self.persisted_private(cx) {
+            return;
+        }
+        let clan_id = self.clan_id;
+        RolesStore::global(cx).update(cx, |store, cx| store.reload(clan_id, cx));
     }
 
     fn persisted_private(&self, cx: &App) -> bool {
