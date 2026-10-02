@@ -242,11 +242,16 @@ impl PermissionsTab {
             }),
             cx.subscribe(
                 &ChannelUsersStore::global(cx),
-                |this, _, event: &ChannelUsersEvent, cx| {
-                    let ChannelUsersEvent::Changed { channel_id } = event;
-                    if *channel_id == this.channel_id {
+                |this, _, event: &ChannelUsersEvent, cx| match event {
+                    ChannelUsersEvent::Changed { channel_id } if *channel_id == this.channel_id => {
                         this.refresh(cx);
                     }
+                    ChannelUsersEvent::MembershipChanged { channel_id }
+                        if *channel_id == this.channel_id =>
+                    {
+                        this.reload_private_roles(cx);
+                    }
+                    _ => {}
                 },
             ),
             cx.observe(&RolesStore::global(cx), |this, _, cx| this.refresh(cx)),
@@ -432,6 +437,14 @@ impl PermissionsTab {
                 cx.notify();
             }));
         self.member_search = Some(input);
+    }
+
+    fn reload_private_roles(&self, cx: &mut Context<Self>) {
+        if !self.persisted_private(cx) {
+            return;
+        }
+        let clan_id = self.clan_id;
+        RolesStore::global(cx).update(cx, |store, cx| store.reload(clan_id, cx));
     }
 
     fn persisted_private(&self, cx: &App) -> bool {
