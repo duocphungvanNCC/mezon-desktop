@@ -907,6 +907,7 @@ pub(crate) struct MentionMemberRaw {
     pub username_lc: String,
     pub display_norm: String,
     pub username_norm: String,
+    pub alt_norm: String,
 }
 
 fn active_dm(cx: &App) -> Option<ChannelId> {
@@ -931,6 +932,7 @@ fn mention_member_raw(
         username_lc: username.to_lowercase(),
         display_norm: normalize_search_string(name),
         username_norm: normalize_search_string(username),
+        alt_norm: String::new(),
     }
 }
 
@@ -971,6 +973,27 @@ pub(crate) fn mention_direct_id(cx: &App) -> Option<ChannelId> {
 
 pub(crate) fn mention_private_channel(cx: &App) -> Option<ChannelId> {
     mention_channel_context(cx).and_then(|ctx| ctx.private_channel)
+}
+
+pub(crate) fn mention_remote_search_scope(cx: &App) -> Option<(ClanId, Option<ChannelId>)> {
+    let ctx = mention_channel_context(cx)?;
+    ClanMembersStore::global(cx)
+        .read(cx)
+        .roster_capped(ctx.clan_id)
+        .then_some((ctx.clan_id, ctx.private_channel))
+}
+
+pub(crate) fn mention_member_from_clan_member(member: &ClanMember) -> MentionMemberRaw {
+    let mut raw = mention_member_raw(
+        member.user.id.to_string(),
+        member.name(),
+        &member.user.username,
+        member.avatar(),
+    );
+    if !member.clan_nick.is_empty() && !member.user.display_name.is_empty() {
+        raw.alt_norm = normalize_search_string(&member.user.display_name);
+    }
+    raw
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -1058,15 +1081,8 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
             None => store.members(ctx.clan_id),
         };
         members
-            .iter()
-            .map(|m| {
-                mention_member_raw(
-                    m.user.id.to_string(),
-                    m.name(),
-                    &m.user.username,
-                    m.avatar(),
-                )
-            })
+            .into_iter()
+            .map(mention_member_from_clan_member)
             .collect::<Vec<_>>()
     };
     pool.sort_by(|a, b| a.display_lc.cmp(&b.display_lc));
