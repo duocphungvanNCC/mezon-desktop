@@ -62,7 +62,7 @@ pub struct ChannelHeader {
     dm_header: Option<DmHeaderInfo>,
     create_group_handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
     muted: bool,
-    in_voice: Option<(SharedString, InVoiceInfo)>,
+    in_voice: Option<(SharedString, IconName, InVoiceInfo)>,
     members_action: bool,
     members_active: bool,
     on_toggle_members: Option<ToggleHandler>,
@@ -143,8 +143,8 @@ impl ChannelHeader {
         self
     }
 
-    pub fn in_voice(mut self, label: SharedString, info: InVoiceInfo) -> Self {
-        self.in_voice = Some((label, info));
+    pub fn in_voice(mut self, label: SharedString, icon: IconName, info: InVoiceInfo) -> Self {
+        self.in_voice = Some((label, icon, info));
         self
     }
 
@@ -468,7 +468,7 @@ impl ChannelHeader {
                                 .into_any_element()
                         } else {
                             match in_voice {
-                                Some((label, info)) => div()
+                                Some((label, icon, info)) => div()
                                     .flex()
                                     .flex_col()
                                     .min_w_0()
@@ -494,15 +494,11 @@ impl ChannelHeader {
                                                     },
                                                 )
                                             })
-                                            .child(
-                                                Icon::new(IconName::Speaker)
-                                                    .size(px(12.))
-                                                    .text_color(
-                                                    crate::util::user_status::in_voice_icon_color(
-                                                        theme,
-                                                    ),
+                                            .child(Icon::new(icon).size(px(12.)).text_color(
+                                                crate::util::user_status::in_voice_icon_color(
+                                                    theme,
                                                 ),
-                                            )
+                                            ))
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -1607,8 +1603,9 @@ impl Render for ChatHeader {
         if self.dm
             && let Some(info) = self.in_voice
         {
-            let label: SharedString = mezon_i18n::t(&locale, "channelTopbar.invoice").into();
-            header = header.in_voice(label, info);
+            let (label_key, icon) = dm_voice_indicator(info);
+            let label: SharedString = mezon_i18n::t(&locale, label_key).into();
+            header = header.in_voice(label, icon, info);
         }
         if show_search_bar {
             let search_bar = crate::chat::message_search::render_header_search_bar(
@@ -1646,6 +1643,14 @@ impl Render for ChatHeader {
             header = header.canvas_popover(handle, settings);
         }
         header.render(&theme, cx).into_any_element()
+    }
+}
+
+fn dm_voice_indicator(info: InVoiceInfo) -> (&'static str, IconName) {
+    if info.sharing_screen {
+        ("memberPage.shareScreen", IconName::VoiceScreenShareIcon)
+    } else {
+        ("channelTopbar.invoice", IconName::Speaker)
     }
 }
 
@@ -2276,7 +2281,9 @@ impl IntoElement for NotificationSettingTrigger {
 
 #[cfg(test)]
 mod tests {
-    use super::{DmHeaderState, dm_header_actions};
+    use super::{DmHeaderState, dm_header_actions, dm_voice_indicator};
+    use crate::components::primitives::IconName;
+    use mezon_store::{ChannelId, ClanId, InVoiceInfo};
 
     fn action_ids(state: DmHeaderState) -> Vec<&'static str> {
         dm_header_actions(state).iter().map(|(id, _)| *id).collect()
@@ -2318,5 +2325,23 @@ mod tests {
         assert_eq!(actions, ["hdr-add-members", "hdr-members", "hdr-pin"]);
         assert!(!actions.contains(&"hdr-gallery"));
         assert!(!actions.contains(&"hdr-files"));
+    }
+
+    #[test]
+    fn dm_voice_indicator_distinguishes_screen_share() {
+        let info = |sharing_screen| InVoiceInfo {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            sharing_screen,
+        };
+
+        assert_eq!(
+            dm_voice_indicator(info(false)),
+            ("channelTopbar.invoice", IconName::Speaker)
+        );
+        assert_eq!(
+            dm_voice_indicator(info(true)),
+            ("memberPage.shareScreen", IconName::VoiceScreenShareIcon)
+        );
     }
 }
