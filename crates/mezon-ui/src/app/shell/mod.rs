@@ -310,6 +310,17 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn show_modal_restoring_focus(
+        &mut self,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        self.show_modal(view, cx);
+        self.modal_restore_focus = previous_focus;
+    }
+
     pub fn show_modal_keyboard_dismiss_only(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.show_modal(view, cx);
         self.modal_backdrop_dismissible = false;

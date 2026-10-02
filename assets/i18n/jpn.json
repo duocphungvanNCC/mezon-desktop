@@ -4777,5 +4777,8 @@
   "screenShare.modeVideoDescription": "動画がより滑らかになります。回線が遅いと鮮明さが下がる場合があります。",
   "chat.activityStrip.latestPin": "最新のピン留め",
   "chat.activityStrip.latestTopicMessage": "トピックの最新メッセージ",
-  "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}"
+  "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}",
+  "chat.activityStrip.hideAction": "ピンとトピックのバーを非表示",
+  "chat.activityStrip.hideConfirm.title": "ピンとトピックのバーを非表示",
+  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。"
 }
