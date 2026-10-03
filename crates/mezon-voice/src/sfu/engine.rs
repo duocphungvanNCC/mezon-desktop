@@ -1797,8 +1797,9 @@ async fn announce_initial_state(
     mute_sync: &mut MuteSync,
 ) -> Result<()> {
     let resume_push_to_talk = local.resumes_push_to_talk(config.role);
-    let is_mute = local.announced_mute(config.role);
-    send_mute(ws_tx, local, mute_sync, is_mute).await?;
+    if !local.announced_mute(config.role) {
+        send_mute(ws_tx, local, mute_sync, false).await?;
+    }
     if resume_push_to_talk {
         tracing::info!("re-asserting the held push-to-talk turn on the new sfu session");
         send(ws_tx, &ClientMessage::PushToTalk { active: true }).await?;
@@ -2649,8 +2650,9 @@ mod tests {
             ))
             .await
             .unwrap();
-        let mut expected = vec![json!({ "type": "mute", "is_mute": !held })];
+        let mut expected = Vec::new();
         if held {
+            expected.push(json!({ "type": "mute", "is_mute": false }));
             expected.push(json!({ "type": "push_to_talk", "active": true }));
         }
         expected.push(json!({ "type": "visibility", "visible": true }));
