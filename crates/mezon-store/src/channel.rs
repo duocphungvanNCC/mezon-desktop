@@ -2442,6 +2442,8 @@ impl ChannelList {
                     if !message_id.is_zero() {
                         ch.last_sent_message_id = message_id;
                     }
+                } else if ts == ch.last_sent_timestamp && message_id > ch.last_sent_message_id {
+                    ch.last_sent_message_id = message_id;
                 }
                 if seen && ts > ch.last_seen_timestamp {
                     ch.last_seen_timestamp = ts;
@@ -2472,6 +2474,10 @@ impl ChannelList {
                     if !message_id.is_zero() {
                         overlay.last_sent_message_id = message_id;
                     }
+                } else if ts == overlay.last_sent_timestamp
+                    && message_id > overlay.last_sent_message_id
+                {
+                    overlay.last_sent_message_id = message_id;
                 }
             }
             self.patch_user_channel_message(channel_id, is_mention, seen, ts, message_id, cx);
@@ -3630,7 +3636,9 @@ impl ChannelList {
                 }
                 if !seen_message_id.is_zero() {
                     ch.last_seen_message_id = seen_message_id;
-                    if seen_message_id == ch.last_sent_message_id {
+                    if !ch.last_sent_message_id.is_zero()
+                        && seen_message_id >= ch.last_sent_message_id
+                    {
                         ch.last_seen_timestamp = ch.last_seen_timestamp.max(ch.last_sent_timestamp);
                     }
                 }
@@ -11758,45 +11766,60 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn a_read_on_another_device_clears_the_row_and_the_clan_dot(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let channels = init_channel_list(cx);
-            let mut clan = test_clan(ClanId(1), "One");
-            clan.has_unread = true;
-            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
-                clans.update_clans(vec![clan], cx);
-            });
-            channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+    fn clan_one_dot(cx: &App) -> bool {
+        let clans = crate::clan::ClanList::global(cx);
+        clans.read(cx).clan(ClanId(1)).unwrap().has_unread
+    }
+
+    fn channel_one_unread(channels: &ChannelList) -> bool {
+        channels
+            .channel(ClanId(1), ChannelId(1))
+            .unwrap()
+            .is_unread()
+    }
+
+    fn init_with_messages(cx: &mut App, messages: &[(i64, i64)]) -> Entity<ChannelList> {
+        let channels = init_channel_list(cx);
+        crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+            clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+        });
+        channels.update(cx, |channels, cx| {
+            channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+            channels.apply_badge_seed(ClanId(1), vec![api_desc(2, "", 0)], cx);
+            for (ts, id) in messages {
                 channels.note_channel_message(
                     ClanId(1),
                     ChannelId(1),
                     false,
                     false,
-                    100,
-                    MessageId(9),
+                    *ts,
+                    MessageId(*id),
                     cx,
                 );
-                assert!(
-                    channels
-                        .channel(ClanId(1), ChannelId(1))
-                        .unwrap()
-                        .is_unread()
-                );
+            }
+        });
+        crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+            clans.set_has_unread(ClanId(1), true, cx);
+        });
+        channels
+    }
 
+    #[gpui::test]
+    fn a_read_on_another_device_clears_the_row_and_the_clan_dot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_with_messages(cx, &[(100, 9)]);
+            assert!(channel_one_unread(channels.read(cx)));
+            assert!(clan_one_dot(cx));
+
+            channels.update(cx, |channels, cx| {
                 channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(9), cx);
-                assert!(
-                    !channels
-                        .channel(ClanId(1), ChannelId(1))
-                        .unwrap()
-                        .is_unread(),
-                    "proto-server echoes a read to the user's other sessions without its \
-                     timestamp, so the message id is the only proof the row was read to its end"
-                );
             });
-            let clans = crate::clan::ClanList::global(cx);
-            assert!(!clans.read(cx).clan(ClanId(1)).unwrap().has_unread);
+            assert!(
+                !channel_one_unread(channels.read(cx)),
+                "proto-server echoes a read to the user's other sessions without its \
+                 timestamp, so the message id is the only proof the row was read to its end"
+            );
+            assert!(!clan_one_dot(cx), "the clan has no other unread row");
         });
     }
 
@@ -11805,27 +11828,46 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let channels = init_channel_list(cx);
+            let channels = init_with_messages(cx, &[(100, 9)]);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
-                channels.note_channel_message(
-                    ClanId(1),
-                    ChannelId(1),
-                    false,
-                    false,
-                    100,
-                    MessageId(9),
-                    cx,
-                );
                 channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(8), cx);
-                assert!(
-                    channels
-                        .channel(ClanId(1), ChannelId(1))
-                        .unwrap()
-                        .is_unread(),
-                    "a message newer than the one read elsewhere is still unread"
-                );
             });
+            assert!(
+                channel_one_unread(channels.read(cx)),
+                "a message newer than the one read elsewhere is still unread"
+            );
+            assert!(clan_one_dot(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn messages_in_the_same_second_keep_the_newest_as_the_last_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_with_messages(cx, &[(100, 9), (100, 10)]);
+            channels.update(cx, |channels, cx| {
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(9), cx);
+                assert!(
+                    channel_one_unread(channels),
+                    "the bot reply sent in the same second as the read message is still unread"
+                );
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(10), cx);
+                assert!(!channel_one_unread(channels));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_past_the_last_known_message_clears_the_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_with_messages(cx, &[(100, 9)]);
+            channels.update(cx, |channels, cx| {
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(11), cx);
+            });
+            assert!(
+                !channel_one_unread(channels.read(cx)),
+                "a message this client never received (a skipped welcome or pin notice, a \
+                 reconnect gap) can still be the one read elsewhere"
+            );
         });
     }
 
