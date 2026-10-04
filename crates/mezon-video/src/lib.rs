@@ -126,6 +126,15 @@ impl VideoPlayer {
         Ok(Self { inner })
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn open_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        let inner = platform::PlayerImpl::from_webm_bytes(bytes, max_size)?;
+        Ok(Self { inner })
+    }
+
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         self.inner.copy_frame()
     }
@@ -173,4 +182,14 @@ impl VideoPlayer {
     pub fn failed(&self) -> bool {
         self.inner.failed()
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn is_webm_url(url: &str) -> bool {
+    webm_player::is_webm_source(url)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+    webm_player::load_webm_bytes(url)
 }

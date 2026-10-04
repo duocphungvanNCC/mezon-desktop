@@ -1,10 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, Entity, EntityId,
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
-    Window, canvas, div, img, prelude::*, px, relative,
+    Task, Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
 use mezon_video::{VideoFrame, VideoPlayer};
@@ -15,6 +16,7 @@ use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
+const SEEK_MIN_INTERVAL: Duration = Duration::from_millis(80);
 const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
 const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
 const THEATER_FILL: f32 = 0.92;
@@ -105,6 +107,9 @@ pub struct VideoPlayerView {
     time_label: SharedString,
     last_label_seconds: (u64, u64),
     image_cache: Entity<LruImageCache>,
+    _open_task: Option<Task<()>>,
+    last_seek_at: Option<Instant>,
+    pending_seek: Option<f64>,
 }
 
 impl VideoPlayerView {
@@ -120,18 +125,9 @@ impl VideoPlayerView {
             decode_max_size,
             locale,
         } = activation;
-        let player = VideoPlayer::open(url.as_ref(), decode_max_size)
-            .ok()
-            .map(Rc::new);
-        if let Some(player) = player.as_ref() {
-            player.play();
-        }
-        let shared = Rc::new(RefCell::new(SharedPlayback {
-            playing: player.is_some(),
-            ..SharedPlayback::default()
-        }));
+        let shared = Rc::new(RefCell::new(SharedPlayback::default()));
         Self::register_teardown(cx);
-        Self {
+        let mut view = Self {
             theater: false,
             fullscreen_mode,
             layout,
@@ -142,7 +138,7 @@ impl VideoPlayerView {
             locale,
             width,
             height,
-            player,
+            player: None,
             shared,
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
@@ -150,7 +146,69 @@ impl VideoPlayerView {
             image_cache: cx.new(|cx| {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
+            _open_task: None,
+            last_seek_at: None,
+            pending_seek: None,
+        };
+        view.begin_open(decode_max_size, true, cx);
+        view
+    }
+
+    fn begin_open(
+        &mut self,
+        decode_max_size: Option<(u32, u32)>,
+        autoplay: bool,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(any(windows, target_os = "macos"))]
+        if mezon_video::is_webm_url(self.url.as_ref()) {
+            let url = self.url.to_string();
+            let load = cx
+                .background_executor()
+                .spawn(async move { mezon_video::load_webm_bytes(&url) });
+            self._open_task = Some(cx.spawn(async move |this, cx| {
+                let loaded = load.await;
+                let _ = this.update(cx, |this, cx| {
+                    let opened = loaded.ok().and_then(|bytes| {
+                        VideoPlayer::open_webm_bytes(bytes, decode_max_size).ok()
+                    });
+                    match opened {
+                        Some(player) => {
+                            let player = Rc::new(player);
+                            if autoplay {
+                                player.play();
+                            }
+                            this.player = Some(player);
+                            let mut shared = this.shared.borrow_mut();
+                            shared.playing = autoplay;
+                            shared.failed = false;
+                        }
+                        None => {
+                            this.player = None;
+                            let mut shared = this.shared.borrow_mut();
+                            shared.playing = false;
+                            shared.failed = true;
+                        }
+                    }
+                    cx.notify();
+                });
+            }));
+            return;
         }
+
+        let player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
+            .ok()
+            .map(Rc::new);
+        if autoplay {
+            if let Some(player) = player.as_ref() {
+                player.play();
+            }
+        }
+        let playing = player.is_some() && autoplay;
+        self.player = player;
+        let mut shared = self.shared.borrow_mut();
+        shared.playing = playing;
+        shared.failed = false;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -171,10 +229,6 @@ impl VideoPlayerView {
             fullscreen_mode: VideoFullscreenMode::ShellModal,
             layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
-            // The theater plays a player that is already open, so it never needed
-            // the source — until decoding fails mid-playback and the error card
-            // offers Download and Open externally, which have nothing to act on
-            // without it.
             url,
             filename,
             poster,
@@ -189,6 +243,9 @@ impl VideoPlayerView {
             image_cache: cx.new(|cx| {
                 LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
             }),
+            _open_task: None,
+            last_seek_at: None,
+            pending_seek: None,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -196,6 +253,9 @@ impl VideoPlayerView {
     }
 
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.pending_seek.take() {
+            self.apply_seek_target(target, true, window, cx);
+        }
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -273,23 +333,20 @@ impl VideoPlayerView {
         self.track_bounds = Bounds::default();
         self.time_label = SharedString::new_static("00:00 / 00:00");
         self.last_label_seconds = (0, 0);
-        self.player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
-            .ok()
-            .map(Rc::new);
-        if let Some(player) = self.player.as_ref() {
-            player.play();
-        }
+        self.last_seek_at = None;
+        self.pending_seek = None;
         {
             let mut shared = self.shared.borrow_mut();
-            shared.playing = self.player.is_some();
-            shared.failed = false;
             shared.current_time = 0.0;
             shared.duration = 0.0;
         }
+        self.begin_open(decode_max_size, true, cx);
         cx.notify();
     }
 
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self._open_task = None;
+        self.pending_seek = None;
         if let Some(player) = self.player.take() {
             player.pause();
             drop(player);
@@ -348,68 +405,78 @@ impl VideoPlayerView {
     }
 
     fn seek_relative(&mut self, delta: f64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
-            return;
-        };
-        let was_playing = player.is_playing();
         let target = {
-            let mut shared = self.shared.borrow_mut();
+            let shared = self.shared.borrow();
             if shared.duration <= 0.0 {
                 return;
             }
-            let target = (shared.current_time + delta).clamp(0.0, shared.duration);
-            shared.current_time = target;
-            target
+            (shared.current_time + delta).clamp(0.0, shared.duration)
         };
-        player.seek(target);
-        if was_playing {
-            player.play();
-            self.shared.borrow_mut().playing = true;
-        }
-        self.apply_seeked_frame(&player, window, cx);
-        cx.notify();
+        self.apply_seek_target(target, true, window, cx);
     }
 
-    fn seek_to_x(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
-            return;
-        };
-        let was_playing = player.is_playing();
+    fn seek_to_x(&mut self, x: Pixels, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = self.track_bounds;
         let target = {
-            let mut shared = self.shared.borrow_mut();
+            let shared = self.shared.borrow();
             if shared.duration <= 0.0 {
                 return;
             }
-            let target = fraction_from_position(bounds, x) as f64 * shared.duration;
-            shared.current_time = target;
-            target
+            fraction_from_position(bounds, x) as f64 * shared.duration
         };
-        player.seek(target);
-        if was_playing {
-            player.play();
-            self.shared.borrow_mut().playing = true;
-        }
-        self.apply_seeked_frame(&player, window, cx);
-        cx.notify();
+        self.apply_seek_target(target, force, window, cx);
     }
 
-    fn apply_seeked_frame(
+    fn apply_seek_target(
         &mut self,
-        player: &VideoPlayer,
+        target: f64,
+        force: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(frame) = player.copy_frame() else {
+        let Some(player) = self.player.clone() else {
             return;
         };
-        let frame = Self::adopt_frame(&self.shared, frame, window, cx);
-        let previous = self.shared.borrow_mut().frame.replace(frame);
-        Self::release_stale_frame(previous, &self.shared, window, cx);
+        {
+            let mut shared = self.shared.borrow_mut();
+            if shared.duration <= 0.0 {
+                return;
+            }
+            shared.current_time = target.clamp(0.0, shared.duration);
+        }
+        let now = Instant::now();
+        if !force
+            && self
+                .last_seek_at
+                .is_some_and(|prev| now.duration_since(prev) < SEEK_MIN_INTERVAL)
+        {
+            self.pending_seek = Some(target);
+            let (current_time, duration) = {
+                let shared = self.shared.borrow();
+                (shared.current_time, shared.duration)
+            };
+            self.refresh_time_label(player.is_playing(), current_time, duration);
+            cx.notify();
+            return;
+        }
+        self.last_seek_at = Some(now);
+        self.pending_seek = None;
+        let was_playing = player.is_playing();
+        player.seek(target);
+        if was_playing {
+            player.play();
+            self.shared.borrow_mut().playing = true;
+        }
+        if let Some(frame) = player.copy_frame() {
+            let frame = Self::adopt_frame(&self.shared, frame, window, cx);
+            let previous = self.shared.borrow_mut().frame.replace(frame);
+            Self::release_stale_frame(previous, &self.shared, window, cx);
+        }
         let current_time = player.current_time();
         let duration = player.duration();
         self.shared.borrow_mut().current_time = current_time;
         self.refresh_time_label(player.is_playing(), current_time, duration);
+        cx.notify();
     }
 
     fn open_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -617,7 +684,7 @@ impl VideoPlayerView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.seek_to_x(event.position.x, window, cx);
+                    view.seek_to_x(event.position.x, true, window, cx);
                 }),
             )
             .on_drag(SeekDrag(entity_id), |drag, _, _, cx| {
@@ -630,7 +697,7 @@ impl VideoPlayerView {
                     if *id != entity_id {
                         return;
                     }
-                    view.seek_to_x(event.event.position.x, window, cx);
+                    view.seek_to_x(event.event.position.x, false, window, cx);
                 }),
             )
             .child(

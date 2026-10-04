@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use matroska_demuxer::{DemuxError, Frame, MatroskaFile, TrackType};
 use oxideav_vp8::state::Vp8DecoderState;
@@ -11,6 +11,9 @@ use parking_lot::Mutex;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
+const WEBM_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+type WebmCursor = Cursor<Arc<[u8]>>;
 
 fn matroska_codec_id(id: &str) -> &str {
     id.trim_end_matches('\0')
@@ -20,6 +23,13 @@ fn is_vp8_video_track(track: &matroska_demuxer::TrackEntry) -> bool {
     track.track_type() == TrackType::Video && matroska_codec_id(track.codec_id()) == "V_VP8"
 }
 
+fn has_audio_track(demuxer: &MatroskaFile<WebmCursor>) -> bool {
+    demuxer
+        .tracks()
+        .iter()
+        .any(|track| track.track_type() == TrackType::Audio)
+}
+
 pub(crate) fn is_webm_source(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     path.rsplit('/')
@@ -27,20 +37,39 @@ pub(crate) fn is_webm_source(url: &str) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().ends_with(".webm"))
 }
 
+struct RawI420 {
+    width: u32,
+    height: u32,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+#[cfg(windows)]
+struct CachedBgra {
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
+}
+
 struct DemuxState {
-    demuxer: MatroskaFile<Cursor<Vec<u8>>>,
+    demuxer: MatroskaFile<WebmCursor>,
     video_track: u64,
     timestamp_scale: u64,
     vp8: Vp8DecoderState,
     last_frame_ns: u64,
     last_emitted_ns: Option<u64>,
+    raw: Option<RawI420>,
+    #[cfg(windows)]
+    cached_bgra: Option<CachedBgra>,
+    #[cfg(target_os = "macos")]
     cached: Option<VideoFrame>,
     eos: bool,
 }
 
 pub struct WebmPlayerImpl {
     state: Mutex<DemuxState>,
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<[u8]>,
     duration_seconds: f64,
     playing: Cell<bool>,
     play_started_at: RefCell<Option<Instant>>,
@@ -60,8 +89,15 @@ impl WebmPlayerImpl {
     }
 
     pub fn open_bytes(bytes: Vec<u8>, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
-        let bytes = Arc::new(bytes);
+        let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
         let mut demuxer = open_demuxer(&bytes)?;
+        if has_audio_track(&demuxer) {
+            tracing::warn!(
+                target: "mezon_video",
+                "webm with audio is not decoded inline; use download or open externally"
+            );
+            return Err(PlayerError::Open);
+        }
         let video_track = demuxer
             .tracks()
             .iter()
@@ -87,6 +123,10 @@ impl WebmPlayerImpl {
             vp8: Vp8DecoderState::new(),
             last_frame_ns: 0,
             last_emitted_ns: None,
+            raw: None,
+            #[cfg(windows)]
+            cached_bgra: None,
+            #[cfg(target_os = "macos")]
             cached: None,
             eos: false,
         };
@@ -171,11 +211,17 @@ impl WebmPlayerImpl {
         *self.play_started_at.borrow_mut() = None;
         self.play_offset_ns.set(target_ns);
         let mut state = self.state.lock();
-        if reopen_at(&mut state, &self.bytes, target_ns, self.max_size).is_err() {
+        let can_advance = !state.eos && state.raw.is_some() && target_ns >= state.last_frame_ns;
+        let seek_result = if can_advance {
+            decode_until(&mut state, target_ns, self.max_size)
+        } else {
+            reopen_at(&mut state, &self.bytes, target_ns, self.max_size)
+        };
+        if seek_result.is_err() {
             tracing::warn!(
                 target: "mezon_video",
                 target_ms = target_ns / 1_000_000,
-                "webm seek reopen failed"
+                "webm seek failed"
             );
             self.failed.store(true, Ordering::SeqCst);
         }
@@ -212,7 +258,8 @@ impl WebmPlayerImpl {
 
 pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     let bytes = load_bytes(path).ok()?;
-    let mut demuxer = MatroskaFile::open(Cursor::new(bytes)).ok()?;
+    let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+    let mut demuxer = open_demuxer(&bytes).ok()?;
     let video_track = demuxer
         .tracks()
         .iter()
@@ -224,9 +271,11 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
         if frame.track != video_track {
             continue;
         }
-        let decoded = oxideav_vp8::state::Vp8DecoderState::new()
-            .decode_frame(&frame.data)
-            .ok()?;
+        let mut vp8 = Vp8DecoderState::new();
+        let decoded = vp8.decode_frame(&frame.data).ok()?;
+        if vp8.last_frame_shown() == Some(false) {
+            continue;
+        }
         #[cfg(windows)]
         let poster_jpeg = {
             let bgra = crate::frame_util::i420_to_bgra(
@@ -246,6 +295,8 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
                 max_poster_edge,
             )
         };
+        #[cfg(target_os = "macos")]
+        let _ = max_poster_edge;
         return Some(VideoProbe {
             width: decoded.width,
             height: decoded.height,
@@ -258,8 +309,12 @@ pub fn probe_webm(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     None
 }
 
-fn open_demuxer(bytes: &Arc<Vec<u8>>) -> Result<MatroskaFile<Cursor<Vec<u8>>>, PlayerError> {
-    MatroskaFile::open(Cursor::new(Vec::clone(bytes))).map_err(|error| {
+pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+    load_bytes(url)
+}
+
+fn open_demuxer(bytes: &Arc<[u8]>) -> Result<MatroskaFile<WebmCursor>, PlayerError> {
+    MatroskaFile::open(Cursor::new(Arc::clone(bytes))).map_err(|error| {
         tracing::warn!(target: "mezon_video", ?error, "webm demuxer open failed");
         PlayerError::Open
     })
@@ -269,13 +324,21 @@ fn clear_frame_cache(state: &mut DemuxState) {
     state.vp8 = Vp8DecoderState::new();
     state.last_frame_ns = 0;
     state.last_emitted_ns = None;
-    state.cached = None;
+    state.raw = None;
+    #[cfg(windows)]
+    {
+        state.cached_bgra = None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        state.cached = None;
+    }
     state.eos = false;
 }
 
 fn reopen_at(
     state: &mut DemuxState,
-    bytes: &Arc<Vec<u8>>,
+    bytes: &Arc<[u8]>,
     target_ns: u64,
     max_size: Option<(u32, u32)>,
 ) -> Result<(), PlayerError> {
@@ -295,7 +358,7 @@ fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
 }
 
 fn video_duration_from_frames(
-    demuxer: &mut MatroskaFile<Cursor<Vec<u8>>>,
+    demuxer: &mut MatroskaFile<WebmCursor>,
     video_track: u64,
     timestamp_scale: u64,
 ) -> Result<f64, PlayerError> {
@@ -315,7 +378,11 @@ fn video_duration_from_frames(
 
 fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
-        let mut response = ureq::get(url).call().map_err(|error| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(WEBM_HTTP_TIMEOUT))
+            .build()
+            .into();
+        let mut response = agent.get(url).call().map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm download failed");
             PlayerError::Open
         })?;
@@ -326,28 +393,66 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
             .read_to_vec()
             .map_err(|_| PlayerError::Open)?;
         Ok(body)
-    } else if let Some(path) = url.strip_prefix("file://") {
-        let bytes = std::fs::read(path).map_err(|_| PlayerError::Open)?;
-        if bytes.len() > MAX_WEBM_BYTES {
-            return Err(PlayerError::Open);
-        }
-        Ok(bytes)
+    } else if let Some(path) = local_file_path(url) {
+        read_local_capped(path)
     } else {
-        let bytes = std::fs::read(url).map_err(|_| PlayerError::Open)?;
-        if bytes.len() > MAX_WEBM_BYTES {
-            return Err(PlayerError::Open);
-        }
-        Ok(bytes)
+        Err(PlayerError::InvalidUrl)
     }
+}
+
+fn local_file_path(url: &str) -> Option<&str> {
+    let path = url.strip_prefix("file://")?;
+    if path.starts_with("//") || path.starts_with("\\\\") {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        let trimmed = path.trim_start_matches('/');
+        if trimmed.starts_with('\\') || trimmed.starts_with("//") {
+            return None;
+        }
+        if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+            return Some(trimmed);
+        }
+    }
+    Some(path)
+}
+
+fn read_local_capped(path: &str) -> Result<Vec<u8>, PlayerError> {
+    let meta = std::fs::metadata(path).map_err(|_| PlayerError::Open)?;
+    if !meta.is_file() || meta.len() > MAX_WEBM_BYTES as u64 {
+        return Err(PlayerError::Open);
+    }
+    let bytes = std::fs::read(path).map_err(|_| PlayerError::Open)?;
+    if bytes.len() > MAX_WEBM_BYTES {
+        return Err(PlayerError::Open);
+    }
+    Ok(bytes)
 }
 
 fn take_frame(state: &mut DemuxState) -> Option<VideoFrame> {
     if state.last_emitted_ns == Some(state.last_frame_ns) {
         return None;
     }
-    let frame = state.cached.clone()?;
-    state.last_emitted_ns = Some(state.last_frame_ns);
-    Some(frame)
+    #[cfg(windows)]
+    {
+        let cached = state.cached_bgra.as_ref()?;
+        let frame =
+            crate::render_frame::bgra_to_frame(cached.width, cached.height, cached.bgra.clone())?;
+        state.last_emitted_ns = Some(state.last_frame_ns);
+        return Some(frame);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let frame = state.cached.clone()?;
+        state.last_emitted_ns = Some(state.last_frame_ns);
+        return Some(frame);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = state;
+        None
+    }
 }
 
 fn advance_to(
@@ -356,15 +461,78 @@ fn advance_to(
     max_size: Option<(u32, u32)>,
 ) -> Result<bool, DemuxError> {
     if state.eos {
-        return Ok(state.cached.is_some());
+        return Ok(present_raw(state, max_size));
     }
-    while state.last_frame_ns <= target_ns {
-        if !decode_next_video_frame(state, max_size)? {
-            state.eos = true;
-            break;
+    loop {
+        match decode_next_shown_planes(state)? {
+            None => {
+                state.eos = true;
+                break;
+            }
+            Some((timestamp_ns, raw)) => {
+                if timestamp_ns > target_ns && state.raw.is_some() {
+                    break;
+                }
+                state.last_frame_ns = timestamp_ns;
+                state.raw = Some(raw);
+                invalidate_presented(state);
+                if timestamp_ns >= target_ns {
+                    break;
+                }
+            }
         }
     }
-    Ok(state.cached.is_some())
+    Ok(present_raw(state, max_size))
+}
+
+fn invalidate_presented(state: &mut DemuxState) {
+    #[cfg(windows)]
+    {
+        state.cached_bgra = None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        state.cached = None;
+    }
+    state.last_emitted_ns = None;
+}
+
+fn present_raw(state: &mut DemuxState, max_size: Option<(u32, u32)>) -> bool {
+    #[cfg(windows)]
+    {
+        if state.cached_bgra.is_some() {
+            return true;
+        }
+        let Some(raw) = state.raw.as_ref() else {
+            return false;
+        };
+        let Some(cached) = raw_to_bgra(raw, max_size) else {
+            return false;
+        };
+        state.cached_bgra = Some(cached);
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if state.cached.is_some() {
+            return true;
+        }
+        let Some(raw) = state.raw.as_ref() else {
+            return false;
+        };
+        let Some(frame) = crate::webm_frame_macos::pixel_buffer_from_i420(
+            raw.width, raw.height, &raw.y, &raw.u, &raw.v, max_size,
+        ) else {
+            return false;
+        };
+        state.cached = Some(frame);
+        return true;
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (state, max_size);
+        false
+    }
 }
 
 fn decode_until(
@@ -378,10 +546,7 @@ fn decode_until(
     })
 }
 
-fn decode_next_video_frame(
-    state: &mut DemuxState,
-    max_size: Option<(u32, u32)>,
-) -> Result<bool, DemuxError> {
+fn decode_next_shown_planes(state: &mut DemuxState) -> Result<Option<(u64, RawI420)>, DemuxError> {
     let mut frame = Frame::default();
     while state.demuxer.next_frame(&mut frame)? {
         if frame.track != state.video_track {
@@ -392,56 +557,47 @@ fn decode_next_video_frame(
             Ok(decoded) => decoded,
             Err(_) => continue,
         };
-        if let Some(video_frame) = vp8_to_frame(&decoded, max_size) {
-            state.last_frame_ns = timestamp_ns;
-            state.cached = Some(video_frame);
-            return Ok(true);
+        if state.vp8.last_frame_shown() == Some(false) {
+            continue;
         }
+        return Ok(Some((
+            timestamp_ns,
+            RawI420 {
+                width: decoded.width,
+                height: decoded.height,
+                y: decoded.y,
+                u: decoded.u,
+                v: decoded.v,
+            },
+        )));
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn vp8_to_frame(
-    decoded: &oxideav_vp8::decoder::Vp8DecodedFrame,
-    max_size: Option<(u32, u32)>,
-) -> Option<VideoFrame> {
-    #[cfg(target_os = "macos")]
-    {
-        return crate::webm_frame_macos::pixel_buffer_from_vp8(decoded, max_size);
-    }
-    #[cfg(windows)]
-    {
-        let mut bgra = crate::frame_util::i420_to_bgra(
-            decoded.width,
-            decoded.height,
-            &decoded.y,
-            &decoded.u,
-            &decoded.v,
-        )?;
-        let (width, height) = match max_size {
-            Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
-                let max_w = max_w.min(decoded.width);
-                let max_h = max_h.min(decoded.height);
-                if decoded.width <= max_w && decoded.height <= max_h {
-                    (decoded.width, decoded.height)
-                } else {
-                    let scale = (max_w as f32 / decoded.width as f32)
-                        .min(max_h as f32 / decoded.height as f32);
-                    let out_w = ((decoded.width as f32 * scale).round() as u32).max(1);
-                    let out_h = ((decoded.height as f32 * scale).round() as u32).max(1);
-                    bgra = scale_bgra(&bgra, decoded.width, decoded.height, out_w, out_h)?;
-                    (out_w, out_h)
-                }
+#[cfg(windows)]
+fn raw_to_bgra(raw: &RawI420, max_size: Option<(u32, u32)>) -> Option<CachedBgra> {
+    let mut bgra = crate::frame_util::i420_to_bgra(raw.width, raw.height, &raw.y, &raw.u, &raw.v)?;
+    let (width, height) = match max_size {
+        Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
+            let max_w = max_w.min(raw.width);
+            let max_h = max_h.min(raw.height);
+            if raw.width <= max_w && raw.height <= max_h {
+                (raw.width, raw.height)
+            } else {
+                let scale = (max_w as f32 / raw.width as f32).min(max_h as f32 / raw.height as f32);
+                let out_w = ((raw.width as f32 * scale).round() as u32).max(1);
+                let out_h = ((raw.height as f32 * scale).round() as u32).max(1);
+                bgra = scale_bgra(&bgra, raw.width, raw.height, out_w, out_h)?;
+                (out_w, out_h)
             }
-            _ => (decoded.width, decoded.height),
-        };
-        crate::render_frame::bgra_to_frame(width, height, bgra)
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = (decoded, max_size);
-        None
-    }
+        }
+        _ => (raw.width, raw.height),
+    };
+    Some(CachedBgra {
+        width,
+        height,
+        bgra,
+    })
 }
 
 #[cfg(windows)]
@@ -482,5 +638,13 @@ mod tests {
     fn matroska_codec_id_strips_null_suffix() {
         assert_eq!(matroska_codec_id("V_VP8\0"), "V_VP8");
         assert_eq!(matroska_codec_id("V_VP8"), "V_VP8");
+    }
+
+    #[test]
+    fn local_file_path_rejects_unc() {
+        assert!(local_file_path("file:///tmp/a.webm").is_some());
+        assert!(local_file_path("file:////server/share/a.webm").is_none());
+        assert!(local_file_path("https://cdn.example/a.webm").is_none());
+        assert!(local_file_path("C:\\\\temp\\\\a.webm").is_none());
     }
 }
