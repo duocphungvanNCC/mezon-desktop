@@ -3630,6 +3630,9 @@ impl ChannelList {
                 }
                 if !seen_message_id.is_zero() {
                     ch.last_seen_message_id = seen_message_id;
+                    if seen_message_id == ch.last_sent_message_id {
+                        ch.last_seen_timestamp = ch.last_seen_timestamp.max(ch.last_sent_timestamp);
+                    }
                 }
                 if !computed {
                     computed = true;
@@ -11750,6 +11753,77 @@ mod tests {
                     4,
                     "a later refetch (e.g. after the clan's CACHE_TTL expires) must reapply the \
                      seed itself — the zeroed live rows prove the carry cannot mask this"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_on_another_device_clears_the_row_and_the_clan_dot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            let mut clan = test_clan(ClanId(1), "One");
+            clan.has_unread = true;
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![clan], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    false,
+                    false,
+                    100,
+                    MessageId(9),
+                    cx,
+                );
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .is_unread()
+                );
+
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(9), cx);
+                assert!(
+                    !channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .is_unread(),
+                    "proto-server echoes a read to the user's other sessions without its \
+                     timestamp, so the message id is the only proof the row was read to its end"
+                );
+            });
+            let clans = crate::clan::ClanList::global(cx);
+            assert!(!clans.read(cx).clan(ClanId(1)).unwrap().has_unread);
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_that_stops_short_of_the_last_message_leaves_the_row_unread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    false,
+                    false,
+                    100,
+                    MessageId(9),
+                    cx,
+                );
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 0, 0, MessageId(8), cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .is_unread(),
+                    "a message newer than the one read elsewhere is still unread"
                 );
             });
         });
