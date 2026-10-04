@@ -54,6 +54,7 @@ pub struct CommandPaletteModal {
     search_input: Entity<InputState>,
     items: Rc<Vec<PaletteItem>>,
     debounced_query: String,
+    applied_query: String,
     filtered: Rc<Vec<usize>>,
     display_rows: Rc<Vec<PaletteDisplayRow>>,
     selected_visible: usize,
@@ -132,6 +133,7 @@ impl CommandPaletteModal {
                 search_input,
                 items,
                 debounced_query: String::new(),
+                applied_query: String::new(),
                 filtered,
                 display_rows: display_rows.clone(),
                 selected_visible: first_selectable_row(display_rows.as_ref()),
@@ -185,6 +187,7 @@ impl CommandPaletteModal {
                 }
                 this._router_observe = cx.observe(&Router::global(cx), |this, _, cx| {
                     this.recompute_filtered(cx);
+                    this.ensure_selection_visible();
                     cx.notify();
                 });
                 this._ctrlk_observe = cx.observe(&CtrlKSearchStore::global(cx), |this, _, cx| {
@@ -193,6 +196,7 @@ impl CommandPaletteModal {
                         return;
                     }
                     this.recompute_filtered(cx);
+                    this.ensure_selection_visible();
                     cx.notify();
                 });
                 if let Some(store) = AccountStore::try_global(cx) {
@@ -263,8 +267,7 @@ impl CommandPaletteModal {
                 if this.debounced_query.trim().is_empty() {
                     CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
                     this.recompute_filtered(cx);
-                    this.scroll
-                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
+                    this.ensure_selection_visible();
                     cx.notify();
                     return;
                 }
@@ -272,8 +275,7 @@ impl CommandPaletteModal {
                 if text.is_empty() {
                     CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
                     this.recompute_filtered(cx);
-                    this.scroll
-                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
+                    this.ensure_selection_visible();
                     cx.notify();
                     return;
                 }
@@ -281,17 +283,22 @@ impl CommandPaletteModal {
                     store.search(text, search_type, cx);
                 });
                 this.recompute_filtered(cx);
-                this.scroll
-                    .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
+                this.ensure_selection_visible();
                 cx.notify();
             });
         });
     }
 
     fn recompute_filtered(&mut self, cx: &App) {
-        let previous_selection = self.selected_item_id();
-        let query = self.debounced_query.trim();
-        let (api_text, _) = parse_ctrlk_query(query);
+        let query = self.debounced_query.trim().to_string();
+        let query_changed = self.applied_query != query;
+        let previous_selection = if query_changed {
+            None
+        } else {
+            self.selected_item_id()
+        };
+        self.applied_query = query.clone();
+        let (api_text, _) = parse_ctrlk_query(&query);
         if query.is_empty() || api_text.is_empty() {
             self.items = Rc::new(build_palette_items(cx));
             self.recompute_local_filtered(cx, previous_selection);
@@ -308,29 +315,28 @@ impl CommandPaletteModal {
         let (items, in_flight) = {
             let store = ctrlk.read(cx);
             (
-                build_palette_items_from_ctrlk(store.state(), query, cx),
+                build_palette_items_from_ctrlk(store.state(), &query, cx),
                 store.state().is_searching,
             )
         };
         self.items = Rc::new(items);
         self.filtered = Rc::new(if in_flight {
-            filter_and_sort_indices(self.items.as_ref(), query)
+            filter_and_sort_indices(self.items.as_ref(), &query)
         } else {
-            sort_palette_indices(self.items.as_ref(), query)
+            sort_palette_indices(self.items.as_ref(), &query)
         });
         self.display_rows = Rc::new(build_display_rows(
             self.items.as_ref(),
             self.filtered.as_ref(),
-            query,
+            &query,
             &[],
             None,
             &section_labels(&self.locale),
         ));
-        self.selected_visible = previous_selection
-            .and_then(|id| {
-                find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
-            })
-            .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
+        self.apply_selection(previous_selection);
+        if query_changed {
+            self.keyboard_nav = true;
+        }
     }
 
     fn recompute_local_filtered(&mut self, cx: &App, previous_selection: Option<PaletteItemId>) {
@@ -354,11 +360,29 @@ impl CommandPaletteModal {
             browse_context,
             &section_labels(&self.locale),
         ));
+        self.apply_selection(previous_selection);
+    }
+
+    fn apply_selection(&mut self, previous_selection: Option<PaletteItemId>) {
         self.selected_visible = previous_selection
             .and_then(|id| {
                 find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
             })
             .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
+        if !matches!(
+            self.display_rows.get(self.selected_visible),
+            Some(PaletteDisplayRow::Item { .. })
+        ) {
+            self.selected_visible = first_selectable_row(self.display_rows.as_ref());
+        }
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        if self.display_rows.is_empty() {
+            return;
+        }
+        self.scroll
+            .scroll_to_item(self.selected_visible, ScrollStrategy::Top);
     }
 
     fn selected_item_id(&self) -> Option<PaletteItemId> {
@@ -379,6 +403,7 @@ impl CommandPaletteModal {
         });
         self.items_dirty = false;
         self.recompute_filtered(cx);
+        self.ensure_selection_visible();
         cx.notify();
     }
 
