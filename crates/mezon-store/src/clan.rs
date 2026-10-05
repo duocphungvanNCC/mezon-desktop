@@ -1198,12 +1198,16 @@ impl ClanList {
         let Some(clan) = clan else {
             return cx.spawn(async move |_, _| Err(ClanSaveError::Other("clan not found".into())));
         };
-        let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
-        let saved_name = saved_name.to_string();
-        let local_update = draft.clan_update(&clan, trimmed_name.clone());
+        let change = name_change(&trimmed_name, saved_name, &clan.name);
+        let name_edited = change != NameChange::Unchanged;
+        let mut request = draft.update_request(clan_id, &clan);
+        if !name_edited {
+            request.clan_name.clear();
+        }
+        let check_name = change == NameChange::Renamed;
         cx.spawn(async move |this, cx| {
-            if !clan_names_match(&trimmed_name, &saved_name) {
+            if check_name {
                 let is_duplicate = api
                     .check_duplicate_clan_name(&trimmed_name, "0")
                     .await
@@ -1218,7 +1222,15 @@ impl ClanList {
                 .map_err(clan_update_error)?;
 
             this.update(cx, |this, cx| {
-                let _ = update_clan(&mut this.clans, clan_id, local_update);
+                if let Some(current) = this.clans.iter().find(|c| c.id == clan_id).cloned() {
+                    let name = if name_edited {
+                        trimmed_name
+                    } else {
+                        current.name.clone()
+                    };
+                    let _ =
+                        update_clan(&mut this.clans, clan_id, draft.clan_update(&current, name));
+                }
                 cx.notify();
             })
             .map_err(|_| ClanSaveError::Other("store dropped".into()))?;
@@ -1625,6 +1637,23 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
         clan.short_url = community.short_url;
     }
     true
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NameChange {
+    Unchanged,
+    OwnName,
+    Renamed,
+}
+
+fn name_change(new_name: &str, saved_name: &str, current_name: &str) -> NameChange {
+    if new_name == saved_name.trim() {
+        NameChange::Unchanged
+    } else if clan_names_match(new_name, current_name) {
+        NameChange::OwnName
+    } else {
+        NameChange::Renamed
+    }
 }
 
 fn clan_names_match(a: &str, b: &str) -> bool {
@@ -2156,7 +2185,23 @@ mod tests {
     }
 
     #[test]
-    fn clan_names_match_lowercases_each_letter_like_the_server() {
+    fn an_untouched_name_is_not_sent_even_after_a_rename_elsewhere() {
+        assert_eq!(name_change("Foo", "Foo", "Bar"), NameChange::Unchanged);
+    }
+
+    #[test]
+    fn typing_the_clans_current_name_skips_the_duplicate_check() {
+        assert_eq!(name_change("Bar", "Foo", "Bar"), NameChange::OwnName);
+        assert_eq!(name_change("foo", "Foo", "Foo"), NameChange::OwnName);
+    }
+
+    #[test]
+    fn a_new_name_is_checked() {
+        assert_eq!(name_change("Baz", "Foo", "Foo"), NameChange::Renamed);
+    }
+
+    #[test]
+    fn clan_names_match_lowercases_letter_by_letter() {
         assert!(clan_names_match("İzmir", "izmir"));
         assert!(clan_names_match("ΟΔΟΣ", "οδοσ"));
     }

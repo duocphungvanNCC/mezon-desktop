@@ -407,6 +407,22 @@ impl OverviewSettingPage {
             })
         });
         let system_request = system_draft.clone().filter(|_| has_system);
+        let system_follows_clan = system_request.as_ref().is_some_and(|message| {
+            self.saved_system_message
+                .as_ref()
+                .map(|saved| saved.channel_id)
+                != Some(message.channel_id)
+        });
+        let (system_now, system_after_clan) = if system_follows_clan {
+            (None, system_request)
+        } else {
+            (system_request, None)
+        };
+        let system_task = system_now.map(|message| {
+            clan_list.update(cx, |store, cx| {
+                store.save_system_message(clan_id, message, cx)
+            })
+        });
 
         cx.spawn(async move |this, cx| {
             let clan_result = match clan_task {
@@ -416,8 +432,9 @@ impl OverviewSettingPage {
             if let Err(ClanSaveError::Other(reason)) = &clan_result {
                 tracing::error!("save clan overview failed: {reason}");
             }
-            let system_result = match (&clan_result, system_request) {
-                (Ok(()), Some(message)) => {
+            let system_result = match (system_task, &clan_result, system_after_clan) {
+                (Some(task), _, _) => Some(task.await),
+                (None, Ok(()), Some(message)) => {
                     let task = clan_list.update(cx, |store, cx| {
                         store.save_system_message(clan_id, message, cx)
                     });
