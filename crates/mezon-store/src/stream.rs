@@ -56,6 +56,7 @@ pub struct StreamStore {
     volume: f32,
     muted: bool,
     fullscreen: bool,
+    output_device_id: Option<String>,
     error_message: Option<String>,
     session: Option<StreamSession>,
     session_generation: u64,
@@ -104,6 +105,7 @@ impl StreamStore {
             volume: 1.0,
             muted: false,
             fullscreen: false,
+            output_device_id: None,
             error_message: None,
             session: None,
             session_generation: 0,
@@ -274,6 +276,10 @@ impl StreamStore {
         self.fullscreen
     }
 
+    pub fn output_device_id(&self) -> Option<&str> {
+        self.output_device_id.as_deref()
+    }
+
     pub fn effective_volume(&self) -> f32 {
         if self.muted { 0.0 } else { self.volume }
     }
@@ -391,6 +397,22 @@ impl StreamStore {
         }
     }
 
+    pub fn set_output_device(&mut self, output_device_id: Option<String>, cx: &mut Context<Self>) {
+        if self.output_device_id != output_device_id {
+            self.output_device_id = output_device_id.clone();
+            if let Some(session) = &self.session {
+                session.set_output_device(output_device_id.clone());
+            }
+        }
+        if let Some(settings) = crate::Settings::try_global(cx) {
+            settings.update(cx, |settings, _| {
+                settings.output_device_id = output_device_id;
+            });
+            crate::schedule_settings_save(&settings, cx);
+        }
+        cx.notify();
+    }
+
     fn sync_audio_playback(&self) {
         if let Some(session) = &self.session
             && let Some(audio) = session.audio()
@@ -440,6 +462,7 @@ impl StreamStore {
         self.join_started = Some(Instant::now());
         self.error_message = None;
         self.playback_blocked = false;
+        self.output_device_id = output_device_id;
         self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
         cx.notify();
 
@@ -485,8 +508,12 @@ impl StreamStore {
                     room,
                     token_provider: provider,
                 };
-                let stream_session =
-                    StreamSession::start(session_config, output_device_id, volume, muted);
+                let stream_session = StreamSession::start(
+                    session_config,
+                    this.output_device_id.clone(),
+                    volume,
+                    muted,
+                );
                 let events = stream_session.events().clone();
                 this.session = Some(stream_session);
                 this._session_task = Some(cx.spawn(async move |this, cx| {
@@ -784,6 +811,28 @@ mod tests {
         });
 
         assert!(cx.update(|cx| store.read(cx).show_chat()));
+    }
+
+    #[gpui::test]
+    fn choosing_an_output_device_is_kept_for_the_stream(cx: &mut gpui::TestAppContext) {
+        let store = init_store(cx);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.set_output_device(Some("usb-headset".into()), cx);
+            });
+        });
+        assert_eq!(
+            cx.update(|cx| store.read(cx).output_device_id().map(str::to_owned)),
+            Some("usb-headset".to_string())
+        );
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| store.set_output_device(None, cx));
+        });
+        assert_eq!(
+            cx.update(|cx| store.read(cx).output_device_id().map(str::to_owned)),
+            None
+        );
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn run_apm(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioFormat {
     pub sample_rate: u32,
     pub channels: u32,

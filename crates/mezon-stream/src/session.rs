@@ -14,7 +14,7 @@ use libwebrtc::peer_connection_factory::{
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use mezon_voice::{
-    SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
+    AudioFormat, SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
     stabilize_inactive_video_sections,
 };
 use parking_lot::Mutex;
@@ -53,6 +53,7 @@ pub enum StreamEvent {
 pub struct StreamSession {
     stop_tx: Sender<()>,
     event_rx: Receiver<StreamEvent>,
+    output_device_tx: Sender<Option<String>>,
     audio: Arc<Mutex<Option<Arc<StreamAudioOutput>>>>,
 }
 
@@ -65,6 +66,7 @@ impl StreamSession {
     ) -> Self {
         let (stop_tx, stop_rx) = flume::bounded(1);
         let (event_tx, event_rx) = flume::unbounded();
+        let (output_device_tx, output_device_rx) = flume::unbounded();
         let audio = Arc::new(Mutex::new(None));
         let audio_for_thread = audio.clone();
         std::thread::spawn(move || {
@@ -86,13 +88,21 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
+            let output_follower =
+                runtime.spawn(follow_output_device(audio_output.clone(), output_device_rx));
             runtime.block_on(run_session(config, audio_output, stop_rx, event_tx));
+            output_follower.abort();
         });
         Self {
             stop_tx,
             event_rx,
+            output_device_tx,
             audio,
         }
+    }
+
+    pub fn set_output_device(&self, output_device_id: Option<String>) {
+        let _ = self.output_device_tx.send(output_device_id);
     }
 
     pub fn audio(&self) -> Option<Arc<StreamAudioOutput>> {
@@ -111,6 +121,20 @@ impl StreamSession {
 impl Drop for StreamSession {
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+
+async fn follow_output_device(audio: Arc<StreamAudioOutput>, requests: Receiver<Option<String>>) {
+    while let Ok(mut output_device_id) = requests.recv_async().await {
+        while let Ok(newer) = requests.try_recv() {
+            output_device_id = newer;
+        }
+        let audio = audio.clone();
+        match tokio::task::spawn_blocking(move || audio.set_output_device(output_device_id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
+            Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
+        }
     }
 }
 
@@ -467,11 +491,13 @@ impl AudioPumpRegistry {
         let weak_registry = Arc::downgrade(self);
         let registry = Arc::clone(self);
         let handle = runtime.spawn(async move {
-            let format = audio.format();
-            let mut stream =
-                NativeAudioStream::new(track, format.sample_rate as i32, format.channels as i32);
+            let mut format = audio.format();
+            let mut stream = track_stream(&track, format);
             while let Some(frame) = stream.next().await {
-                audio.push_track(key, &frame.data);
+                if !audio.push_track(key, format, &frame.data) {
+                    format = audio.format();
+                    stream = track_stream(&track, format);
+                }
             }
             audio.clear_track(key);
             let _ = event_tx.send(StreamEvent::RemoteAudio(false));
@@ -490,6 +516,17 @@ impl AudioPumpRegistry {
             pump.abort();
         }
     }
+}
+
+fn track_stream(
+    track: &libwebrtc::audio_track::RtcAudioTrack,
+    format: AudioFormat,
+) -> NativeAudioStream {
+    NativeAudioStream::new(
+        track.clone(),
+        format.sample_rate as i32,
+        format.channels as i32,
+    )
 }
 
 struct PeerConnectionGuard {
