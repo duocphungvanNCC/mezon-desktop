@@ -1394,7 +1394,7 @@ impl ChannelList {
             );
         }
         self.pending_badge_seed.insert(clan_id, seed);
-        self.sync_clan_rail(clan_id, 0, cx);
+        self.sync_clan_after_read(clan_id, 0, cx);
         if applied {
             self.notify_channel_list(clan_id, cx);
         }
@@ -1804,7 +1804,7 @@ impl ChannelList {
         );
         self.invalidate_channel_index(clan_id);
         self.channel_detail_failed.clear();
-        self.sync_clan_rail(clan_id, 0, cx);
+        self.sync_clan_after_read(clan_id, 0, cx);
         cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
         cx.notify();
         if self.want_extras.contains(&clan_id) {
@@ -2290,7 +2290,7 @@ impl ChannelList {
         Some(tally)
     }
 
-    fn sync_clan_rail(&self, clan_id: ClanId, cleared_badge: u32, cx: &mut Context<Self>) {
+    fn sync_clan_after_read(&self, clan_id: ClanId, cleared_badge: u32, cx: &mut Context<Self>) {
         let tally = self.clan_badge_tally(clan_id);
         ClanList::global(cx).update(cx, |cls, cx| {
             let Some(tally) = tally else {
@@ -2308,13 +2308,7 @@ impl ChannelList {
         });
     }
 
-    fn sync_clan_after_read(
-        &mut self,
-        clan_id: ClanId,
-        cleared_badge: u32,
-        cx: &mut Context<Self>,
-    ) {
-        self.sync_clan_rail(clan_id, cleared_badge, cx);
+    fn reseed_unknown_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if !self.badge_seeds.contains_key(&clan_id) && self.cache.contains(&clan_id) {
             self.seed_badges(clan_id, cx).detach();
         }
@@ -2339,6 +2333,9 @@ impl ChannelList {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
+        if should_notify || cleared_badge > 0 {
+            self.reseed_unknown_clan(clan_id, cx);
+        }
     }
 
     pub fn apply_mark_as_read_category(
@@ -2385,6 +2382,9 @@ impl ChannelList {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
+        if should_notify || cleared_badge > 0 {
+            self.reseed_unknown_clan(clan_id, cx);
+        }
     }
 
     pub fn note_channel_message(
@@ -2738,6 +2738,9 @@ impl ChannelList {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
+        if should_notify || cleared_badge > 0 {
+            self.reseed_unknown_clan(clan_id, cx);
+        }
     }
 
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -3616,6 +3619,7 @@ impl ChannelList {
         }
         if badge_delta > 0 || visible_changed {
             self.sync_clan_after_read(clan_id, badge_delta, cx);
+            self.reseed_unknown_clan(clan_id, cx);
         }
     }
 
@@ -3660,6 +3664,7 @@ impl ChannelList {
         if cleared > 0 {
             self.notify_channel_list(tracked.clan_id, cx);
             self.sync_clan_after_read(tracked.clan_id, cleared, cx);
+            self.reseed_unknown_clan(tracked.clan_id, cx);
         }
     }
 
@@ -11220,6 +11225,38 @@ mod tests {
                 channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 0)], cx);
             });
             assert_eq!(clan_rail(cx), (0, false));
+        });
+    }
+
+    #[gpui::test]
+    fn seeing_new_messages_never_asks_for_the_badge_seed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_clan_with_rail_badge(cx, 0);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                for ts in [200, 210, 220] {
+                    channels.note_channel_message(
+                        ClanId(1),
+                        ChannelId(1),
+                        false,
+                        true,
+                        ts,
+                        MessageId(ts),
+                        cx,
+                    );
+                    channels.apply_read(ClanId(1), ChannelId(1), cx);
+                }
+                assert!(
+                    !channels.is_seeding_badges_for_test(ClanId(1)),
+                    "a read that clears nothing must not ask again, or a busy channel whose seed \
+                     keeps failing sends ListChannelBadgeCount for every message it shows"
+                );
+            });
         });
     }
 
