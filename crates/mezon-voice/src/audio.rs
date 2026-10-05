@@ -288,9 +288,7 @@ fn run_apm(
         Stop,
     }
     let mut apm = AudioProcessingModule::new(true, true, true, true);
-    // Keep the same automatic mic level as the normal path. Mezon-NS replaces
-    // WebRTC's noise suppression, not its gain control.
-    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, true, true, false);
+    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, false, true, false);
     loop {
         match capture_rx.try_recv() {
             Ok(chunk) => {

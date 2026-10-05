@@ -622,6 +622,13 @@ async fn session_main(
                         let _ = evt_tx.send(VoiceEvent::PushToTalkActive(active));
                         emit!();
                     }
+                    SfuEvent::NetworkWeak(weak) => {
+                        let _ = evt_tx.send(if weak {
+                            VoiceEvent::NetworkWeak
+                        } else {
+                            VoiceEvent::NetworkRecovered
+                        });
+                    }
                     SfuEvent::Reconnecting => {
                         for (key, task) in audio_tracks.drain() {
                             task.handle.abort();

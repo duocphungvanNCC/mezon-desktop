@@ -1087,6 +1087,7 @@
   "channelVoice.connecting": "Connecting…",
   "channelVoice.reconnecting": "Reconnecting…",
   "channelVoice.weakNetwork": "Weak network",
+  "channelVoice.networkWarning": "Your internet connection is unstable.",
   "channelVoice.everyoneWaiting": "Everyone is waiting for you inside",
   "channelVoice.addAgent": "Add AI agent",
   "channelVoice.removeAgent": "Remove AI agent",

@@ -436,6 +436,7 @@ pub struct VoiceStore {
     ptt_held: bool,
     hold_to_talk: bool,
     ptt_hint_dismissed: bool,
+    network_warning_dismissed: bool,
     pending_join_role: SfuRole,
     join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
@@ -828,6 +829,7 @@ impl VoiceStore {
             ptt_held: false,
             hold_to_talk: false,
             ptt_hint_dismissed: false,
+            network_warning_dismissed: false,
             pending_join_role: SfuRole::Speaker,
             join_role_menu_open: false,
             meet_token_prefetching: None,
@@ -3524,7 +3526,8 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::NetworkWeak => {
-                if !matches!(self.call_status, VoiceCallStatus::Reconnecting) {
+                if matches!(self.call_status, VoiceCallStatus::Stable) {
+                    self.network_warning_dismissed = false;
                     self.call_status = VoiceCallStatus::WeakNetwork;
                 }
             }
@@ -3753,6 +3756,17 @@ impl VoiceStore {
     pub fn dismiss_ptt_hint(&mut self, cx: &mut Context<Self>) {
         if !self.ptt_hint_dismissed {
             self.ptt_hint_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    pub fn network_warning_dismissed(&self) -> bool {
+        self.network_warning_dismissed
+    }
+
+    pub fn dismiss_network_warning(&mut self, cx: &mut Context<Self>) {
+        if !self.network_warning_dismissed {
+            self.network_warning_dismissed = true;
             cx.notify();
         }
     }

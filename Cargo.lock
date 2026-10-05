@@ -5934,6 +5934,7 @@ dependencies = [
  "core-video",
  "cosmic-text",
  "cpal",
+ "dirs 5.0.1",
  "flume",
  "futures",
  "image",
@@ -5953,6 +5954,7 @@ dependencies = [
  "screencapturekit-sys",
  "serde",
  "serde_json",
+ "sha2",
  "tiny-skia",
  "tokio",
  "tokio-tungstenite",
@@ -5962,6 +5964,7 @@ dependencies = [
  "windows-core 0.61.2",
  "xcb",
  "yuv",
+ "zed-reqwest",
  "zed-scap",
 ]
 
