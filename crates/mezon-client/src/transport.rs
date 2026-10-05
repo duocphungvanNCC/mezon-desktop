@@ -46,6 +46,7 @@ pub struct ApiStatusError {
 impl ApiStatusError {
     pub const INVALID_ARGUMENT: u32 = 3;
     pub const NOT_FOUND: u32 = 5;
+    pub const ALREADY_EXISTS: u32 = 6;
     pub const PERMISSION_DENIED: u32 = 7;
     pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
@@ -58,6 +59,10 @@ impl ApiStatusError {
 
     pub fn is_invalid_argument(self) -> bool {
         self.code == Self::INVALID_ARGUMENT
+    }
+
+    pub fn is_already_exists(self) -> bool {
+        self.code == Self::ALREADY_EXISTS
     }
 
     pub fn is_permission_denied(self) -> bool {
@@ -96,8 +101,6 @@ pub fn api_status_from_error(err: &anyhow::Error) -> Option<ApiStatusError> {
 pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
-
-const API_CODE_ALREADY_EXISTS: u32 = 6;
 
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
@@ -7517,7 +7520,7 @@ impl MezonTransport {
         let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -10143,7 +10146,7 @@ impl MezonTransport {
             .send_api_request(cid, "LinkSMS", body)
             .await
             .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
-        if code == API_CODE_ALREADY_EXISTS {
+        if code == ApiStatusError::ALREADY_EXISTS {
             return Err(LinkPhoneError::AlreadyLinked);
         }
         if code != 0 {
