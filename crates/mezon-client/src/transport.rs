@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
-const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -7012,8 +7013,8 @@ impl MezonTransport {
         if text.is_empty() {
             anyhow::bail!("SearchCtrlK text must not be empty");
         }
-        if text.len() > 255 {
-            anyhow::bail!("SearchCtrlK text exceeds 255 bytes");
+        if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
+            anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");
         }
         let cid = self.generate_cid();
         let body = api::SearchCtrlKRequest {

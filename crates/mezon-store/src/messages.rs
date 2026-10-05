@@ -35,7 +35,9 @@ use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::buzz::BuzzStore;
-use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
+use crate::channel::{
+    ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
+};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
@@ -879,9 +881,42 @@ fn forward_source(msg: &Message) -> ForwardSource {
     }
 }
 
+fn start_target_clan_joins(targets: &[ForwardTarget], cx: &mut App) {
+    let channels = ChannelList::global(cx);
+    for target in targets {
+        if let ForwardTarget::Channel {
+            clan_id, is_public, ..
+        } = target
+            && joins_through_clan_stream(*clan_id, *is_public)
+        {
+            drop(channels.update(cx, |channels, cx| channels.ensure_clan_joined(*clan_id, cx)));
+        }
+    }
+}
+
 /// Turn a picked destination into a real channel. A friend row has no DM yet,
 /// so one is created first (React `createDirectMessageWithUser`).
 async fn resolve_forward_target(
+    target: &ForwardTarget,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<ResolvedTarget> {
+    let dest = forward_destination(target, cx).await?;
+    cx.update(|cx| {
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.join_channel(
+                ClanId(dest.clan_id),
+                ChannelId(dest.channel_id),
+                dest.channel_type,
+                dest.is_public,
+                cx,
+            )
+        })
+    })
+    .await?;
+    Ok(dest)
+}
+
+async fn forward_destination(
     target: &ForwardTarget,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<ResolvedTarget> {
@@ -936,13 +971,6 @@ async fn send_forward(
     source_channel_id: ChannelId,
     note: Option<&str>,
 ) -> anyhow::Result<()> {
-    api.join_chat(
-        dest.clan_id,
-        dest.channel_id,
-        dest.channel_type,
-        dest.is_public,
-    )
-    .await?;
     let same_channel = dest.channel_id == source_channel_id.get();
     let mut failures = 0usize;
     for source in sources {
@@ -1013,13 +1041,6 @@ async fn send_share_contact_to_target(
     dest: ResolvedTarget,
     content_json: &str,
 ) -> anyhow::Result<()> {
-    api.join_chat(
-        dest.clan_id,
-        dest.channel_id,
-        dest.channel_type,
-        dest.is_public,
-    )
-    .await?;
     let flags = OutgoingMessageFlags {
         anonymous_message: false,
         message_code: SHARE_CONTACT_CODE,
@@ -4293,6 +4314,7 @@ impl MessagesStore {
 
         let api = self.api.clone();
         let total = targets.len();
+        start_target_clan_joins(&targets, cx);
         self.forward_in_flight = true;
         let task = cx.spawn(async move |this, cx| {
             let mut failed: Vec<SharedString> = Vec::new();
@@ -4584,6 +4606,7 @@ impl MessagesStore {
             &contact.avatar,
         );
         let api = self.api.clone();
+        start_target_clan_joins(&targets, cx);
         cx.spawn(async move |this, cx| {
             let mut failed = Vec::new();
             let total = targets.len();
@@ -6547,20 +6570,13 @@ impl MessagesStore {
         is_public: bool,
         cx: &mut Context<Self>,
     ) {
-        let api = self.api.clone();
-        let clan_joined = (!clan_id.is_zero()).then(|| {
-            ChannelList::global(cx)
-                .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+        let join = ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.join_channel(clan_id, channel_id, join_type, is_public, cx)
         });
-        cx.spawn(async move |_this, _cx| {
-            if let Some(clan_joined) = clan_joined {
-                clan_joined.await;
-            }
-            if let Err(e) = api
-                .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
-                .await
-            {
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = join.await {
                 tracing::warn!("join_chat failed: {e}");
+                let _ = this.update(cx, |this, _| this.joined_channels.remove(&channel_id));
             }
         })
         .detach();
@@ -8397,7 +8413,7 @@ fn should_write_last_seen(
     channel_tail == Some(viewport_id)
 }
 
-fn channel_join_params(
+pub fn channel_join_params(
     channel_type: ChannelType,
     parent_id: Option<ChannelId>,
     private: bool,
@@ -11183,6 +11199,92 @@ mod tests {
                     "a second page must not start while one is in flight"
                 );
             });
+        });
+    }
+
+    fn init_forward_stores(cx: &mut App) -> (Entity<ChannelList>, Entity<MessagesStore>) {
+        let store = test_store(cx);
+        (ChannelList::global(cx), store)
+    }
+
+    fn channel_target(clan_id: ClanId) -> ForwardTarget {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id: ChannelId(20),
+            channel_type: 1,
+            mode: 2,
+            is_public: true,
+            label: "#general".into(),
+        }
+    }
+
+    fn thread_target(clan_id: ClanId) -> ForwardTarget {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id: ChannelId(21),
+            channel_type: 7,
+            mode: 6,
+            is_public: false,
+            label: "#thread".into(),
+        }
+    }
+
+    #[gpui::test]
+    fn a_forward_starts_every_destination_clan_join_up_front(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (channels, store) = init_forward_stores(cx);
+            let source = ChannelId(10);
+            let started = store.update(cx, |store, cx| {
+                store.activate(ClanId(1), source, true, false, 1, 2, cx);
+                store.set_channel(
+                    source,
+                    vec![Message::new(MessageId(1), "hi", "u1", "U1", 100)],
+                );
+                store.forward(
+                    vec![MessageRef {
+                        bucket: source,
+                        id: MessageId(1),
+                    }],
+                    vec![
+                        channel_target(ClanId(2)),
+                        channel_target(ClanId(3)),
+                        thread_target(ClanId(4)),
+                    ],
+                    None,
+                    cx,
+                )
+            });
+            assert!(started);
+            let channels = channels.read(cx);
+            assert!(
+                channels.is_loading_clan(ClanId(2)) && channels.is_loading_clan(ClanId(3)),
+                "the second clan's listing must not wait for the first destination's send"
+            );
+            assert!(
+                !channels.is_loading_clan(ClanId(4)),
+                "a thread join never rides the clan stream, so its clan needs no listing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_public_channel_target_waits_for_its_clan_join(cx: &mut gpui::TestAppContext) {
+        use futures::FutureExt as _;
+        let (channels, _store) = cx.update(init_forward_stores);
+        let unopened = ClanId(2);
+        let mut async_cx = cx.to_async();
+
+        assert!(
+            resolve_forward_target(&channel_target(unopened), &mut async_cx)
+                .now_or_never()
+                .is_none(),
+            "the send must not start before clan_join has gone out"
+        );
+        cx.update(|cx| {
+            assert!(
+                channels.read(cx).is_loading_clan(unopened),
+                "clan_join needs the channel listing first"
+            );
         });
     }
 

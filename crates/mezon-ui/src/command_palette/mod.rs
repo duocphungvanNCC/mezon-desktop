@@ -35,7 +35,7 @@ use items::{
     build_palette_items_from_ctrlk, ensure_palette_sources_loaded, render_palette_row,
 };
 
-const FILTER_DEBOUNCE_MS: u64 = 300;
+pub(crate) const FILTER_DEBOUNCE_MS: u64 = 300;
 pub(crate) const KEY_CONTEXT: &str = "CommandPalette";
 
 actions!(mezon_command_palette, [PaletteMoveUp, PaletteMoveDown]);
