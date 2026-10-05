@@ -1265,7 +1265,7 @@
   "clan.createClanModal.toast.limitImageSize": "Image size must be less than {{size}}MB",
   "clan.createClanModal.upload": "Upload",
   "clan.createServer": "Create Clan",
-  "clan.duplicateNameMessage": "This clan name is already in use. Please choose a different name.",
+  "clan.duplicateNameMessage": "The clan name already exists. Please enter another name.",
   "clan.errorMessage": "Please enter a valid clan name (max 64 characters, only words, numbers, _ or -).",
   "clan.findOrStartConversation": "Find or start a conversation",
   "clan.leaveClan": "Leave Clan",

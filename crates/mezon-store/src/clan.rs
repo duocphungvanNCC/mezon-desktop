@@ -1219,7 +1219,7 @@ impl ClanList {
 
             api.update_clan_desc(request)
                 .await
-                .map_err(clan_update_error)?;
+                .map_err(|err| clan_update_error(err, name_edited))?;
 
             this.update(cx, |this, cx| {
                 if let Some(current) = this.clans.iter().find(|c| c.id == clan_id).cloned() {
@@ -1665,8 +1665,11 @@ fn clan_names_match(a: &str, b: &str) -> bool {
     folded(a).eq(folded(b))
 }
 
-fn clan_update_error(err: anyhow::Error) -> ClanSaveError {
-    if mezon_client::api_status_from_error(&err).is_some_and(|status| status.is_already_exists()) {
+fn clan_update_error(err: anyhow::Error, name_sent: bool) -> ClanSaveError {
+    if name_sent
+        && mezon_client::api_status_from_error(&err)
+            .is_some_and(|status| status.is_already_exists())
+    {
         ClanSaveError::DuplicateName
     } else {
         ClanSaveError::Other(err.to_string())
@@ -2208,15 +2211,19 @@ mod tests {
 
     #[test]
     fn a_name_the_server_rejects_as_taken_is_a_duplicate() {
-        let taken = anyhow::Error::from(mezon_client::ApiStatusError { code: 6 });
+        let taken = || anyhow::Error::from(mezon_client::ApiStatusError { code: 6 });
         assert!(matches!(
-            clan_update_error(taken),
+            clan_update_error(taken(), true),
             ClanSaveError::DuplicateName
+        ));
+        assert!(matches!(
+            clan_update_error(taken(), false),
+            ClanSaveError::Other(_)
         ));
 
         let internal = anyhow::Error::from(mezon_client::ApiStatusError { code: 13 });
         assert!(matches!(
-            clan_update_error(internal),
+            clan_update_error(internal, true),
             ClanSaveError::Other(_)
         ));
     }
