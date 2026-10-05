@@ -8,6 +8,8 @@ use gpui::{
     Task, Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
+#[cfg(any(windows, target_os = "macos"))]
+use mezon_video::{PreparedWebm, is_webm_url};
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
@@ -81,6 +83,13 @@ struct SharedPlayback {
 
 type Shared = Rc<RefCell<SharedPlayback>>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoLoadState {
+    Loading,
+    Ready,
+    Failed,
+}
+
 #[derive(Clone)]
 struct SeekDrag(EntityId);
 
@@ -102,6 +111,9 @@ pub struct VideoPlayerView {
     width: f32,
     height: f32,
     player: Option<Rc<VideoPlayer>>,
+    load_state: VideoLoadState,
+    decode_max_size: Option<(u32, u32)>,
+    autoplay_when_ready: bool,
     shared: Shared,
     track_bounds: Bounds<Pixels>,
     time_label: SharedString,
@@ -139,6 +151,9 @@ impl VideoPlayerView {
             width,
             height,
             player: None,
+            load_state: VideoLoadState::Loading,
+            decode_max_size,
+            autoplay_when_ready: true,
             shared,
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
@@ -150,65 +165,65 @@ impl VideoPlayerView {
             last_seek_at: None,
             pending_seek: None,
         };
-        view.begin_open(decode_max_size, true, cx);
+        view.start_open(cx);
         view
     }
 
-    fn begin_open(
+    fn finish_open(
         &mut self,
-        decode_max_size: Option<(u32, u32)>,
-        autoplay: bool,
+        opened: Result<VideoPlayer, mezon_video::PlayerError>,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(any(windows, target_os = "macos"))]
-        if mezon_video::is_webm_url(self.url.as_ref()) {
-            let url = self.url.to_string();
-            let load = cx
-                .background_executor()
-                .spawn(async move { mezon_video::load_webm_bytes(&url) });
-            self._open_task = Some(cx.spawn(async move |this, cx| {
-                let loaded = load.await;
-                let _ = this.update(cx, |this, cx| {
-                    let opened = loaded.ok().and_then(|bytes| {
-                        VideoPlayer::open_webm_bytes(bytes, decode_max_size).ok()
-                    });
-                    match opened {
-                        Some(player) => {
-                            let player = Rc::new(player);
-                            if autoplay {
-                                player.play();
-                            }
-                            this.player = Some(player);
-                            let mut shared = this.shared.borrow_mut();
-                            shared.playing = autoplay;
-                            shared.failed = false;
-                        }
-                        None => {
-                            this.player = None;
-                            let mut shared = this.shared.borrow_mut();
-                            shared.playing = false;
-                            shared.failed = true;
-                        }
-                    }
-                    cx.notify();
-                });
-            }));
-            return;
-        }
-
-        let player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
-            .ok()
-            .map(Rc::new);
-        if autoplay {
-            if let Some(player) = player.as_ref() {
-                player.play();
+        self._open_task = None;
+        match opened {
+            Ok(player) => {
+                let duration = player.duration();
+                let player = Rc::new(player);
+                let should_play = self.autoplay_when_ready && duration > 0.0;
+                if should_play {
+                    player.play();
+                }
+                self.player = Some(player);
+                self.load_state = VideoLoadState::Ready;
+                let mut shared = self.shared.borrow_mut();
+                shared.playing = should_play;
+                shared.failed = false;
+                shared.duration = duration;
+            }
+            Err(_) => {
+                self.player = None;
+                self.load_state = VideoLoadState::Failed;
+                let mut shared = self.shared.borrow_mut();
+                shared.playing = false;
+                shared.failed = true;
             }
         }
-        let playing = player.is_some() && autoplay;
-        self.player = player;
-        let mut shared = self.shared.borrow_mut();
-        shared.playing = playing;
-        shared.failed = false;
+        cx.notify();
+    }
+
+    fn start_open(&mut self, cx: &mut Context<Self>) {
+        self.load_state = VideoLoadState::Loading;
+        self._open_task = None;
+        let url = self.url.clone();
+        let decode_max_size = self.decode_max_size;
+        self._open_task = Some(cx.spawn(async move |this, cx| {
+            #[cfg(any(windows, target_os = "macos"))]
+            if is_webm_url(url.as_ref()) {
+                let open_url = url.clone();
+                let prepared = cx
+                    .background_executor()
+                    .spawn(async move { PreparedWebm::open(open_url.as_ref(), decode_max_size) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.finish_open(prepared.map(VideoPlayer::from_prepared_webm), cx);
+                });
+                return;
+            }
+
+            let _ = this.update(cx, |this, cx| {
+                this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);
+            });
+        }));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -236,6 +251,9 @@ impl VideoPlayerView {
             width,
             height,
             player: Some(player),
+            load_state: VideoLoadState::Ready,
+            decode_max_size: None,
+            autoplay_when_ready: false,
             shared,
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
@@ -254,7 +272,7 @@ impl VideoPlayerView {
 
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_seek.take() {
-            self.apply_seek_target(target, true, window, cx);
+            self.apply_seek_target(target, false, window, cx);
         }
         let Some(player) = self.player.clone() else {
             return;
@@ -340,13 +358,17 @@ impl VideoPlayerView {
             shared.current_time = 0.0;
             shared.duration = 0.0;
         }
-        self.begin_open(decode_max_size, true, cx);
+        self.decode_max_size = decode_max_size;
+        self.autoplay_when_ready = true;
+        self.start_open(cx);
         cx.notify();
     }
 
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self._open_task = None;
         self.pending_seek = None;
+        self.load_state = VideoLoadState::Loading;
+        self.autoplay_when_ready = false;
         if let Some(player) = self.player.take() {
             player.pause();
             drop(player);
@@ -363,6 +385,7 @@ impl VideoPlayerView {
     }
 
     pub fn pause_for_background(&mut self, cx: &mut Context<Self>) {
+        self.autoplay_when_ready = false;
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -945,7 +968,20 @@ impl Render for VideoPlayerView {
                 .rounded_lg()
         };
 
-        if self.player.is_none() || failed {
+        if self.load_state == VideoLoadState::Loading {
+            let poster_fit = if self.layout == VideoLayout::FillContainer {
+                ObjectFit::Contain
+            } else {
+                ObjectFit::Cover
+            };
+            return root
+                .when(!self.poster.is_empty(), |d| {
+                    d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
+                })
+                .into_any_element();
+        }
+
+        if self.load_state == VideoLoadState::Failed || failed || self.player.is_none() {
             let poster_fit = if self.layout == VideoLayout::FillContainer {
                 ObjectFit::Contain
             } else {

@@ -116,6 +116,28 @@ pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option
     None
 }
 
+pub fn is_webm_url(url: &str) -> bool {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        webm_player::is_webm_source(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub struct PreparedWebm(webm_player::WebmPlayerImpl);
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PreparedWebm {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        Ok(Self(webm_player::WebmPlayerImpl::open(url, max_size)?))
+    }
+}
+
 pub struct VideoPlayer {
     inner: platform::PlayerImpl,
 }
@@ -124,6 +146,13 @@ impl VideoPlayer {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let inner = platform::PlayerImpl::open(url, max_size)?;
         Ok(Self { inner })
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn from_prepared_webm(prepared: PreparedWebm) -> Self {
+        Self {
+            inner: platform::PlayerImpl::from_webm(prepared.0),
+        }
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -182,11 +211,6 @@ impl VideoPlayer {
     pub fn failed(&self) -> bool {
         self.inner.failed()
     }
-}
-
-#[cfg(any(windows, target_os = "macos"))]
-pub fn is_webm_url(url: &str) -> bool {
-    webm_player::is_webm_source(url)
 }
 
 #[cfg(any(windows, target_os = "macos"))]

@@ -103,17 +103,20 @@ impl PlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        let inner = if crate::webm_player::is_webm_source(url) {
-            PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open(
-                url, max_size,
-            )?))
-        } else {
-            MediaFoundationPlayer::build(url, max_size).map_err(|error| {
-                tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
-                PlayerError::Open
-            })?
-        };
+        if crate::webm_player::is_webm_source(url) {
+            return Err(PlayerError::Open);
+        }
+        let inner = MediaFoundationPlayer::build(url, max_size).map_err(|error| {
+            tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
+            PlayerError::Open
+        })?;
         Ok(Self { inner })
+    }
+
+    pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
+        Self {
+            inner: PlayerBackend::Webm(Box::new(player)),
+        }
     }
 
     pub fn from_webm_bytes(
