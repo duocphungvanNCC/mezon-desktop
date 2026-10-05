@@ -399,9 +399,11 @@ impl OverviewSettingPage {
         let has_system = self.has_system_changes();
         let system_draft = self.system_message.clone();
 
+        let saved_name = self.saved_draft.clan_name.clone();
+        let clan_list = self.clan_list.clone();
         let clan_task = has_clan.then(|| {
-            self.clan_list.update(cx, |store, cx| {
-                store.save_clan_overview(clan_id, draft.clone(), cx)
+            clan_list.update(cx, |store, cx| {
+                store.save_clan_overview(clan_id, draft.clone(), &saved_name, cx)
             })
         });
         let system_request = system_draft.clone().filter(|_| has_system);
@@ -414,57 +416,39 @@ impl OverviewSettingPage {
             if let Err(ClanSaveError::Other(reason)) = &clan_result {
                 tracing::error!("save clan overview failed: {reason}");
             }
-            let mut system_saved = false;
-            let mut system_failed = false;
-            if clan_result.is_ok()
-                && let Some(message) = system_request
-            {
-                let Ok(task) = this.update(cx, |this, cx| {
-                    this.clan_list.update(cx, |store, cx| {
+            let system_result = match (&clan_result, system_request) {
+                (Ok(()), Some(message)) => {
+                    let task = clan_list.update(cx, |store, cx| {
                         store.save_system_message(clan_id, message, cx)
-                    })
-                }) else {
-                    return;
-                };
-                match task.await {
-                    Ok(()) => system_saved = true,
-                    Err(err) => {
-                        tracing::error!("save system message failed: {err}");
-                        system_failed = true;
-                    }
+                    });
+                    Some(task.await)
                 }
-            }
-            let error = match &clan_result {
-                Err(err) => Some(clan_save_error_message(&locale, err)),
-                Ok(()) if system_failed => Some(mezon_i18n::t(
-                    &locale,
-                    "clanOverviewSetting.toast.saveError",
-                )),
-                Ok(()) => None,
+                _ => None,
             };
-            let name_taken = matches!(clan_result, Err(ClanSaveError::DuplicateName));
+            if let Some(Err(err)) = &system_result {
+                tracing::error!("save system message failed: {err}");
+            }
+            let outcome = save_outcome(&locale, &clan_result, system_result.as_ref());
             let _ = this.update(cx, |this, cx| {
-                if clan_result.is_ok() {
+                if outcome.clan_saved {
                     this.saved_draft = draft.clone();
                 }
-                if system_saved {
+                if outcome.system_saved {
                     this.saved_system_message = system_draft;
                 }
-                if name_taken && this.draft.clan_name == draft.clan_name {
+                if outcome.name_taken && this.draft.clan_name == draft.clan_name {
                     this.name_taken = true;
                 }
                 this.saving = false;
                 cx.notify();
             });
-            let toast = error
-                .unwrap_or_else(|| mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveSuccess"));
             cx.update(|cx| {
-                Shell::global(cx).update(cx, |shell, cx| {
-                    if error.is_some() {
-                        shell.error(toast.to_string(), cx);
-                    } else {
-                        shell.success(toast.to_string(), cx);
-                    }
+                Shell::global(cx).update(cx, |shell, cx| match outcome.error {
+                    Some(message) => shell.error(message.to_string(), cx),
+                    None => shell.success(
+                        mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveSuccess").to_string(),
+                        cx,
+                    ),
                 });
             });
         })
@@ -1011,7 +995,7 @@ impl Render for OverviewSettingPage {
         let name_error = if !self.name_valid {
             Some(mezon_i18n::t(&locale, "clanSettings.clanLogo.validationError").to_string())
         } else if self.name_taken {
-            Some(clan_save_error_message(&locale, &ClanSaveError::DuplicateName).to_string())
+            Some(mezon_i18n::t(&locale, NAME_TAKEN_KEY).to_string())
         } else {
             None
         };
@@ -1194,13 +1178,32 @@ impl Render for OverviewSettingPage {
     }
 }
 
-fn clan_save_error_message(locale: &str, error: &ClanSaveError) -> &'static str {
-    match error {
-        ClanSaveError::DuplicateName => mezon_i18n::t(
-            locale,
-            "clanOverviewSetting.menu.serverName.duplicateNameMessage",
-        ),
-        ClanSaveError::Other(_) => mezon_i18n::t(locale, "clanOverviewSetting.toast.saveError"),
+const NAME_TAKEN_KEY: &str = "clanOverviewSetting.menu.serverName.duplicateNameMessage";
+
+struct SaveOutcome {
+    error: Option<&'static str>,
+    clan_saved: bool,
+    system_saved: bool,
+    name_taken: bool,
+}
+
+fn save_outcome(
+    locale: &str,
+    clan: &Result<(), ClanSaveError>,
+    system: Option<&Result<(), String>>,
+) -> SaveOutcome {
+    let error = match (clan, system) {
+        (Err(ClanSaveError::DuplicateName), _) => Some(mezon_i18n::t(locale, NAME_TAKEN_KEY)),
+        (Err(ClanSaveError::Other(_)), _) | (Ok(()), Some(Err(_))) => {
+            Some(mezon_i18n::t(locale, "clanOverviewSetting.toast.saveError"))
+        }
+        (Ok(()), _) => None,
+    };
+    SaveOutcome {
+        error,
+        clan_saved: clan.is_ok(),
+        system_saved: matches!(system, Some(Ok(()))),
+        name_taken: matches!(clan, Err(ClanSaveError::DuplicateName)),
     }
 }
 
@@ -1237,27 +1240,48 @@ pub fn render_clan_overview_save_bar(
 }
 
 #[cfg(test)]
-mod save_error_tests {
+mod save_outcome_tests {
     use mezon_store::ClanSaveError;
 
-    use super::clan_save_error_message;
+    use super::{NAME_TAKEN_KEY, save_outcome};
 
     #[test]
-    fn a_taken_clan_name_says_so() {
-        assert_eq!(
-            clan_save_error_message("en", &ClanSaveError::DuplicateName),
-            mezon_i18n::t(
-                "en",
-                "clanOverviewSetting.menu.serverName.duplicateNameMessage"
-            )
-        );
+    fn a_taken_name_saves_nothing_and_says_so() {
+        let outcome = save_outcome("en", &Err(ClanSaveError::DuplicateName), None);
+        assert_eq!(outcome.error, Some(mezon_i18n::t("en", NAME_TAKEN_KEY)));
+        assert!(outcome.name_taken);
+        assert!(!outcome.clan_saved);
+        assert!(!outcome.system_saved);
     }
 
     #[test]
-    fn any_other_failure_keeps_the_generic_message() {
+    fn a_failed_clan_save_keeps_the_generic_message() {
+        let outcome = save_outcome("en", &Err(ClanSaveError::Other("timeout".into())), None);
         assert_eq!(
-            clan_save_error_message("en", &ClanSaveError::Other("timeout".into())),
-            mezon_i18n::t("en", "clanOverviewSetting.toast.saveError")
+            outcome.error,
+            Some(mezon_i18n::t("en", "clanOverviewSetting.toast.saveError"))
         );
+        assert!(!outcome.name_taken);
+        assert!(!outcome.clan_saved);
+    }
+
+    #[test]
+    fn a_failed_system_save_keeps_the_saved_clan_half() {
+        let system = Err("timeout".to_string());
+        let outcome = save_outcome("en", &Ok(()), Some(&system));
+        assert_eq!(
+            outcome.error,
+            Some(mezon_i18n::t("en", "clanOverviewSetting.toast.saveError"))
+        );
+        assert!(outcome.clan_saved);
+        assert!(!outcome.system_saved);
+    }
+
+    #[test]
+    fn a_full_save_reports_success() {
+        let outcome = save_outcome("en", &Ok(()), Some(&Ok(())));
+        assert_eq!(outcome.error, None);
+        assert!(outcome.clan_saved);
+        assert!(outcome.system_saved);
     }
 }

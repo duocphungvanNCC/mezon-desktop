@@ -1190,6 +1190,7 @@ impl ClanList {
         &mut self,
         clan_id: ClanId,
         draft: ClanOverviewDraft,
+        saved_name: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), ClanSaveError>> {
         let api = self.api.clone();
@@ -1199,10 +1200,10 @@ impl ClanList {
         };
         let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
-        let previous_name = clan.name.clone();
+        let saved_name = saved_name.to_string();
         let local_update = draft.clan_update(&clan, trimmed_name.clone());
         cx.spawn(async move |this, cx| {
-            if !clan_names_match(&trimmed_name, &previous_name) {
+            if !clan_names_match(&trimmed_name, &saved_name) {
                 let is_duplicate = api
                     .check_duplicate_clan_name(&trimmed_name, "0")
                     .await
@@ -1626,7 +1627,7 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
     true
 }
 
-pub fn clan_names_match(a: &str, b: &str) -> bool {
+fn clan_names_match(a: &str, b: &str) -> bool {
     fn folded(name: &str) -> impl Iterator<Item = char> + '_ {
         name.trim()
             .chars()
