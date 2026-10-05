@@ -205,7 +205,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
-pub use mezon_voice::{MediaDevice, MediaPermission};
+pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
 pub use mmn_client::{
     DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
     MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
