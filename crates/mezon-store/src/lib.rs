@@ -348,6 +348,24 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     }
 }
 
+pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_output_device(output_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.output_device_id = output_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(stream) = StreamStore::try_global(cx) {
+        stream.update(cx, |stream, cx| {
+            stream.set_output_device(output_device_id, cx)
+        });
+    }
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),

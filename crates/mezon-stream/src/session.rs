@@ -45,6 +45,7 @@ pub enum StreamEvent {
     Live,
     NoBroadcast,
     RemoteAudio(bool),
+    OutputDevice(Option<String>),
     PlaybackBlocked,
     Error(String),
     Disconnected,
@@ -79,6 +80,7 @@ impl StreamSession {
                 }
             };
             *audio_for_thread.lock() = Some(audio_output.clone());
+            let _ = event_tx.send(StreamEvent::OutputDevice(audio_output.device_id()));
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -88,8 +90,11 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
-            let output_follower =
-                runtime.spawn(follow_output_device(audio_output.clone(), output_device_rx));
+            let output_follower = runtime.spawn(follow_output_device(
+                audio_output.clone(),
+                output_device_rx,
+                event_tx.clone(),
+            ));
             runtime.block_on(run_session(config, audio_output, stop_rx, event_tx));
             output_follower.abort();
         });
@@ -124,15 +129,28 @@ impl Drop for StreamSession {
     }
 }
 
-async fn follow_output_device(audio: Arc<StreamAudioOutput>, requests: Receiver<Option<String>>) {
+async fn follow_output_device(
+    audio: Arc<StreamAudioOutput>,
+    requests: Receiver<Option<String>>,
+    event_tx: Sender<StreamEvent>,
+) {
     while let Ok(mut output_device_id) = requests.recv_async().await {
         while let Ok(newer) = requests.try_recv() {
             output_device_id = newer;
         }
-        let audio = audio.clone();
-        match tokio::task::spawn_blocking(move || audio.set_output_device(output_device_id)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
+        let switching = audio.clone();
+        let switched = tokio::task::spawn_blocking(move || {
+            let result = switching.set_output_device(output_device_id);
+            (result, switching.device_id())
+        })
+        .await;
+        match switched {
+            Ok((result, active)) => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "stream audio output switch failed");
+                }
+                let _ = event_tx.send(StreamEvent::OutputDevice(active));
+            }
             Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
         }
     }

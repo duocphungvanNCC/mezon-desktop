@@ -3,10 +3,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    CursorStyle, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
     FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Subscription, Window,
-    canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription,
+    Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
@@ -4369,10 +4369,7 @@ fn device_list_panel(
     let voice = voice.clone();
     let hover_bg = theme.bg_hover;
     let text_color = theme.text_primary;
-    let active_present = entries
-        .iter()
-        .any(|(id, _)| id.as_deref() == active_id.as_deref());
-    let effective_active = if active_present { active_id } else { None };
+    let effective_active = selected_device_id(&entries, active_id.as_deref());
     div()
         .id(SharedString::from(format!(
             "voice-device-list-{}",
@@ -4391,51 +4388,81 @@ fn device_list_panel(
         .border_color(theme.border)
         .shadow_lg()
         .children(entries.into_iter().map(move |(id, name)| {
-            let selected = id.as_deref() == effective_active.as_deref();
-            let slug = id.as_deref().unwrap_or("default").to_string();
-            let radio = device_radio(theme, selected);
+            let selected = id == effective_active;
+            let row_id = SharedString::from(format!(
+                "dev-{}-{}",
+                kind_slug(kind),
+                id.as_deref().unwrap_or("default")
+            ));
             let voice = voice.clone();
-            div()
-                .id(SharedString::from(format!(
-                    "dev-{}-{}",
-                    kind_slug(kind),
-                    slug
-                )))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_sm()
-                        .text_color(text_color)
-                        .child(name),
-                )
-                .child(radio)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let id = id.clone();
-                    voice.update(cx, |store, cx| match kind {
-                        DeviceKind::AudioInput => store.set_input_device(id, cx),
-                        DeviceKind::AudioOutput => store.set_output_device(id, cx),
-                        DeviceKind::VideoInput => store.set_camera_device(id, cx),
-                    });
-                })
+            device_option_row(
+                row_id,
+                name,
+                device_radio(theme.text_muted, selected),
+                text_color,
+                hover_bg,
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let id = id.clone();
+                match kind {
+                    DeviceKind::AudioOutput => mezon_store::set_output_device(id, cx),
+                    DeviceKind::AudioInput => {
+                        voice.update(cx, |store, cx| store.set_input_device(id, cx))
+                    }
+                    DeviceKind::VideoInput => {
+                        voice.update(cx, |store, cx| store.set_camera_device(id, cx))
+                    }
+                }
+            })
         }))
         .into_any_element()
 }
 
-pub(crate) fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
+pub(crate) fn selected_device_id(
+    entries: &[(Option<String>, String)],
+    active_id: Option<&str>,
+) -> Option<String> {
+    entries
+        .iter()
+        .find(|(id, _)| id.as_deref() == active_id)
+        .and_then(|(id, _)| id.clone())
+}
+
+pub(crate) fn device_option_row(
+    id: SharedString,
+    name: String,
+    radio: AnyElement,
+    text_color: impl Into<Hsla>,
+    hover_bg: impl Into<Hsla>,
+) -> Stateful<Div> {
+    let hover_bg = hover_bg.into();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_sm()
+                .text_color(text_color.into())
+                .child(name),
+        )
+        .child(radio)
+}
+
+pub(crate) fn device_radio(ring: impl Into<Hsla>, selected: bool) -> AnyElement {
     if selected {
         div()
             .flex_shrink_0()
@@ -4453,7 +4480,7 @@ pub(crate) fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
             .size(px(16.))
             .rounded_full()
             .border_2()
-            .border_color(theme.text_muted)
+            .border_color(ring.into())
             .into_any_element()
     }
 }
@@ -4571,7 +4598,7 @@ mod carousel_tests {
 
 #[cfg(test)]
 mod device_menu_tests {
-    use super::active_device_name;
+    use super::{active_device_name, selected_device_id};
 
     fn entries() -> Vec<(Option<String>, String)> {
         vec![
@@ -4600,6 +4627,24 @@ mod device_menu_tests {
             active_device_name(&entries(), &Some("gone".to_string())),
             "System default"
         );
+    }
+
+    #[test]
+    fn selects_the_chosen_device() {
+        assert_eq!(
+            selected_device_id(&entries(), Some("b")),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn selects_default_when_nothing_was_chosen() {
+        assert_eq!(selected_device_id(&entries(), None), None);
+    }
+
+    #[test]
+    fn selects_default_when_the_chosen_device_is_gone() {
+        assert_eq!(selected_device_id(&entries(), Some("gone")), None);
     }
 }
 

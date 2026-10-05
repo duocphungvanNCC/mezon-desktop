@@ -509,11 +509,7 @@ impl VoicePage {
                                                 _cx,
                                             );
                                         } else {
-                                            this.select_output_device(
-                                                device_id.clone(),
-                                                settings.clone(),
-                                                _cx,
-                                            );
+                                            this.select_output_device(device_id.clone(), _cx);
                                         }
                                     });
                                 })
@@ -546,18 +542,10 @@ impl VoicePage {
         mezon_store::schedule_settings_save(&settings, cx);
     }
 
-    fn select_output_device(
-        &mut self,
-        id: String,
-        settings: Entity<Settings>,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_output_device(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_output_id = Some(id.clone());
         self.output_dropdown_open = false;
-        settings.update(cx, |s, _| {
-            s.output_device_id = Some(id);
-        });
-        mezon_store::schedule_settings_save(&settings, cx);
+        mezon_store::set_output_device(Some(id), cx);
     }
 
     fn stop_mic_test(&mut self, cx: &mut Context<Self>) {

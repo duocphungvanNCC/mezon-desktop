@@ -9,7 +9,9 @@ use mezon_store::{
 };
 
 use crate::chat::layout::ChatLayout;
-use crate::chat::voice::{audio_device_entries, device_radio};
+use crate::chat::voice::{
+    audio_device_entries, device_option_row, device_radio, selected_device_id,
+};
 use crate::components::primitives::{Avatar, Icon, IconName, Slider, SliderState};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::STREAM_THUMBNAIL;
@@ -1023,10 +1025,11 @@ fn render_output_picker(
             Some(cx.new(|cx| StreamOutputMenu::new(stream, locale, window, cx)))
         })
         .trigger(StreamOutputTrigger::new(icon_color, label));
-    match output_menu {
-        Some(handle) => picker.with_handle(handle.clone()).into_any_element(),
-        None => picker.into_any_element(),
-    }
+    picker
+        .when_some(output_menu, |picker, handle| {
+            picker.with_handle(handle.clone())
+        })
+        .into_any_element()
 }
 
 #[derive(IntoElement)]
@@ -1131,43 +1134,24 @@ impl Render for StreamOutputMenu {
         let theme = cx.theme();
         let tokens = &theme.tokens;
         let entries = audio_device_entries(DeviceKind::AudioOutput, &self.locale, cx);
-        let selected_id = selected_output_id(&entries, self.stream.read(cx).output_device_id());
-        let hover_bg = tokens.bg_item_hover;
+        let selected_id = selected_device_id(&entries, self.stream.read(cx).output_device_id());
         let rows = entries.into_iter().map(|(id, name)| {
             let selected = id == selected_id;
             let row_id = SharedString::from(format!(
                 "stream-output-{}",
                 id.as_deref().unwrap_or("default")
             ));
-            let stream = self.stream.clone();
-            div()
-                .id(row_id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_sm()
-                        .text_color(tokens.text_theme_message)
-                        .child(name),
-                )
-                .child(device_radio(theme, selected))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    let id = id.clone();
-                    stream.update(cx, |store, cx| store.set_output_device(id, cx));
-                    cx.emit(DismissEvent);
-                }))
+            device_option_row(
+                row_id,
+                name,
+                device_radio(tokens.text_secondary, selected),
+                tokens.text_theme_message,
+                tokens.bg_item_hover,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                mezon_store::set_output_device(id.clone(), cx);
+                cx.emit(DismissEvent);
+            }))
         });
 
         div()
@@ -1204,16 +1188,6 @@ impl Render for StreamOutputMenu {
             )
             .children(rows)
     }
-}
-
-fn selected_output_id(
-    entries: &[(Option<String>, String)],
-    output_device_id: Option<&str>,
-) -> Option<String> {
-    entries
-        .iter()
-        .find(|(id, _)| id.as_deref() == output_device_id)
-        .and_then(|(id, _)| id.clone())
 }
 
 fn volume_icon(volume: f32, muted: bool) -> IconName {
@@ -1346,35 +1320,4 @@ fn darken(color: impl Into<gpui::Hsla>, amount: f32) -> gpui::Hsla {
     let mut hsla = color.into();
     hsla.l = (hsla.l - amount).max(0.);
     hsla
-}
-
-#[cfg(test)]
-mod output_picker_tests {
-    use super::selected_output_id;
-
-    fn entries() -> Vec<(Option<String>, String)> {
-        vec![
-            (None, "Default - Speakers".to_string()),
-            (Some("speakers".to_string()), "Speakers".to_string()),
-            (Some("headset".to_string()), "Headset".to_string()),
-        ]
-    }
-
-    #[test]
-    fn selects_the_chosen_output() {
-        assert_eq!(
-            selected_output_id(&entries(), Some("headset")),
-            Some("headset".to_string())
-        );
-    }
-
-    #[test]
-    fn selects_default_when_nothing_was_chosen() {
-        assert_eq!(selected_output_id(&entries(), None), None);
-    }
-
-    #[test]
-    fn selects_default_when_the_chosen_output_is_gone() {
-        assert_eq!(selected_output_id(&entries(), Some("unplugged")), None);
-    }
 }

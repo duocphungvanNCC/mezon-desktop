@@ -398,18 +398,10 @@ impl StreamStore {
     }
 
     pub fn set_output_device(&mut self, output_device_id: Option<String>, cx: &mut Context<Self>) {
-        if self.output_device_id != output_device_id {
-            self.output_device_id = output_device_id.clone();
-            if let Some(session) = &self.session {
-                session.set_output_device(output_device_id.clone());
-            }
+        if let Some(session) = &self.session {
+            session.set_output_device(output_device_id.clone());
         }
-        if let Some(settings) = crate::Settings::try_global(cx) {
-            settings.update(cx, |settings, _| {
-                settings.output_device_id = output_device_id;
-            });
-            crate::schedule_settings_save(&settings, cx);
-        }
+        self.output_device_id = output_device_id;
         cx.notify();
     }
 
@@ -632,6 +624,9 @@ impl StreamStore {
                 self.bump_controls_visible(cx);
             }
             StreamEvent::RemoteAudio(_) => {}
+            StreamEvent::OutputDevice(output_device_id) => {
+                self.output_device_id = output_device_id;
+            }
             StreamEvent::PlaybackBlocked => {
                 self.playback_blocked = true;
             }
@@ -814,24 +809,56 @@ mod tests {
     }
 
     #[gpui::test]
-    fn choosing_an_output_device_is_kept_for_the_stream(cx: &mut gpui::TestAppContext) {
+    fn choosing_an_output_device_saves_it_and_moves_the_stream(cx: &mut gpui::TestAppContext) {
+        let store = init_store(cx);
+        let settings = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            cx.set_global(GlobalStreamStore(store.clone()));
+            settings
+        });
+
+        cx.update(|cx| crate::set_output_device(Some("usb-headset".into()), cx));
+        cx.update(|cx| {
+            assert_eq!(
+                settings.read(cx).output_device_id.as_deref(),
+                Some("usb-headset")
+            );
+            assert_eq!(store.read(cx).output_device_id(), Some("usb-headset"));
+        });
+
+        cx.update(|cx| crate::set_output_device(None, cx));
+        cx.update(|cx| {
+            assert_eq!(settings.read(cx).output_device_id, None);
+            assert_eq!(store.read(cx).output_device_id(), None);
+        });
+    }
+
+    #[gpui::test]
+    fn the_picker_shows_the_device_the_stream_reports(cx: &mut gpui::TestAppContext) {
+        let channel_id = ChannelId(1);
         let store = init_store(cx);
         cx.update(|cx| {
             store.update(cx, |store, cx| {
-                store.set_output_device(Some("usb-headset".into()), cx);
+                store.phase = StreamPhase::Joined {
+                    channel_id,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.set_output_device(Some("unplugged".into()), cx);
+                store.handle_stream_event(
+                    0,
+                    ClanId(9),
+                    channel_id,
+                    StreamEvent::OutputDevice(Some("speakers".into())),
+                    cx,
+                );
             });
         });
-        assert_eq!(
-            cx.update(|cx| store.read(cx).output_device_id().map(str::to_owned)),
-            Some("usb-headset".to_string())
-        );
 
-        cx.update(|cx| {
-            store.update(cx, |store, cx| store.set_output_device(None, cx));
-        });
         assert_eq!(
             cx.update(|cx| store.read(cx).output_device_id().map(str::to_owned)),
-            None
+            Some("speakers".to_string())
         );
     }
 
