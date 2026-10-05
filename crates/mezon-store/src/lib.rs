@@ -359,6 +359,11 @@ pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
         });
         schedule_settings_save(&settings, cx);
     }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_output_device(output_device_id.clone(), cx)
+        });
+    }
     if let Some(stream) = StreamStore::try_global(cx) {
         stream.update(cx, |stream, cx| {
             stream.set_output_device(output_device_id, cx)

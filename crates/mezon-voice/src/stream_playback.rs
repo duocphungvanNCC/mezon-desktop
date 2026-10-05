@@ -1,12 +1,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 
 use crate::audio::AudioFormat;
+
+const PREFERRED_OUTPUT_OPEN_ATTEMPTS: u32 = 3;
+const PREFERRED_OUTPUT_RETRY_INTERVAL: Duration = Duration::from_millis(300);
 
 struct MixerState {
     format: AudioFormat,
@@ -46,10 +50,8 @@ impl StreamPlaybackMixer {
     fn activate(&self, output: u64, format: AudioFormat) {
         let mut state = self.state.lock();
         state.output = output;
-        if state.format != format {
-            state.format = format;
-            state.tracks.clear();
-        }
+        state.format = format;
+        state.tracks.clear();
     }
 
     fn set_volume(&self, volume: f32) {
@@ -115,61 +117,76 @@ impl StreamPlaybackMixer {
     }
 }
 
+#[derive(Clone)]
+struct OutputHealth {
+    failed: Arc<AtomicBool>,
+    failures: flume::Sender<()>,
+}
+
+impl OutputHealth {
+    fn new(failures: flume::Sender<()>) -> Self {
+        Self {
+            failed: Arc::new(AtomicBool::new(false)),
+            failures,
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
+    fn report_failure(&self) -> bool {
+        let first = !self.failed.swap(true, Ordering::Relaxed);
+        if first {
+            let _ = self.failures.try_send(());
+        }
+        first
+    }
+}
+
 struct ActiveOutput {
     device_id: Option<String>,
+    opened: Option<String>,
     stream: cpal::Stream,
-    failed: Arc<AtomicBool>,
+    health: OutputHealth,
 }
 
 pub struct StreamAudioOutput {
     mixer: Arc<StreamPlaybackMixer>,
     active: Mutex<ActiveOutput>,
+    failure_tx: flume::Sender<()>,
+    failure_rx: flume::Receiver<()>,
 }
 
 impl StreamAudioOutput {
     pub fn start(output_device_id: Option<String>, volume: f32, muted: bool) -> Result<Self> {
-        match Self::open(output_device_id.clone(), volume, muted) {
-            Err(error) if output_device_id.is_some() => {
-                tracing::warn!(%error, "stream audio output device unavailable, using the system default");
-                Self::open(None, volume, muted)
-            }
-            opened => opened,
-        }
-    }
-
-    fn open(output_device_id: Option<String>, volume: f32, muted: bool) -> Result<Self> {
-        let (device, supported, format) = open_output(output_device_id.as_deref())?;
-        let mixer = Arc::new(StreamPlaybackMixer::new(format, volume, muted));
-        let failed = Arc::new(AtomicBool::new(false));
-        let stream = build_output(&device, &supported, mixer.clone(), 0, failed.clone())?;
-        stream.play()?;
+        let (failure_tx, failure_rx) = flume::bounded(1);
+        let (mixer, active) = open_preferred(output_device_id, volume, muted, &failure_tx)?;
         Ok(Self {
             mixer,
-            active: Mutex::new(ActiveOutput {
-                device_id: output_device_id,
-                stream,
-                failed,
-            }),
+            active: Mutex::new(active),
+            failure_tx,
+            failure_rx,
         })
     }
 
     pub fn set_output_device(&self, output_device_id: Option<String>) -> Result<()> {
         let mut active = self.active.lock();
-        if output_device_id.is_some()
+        if !active.health.failed()
             && active.device_id == output_device_id
-            && !active.failed.load(Ordering::Relaxed)
+            && (output_device_id.is_some() || active.opened == default_output_key())
         {
             return Ok(());
         }
         let (device, supported, format) = open_output(output_device_id.as_deref())?;
         let output = self.mixer.output().wrapping_add(1);
-        let failed = Arc::new(AtomicBool::new(false));
+        let health = OutputHealth::new(self.failure_tx.clone());
         let stream = build_output(
             &device,
             &supported,
             self.mixer.clone(),
             output,
-            failed.clone(),
+            health.clone(),
         )?;
         stream.play()?;
         self.mixer.activate(output, format);
@@ -177,13 +194,35 @@ impl StreamAudioOutput {
             &mut *active,
             ActiveOutput {
                 device_id: output_device_id,
+                opened: device_key(&device),
                 stream,
-                failed,
+                health,
             },
         );
         drop(active);
         drop_stream_detached(previous.stream);
         Ok(())
+    }
+
+    pub fn recover(&self) -> Result<()> {
+        let preferred = {
+            let active = self.active.lock();
+            if !active.health.failed() {
+                return Ok(());
+            }
+            active.device_id.clone()
+        };
+        match self.set_output_device(preferred.clone()) {
+            Err(error) if preferred.is_some() => {
+                tracing::warn!(%error, "stream audio output device lost, using the system default");
+                self.set_output_device(None)
+            }
+            result => result,
+        }
+    }
+
+    pub fn failures(&self) -> flume::Receiver<()> {
+        self.failure_rx.clone()
     }
 
     pub fn device_id(&self) -> Option<String> {
@@ -213,6 +252,59 @@ impl StreamAudioOutput {
     pub fn clear_track(&self, key: u64) {
         self.mixer.clear(key);
     }
+}
+
+fn open_preferred(
+    output_device_id: Option<String>,
+    volume: f32,
+    muted: bool,
+    failure_tx: &flume::Sender<()>,
+) -> Result<(Arc<StreamPlaybackMixer>, ActiveOutput)> {
+    if output_device_id.is_some() {
+        for attempt in 1..=PREFERRED_OUTPUT_OPEN_ATTEMPTS {
+            match open_first_output(output_device_id.clone(), volume, muted, failure_tx) {
+                Ok(opened) => return Ok(opened),
+                Err(error) => {
+                    tracing::warn!(attempt, %error, "stream audio output device unavailable");
+                    if attempt < PREFERRED_OUTPUT_OPEN_ATTEMPTS {
+                        std::thread::sleep(PREFERRED_OUTPUT_RETRY_INTERVAL);
+                    }
+                }
+            }
+        }
+        tracing::warn!("stream audio output device still unavailable, using the system default");
+    }
+    open_first_output(None, volume, muted, failure_tx)
+}
+
+fn open_first_output(
+    output_device_id: Option<String>,
+    volume: f32,
+    muted: bool,
+    failure_tx: &flume::Sender<()>,
+) -> Result<(Arc<StreamPlaybackMixer>, ActiveOutput)> {
+    let (device, supported, format) = open_output(output_device_id.as_deref())?;
+    let mixer = Arc::new(StreamPlaybackMixer::new(format, volume, muted));
+    let health = OutputHealth::new(failure_tx.clone());
+    let stream = build_output(&device, &supported, mixer.clone(), 0, health.clone())?;
+    stream.play()?;
+    let active = ActiveOutput {
+        device_id: output_device_id,
+        opened: device_key(&device),
+        stream,
+        health,
+    };
+    Ok((mixer, active))
+}
+
+fn device_key(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.to_string())
+}
+
+fn default_output_key() -> Option<String> {
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|device| device_key(&device))
 }
 
 fn drop_stream_detached(stream: cpal::Stream) {
@@ -268,13 +360,13 @@ fn build_output(
     supported: &cpal::SupportedStreamConfig,
     mixer: Arc<StreamPlaybackMixer>,
     output: u64,
-    failed: Arc<AtomicBool>,
+    health: OutputHealth,
 ) -> Result<cpal::Stream> {
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = low_latency_buffer(supported);
     let on_error = move |err: cpal::StreamError| {
-        failed.store(true, Ordering::Relaxed);
         tracing::warn!("stream audio output error: {err}");
+        health.report_failure();
     };
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
@@ -370,32 +462,46 @@ mod tests {
     }
 
     #[test]
-    fn keeps_buffered_samples_when_the_output_format_is_unchanged() {
+    fn switching_output_drops_the_backlog_of_the_previous_one() {
         let mixer = StreamPlaybackMixer::new(STEREO_48K, 1.0, false);
         mixer.push(1, STEREO_48K, &[1_000, 1_000]);
 
         mixer.activate(1, STEREO_48K);
-        let mut output = [0; 2];
+        let mut output = [7; 2];
         mixer.mix_into(1, &mut output);
-        assert_eq!(output, [1_000, 1_000]);
+        assert_eq!(output, [0, 0]);
     }
 
     #[test]
     fn only_the_active_output_plays_and_consumes_samples() {
         let mixer = StreamPlaybackMixer::new(STEREO_48K, 1.0, false);
-        mixer.push(1, STEREO_48K, &[1_000, 1_000, 2_000, 2_000]);
+        mixer.push(1, STEREO_48K, &[1_000, 1_000]);
 
         let mut starting = [7; 2];
         mixer.mix_into(1, &mut starting);
         assert_eq!(starting, [0, 0]);
+        let mut current = [0; 2];
+        mixer.mix_into(0, &mut current);
+        assert_eq!(current, [1_000, 1_000]);
 
         mixer.activate(1, STEREO_48K);
+        mixer.push(1, STEREO_48K, &[2_000, 2_000]);
         let mut replaced = [7; 2];
         mixer.mix_into(0, &mut replaced);
         assert_eq!(replaced, [0, 0]);
-
-        let mut active = [0; 4];
+        let mut active = [0; 2];
         mixer.mix_into(1, &mut active);
-        assert_eq!(active, [1_000, 1_000, 2_000, 2_000]);
+        assert_eq!(active, [2_000, 2_000]);
+    }
+
+    #[test]
+    fn an_output_reports_its_failure_once() {
+        let (failure_tx, failure_rx) = flume::bounded(1);
+        let health = OutputHealth::new(failure_tx);
+
+        assert!(health.report_failure());
+        assert!(!health.report_failure());
+        assert!(health.failed());
+        assert_eq!(failure_rx.try_iter().count(), 1);
     }
 }

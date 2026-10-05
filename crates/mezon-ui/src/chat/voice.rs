@@ -4398,7 +4398,7 @@ fn device_list_panel(
             device_option_row(
                 row_id,
                 name,
-                device_radio(theme.text_muted, selected),
+                device_radio(theme.tokens.text_secondary, selected),
                 text_color,
                 hover_bg,
             )

@@ -28,6 +28,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
 const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_TOKEN_REFRESH_ATTEMPTS: u32 = 3;
+const OUTPUT_RECOVERY_DELAY: Duration = Duration::from_millis(500);
 
 pub type StreamTokenProvider =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String>> + Send + Sync + 'static>;
@@ -129,30 +130,46 @@ impl Drop for StreamSession {
     }
 }
 
+enum OutputTask {
+    Switch(Option<String>),
+    Recover,
+}
+
 async fn follow_output_device(
     audio: Arc<StreamAudioOutput>,
     requests: Receiver<Option<String>>,
     event_tx: Sender<StreamEvent>,
 ) {
-    while let Ok(mut output_device_id) = requests.recv_async().await {
-        while let Ok(newer) = requests.try_recv() {
-            output_device_id = newer;
-        }
-        let switching = audio.clone();
-        let switched = tokio::task::spawn_blocking(move || {
-            let result = switching.set_output_device(output_device_id);
-            (result, switching.device_id())
+    let failures = audio.failures();
+    loop {
+        let task = tokio::select! {
+            request = requests.recv_async() => {
+                let Ok(mut output_device_id) = request else {
+                    break;
+                };
+                while let Ok(newer) = requests.try_recv() {
+                    output_device_id = newer;
+                }
+                OutputTask::Switch(output_device_id)
+            }
+            Ok(()) = failures.recv_async() => {
+                tokio::time::sleep(OUTPUT_RECOVERY_DELAY).await;
+                while failures.try_recv().is_ok() {}
+                OutputTask::Recover
+            }
+        };
+        let worker = audio.clone();
+        let outcome = tokio::task::spawn_blocking(move || match task {
+            OutputTask::Switch(output_device_id) => worker.set_output_device(output_device_id),
+            OutputTask::Recover => worker.recover(),
         })
         .await;
-        match switched {
-            Ok((result, active)) => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "stream audio output switch failed");
-                }
-                let _ = event_tx.send(StreamEvent::OutputDevice(active));
-            }
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
             Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
         }
+        let _ = event_tx.send(StreamEvent::OutputDevice(audio.device_id()));
     }
 }
 
