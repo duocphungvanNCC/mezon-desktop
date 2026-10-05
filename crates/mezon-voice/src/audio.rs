@@ -335,7 +335,7 @@ fn run_apm(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioFormat {
     pub sample_rate: u32,
     pub channels: u32,
@@ -1255,7 +1255,7 @@ enum OutputRebuild {
     },
 }
 
-fn output_device_absent(id: &str) -> bool {
+pub(crate) fn output_device_absent(id: &str) -> bool {
     let host = cpal::default_host();
     match host.output_devices() {
         Ok(mut devices) => {
@@ -1387,7 +1387,7 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
-fn default_output_id(host: &cpal::Host) -> Option<String> {
+pub(crate) fn default_output_id(host: &cpal::Host) -> Option<String> {
     host.default_output_device()
         .and_then(|device| device.id().ok())
         .map(|id| id.to_string())
