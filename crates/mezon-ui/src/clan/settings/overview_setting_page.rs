@@ -4,8 +4,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList,
-    ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES,
-    SaveClanOverviewError, Settings, is_valid_clan_name,
+    ClanNameError, ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES,
+    MAX_CLAN_LOGO_BYTES, Settings, clan_names_match, is_valid_clan_name,
 };
 
 use crate::app::shell::Shell;
@@ -93,6 +93,7 @@ pub struct OverviewSettingPage {
     channel_menu_open: bool,
     name_input: Option<Entity<InputState>>,
     name_valid: bool,
+    taken_name: Option<String>,
     saving: bool,
     logo_uploading: bool,
     banner_uploading: bool,
@@ -140,6 +141,7 @@ impl OverviewSettingPage {
             channel_menu_open: false,
             name_input: None,
             name_valid,
+            taken_name: None,
             saving: false,
             logo_uploading: false,
             banner_uploading: false,
@@ -344,6 +346,12 @@ impl OverviewSettingPage {
         self.saving
     }
 
+    fn name_taken(&self) -> bool {
+        self.taken_name
+            .as_deref()
+            .is_some_and(|taken| clan_names_match(taken, &self.draft.clan_name))
+    }
+
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.draft = self.saved_draft.clone();
         self.system_message = self.saved_system_message.clone();
@@ -371,6 +379,7 @@ impl OverviewSettingPage {
         self.sync_name_from_input(cx);
         if self.saving
             || !self.name_valid
+            || self.name_taken()
             || !self.has_unsaved_changes()
             || self.logo_uploading
             || self.banner_uploading
@@ -400,57 +409,49 @@ impl OverviewSettingPage {
         });
 
         cx.spawn(async move |this, cx| {
-            if let Some(task) = clan_task {
-                match task.await {
-                    Ok(()) => {}
-                    Err(err) => {
-                        if let SaveClanOverviewError::Other(reason) = &err {
-                            tracing::error!("save clan overview failed: {reason}");
-                        }
-                        let message = clan_save_error_message(&locale, &err).to_string();
-                        let _ = this.update(cx, |this, cx| {
-                            this.saving = false;
-                            cx.notify();
-                        });
-                        cx.update(|cx| {
-                            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
-                        });
-                        return;
-                    }
-                }
+            let clan_result = match clan_task {
+                Some(task) => task.await,
+                None => Ok(()),
+            };
+            let system_result = match system_task {
+                Some(task) => task.await,
+                None => Ok(()),
+            };
+            let name_taken = matches!(clan_result, Err(ClanNameError::DuplicateName));
+            if let Err(err) = &system_result {
+                tracing::error!("save system message failed: {err}");
             }
-
-            if let Some(task) = system_task {
-                match task.await {
-                    Ok(()) => {}
-                    Err(err) => {
-                        tracing::error!("save system message failed: {err}");
-                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
-                            .to_string();
-                        let _ = this.update(cx, |this, cx| {
-                            this.saving = false;
-                            cx.notify();
-                        });
-                        cx.update(|cx| {
-                            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
-                        });
-                        return;
-                    }
-                }
-            }
-
+            let error = match (&clan_result, &system_result) {
+                (Err(err), _) => Some(clan_save_error_message(&locale, err)),
+                (Ok(()), Err(_)) => Some(mezon_i18n::t(
+                    &locale,
+                    "clanOverviewSetting.toast.saveError",
+                )),
+                (Ok(()), Ok(())) => None,
+            };
             let _ = this.update(cx, |this, cx| {
-                this.saved_draft = draft;
-                if has_system {
+                if clan_result.is_ok() {
+                    this.saved_draft = draft.clone();
+                }
+                if name_taken {
+                    this.taken_name = Some(draft.clan_name.clone());
+                }
+                if has_system && system_result.is_ok() {
                     this.saved_system_message = system_draft;
                 }
                 this.saving = false;
                 cx.notify();
             });
-            let success =
-                mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveSuccess").to_string();
+            let toast = error
+                .unwrap_or_else(|| mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveSuccess"));
             cx.update(|cx| {
-                Shell::global(cx).update(cx, |shell, cx| shell.success(success, cx));
+                Shell::global(cx).update(cx, |shell, cx| {
+                    if error.is_some() {
+                        shell.error(toast.to_string(), cx);
+                    } else {
+                        shell.success(toast.to_string(), cx);
+                    }
+                });
             });
         })
         .detach();
@@ -993,8 +994,19 @@ impl Render for OverviewSettingPage {
         self.ensure_name_input(window, cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let name_error = (!self.name_valid)
-            .then(|| mezon_i18n::t(&locale, "clanSettings.clanLogo.validationError").to_string());
+        let name_error = if !self.name_valid {
+            Some(mezon_i18n::t(&locale, "clanSettings.clanLogo.validationError").to_string())
+        } else if self.name_taken() {
+            Some(
+                mezon_i18n::t(
+                    &locale,
+                    "clanOverviewSetting.menu.serverName.duplicateNameMessage",
+                )
+                .to_string(),
+            )
+        } else {
+            None
+        };
         let system = self.system_message.clone();
 
         v_flex()
@@ -1174,13 +1186,14 @@ impl Render for OverviewSettingPage {
     }
 }
 
-fn clan_save_error_message(locale: &str, error: &SaveClanOverviewError) -> &'static str {
+fn clan_save_error_message(locale: &str, error: &ClanNameError) -> &'static str {
     match error {
-        SaveClanOverviewError::DuplicateName => mezon_i18n::t(
+        ClanNameError::DuplicateName => mezon_i18n::t(
             locale,
             "clanOverviewSetting.menu.serverName.duplicateNameMessage",
         ),
-        SaveClanOverviewError::Other(_) => {
+        ClanNameError::Other(reason) => {
+            tracing::error!("save clan overview failed: {reason}");
             mezon_i18n::t(locale, "clanOverviewSetting.toast.saveError")
         }
     }
@@ -1193,6 +1206,7 @@ pub fn render_clan_overview_save_bar(
     cx: &App,
 ) -> impl IntoElement {
     let saving = overview.read(cx).is_saving();
+    let name_taken = overview.read(cx).name_taken();
     let reset = overview.clone();
     let save = overview.clone();
     UnsavedChangesBar::new(
@@ -1200,6 +1214,7 @@ pub fn render_clan_overview_save_bar(
         Button::new("clan-overview-reset")
             .label(mezon_i18n::t(locale, "clanSettings.modalSaveChanges.reset"))
             .ghost()
+            .disabled(saving)
             .on_click(move |_, window, cx| {
                 reset.update(cx, |page, cx| page.reset(window, cx));
             }),
@@ -1209,7 +1224,7 @@ pub fn render_clan_overview_save_bar(
                 "clanSettings.modalSaveChanges.saveChanges",
             ))
             .primary()
-            .disabled(saving)
+            .disabled(saving || name_taken)
             .on_click(move |_, _, cx| {
                 save.update(cx, |page, cx| page.save(cx));
             }),
@@ -1218,23 +1233,26 @@ pub fn render_clan_overview_save_bar(
 
 #[cfg(test)]
 mod save_error_tests {
-    use mezon_store::SaveClanOverviewError;
+    use mezon_store::ClanNameError;
 
     use super::clan_save_error_message;
 
     #[test]
     fn a_taken_clan_name_says_so() {
         assert_eq!(
-            clan_save_error_message("en", &SaveClanOverviewError::DuplicateName),
-            "This clan name is already in use. Please choose a different name."
+            clan_save_error_message("en", &ClanNameError::DuplicateName),
+            mezon_i18n::t(
+                "en",
+                "clanOverviewSetting.menu.serverName.duplicateNameMessage"
+            )
         );
     }
 
     #[test]
     fn any_other_failure_keeps_the_generic_message() {
         assert_eq!(
-            clan_save_error_message("en", &SaveClanOverviewError::Other("timeout".into())),
-            "Error when saving"
+            clan_save_error_message("en", &ClanNameError::Other("timeout".into())),
+            mezon_i18n::t("en", "clanOverviewSetting.toast.saveError")
         );
     }
 }

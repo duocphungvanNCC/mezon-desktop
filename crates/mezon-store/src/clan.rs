@@ -1088,27 +1088,27 @@ impl ClanList {
         name: String,
         logo: String,
         cx: &mut Context<Self>,
-    ) -> Task<Result<String, CreateClanError>> {
+    ) -> Task<Result<String, ClanNameError>> {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let trimmed = name.trim().to_string();
             let is_dup = api
                 .check_duplicate_clan_name(&trimmed, "0")
                 .await
-                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+                .map_err(|e| ClanNameError::Other(e.to_string()))?;
             if is_dup {
-                return Err(CreateClanError::DuplicateName);
+                return Err(ClanNameError::DuplicateName);
             }
             let desc = api
                 .create_clan_desc(&trimmed, &logo, "")
                 .await
-                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+                .map_err(|e| ClanNameError::Other(e.to_string()))?;
             let clan_id = desc.clan_id;
             this.update(cx, |this, cx| {
                 apply_created_clan(&mut this.clans, desc);
                 this.select_clan(ClanId(clan_id), cx);
             })
-            .map_err(|_| CreateClanError::Other("store dropped".into()))?;
+            .map_err(|_| ClanNameError::Other("store dropped".into()))?;
             Ok(clan_id.to_string())
         })
     }
@@ -1191,38 +1191,36 @@ impl ClanList {
         clan_id: ClanId,
         draft: ClanOverviewDraft,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), SaveClanOverviewError>> {
+    ) -> Task<Result<(), ClanNameError>> {
         let api = self.api.clone();
         let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
         let Some(clan) = clan else {
-            return cx.spawn(async move |_, _| {
-                Err(SaveClanOverviewError::Other("clan not found".into()))
-            });
+            return cx.spawn(async move |_, _| Err(ClanNameError::Other("clan not found".into())));
         };
         let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
         let previous_name = clan.name.clone();
         let local_update = draft.clan_update(&clan, trimmed_name.clone());
         cx.spawn(async move |this, cx| {
-            if trimmed_name != previous_name.trim() {
+            if !clan_names_match(&trimmed_name, &previous_name) {
                 let is_duplicate = api
                     .check_duplicate_clan_name(&trimmed_name, "0")
                     .await
-                    .map_err(|e| SaveClanOverviewError::Other(e.to_string()))?;
+                    .map_err(|e| ClanNameError::Other(e.to_string()))?;
                 if is_duplicate {
-                    return Err(SaveClanOverviewError::DuplicateName);
+                    return Err(ClanNameError::DuplicateName);
                 }
             }
 
             api.update_clan_desc(request)
                 .await
-                .map_err(|e| SaveClanOverviewError::Other(e.to_string()))?;
+                .map_err(|e| ClanNameError::Other(e.to_string()))?;
 
             this.update(cx, |this, cx| {
                 let _ = update_clan(&mut this.clans, clan_id, local_update);
                 cx.notify();
             })
-            .map_err(|_| SaveClanOverviewError::Other("store dropped".into()))?;
+            .map_err(|_| ClanNameError::Other("store dropped".into()))?;
             Ok(())
         })
     }
@@ -1628,25 +1626,23 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
     true
 }
 
+pub fn clan_names_match(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
 #[derive(Debug)]
-pub enum CreateClanError {
+pub enum ClanNameError {
     DuplicateName,
     Other(String),
 }
 
-impl std::fmt::Display for CreateClanError {
+impl std::fmt::Display for ClanNameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateName => write!(f, "A clan with that name already exists."),
             Self::Other(msg) => write!(f, "{msg}"),
         }
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum SaveClanOverviewError {
-    DuplicateName,
-    Other(String),
 }
 
 pub(crate) fn apply_created_clan(clans: &mut Vec<Clan>, desc: ApiClanDesc) {
@@ -2139,8 +2135,15 @@ mod tests {
     }
 
     #[test]
+    fn clan_names_match_ignores_case_and_surrounding_spaces() {
+        assert!(clan_names_match("mezon", "Mezon"));
+        assert!(clan_names_match(" DM ", "dm"));
+        assert!(!clan_names_match("mezon", "mezon 2"));
+    }
+
+    #[test]
     fn create_clan_error_display_duplicate_name() {
-        let err = CreateClanError::DuplicateName;
+        let err = ClanNameError::DuplicateName;
         let msg = format!("{err}");
         assert!(msg.contains("already exists"));
     }
@@ -2173,7 +2176,7 @@ mod tests {
 
     #[test]
     fn create_clan_error_display_other() {
-        let err = CreateClanError::Other("network timeout".into());
+        let err = ClanNameError::Other("network timeout".into());
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
