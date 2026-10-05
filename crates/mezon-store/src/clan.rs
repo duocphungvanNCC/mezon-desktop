@@ -1191,11 +1191,13 @@ impl ClanList {
         clan_id: ClanId,
         draft: ClanOverviewDraft,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), SaveClanOverviewError>> {
         let api = self.api.clone();
         let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
         let Some(clan) = clan else {
-            return cx.spawn(async move |_, _| Err("clan not found".into()));
+            return cx.spawn(async move |_, _| {
+                Err(SaveClanOverviewError::Other("clan not found".into()))
+            });
         };
         let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
@@ -1206,21 +1208,21 @@ impl ClanList {
                 let is_duplicate = api
                     .check_duplicate_clan_name(&trimmed_name, "0")
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| SaveClanOverviewError::Other(e.to_string()))?;
                 if is_duplicate {
-                    return Err("Duplicate clan name".into());
+                    return Err(SaveClanOverviewError::DuplicateName);
                 }
             }
 
             api.update_clan_desc(request)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| SaveClanOverviewError::Other(e.to_string()))?;
 
             this.update(cx, |this, cx| {
                 let _ = update_clan(&mut this.clans, clan_id, local_update);
                 cx.notify();
             })
-            .map_err(|_| "store dropped".to_string())?;
+            .map_err(|_| SaveClanOverviewError::Other("store dropped".into()))?;
             Ok(())
         })
     }
@@ -1639,6 +1641,12 @@ impl std::fmt::Display for CreateClanError {
             Self::Other(msg) => write!(f, "{msg}"),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveClanOverviewError {
+    DuplicateName,
+    Other(String),
 }
 
 pub(crate) fn apply_created_clan(clans: &mut Vec<Clan>, desc: ApiClanDesc) {

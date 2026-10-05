@@ -1436,7 +1436,7 @@
   "clanOverviewSetting.menu.inactive.inactiveChannel": "Inactive Channel",
   "clanOverviewSetting.menu.inactive.inactiveTimeout": "Inactive Timeout",
   "clanOverviewSetting.menu.inactive.title": "Inactive Settings",
-  "clanOverviewSetting.menu.serverName.duplicateNameMessage": "The clan name already exists. Please enter another name.",
+  "clanOverviewSetting.menu.serverName.duplicateNameMessage": "This clan name is already in use. Please choose a different name.",
   "clanOverviewSetting.menu.serverName.errorMessage": "Please enter a valid clan name (max 64 characters, only words, numbers, _ or -).",
   "clanOverviewSetting.menu.serverName.permissionDenied": "You do not have permission to edit Clan banner",
   "clanOverviewSetting.menu.serverName.title": "Clan Name",

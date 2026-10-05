@@ -4,8 +4,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList,
-    ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES, Settings,
-    is_valid_clan_name,
+    ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES,
+    SaveClanOverviewError, Settings, is_valid_clan_name,
 };
 
 use crate::app::shell::Shell;
@@ -403,9 +403,11 @@ impl OverviewSettingPage {
             if let Some(task) = clan_task {
                 match task.await {
                     Ok(()) => {}
-                    Err(_) => {
-                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
-                            .to_string();
+                    Err(err) => {
+                        if let SaveClanOverviewError::Other(reason) = &err {
+                            tracing::error!("save clan overview failed: {reason}");
+                        }
+                        let message = clan_save_error_message(&locale, &err).to_string();
                         let _ = this.update(cx, |this, cx| {
                             this.saving = false;
                             cx.notify();
@@ -1172,6 +1174,18 @@ impl Render for OverviewSettingPage {
     }
 }
 
+fn clan_save_error_message(locale: &str, error: &SaveClanOverviewError) -> &'static str {
+    match error {
+        SaveClanOverviewError::DuplicateName => mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.menu.serverName.duplicateNameMessage",
+        ),
+        SaveClanOverviewError::Other(_) => {
+            mezon_i18n::t(locale, "clanOverviewSetting.toast.saveError")
+        }
+    }
+}
+
 pub fn render_clan_overview_save_bar(
     overview: Entity<OverviewSettingPage>,
     locale: &str,
@@ -1200,4 +1214,27 @@ pub fn render_clan_overview_save_bar(
                 save.update(cx, |page, cx| page.save(cx));
             }),
     )
+}
+
+#[cfg(test)]
+mod save_error_tests {
+    use mezon_store::SaveClanOverviewError;
+
+    use super::clan_save_error_message;
+
+    #[test]
+    fn a_taken_clan_name_says_so() {
+        assert_eq!(
+            clan_save_error_message("en", &SaveClanOverviewError::DuplicateName),
+            "This clan name is already in use. Please choose a different name."
+        );
+    }
+
+    #[test]
+    fn any_other_failure_keeps_the_generic_message() {
+        assert_eq!(
+            clan_save_error_message("en", &SaveClanOverviewError::Other("timeout".into())),
+            "Error when saving"
+        );
+    }
 }
