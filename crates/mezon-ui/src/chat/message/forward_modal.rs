@@ -11,8 +11,8 @@ use mezon_store::{
     BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
     CtrlKChannel, CtrlKSearchStore, DirectKind, DirectMessageStore, ForwardTarget, FriendState,
     FriendStore, MAX_FORWARD_MESSAGE_LENGTH, Message, MessageRef, MessagesEvent, MessagesStore,
-    ProfileContext, ShareContactSubject, UserId, UsersByUserStore, channel_join_params,
-    is_age_restricted, resolve_avatar_url, resolve_user_profile,
+    ProfileContext, SEARCH_CTRL_K_MAX_TEXT_BYTES, ShareContactSubject, UserId, UsersByUserStore,
+    channel_join_params, is_age_restricted, resolve_avatar_url, resolve_user_profile,
 };
 
 use crate::app::shell::Shell;
@@ -437,7 +437,14 @@ fn parse_search(query: &str) -> (SearchScope, &str) {
 
 fn server_channel_query(query: &str) -> Option<String> {
     let (scope, needle) = parse_search(query);
-    (scope != SearchScope::Members && !needle.is_empty()).then(|| needle.to_string())
+    (scope != SearchScope::Members
+        && !needle.is_empty()
+        && needle.len() <= SEARCH_CTRL_K_MAX_TEXT_BYTES)
+        .then(|| needle.to_string())
+}
+
+fn server_query_key(query: &str) -> String {
+    query.to_ascii_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -857,10 +864,11 @@ impl ForwardMessageModal {
 
     fn schedule_server_search(&mut self, cx: &mut Context<Self>) {
         let query = server_channel_query(self.search_input.read(cx).value());
-        if query == self.last_server_query {
+        let key = query.as_deref().map(server_query_key);
+        if key == self.last_server_query {
             return;
         }
-        self.last_server_query = query.clone();
+        self.last_server_query = key;
         let Some(query) = query else {
             self.server_search_pending = false;
             self._server_search_task = Task::ready(());
@@ -2160,6 +2168,22 @@ mod tests {
         assert_eq!(server_channel_query("@gen"), None);
         assert_eq!(server_channel_query("#  "), None);
         assert_eq!(server_channel_query(""), None);
+        assert_eq!(
+            server_channel_query(&"a".repeat(SEARCH_CTRL_K_MAX_TEXT_BYTES + 1)),
+            None,
+            "the client rejects longer text itself, so it is never worth a request"
+        );
+    }
+
+    #[test]
+    fn only_an_ascii_case_change_reuses_the_last_search() {
+        assert_eq!(server_query_key("Gen"), server_query_key("gen"));
+        assert_ne!(
+            server_query_key("Đà"),
+            server_query_key("đà"),
+            "ILIKE folds non-ASCII case only under a non-C locale, so the server may answer \
+             differently"
+        );
     }
 
     #[test]

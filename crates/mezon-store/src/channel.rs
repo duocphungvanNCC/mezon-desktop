@@ -44,6 +44,7 @@ const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const BADGE_SEED_MAX_ATTEMPTS: u32 = 3;
 const BADGE_SEED_RETRY_BACKOFF: Duration = Duration::from_millis(400);
 const CLAN_JOIN_MAX_ATTEMPTS: u32 = 3;
+const WEB_CHANNEL_DESC_FETCH_LIMIT: usize = 500;
 const CLAN_JOIN_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const FAVORITES_PAINT_BUDGET: Duration = Duration::from_millis(1500);
 const CHANNEL_DETAIL_MAX_ATTEMPTS: u32 = 3;
@@ -1245,32 +1246,58 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
-        let rides_clan_stream = is_public && !clan_id.is_zero();
-        if rides_clan_stream {
-            drop(self.ensure_clan_joined(clan_id, cx));
-        }
-        cx.spawn(async move |this, cx| {
-            if rides_clan_stream {
-                let mut attempt = 0;
-                loop {
-                    let joining = this.update(cx, |this, cx| this.ensure_clan_joined(clan_id, cx))?;
-                    joining.await;
-                    if this.read_with(cx, |this, _| this.joined_clans.contains(&clan_id))? {
-                        break;
-                    }
-                    attempt += 1;
-                    if attempt >= CLAN_JOIN_MAX_ATTEMPTS {
-                        anyhow::bail!(
-                            "clan {clan_id} is not joined, so a public channel_join would take its stream"
-                        );
-                    }
-                    cx.background_executor()
-                        .timer(CLAN_JOIN_RETRY_BACKOFF * attempt)
-                        .await;
-                }
-            }
+        let clan_stream = self.clan_stream_ready(clan_id, is_public, cx);
+        cx.spawn(async move |_, _| {
+            clan_stream.await?;
             api.join_chat(clan_id.get(), channel_id.get(), channel_type, is_public)
                 .await
+        })
+    }
+
+    fn clan_stream_ready(
+        &mut self,
+        clan_id: ClanId,
+        is_public: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if !joins_through_clan_stream(clan_id, is_public) {
+            return Task::ready(Ok(()));
+        }
+        let generation = self.reset_generation;
+        let mut joining = self.ensure_clan_joined(clan_id, cx);
+        cx.spawn(async move |this, cx| {
+            let mut attempt = 0;
+            loop {
+                joining.await;
+                let (current, joined) = this.read_with(cx, |this, _| {
+                    (
+                        this.reset_generation == generation,
+                        this.joined_clans.contains(&clan_id),
+                    )
+                })?;
+                if !current {
+                    anyhow::bail!("session reset while joining clan {clan_id}");
+                }
+                if joined {
+                    return Ok(());
+                }
+                attempt += 1;
+                if attempt >= CLAN_JOIN_MAX_ATTEMPTS {
+                    tracing::warn!(
+                        "clan {clan_id} not joined after {attempt} attempts; joining its channel anyway"
+                    );
+                    return Ok(());
+                }
+                cx.background_executor()
+                    .timer(CLAN_JOIN_RETRY_BACKOFF * attempt)
+                    .await;
+                joining = this
+                    .update(cx, |this, cx| {
+                        (this.reset_generation == generation)
+                            .then(|| this.ensure_clan_joined(clan_id, cx))
+                    })?
+                    .ok_or_else(|| anyhow::anyhow!("session reset while joining clan {clan_id}"))?;
+            }
         })
     }
 
@@ -1342,7 +1369,7 @@ impl ChannelList {
         descs: Vec<ApiChannelDesc>,
         cx: &mut Context<Self>,
     ) {
-        if descs.is_empty() {
+        if descs.is_empty() || self.forgotten_clans.contains(&clan_id) {
             return;
         }
         let desc_count = descs.len();
@@ -1350,7 +1377,8 @@ impl ChannelList {
             clan_id,
             BadgeSeed {
                 current: true,
-                complete: desc_count < CHANNEL_DESC_FETCH_LIMIT as usize,
+                complete: desc_count
+                    < WEB_CHANNEL_DESC_FETCH_LIMIT.min(CHANNEL_DESC_FETCH_LIMIT as usize),
             },
         );
         let seed = unread_seed_from_descs(descs);
@@ -4944,6 +4972,10 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let child_ids = self.child_thread_ids(clan_id, parent_channel_id);
+        let leaving_badge: u32 = child_ids
+            .iter()
+            .map(|child_id| self.channel_badge_count(clan_id, *child_id))
+            .sum();
         if let Some(threads) = crate::threads::ThreadsStore::try_global(cx) {
             threads.update(cx, |store, cx| {
                 store.remove_threads_of_parent(&parent_channel_id.to_string(), cx);
@@ -4982,7 +5014,7 @@ impl ChannelList {
         if removed_any {
             self.invalidate_channel_index(clan_id);
         }
-        self.sync_clan_after_read(clan_id, 0, cx);
+        self.sync_clan_after_read(clan_id, leaving_badge, cx);
         cx.notify();
     }
 
@@ -5818,6 +5850,10 @@ fn voice_members_from(user_ids: Vec<i64>, share_screen_ids: Vec<i64>) -> Vec<Voi
             sharing_screen: sharing.contains(&user_id),
         })
         .collect()
+}
+
+pub fn joins_through_clan_stream(clan_id: ClanId, is_public: bool) -> bool {
+    is_public && !clan_id.is_zero()
 }
 
 fn channel_from_desc(
@@ -11280,12 +11316,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_public_channel_join_gives_up_when_its_clan_never_joins(cx: &mut gpui::TestAppContext) {
+    fn a_public_channel_join_still_goes_out_when_its_clan_never_joins(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let channels = cx.update(|cx| init_clan_with_rail_badge(cx, 0));
         let join = cx.update(|cx| {
             channels.update(cx, |channels, cx| {
                 channels.forget_clan(ClanId(2), cx);
-                channels.join_channel(ClanId(2), ChannelId(20), 1, true, cx)
+                channels.clan_stream_ready(ClanId(2), true, cx)
             })
         });
         for _ in 0..CLAN_JOIN_MAX_ATTEMPTS {
@@ -11294,17 +11332,87 @@ mod tests {
             cx.run_until_parked();
         }
         assert!(
-            matches!(join.now_or_never(), Some(Err(_))),
-            "a public channel_join ahead of clan_join collapses onto the clan stream and leaves \
-             that clan's private channels and threads unsubscribed for the session"
+            matches!(join.now_or_never(), Some(Ok(()))),
+            "after its retries the join must still go out, or the open channel gets no messages \
+             until it is reopened"
         );
+    }
+
+    #[gpui::test]
+    fn a_public_channel_join_stops_when_the_session_resets(cx: &mut gpui::TestAppContext) {
+        let channels = cx.update(|cx| init_clan_with_rail_badge(cx, 0));
+        let join = cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.forget_clan(ClanId(2), cx);
+                let join = channels.clan_stream_ready(ClanId(2), true, cx);
+                channels.reset(cx);
+                join
+            })
+        });
+        for _ in 0..CLAN_JOIN_MAX_ATTEMPTS {
+            cx.executor()
+                .advance_clock(CLAN_JOIN_RETRY_BACKOFF * CLAN_JOIN_MAX_ATTEMPTS);
+            cx.run_until_parked();
+        }
+        assert!(
+            matches!(join.now_or_never(), Some(Err(err)) if err.to_string().contains("session reset")),
+            "a join started before a logout must not run under the next account"
+        );
+    }
+
+    #[gpui::test]
+    fn a_seed_for_a_clan_already_left_is_dropped(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_clan_with_rail_badge(cx, 0);
+            channels.update(cx, |channels, cx| {
+                channels.forget_clan(ClanId(1), cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], cx);
+                assert!(
+                    !channels.badge_seeds.contains_key(&ClanId(1))
+                        && !channels.pending_badge_seed.contains_key(&ClanId(1)),
+                    "a seed landing after the user left must not come back if they rejoin"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_a_channel_takes_its_threads_badges_off_a_capped_rail(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_clan_with_rail_badge(cx, 5);
+            let mut seed: Vec<ApiChannelDesc> = (0..WEB_CHANNEL_DESC_FETCH_LIMIT as i64)
+                .map(|ix| badge_desc(1_000 + ix, 0))
+                .collect();
+            seed[0] = badge_desc(9, 2);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_a_thread(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                channels.apply_badge_seed(ClanId(1), seed, cx);
+            });
+            assert_eq!(clan_rail(cx), (5, true));
+
+            channels.update(cx, |channels, cx| {
+                channels.apply_local_delete(ClanId(1), ChannelId(1), ChannelId(0), cx);
+            });
+            assert_eq!(
+                clan_rail(cx),
+                (3, true),
+                "the deleted channel's threads take their badges with them"
+            );
+        });
     }
 
     #[gpui::test]
     fn a_capped_listing_never_lowers_the_rail_below_its_own_count(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_clan_with_rail_badge(cx, 5);
-            let mut seed: Vec<ApiChannelDesc> = (0..i64::from(CHANNEL_DESC_FETCH_LIMIT))
+            let mut seed: Vec<ApiChannelDesc> = (0..WEB_CHANNEL_DESC_FETCH_LIMIT as i64)
                 .map(|ix| badge_desc(1_000 + ix, 0))
                 .collect();
             seed[0] = badge_desc(1, 2);
@@ -11320,7 +11428,8 @@ mod tests {
             assert_eq!(
                 clan_rail(cx),
                 (5, true),
-                "a listing cut at CHANNEL_DESC_FETCH_LIMIT misses channels ListClanBadgeCount \
+                "the server's listing cache holds whichever client's limit filled it first (500 on \
+                 web), so a listing that long may be cut and miss channels ListClanBadgeCount \
                  still counts"
             );
 

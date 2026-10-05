@@ -140,6 +140,7 @@ pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_d
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
+    SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,

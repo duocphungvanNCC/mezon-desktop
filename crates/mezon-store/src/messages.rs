@@ -34,7 +34,9 @@ use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::buzz::BuzzStore;
-use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
+use crate::channel::{
+    ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
+};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
@@ -882,11 +884,9 @@ fn start_target_clan_joins(targets: &[ForwardTarget], cx: &mut App) {
     let channels = ChannelList::global(cx);
     for target in targets {
         if let ForwardTarget::Channel {
-            clan_id,
-            is_public: true,
-            ..
+            clan_id, is_public, ..
         } = target
-            && !clan_id.is_zero()
+            && joins_through_clan_stream(*clan_id, *is_public)
         {
             drop(channels.update(cx, |channels, cx| channels.ensure_clan_joined(*clan_id, cx)));
         }
