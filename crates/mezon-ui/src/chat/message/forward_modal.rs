@@ -1,5 +1,5 @@
+use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
@@ -16,6 +16,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
+use crate::command_palette::FILTER_DEBOUNCE_MS;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Checkbox, Icon, IconName, Input, InputEvent, InputState,
     Sizable, Size, Spinner,
@@ -26,7 +27,6 @@ use crate::theme::{ActiveTheme, Theme};
 const ROW_PX: f32 = 32.;
 const LIST_PX: f32 = 300.;
 const MAX_RESULTS: usize = 15;
-const SERVER_SEARCH_DEBOUNCE_MS: u64 = 300;
 const COUNTER_VISIBLE_AT: usize = MAX_FORWARD_MESSAGE_LENGTH - 200;
 const COUNTER_WARN_AT: usize = MAX_FORWARD_MESSAGE_LENGTH - 100;
 
@@ -51,6 +51,7 @@ enum OptionKind {
         clan_name: SharedString,
         icon: IconName,
         lock: Option<IconName>,
+        parent_id: Option<ChannelId>,
     },
     Member {
         username: SharedString,
@@ -356,6 +357,7 @@ fn channel_option(row: ChannelRow<'_>) -> Option<ForwardOption> {
             clan_name: SharedString::from(row.clan_name.to_uppercase()),
             icon,
             lock,
+            parent_id: row.parent_id,
         },
         filter_key: row.name.to_lowercase(),
         sort_key: row.last_sent_timestamp,
@@ -386,13 +388,18 @@ fn searched_channel_option(channel: &CtrlKChannel, clan_name: &str) -> Option<Fo
 
 fn searched_options<'a>(
     searched: &'a [CtrlKChannel],
-    hidden: impl Fn(ChannelId) -> bool + 'a,
+    hidden: impl Fn(&CtrlKChannel) -> bool + 'a,
     clan_name: impl Fn(ClanId) -> Option<&'a str> + 'a,
 ) -> impl Iterator<Item = ForwardOption> + 'a {
     searched
         .iter()
-        .filter(move |channel| !hidden(channel.channel_id))
+        .filter(move |channel| !hidden(channel))
         .filter_map(move |channel| searched_channel_option(channel, clan_name(channel.clan_id)?))
+}
+
+fn is_removed(channels: &ChannelList, channel_id: ChannelId, parent_id: Option<ChannelId>) -> bool {
+    channels.is_locally_removed(channel_id)
+        || parent_id.is_some_and(|parent_id| channels.is_locally_removed(parent_id))
 }
 
 fn upsert_searched(searched: &mut Vec<CtrlKChannel>, found: Vec<CtrlKChannel>) -> bool {
@@ -433,55 +440,57 @@ fn server_channel_query(query: &str) -> Option<String> {
     (scope != SearchScope::Members && !needle.is_empty()).then(|| needle.to_string())
 }
 
-fn ranked_hits(
-    options: &[ForwardOption],
-    range: Range<usize>,
-    scope: SearchScope,
-    needle: &str,
-) -> Vec<usize> {
-    let mut hits: Vec<usize> = range
-        .filter(|ix| {
-            let option = &options[*ix];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hit {
+    Local(usize),
+    Searched(usize),
+}
+
+fn rank_order(a: &ForwardOption, b: &ForwardOption, needle: &str) -> Ordering {
+    let a_prefix = a.filter_key.starts_with(needle);
+    let b_prefix = b.filter_key.starts_with(needle);
+    b_prefix
+        .cmp(&a_prefix)
+        .then(b.sort_key.cmp(&a.sort_key))
+        .then(a.filter_key.cmp(&b.filter_key))
+}
+
+fn ranked_hits(options: &[ForwardOption], scope: SearchScope, needle: &str) -> Vec<usize> {
+    let mut hits: Vec<usize> = options
+        .iter()
+        .enumerate()
+        .filter(|(_, option)| {
             scope.accepts(option) && (needle.is_empty() || option.filter_key.contains(needle))
         })
+        .map(|(ix, _)| ix)
         .collect();
-    hits.sort_by(|a, b| {
-        let a = &options[*a];
-        let b = &options[*b];
-        let a_prefix = a.filter_key.starts_with(needle);
-        let b_prefix = b.filter_key.starts_with(needle);
-        b_prefix
-            .cmp(&a_prefix)
-            .then(b.sort_key.cmp(&a.sort_key))
-            .then(a.filter_key.cmp(&b.filter_key))
-    });
+    hits.sort_by(|a, b| rank_order(&options[*a], &options[*b], needle));
+    hits.truncate(MAX_RESULTS);
     hits
 }
 
 fn search_hits(
-    options: &[ForwardOption],
-    local_count: usize,
+    local: &[ForwardOption],
+    searched: &[ForwardOption],
     scope: SearchScope,
     needle: &str,
-) -> Vec<usize> {
-    let end = if needle.is_empty() {
-        local_count
+) -> Vec<Hit> {
+    let searched_hits = if needle.is_empty() {
+        Vec::new()
     } else {
-        options.len()
+        ranked_hits(searched, scope, needle)
     };
-    let (mut local, mut searched) = (0, 0);
-    ranked_hits(options, 0..end, scope, needle)
+    let mut hits: Vec<Hit> = ranked_hits(local, scope, needle)
         .into_iter()
-        .filter(|ix| {
-            let taken = if *ix < local_count {
-                &mut local
-            } else {
-                &mut searched
-            };
-            *taken += 1;
-            *taken <= MAX_RESULTS
-        })
-        .collect()
+        .map(Hit::Local)
+        .chain(searched_hits.into_iter().map(Hit::Searched))
+        .collect();
+    let option = |hit: Hit| match hit {
+        Hit::Local(ix) => &local[ix],
+        Hit::Searched(ix) => &searched[ix],
+    };
+    hits.sort_by(|a, b| rank_order(option(*a), option(*b), needle));
+    hits
 }
 
 /// Cheap gate for the store observers: the three source lists only need a
@@ -537,6 +546,9 @@ fn source_fingerprint(cx: &App) -> u64 {
         fold_str(&mut hash, &channel.clan_name);
         fold_i64(&mut hash, channel.clan_id.get());
         fold_i64(&mut hash, channel.last_sent_timestamp);
+        fold_u64(&mut hash, u64::from(channel.private));
+        fold_i64(&mut hash, channel.parent_id.map_or(0, |id| id.get()));
+        fold_i64(&mut hash, i64::from(channel.age_restricted));
     }
     for clan in &ClanList::global(cx).read(cx).clans {
         fold_i64(&mut hash, clan.id.get());
@@ -553,12 +565,12 @@ pub struct ForwardMessageModal {
     shared: SharedContent,
     shared_summary: Option<SharedString>,
     options: Vec<ForwardOption>,
-    local_count: usize,
+    searched_options: Vec<ForwardOption>,
     searched_channels: Vec<CtrlKChannel>,
     lost_channels: HashSet<ChannelId>,
     last_server_query: Option<String>,
     server_search_pending: bool,
-    filtered: Vec<usize>,
+    filtered: Vec<Hit>,
     scope: SearchScope,
     selected: HashSet<TargetKey>,
     search_input: Entity<InputState>,
@@ -675,7 +687,9 @@ impl ForwardMessageModal {
             );
             let image_cache = crate::image_cache::shared_avatar_cache(cx);
             let options = build_options(cx);
-            let filtered = (0..options.len().min(MAX_RESULTS)).collect();
+            let filtered = (0..options.len().min(MAX_RESULTS))
+                .map(Hit::Local)
+                .collect();
             let shared = build_shared_content(&sources, cx);
             let shared_summary = shared.summary(&locale_for_labels);
             Self {
@@ -685,8 +699,8 @@ impl ForwardMessageModal {
                 shared_summary,
                 locale,
                 sources,
-                local_count: options.len(),
                 options,
+                searched_options: Vec::new(),
                 searched_channels: Vec::new(),
                 lost_channels: HashSet::new(),
                 last_server_query: None,
@@ -775,27 +789,43 @@ impl ForwardMessageModal {
     }
 
     fn reload_options(&mut self, cx: &mut Context<Self>) {
-        self.rebuild_options(cx);
+        self.options = build_options(cx);
+        self.rebuild_searched_options(cx);
         self.prune_selection();
         self.recompute_filtered(cx);
         cx.notify();
     }
 
+    fn all_options(&self) -> impl Iterator<Item = &ForwardOption> {
+        self.options.iter().chain(&self.searched_options)
+    }
+
+    fn hit(&self, hit: Hit) -> Option<&ForwardOption> {
+        match hit {
+            Hit::Local(ix) => self.options.get(ix),
+            Hit::Searched(ix) => self.searched_options.get(ix),
+        }
+    }
+
     fn prune_selection(&mut self) {
-        self.selected
-            .retain(|key| self.options.iter().any(|o| o.key == *key));
+        self.selected.retain(|key| {
+            self.options
+                .iter()
+                .chain(&self.searched_options)
+                .any(|o| o.key == *key)
+        });
     }
 
     fn lists_a_removed_channel(&self, cx: &App) -> bool {
         let channels = ChannelList::global(cx);
         let channels = channels.read(cx);
-        self.options[self.local_count..]
+        self.searched_options
             .iter()
-            .any(|option| match option.key {
-                TargetKey::Channel(id) => {
-                    channels.is_locally_archived(id) || channels.is_locally_deleted(id)
+            .any(|option| match (option.key, &option.kind) {
+                (TargetKey::Channel(id), OptionKind::Channel { parent_id, .. }) => {
+                    is_removed(channels, id, *parent_id)
                 }
-                TargetKey::User(_) => false,
+                _ => false,
             })
     }
 
@@ -809,37 +839,28 @@ impl ForwardMessageModal {
         }
     }
 
-    fn rebuild_options(&mut self, cx: &App) {
-        self.options = build_options(cx);
-        self.local_count = self.options.len();
-        self.extend_searched_options(cx);
-    }
-
-    fn extend_searched_options(&mut self, cx: &App) {
-        self.options.truncate(self.local_count);
-        let local: HashSet<TargetKey> = self.options.iter().map(|option| option.key).collect();
+    fn rebuild_searched_options(&mut self, cx: &App) {
         let channels = ChannelList::global(cx);
         let channels = channels.read(cx);
         let clans = ClanList::global(cx);
         let clans = clans.read(cx);
-        self.options.extend(searched_options(
+        self.searched_options = searched_options(
             &self.searched_channels,
-            |channel_id| {
-                local.contains(&TargetKey::Channel(channel_id))
-                    || channels.is_locally_archived(channel_id)
-                    || channels.is_locally_deleted(channel_id)
+            |channel| {
+                channels.user_channel(channel.channel_id).is_some()
+                    || is_removed(channels, channel.channel_id, channel.parent_id)
             },
             |clan_id| clans.clan(clan_id).map(|clan| clan.name.as_str()),
-        ));
+        )
+        .collect();
     }
 
     fn schedule_server_search(&mut self, cx: &mut Context<Self>) {
         let query = server_channel_query(self.search_input.read(cx).value());
-        let key = query.as_deref().map(str::to_lowercase);
-        if key == self.last_server_query {
+        if query == self.last_server_query {
             return;
         }
-        self.last_server_query = key;
+        self.last_server_query = query.clone();
         let Some(query) = query else {
             self.server_search_pending = false;
             self._server_search_task = Task::ready(());
@@ -848,7 +869,7 @@ impl ForwardMessageModal {
         self.server_search_pending = true;
         self._server_search_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(SERVER_SEARCH_DEBOUNCE_MS))
+                .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
                 .await;
             let Ok(search) = this.update(cx, |this, cx| {
                 this.lost_channels.clear();
@@ -881,7 +902,7 @@ impl ForwardMessageModal {
         });
         let pruned = self.searched_channels.len() != kept;
         if upsert_searched(&mut self.searched_channels, channels) || pruned {
-            self.extend_searched_options(cx);
+            self.rebuild_searched_options(cx);
             self.prune_selection();
             self.recompute_filtered(cx);
         }
@@ -895,7 +916,7 @@ impl ForwardMessageModal {
     fn recompute_filtered(&mut self, cx: &App) {
         let (scope, needle) = self.current_query(cx);
         self.scope = scope;
-        self.filtered = search_hits(&self.options, self.local_count, scope, &needle);
+        self.filtered = search_hits(&self.options, &self.searched_options, scope, &needle);
     }
 
     fn toggle(&mut self, key: TargetKey) {
@@ -913,8 +934,7 @@ impl ForwardMessageModal {
             return;
         }
         let targets: Vec<ForwardTarget> = self
-            .options
-            .iter()
+            .all_options()
             .filter(|o| self.selected.contains(&o.key))
             .map(|o| o.target.clone())
             .collect();
@@ -1035,7 +1055,7 @@ impl Render for ForwardMessageModal {
             let this = list_entity.read(cx);
             range
                 .map(|ix| match this.filtered.get(ix) {
-                    Some(&option_ix) => match this.options.get(option_ix) {
+                    Some(&hit) => match this.hit(hit) {
                         Some(option) => {
                             let selected = this.selected.contains(&option.key);
                             render_option_row(
@@ -2213,13 +2233,22 @@ mod tests {
             searched(3, 30, 1),
             searched(2, 21, 10),
             searched(1, 11, 1),
+            CtrlKChannel {
+                parent_id: Some(ChannelId(10)),
+                ..searched(1, 12, 1)
+            },
         ];
         let listed_or_removed = HashSet::from([ChannelId(10)]);
         let known = |clan_id: ClanId| (clan_id != ClanId(3)).then_some("Komu");
 
         let shown: Vec<ChannelId> = searched_options(
             &rows,
-            |channel_id| listed_or_removed.contains(&channel_id),
+            |channel| {
+                listed_or_removed.contains(&channel.channel_id)
+                    || channel
+                        .parent_id
+                        .is_some_and(|parent_id| listed_or_removed.contains(&parent_id))
+            },
             known,
         )
         .filter_map(|option| match option.key {
@@ -2231,9 +2260,10 @@ mod tests {
         assert_eq!(
             shown,
             vec![ChannelId(20), ChannelId(11)],
-            "a channel the local list holds (or knows was archived or deleted) is not repeated; \
-             one missing locally still shows even in a loaded clan, whose listing is capped; a \
-             clan missing from the clan list stays hidden until it arrives; voice is no target"
+            "a channel the local list holds (or knows was archived or deleted) is not repeated, \
+             and neither is a thread under a removed parent; one missing locally still shows \
+             even in a loaded clan, whose listing is capped; a clan missing from the clan list \
+             stays hidden until it arrives; voice is no target"
         );
     }
 
@@ -2269,17 +2299,16 @@ mod tests {
 
     #[test]
     fn a_full_local_page_cannot_crowd_out_server_rows() {
-        let mut options: Vec<ForwardOption> = (0..20)
+        let local: Vec<ForwardOption> = (0..20)
             .map(|ix| channel_named(ix, "general", 100 + ix))
             .collect();
-        let local_count = options.len();
-        options.push(channel_named(99, "general", 0));
+        let searched = vec![channel_named(99, "general", 0)];
 
-        let hits = search_hits(&options, local_count, SearchScope::All, "general");
+        let hits = search_hits(&local, &searched, SearchScope::All, "general");
 
         assert_eq!(hits.len(), MAX_RESULTS + 1);
         assert!(
-            hits.contains(&local_count),
+            hits.contains(&Hit::Searched(0)),
             "a channel only the server found has no last-sent time, so a page of local matches \
              would always cut it"
         );
@@ -2287,24 +2316,23 @@ mod tests {
 
     #[test]
     fn server_rows_rank_with_local_rows_by_how_well_they_match() {
-        let mut options = vec![channel_named(1, "devoops", 100)];
-        let local_count = options.len();
-        options.push(channel_named(10, "bug desktop linux", 0));
-        options.push(channel_named(12, "opensource", 0));
+        let local = vec![channel_named(1, "devoops", 100)];
+        let searched = vec![
+            channel_named(10, "bug desktop linux", 0),
+            channel_named(12, "opensource", 0),
+        ];
 
-        let hits = search_hits(&options, local_count, SearchScope::All, "op");
-        let names: Vec<&str> = hits.iter().map(|ix| options[*ix].label.as_ref()).collect();
+        let hits = search_hits(&local, &searched, SearchScope::All, "op");
 
         assert_eq!(
-            names,
-            vec!["opensource", "devoops", "bug desktop linux"],
+            hits,
+            vec![Hit::Searched(1), Hit::Local(0), Hit::Searched(0)],
             "a name that starts with the query beats one that only contains it, wherever it was \
              found; among equal matches the recently used local row comes first"
         );
-        assert!(
-            search_hits(&options, local_count, SearchScope::All, "")
-                .iter()
-                .all(|ix| *ix < local_count),
+        assert_eq!(
+            search_hits(&local, &searched, SearchScope::All, ""),
+            vec![Hit::Local(0)],
             "with no query only local rows are listed"
         );
     }

@@ -884,11 +884,12 @@ impl ClanList {
     }
 
     pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let channel_list = ChannelList::global(cx).read(cx);
-        if !channel_list.is_clan_cache_loaded(clan_id) {
+        let Some(has_unread) = ChannelList::global(cx)
+            .read(cx)
+            .clan_has_any_unread(clan_id)
+        else {
             return;
-        }
-        let has_unread = channel_list.clan_has_any_unread(clan_id);
+        };
         self.set_has_unread(clan_id, has_unread, cx);
     }
 
