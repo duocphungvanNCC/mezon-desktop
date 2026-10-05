@@ -7,10 +7,11 @@ use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 
-use crate::audio::AudioFormat;
+use crate::audio::{AudioFormat, default_output_id, output_device_absent};
 
 const PREFERRED_OUTPUT_OPEN_ATTEMPTS: u32 = 3;
 const PREFERRED_OUTPUT_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+const RECOVERY_ATTEMPTS_BEFORE_FALLBACK: u32 = 3;
 
 struct MixerState {
     format: AudioFormat,
@@ -144,11 +145,62 @@ impl OutputHealth {
     }
 }
 
+struct DetachedStream(Option<cpal::Stream>);
+
+impl DetachedStream {
+    fn new(stream: cpal::Stream) -> Self {
+        Self(Some(stream))
+    }
+
+    fn play(&self) -> Result<()> {
+        if let Some(stream) = &self.0 {
+            stream.play()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DetachedStream {
+    fn drop(&mut self) {
+        if let Some(stream) = self.0.take() {
+            let _ = std::thread::Builder::new()
+                .name("mezon-stream-output-drop".into())
+                .spawn(move || drop(stream));
+        }
+    }
+}
+
 struct ActiveOutput {
     device_id: Option<String>,
     opened: Option<String>,
-    stream: cpal::Stream,
+    follows_default: bool,
+    _stream: DetachedStream,
     health: OutputHealth,
+}
+
+impl ActiveOutput {
+    fn new(
+        device_id: Option<String>,
+        device: &cpal::Device,
+        stream: DetachedStream,
+        health: OutputHealth,
+    ) -> Self {
+        let opened = device_key(device);
+        let follows_default = opened.is_some() && opened == default_output_key();
+        Self {
+            device_id,
+            opened,
+            follows_default,
+            _stream: stream,
+            health,
+        }
+    }
+
+    fn plays(&self, device_id: &Option<String>) -> bool {
+        !self.health.failed()
+            && self.device_id == *device_id
+            && (!self.follows_default || self.opened == default_output_key())
+    }
 }
 
 pub struct StreamAudioOutput {
@@ -172,39 +224,26 @@ impl StreamAudioOutput {
 
     pub fn set_output_device(&self, output_device_id: Option<String>) -> Result<()> {
         let mut active = self.active.lock();
-        if !active.health.failed()
-            && active.device_id == output_device_id
-            && (output_device_id.is_some() || active.opened == default_output_key())
-        {
+        if active.plays(&output_device_id) {
             return Ok(());
         }
         let (device, supported, format) = open_output(output_device_id.as_deref())?;
         let output = self.mixer.output().wrapping_add(1);
         let health = OutputHealth::new(self.failure_tx.clone());
-        let stream = build_output(
+        let stream = DetachedStream::new(build_output(
             &device,
             &supported,
             self.mixer.clone(),
             output,
             health.clone(),
-        )?;
+        )?);
         stream.play()?;
         self.mixer.activate(output, format);
-        let previous = std::mem::replace(
-            &mut *active,
-            ActiveOutput {
-                device_id: output_device_id,
-                opened: device_key(&device),
-                stream,
-                health,
-            },
-        );
-        drop(active);
-        drop_stream_detached(previous.stream);
+        *active = ActiveOutput::new(output_device_id, &device, stream, health);
         Ok(())
     }
 
-    pub fn recover(&self) -> Result<()> {
+    pub fn recover(&self, attempt: u32) -> Result<()> {
         let preferred = {
             let active = self.active.lock();
             if !active.health.failed() {
@@ -212,13 +251,26 @@ impl StreamAudioOutput {
             }
             active.device_id.clone()
         };
-        match self.set_output_device(preferred.clone()) {
-            Err(error) if preferred.is_some() => {
-                tracing::warn!(%error, "stream audio output device lost, using the system default");
-                self.set_output_device(None)
-            }
-            result => result,
+        let Some(device_id) = preferred else {
+            return self.set_output_device(None);
+        };
+        let absent = output_device_absent(&device_id);
+        if recovery_falls_back(absent, attempt) {
+            tracing::warn!(
+                attempt,
+                absent,
+                "stream audio output device lost, using the system default"
+            );
+            return self.set_output_device(None);
         }
+        if absent {
+            return Err(anyhow!("audio output device {device_id} is not available"));
+        }
+        self.set_output_device(Some(device_id))
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.active.lock().health.failed()
     }
 
     pub fn failures(&self) -> flume::Receiver<()> {
@@ -254,21 +306,31 @@ impl StreamAudioOutput {
     }
 }
 
+fn recovery_falls_back(absent: bool, attempt: u32) -> bool {
+    if absent {
+        attempt >= 1
+    } else {
+        attempt + 1 >= RECOVERY_ATTEMPTS_BEFORE_FALLBACK
+    }
+}
+
 fn open_preferred(
     output_device_id: Option<String>,
     volume: f32,
     muted: bool,
     failure_tx: &flume::Sender<()>,
 ) -> Result<(Arc<StreamPlaybackMixer>, ActiveOutput)> {
-    if output_device_id.is_some() {
+    if let Some(device_id) = output_device_id.as_deref() {
         for attempt in 1..=PREFERRED_OUTPUT_OPEN_ATTEMPTS {
             match open_first_output(output_device_id.clone(), volume, muted, failure_tx) {
                 Ok(opened) => return Ok(opened),
                 Err(error) => {
                     tracing::warn!(attempt, %error, "stream audio output device unavailable");
-                    if attempt < PREFERRED_OUTPUT_OPEN_ATTEMPTS {
-                        std::thread::sleep(PREFERRED_OUTPUT_RETRY_INTERVAL);
+                    if attempt == PREFERRED_OUTPUT_OPEN_ATTEMPTS || output_device_absent(device_id)
+                    {
+                        break;
                     }
+                    std::thread::sleep(PREFERRED_OUTPUT_RETRY_INTERVAL);
                 }
             }
         }
@@ -286,14 +348,15 @@ fn open_first_output(
     let (device, supported, format) = open_output(output_device_id.as_deref())?;
     let mixer = Arc::new(StreamPlaybackMixer::new(format, volume, muted));
     let health = OutputHealth::new(failure_tx.clone());
-    let stream = build_output(&device, &supported, mixer.clone(), 0, health.clone())?;
+    let stream = DetachedStream::new(build_output(
+        &device,
+        &supported,
+        mixer.clone(),
+        0,
+        health.clone(),
+    )?);
     stream.play()?;
-    let active = ActiveOutput {
-        device_id: output_device_id,
-        opened: device_key(&device),
-        stream,
-        health,
-    };
+    let active = ActiveOutput::new(output_device_id, &device, stream, health);
     Ok((mixer, active))
 }
 
@@ -302,15 +365,7 @@ fn device_key(device: &cpal::Device) -> Option<String> {
 }
 
 fn default_output_key() -> Option<String> {
-    cpal::default_host()
-        .default_output_device()
-        .and_then(|device| device_key(&device))
-}
-
-fn drop_stream_detached(stream: cpal::Stream) {
-    let _ = std::thread::Builder::new()
-        .name("mezon-stream-output-drop".into())
-        .spawn(move || drop(stream));
+    default_output_id(&cpal::default_host())
 }
 
 fn open_output(
@@ -365,6 +420,9 @@ fn build_output(
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = low_latency_buffer(supported);
     let on_error = move |err: cpal::StreamError| {
+        if matches!(err, cpal::StreamError::BufferUnderrun) {
+            return;
+        }
         tracing::warn!("stream audio output error: {err}");
         health.report_failure();
     };
@@ -492,6 +550,19 @@ mod tests {
         let mut active = [0; 2];
         mixer.mix_into(1, &mut active);
         assert_eq!(active, [2_000, 2_000]);
+    }
+
+    #[test]
+    fn recovery_waits_for_a_second_absence_check_before_falling_back() {
+        assert!(!recovery_falls_back(true, 0));
+        assert!(recovery_falls_back(true, 1));
+    }
+
+    #[test]
+    fn recovery_retries_a_present_device_before_falling_back() {
+        assert!(!recovery_falls_back(false, 0));
+        assert!(!recovery_falls_back(false, 1));
+        assert!(recovery_falls_back(false, 2));
     }
 
     #[test]

@@ -29,6 +29,7 @@ const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
 const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_TOKEN_REFRESH_ATTEMPTS: u32 = 3;
 const OUTPUT_RECOVERY_DELAY: Duration = Duration::from_millis(500);
+const MAX_OUTPUT_RECOVERY_DELAY: Duration = Duration::from_secs(5);
 
 pub type StreamTokenProvider =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String>> + Send + Sync + 'static>;
@@ -132,7 +133,7 @@ impl Drop for StreamSession {
 
 enum OutputTask {
     Switch(Option<String>),
-    Recover,
+    Recover(u32),
 }
 
 async fn follow_output_device(
@@ -141,6 +142,7 @@ async fn follow_output_device(
     event_tx: Sender<StreamEvent>,
 ) {
     let failures = audio.failures();
+    let mut recovery: Option<u32> = None;
     loop {
         let task = tokio::select! {
             request = requests.recv_async() => {
@@ -152,16 +154,22 @@ async fn follow_output_device(
                 }
                 OutputTask::Switch(output_device_id)
             }
-            Ok(()) = failures.recv_async() => {
-                tokio::time::sleep(OUTPUT_RECOVERY_DELAY).await;
-                while failures.try_recv().is_ok() {}
-                OutputTask::Recover
+            Ok(()) = failures.recv_async(), if recovery.is_none() => {
+                recovery = Some(0);
+                continue;
             }
+            _ = tokio::time::sleep(output_recovery_delay(recovery.unwrap_or(0))), if recovery.is_some() => {
+                OutputTask::Recover(recovery.unwrap_or(0))
+            }
+        };
+        let recovering = match task {
+            OutputTask::Recover(attempt) => Some(attempt),
+            OutputTask::Switch(_) => None,
         };
         let worker = audio.clone();
         let outcome = tokio::task::spawn_blocking(move || match task {
             OutputTask::Switch(output_device_id) => worker.set_output_device(output_device_id),
-            OutputTask::Recover => worker.recover(),
+            OutputTask::Recover(attempt) => worker.recover(attempt),
         })
         .await;
         match outcome {
@@ -169,8 +177,17 @@ async fn follow_output_device(
             Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
             Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
         }
+        recovery = audio
+            .is_failed()
+            .then(|| recovering.map_or(0, |attempt| attempt.saturating_add(1)));
         let _ = event_tx.send(StreamEvent::OutputDevice(audio.device_id()));
     }
+}
+
+fn output_recovery_delay(attempt: u32) -> Duration {
+    OUTPUT_RECOVERY_DELAY
+        .saturating_mul(2u32.saturating_pow(attempt))
+        .min(MAX_OUTPUT_RECOVERY_DELAY)
 }
 
 async fn run_session(
@@ -829,6 +846,15 @@ fn build_ws_url(base: &str, token: &str) -> Result<url::Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_recovery_backs_off_up_to_a_cap() {
+        assert_eq!(output_recovery_delay(0), Duration::from_millis(500));
+        assert_eq!(output_recovery_delay(1), Duration::from_secs(1));
+        assert_eq!(output_recovery_delay(2), Duration::from_secs(2));
+        assert_eq!(output_recovery_delay(4), Duration::from_secs(5));
+        assert_eq!(output_recovery_delay(40), Duration::from_secs(5));
+    }
 
     const OFFER: &str = concat!(
         "v=0\r\n",

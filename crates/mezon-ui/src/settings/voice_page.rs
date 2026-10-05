@@ -14,7 +14,6 @@ pub struct VoicePage {
     input_devices: Vec<AudioDeviceInfo>,
     output_devices: Vec<AudioDeviceInfo>,
     selected_input_id: Option<String>,
-    selected_output_id: Option<String>,
     input_dropdown_open: bool,
     output_dropdown_open: bool,
     is_testing: bool,
@@ -73,13 +72,11 @@ impl VoicePage {
         ));
 
         let saved_input = settings.read(cx).input_device_id.clone();
-        let saved_output = settings.read(cx).output_device_id.clone();
 
-        let (input_devices, output_devices, selected_input_id, selected_output_id) =
+        let (input_devices, output_devices, selected_input_id) =
             if let Some(audio_store) = AudioStore::try_global(cx) {
                 subs.push(cx.observe(&audio_store, |this, store, cx| {
                     let saved_in = this.settings.read(cx).input_device_id.clone();
-                    let saved_out = this.settings.read(cx).output_device_id.clone();
                     let inputs = store.read(cx).input_devices.clone();
                     let outputs = store.read(cx).output_devices.clone();
                     this.selected_input_id = if inputs
@@ -87,14 +84,6 @@ impl VoicePage {
                         .any(|d| Some(d.id.as_str()) == saved_in.as_deref())
                     {
                         saved_in
-                    } else {
-                        None
-                    };
-                    this.selected_output_id = if outputs
-                        .iter()
-                        .any(|d| Some(d.id.as_str()) == saved_out.as_deref())
-                    {
-                        saved_out
                     } else {
                         None
                     };
@@ -113,17 +102,9 @@ impl VoicePage {
                 } else {
                     None
                 };
-                let sel_out = if outputs
-                    .iter()
-                    .any(|d| Some(d.id.as_str()) == saved_output.as_deref())
-                {
-                    saved_output
-                } else {
-                    None
-                };
-                (inputs, outputs, sel_in, sel_out)
+                (inputs, outputs, sel_in)
             } else {
-                (Vec::new(), Vec::new(), None, None)
+                (Vec::new(), Vec::new(), None)
             };
 
         let router = crate::router::Router::global(cx);
@@ -141,7 +122,6 @@ impl VoicePage {
             input_devices,
             output_devices,
             selected_input_id,
-            selected_output_id,
             input_dropdown_open: false,
             output_dropdown_open: false,
             is_testing: false,
@@ -169,7 +149,12 @@ impl Render for VoicePage {
         let input_devices = self.input_devices.clone();
         let output_devices = self.output_devices.clone();
         let selected_input_id = self.selected_input_id.clone();
-        let selected_output_id = self.selected_output_id.clone();
+        let selected_output_id = self
+            .settings
+            .read(cx)
+            .output_device_id
+            .clone()
+            .filter(|id| output_devices.iter().any(|device| &device.id == id));
 
         let is_testing = self.is_testing;
         let mic_level = self.mic_level;
@@ -543,7 +528,6 @@ impl VoicePage {
     }
 
     fn select_output_device(&mut self, id: String, cx: &mut Context<Self>) {
-        self.selected_output_id = Some(id.clone());
         self.output_dropdown_open = false;
         mezon_store::set_output_device(Some(id), cx);
     }
