@@ -72,7 +72,7 @@ mod linux {
     }
 
     struct Graph {
-        x11_audio_fixes: bool,
+        process_identity_fix: bool,
         own_pid: String,
         own_binary: Option<String>,
         core: pw::core::Core,
@@ -88,9 +88,12 @@ mod linux {
     impl Graph {
         fn new(core: pw::core::Core) -> Self {
             Self {
-                // Keep the existing Wayland path during the X11 rollout.
-                x11_audio_fixes: !crate::linux_session::is_wayland_session()
-                    && std::env::var("MEZON_X11_SCREEN_AUDIO_FIX").as_deref() != Ok("0"),
+                // Resolve full process identity on both X11 and Wayland.
+                // Retain the original X11 flag as a rollback alias.
+                process_identity_fix: std::env::var("MEZON_PIPEWIRE_SCREEN_AUDIO_FIX")
+                    .or_else(|_| std::env::var("MEZON_X11_SCREEN_AUDIO_FIX"))
+                    .as_deref()
+                    != Ok("0"),
                 own_pid: std::process::id().to_string(),
                 own_binary: std::env::current_exe().ok().and_then(|path| {
                     path.file_name()
@@ -133,7 +136,7 @@ mod linux {
                     if props.get(*pw::keys::MEDIA_CLASS) != Some(OUTPUT_STREAM_CLASS) {
                         return;
                     }
-                    if !self.x11_audio_fixes {
+                    if !self.process_identity_fix {
                         self.node_added(global.id, props);
                         return;
                     }
@@ -169,7 +172,7 @@ mod linux {
                     );
                 }
                 ObjectType::Client => {
-                    if !self.x11_audio_fixes {
+                    if !self.process_identity_fix {
                         return;
                     }
                     let client: pw::client::Client = match registry.bind(global) {
@@ -244,7 +247,7 @@ mod linux {
                 ?own,
                 "screen audio output stream seen"
             );
-            if !self.x11_audio_fixes {
+            if !self.process_identity_fix {
                 if own != Some(true) {
                     self.app_nodes.insert(id);
                     self.link_pending();
