@@ -1183,6 +1183,7 @@
   "channelVoice.videoConnected": "Đã kết nối Video",
   "channelVoice.voiceConnected": "Đã kết nối Thoại",
   "channelVoice.weakNetwork": "Mạng yếu",
+  "channelVoice.networkWarning": "Kết nối mạng của bạn không ổn định.",
   "chat.clickToSeeAttachment": "Nhấn để xem tệp đính kèm",
   "chat.forwarded": "Đã chuyển tiếp",
   "chat.gifPicker.categories": "Danh mục",

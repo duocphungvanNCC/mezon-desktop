@@ -1739,12 +1739,7 @@ fn render_in_call(
                 theme.status_idle.into(),
                 true,
             )),
-            VoiceCallStatus::WeakNetwork => Some((
-                SharedString::from(mezon_i18n::t(locale, "channelVoice.weakNetwork").to_string()),
-                theme.status_idle.into(),
-                false,
-            )),
-            VoiceCallStatus::Stable => None,
+            VoiceCallStatus::WeakNetwork | VoiceCallStatus::Stable => None,
         }
     };
 
@@ -3074,6 +3069,8 @@ fn control_bar(
     let can_record = store.can_record();
     let is_audience = store.is_audience();
     let ptt_active = store.push_to_talk_active();
+    let network_weak = matches!(store.call_status(), VoiceCallStatus::WeakNetwork);
+    let show_network_warning = network_weak && !store.network_warning_dismissed();
     let has_active_interactive_apps =
         store.has_active_interactive_apps() || store.has_opened_interactive_apps();
 
@@ -3154,6 +3151,12 @@ fn control_bar(
         DeviceMenuKind::Microphone,
         cx,
     );
+    let mic_button = div()
+        .relative()
+        .child(mic_button)
+        .children(network_weak_dot(theme, network_weak, cx))
+        .children(show_network_warning.then(|| render_network_warning_callout(locale, voice)))
+        .into_any_element();
     let camera_button = device_control(
         camera_button.into_any_element(),
         theme,
@@ -3230,8 +3233,12 @@ fn control_bar(
             ),
             voice,
         );
-        let callout = (!store.ptt_hint_dismissed())
-            .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice));
+        let callout = if show_network_warning {
+            Some(render_network_warning_callout(locale, voice))
+        } else {
+            (!store.ptt_hint_dismissed())
+                .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice))
+        };
         div()
             .relative()
             .child(button)
@@ -3240,6 +3247,7 @@ fn control_bar(
                 Some(MediaDevice::Microphone),
                 cx,
             ))
+            .children(network_weak_dot(theme, network_weak, cx))
             .children(callout)
     });
 
@@ -3591,6 +3599,88 @@ fn control_bar(
 
 const PTT_HINT_WIDTH_PX: f32 = 320.;
 const PTT_HINT_CARET_PX: f32 = 12.;
+const NETWORK_WARNING_BG: u32 = 0xfde8d7;
+const NETWORK_WARNING_TEXT: u32 = 0x202124;
+
+fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
+    let card_bg: Hsla = gpui::rgb(NETWORK_WARNING_BG).into();
+    let text_color: Hsla = gpui::rgb(NETWORK_WARNING_TEXT).into();
+    let message = mezon_i18n::t(locale, "channelVoice.networkWarning");
+    let dismiss = voice.clone();
+    div()
+        .id("voice-network-warning")
+        .occlude()
+        .absolute()
+        .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
+        .left(px(-16.))
+        .w(px(PTT_HINT_WIDTH_PX))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .w_full()
+                .rounded(px(16.))
+                .bg(card_bg)
+                .shadow_lg()
+                .p_4()
+                .pl_2()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_left()
+                        .text_color(text_color)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .id("voice-network-warning-close")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgba(0x0000000d)))
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(px(16.))
+                                .text_color(with_alpha(text_color, 0.7)),
+                        )
+                        .on_click(move |_, _, cx| {
+                            dismiss.update(cx, |store, cx| store.dismiss_network_warning(cx));
+                        }),
+                ),
+        )
+        .child(
+            svg()
+                .ml(px(16. + 22. - PTT_HINT_CARET_PX / 2.))
+                .w(px(PTT_HINT_CARET_PX))
+                .h(px(PTT_HINT_CARET_PX / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(card_bg),
+        )
+        .into_any_element()
+}
+
+fn network_weak_dot(theme: &Theme, network_weak: bool, cx: &App) -> Option<gpui::Div> {
+    (network_weak && !media_access_missing(MediaDevice::Microphone, cx)).then(|| {
+        div()
+            .absolute()
+            .top(px(-2.))
+            .right(px(-2.))
+            .size(px(14.))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.bg_tertiary)
+            .bg(theme.status_idle)
+    })
+}
 
 fn render_ptt_hint_callout(
     theme: &Theme,
