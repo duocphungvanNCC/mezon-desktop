@@ -103,8 +103,10 @@ impl CtrlKSearchStore {
         &self.state
     }
 
-    pub fn has_settled_response(&self) -> bool {
-        self.last_response_query.is_some()
+    pub fn matches_settled_query(&self, query: &str) -> bool {
+        self.last_response_query
+            .as_deref()
+            .is_some_and(|settled| settled == query.trim())
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {

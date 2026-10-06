@@ -3419,7 +3419,7 @@ impl VoiceStore {
         };
         let snapshot = current;
         let mic_enabled = snapshot.mic_enabled
-            && !MediaPermissionStore::blocked_global(MediaDevice::Microphone, cx);
+            && !MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);

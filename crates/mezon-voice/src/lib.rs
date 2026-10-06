@@ -54,8 +54,8 @@ pub use camera::{
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
-    MEDIA_DENIAL_IS_AUTHORITATIVE, MediaDevice, MediaPermission, media_permission,
-    media_permission_changes, media_privacy_settings_url, request_media_permission,
+    MediaDevice, MediaPermission, media_permission, media_permission_changes,
+    media_privacy_settings_url, request_media_permission, running_packaged,
 };
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,

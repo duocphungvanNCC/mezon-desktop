@@ -205,7 +205,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
-pub use mezon_voice::{MediaDevice, MediaPermission};
+pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
 pub use mmn_client::{
     DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
     MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
@@ -345,6 +345,29 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     });
     if changed {
         schedule_settings_save(&settings, cx);
+    }
+}
+
+pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_output_device(output_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.output_device_id = output_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_output_device(output_device_id.clone(), cx)
+        });
+    }
+    if let Some(stream) = StreamStore::try_global(cx) {
+        stream.update(cx, |stream, cx| {
+            stream.set_output_device(output_device_id, cx)
+        });
     }
 }
 
