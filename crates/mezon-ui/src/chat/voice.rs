@@ -3623,6 +3623,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .bg(card_bg)
                 .shadow_lg()
                 .p_4()
+                .pl_2()
                 .flex()
                 .flex_row()
                 .items_start()
@@ -3632,6 +3633,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .flex_1()
                         .min_w_0()
                         .text_sm()
+                        .text_left()
                         .text_color(text_color)
                         .child(message),
                 )
