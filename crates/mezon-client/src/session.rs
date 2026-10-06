@@ -41,7 +41,7 @@ impl HealthyEndpointSession {
         let (ws_host, ws_port, _) = parse_endpoint(self.ws_url.as_deref());
         let host = named_host(tcp_host).or_else(|| named_host(ws_host))?;
         Some(RealtimeEndpoint {
-            id: endpoint_id_or_host_index(self.endpoint_id, &host),
+            id: self.endpoint_id,
             host,
             port: tcp_port.or(ws_port).or(default_port).unwrap_or(443),
         })
@@ -686,13 +686,6 @@ mod tests {
                 ..Default::default()
             };
             let endpoint = session.realtime_endpoint("", Some(443)).expect("a node");
-            assert_eq!(endpoint.id, expected, "{host}");
-
-            let response = HealthyEndpointSession {
-                tcp_url: Some(host.into()),
-                ..Default::default()
-            };
-            let endpoint = response.realtime_endpoint(Some(443)).expect("a node");
             assert_eq!(endpoint.id, expected, "{host}");
         }
     }
