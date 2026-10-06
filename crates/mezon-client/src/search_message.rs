@@ -263,6 +263,9 @@ pub fn insert_filter_markup(current: &str, trigger: char, display: &str, id: &st
     if let Some(next) = replace_incomplete_filter_token(current, trigger, &token) {
         return next;
     }
+    if let Some(next) = replace_plain_autocomplete_needle(current, &token) {
+        return next;
+    }
     if current.is_empty() {
         token
     } else if current.ends_with(' ') {
@@ -324,6 +327,31 @@ pub fn search_filter_chip_ranges(query: &str) -> Vec<std::ops::Range<usize>> {
 
 fn is_chip_filter_token(token: &str) -> bool {
     is_complete_markup_token(token) || is_complete_colon_filter(token)
+}
+
+fn replace_plain_autocomplete_needle(current: &str, token: &str) -> Option<String> {
+    if active_search_trigger(current).is_some() {
+        return None;
+    }
+    let trimmed_end = current.trim_end();
+    if trimmed_end.is_empty() {
+        return None;
+    }
+    let needle = autocomplete_needle(current);
+    if needle.is_empty() {
+        return None;
+    }
+    let word_start = trimmed_end.rfind(' ').map(|index| index + 1).unwrap_or(0);
+    let last_word = &trimmed_end[word_start..];
+    let prefix = &trimmed_end[..word_start];
+    if last_word != needle {
+        return None;
+    }
+    if prefix.is_empty() {
+        Some(token.to_string())
+    } else {
+        Some(format!("{prefix}{token}"))
+    }
 }
 
 fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) -> Option<String> {
@@ -721,6 +749,24 @@ mod tests {
     fn insert_filter_markup_replaces_incomplete_from_colon() {
         let next = insert_filter_markup("notes from:ali", '>', "alice", "42");
         assert_eq!(next, "notes from:alice ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_plain_text_needle() {
+        let next = insert_filter_markup("vangiachu", '>', "vangiachu", "42");
+        assert_eq!(next, "from:vangiachu ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_partial_plain_text_needle() {
+        let next = insert_filter_markup("vang", '>', "vangiachu", "42");
+        assert_eq!(next, "from:vangiachu ");
+    }
+
+    #[test]
+    fn insert_filter_markup_does_not_replace_multi_word_plain_query() {
+        let next = insert_filter_markup("notes vangiachu", '>', "vangiachu", "42");
+        assert_eq!(next, "notes vangiachu from:vangiachu ");
     }
 
     #[test]
