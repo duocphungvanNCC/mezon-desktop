@@ -293,9 +293,9 @@ fn run_apm(
         Stop,
     }
     let mut apm = AudioProcessingModule::new(true, true, true, true);
-    // Keep PCM gain stable for Mezon-NS. Its model input normalization does not
-    // amplify the transmitted signal; adaptive gain here would change that level.
-    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, false, true, false);
+    // Retain microphone gain before denoising, so enabling NS does not remove
+    // the level boost used by normal audio. Post-filter gain remains fixed.
+    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, true, true, false);
     loop {
         match capture_rx.try_recv() {
             Ok(chunk) => {
