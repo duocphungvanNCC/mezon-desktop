@@ -2151,6 +2151,7 @@ fn render_emoji_span(
 fn emoji_box(size: Pixels, width: Pixels) -> gpui::Div {
     div()
         .flex_none()
+        .self_center()
         .w(width)
         .when(size >= px(EMOJI_JUMBO_SIZE), |emoji| {
             emoji.pt(px(EMOJI_JUMBO_TOP_PADDING))

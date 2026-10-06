@@ -33,6 +33,13 @@ fn message_pad_top(combined: bool, has_reply: bool, code: MessageCode) -> bool {
     !combined || (has_reply && !matches!(code, MessageCode::CreatePin))
 }
 
+fn message_content_slot(content: AnyElement) -> gpui::Div {
+    div()
+        .w_full()
+        .min_h(px(MESSAGE_ROW_MIN_HEIGHT))
+        .child(content)
+}
+
 pub fn render_user_message(
     msg: &Message,
     combined: bool,
@@ -138,7 +145,7 @@ pub fn render_user_message(
     } else {
         render_message_content(msg, ctx, invite_base, selection_context.as_ref())
     };
-    body_column = body_column.child(content_element);
+    body_column = body_column.child(message_content_slot(content_element));
 
     let shows_text_content =
         !editing && msg.call_log.is_none() && msg.code != MessageCode::SendToken;
