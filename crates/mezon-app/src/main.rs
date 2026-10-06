@@ -660,6 +660,16 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Err(e) = cx
+            .text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+            ))])
+        {
+            tracing::error!("Failed to register IBM Plex Sans: {e}");
+        }
+
         init_ui(cx);
         mezon_ui::clipboard::enable_off_main_thread_reads();
 
