@@ -270,13 +270,12 @@ fn process_capture_dual(
     let mut mezon_input = chunk.data.clone();
     let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
     let _ = apm_for_mezon_ns.process_stream(&mut mezon_input, chunk.rate, chunk.channels);
-    let chosen = if mezon_ns_requested.load(Ordering::Acquire)
-        && mezon_ns_ready.load(Ordering::Acquire)
-    {
-        mezon_input
-    } else {
-        chunk.data
-    };
+    let chosen =
+        if mezon_ns_requested.load(Ordering::Acquire) && mezon_ns_ready.load(Ordering::Acquire) {
+            mezon_input
+        } else {
+            chunk.data
+        };
     let _ = mic_tx.try_send(chosen);
 }
 
@@ -499,7 +498,13 @@ impl AudioIo {
             .name("mezon-voice-apm".into())
             .spawn(move || {
                 let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx, mezon_ns_requested, mezon_ns_ready);
+                run_apm(
+                    capture_rx,
+                    reverse_rx,
+                    mic_tx,
+                    mezon_ns_requested,
+                    mezon_ns_ready,
+                );
             })?;
 
         let mixer_for_thread = mixer.clone();

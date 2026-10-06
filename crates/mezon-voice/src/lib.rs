@@ -1081,8 +1081,7 @@ async fn uplink_pump(
                 && (!sender_mic_enabled.load(Ordering::Relaxed)
                     || match frame.filtered_generation {
                         Some(filtered_generation) => {
-                            !filtering
-                                || filtered_generation != generation
+                            !filtering || filtered_generation != generation
                         }
                         None => filtering,
                     })
