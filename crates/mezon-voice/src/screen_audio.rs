@@ -241,12 +241,6 @@ mod linux {
 
         fn node_added(&mut self, id: u32, props: &DictRef) {
             let own = self.owner(props);
-            tracing::debug!(
-                id,
-                app = props.get(*pw::keys::APP_NAME).unwrap_or("?"),
-                ?own,
-                "screen audio output stream seen"
-            );
             if !self.process_identity_fix {
                 if own != Some(true) {
                     self.app_nodes.insert(id);
@@ -289,7 +283,6 @@ mod linux {
                         self.links.remove(&port);
                     }
                 }
-                tracing::debug!(id, own = ?node.own, ?client_own, "screen audio output excluded or awaiting identity");
             }
             self.link_pending();
         }
@@ -391,7 +384,6 @@ mod linux {
                         },
                     ) {
                         Ok(link) => {
-                            tracing::debug!(port, target, "screen audio app port linked");
                             created.push(link);
                         }
                         Err(e) => tracing::warn!("screen audio link {port}->{target} failed: {e}"),

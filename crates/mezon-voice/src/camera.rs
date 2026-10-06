@@ -552,12 +552,6 @@ fn open_camera(device_id: Option<&str>) -> Result<Camera, String> {
                     if using_cache && let Ok(mut cache) = camera_format_cache().lock() {
                         cache.remove(&cache_key);
                     }
-                    tracing::debug!(
-                        camera = %index.as_string(),
-                        format = ?requested,
-                        error = %e,
-                        "camera open attempt failed"
-                    );
                     last_err = e;
                 }
             }

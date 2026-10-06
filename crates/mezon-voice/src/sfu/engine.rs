@@ -1227,7 +1227,6 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::Offer { offer_generation, sdp } => {
-                        tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         pending_offer = Some((offer_generation, sdp));
                         offer_reissue_deadline = None;
                     }
@@ -1749,7 +1748,6 @@ async fn session_loop(
                 .and_then(|result| result)
                 {
                     Ok(()) => {
-                        tracing::debug!(generation, "sfu answer sent");
                         sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                         if !membership.live_tracks.is_empty()
                             && let Some(previous) = retiring.take()
@@ -2190,21 +2188,6 @@ fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateSt
     format!("{kind}/{} {address}", candidate.protocol)
 }
 
-fn transceiver_summary(pc: &PeerConnection) -> String {
-    pc.transceivers()
-        .iter()
-        .enumerate()
-        .map(|(index, transceiver)| {
-            format!(
-                "#{index}:{}={:?}",
-                transceiver.mid().unwrap_or_else(|| "-".to_owned()),
-                transceiver.direction(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
@@ -2221,26 +2204,11 @@ async fn negotiate(
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
     let hinted = sdp::munge_uplink_start_bitrate(&stabilized, UPLINK_START_KBPS);
 
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&stabilized),
-        codecs = %sdp::codec_summary(&stabilized),
-        ufrag = %sdp::ice_ufrags(&stabilized),
-        setup = %sdp::setup_roles(&stabilized),
-        "offer m-lines"
-    );
-
     let offer = SessionDescription::parse(&hinted, SdpType::Offer)
         .map_err(|e| anyhow::anyhow!("parse offer: {e}"))?;
     pc.set_remote_description(offer)
         .await
         .context("set remote description")?;
-
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after remote offer"
-    );
 
     attach_local_tracks(Some(pc), local, role);
     open_uplink_directions(pc, &stabilized);
@@ -2252,12 +2220,6 @@ async fn negotiate(
 
     let derived = answer.to_string();
     let opened = sdp::force_uplink_sendonly(&derived, &stabilized);
-    tracing::debug!(
-        generation,
-        derived = %sdp::direction_summary(&derived),
-        opened = %sdp::direction_summary(&opened),
-        "answer uplinks reopened"
-    );
     let answer = SessionDescription::parse(&opened, SdpType::Answer)
         .map_err(|e| anyhow::anyhow!("parse patched answer: {e}"))?;
 
@@ -2268,25 +2230,10 @@ async fn negotiate(
     tune_uplinks(pc, local, tiers);
     local.apply_audio_gate(Some(pc), role);
 
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after local answer"
-    );
-
     let local_sdp = pc
         .current_local_description()
         .map(|d| d.to_string())
         .context("local description missing after set_local_description")?;
-
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&local_sdp),
-        codecs = %sdp::codec_summary(&local_sdp),
-        ufrag = %sdp::ice_ufrags(&local_sdp),
-        setup = %sdp::setup_roles(&local_sdp),
-        "answer m-lines"
-    );
 
     membership.absorb_msids(offer_sdp);
     tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
@@ -2420,23 +2367,14 @@ fn open_uplink_directions(pc: &PeerConnection, offer_sdp: &str) {
         if !invited || transceiver.direction() == RtpTransceiverDirection::SendOnly {
             continue;
         }
-        match transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
-            Ok(()) => tracing::debug!(mid = %mid, "uplink opened for sending"),
-            Err(e) => tracing::warn!("uplink mid {mid} could not be opened for sending: {e}"),
+        if let Err(e) = transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
+            tracing::warn!("uplink mid {mid} could not be opened for sending: {e}");
         }
     }
 }
 
 fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: SfuRole) {
     let Some(pc) = pc else { return };
-
-    tracing::debug!(
-        role = role.wire(),
-        audio = local.audio.is_some(),
-        camera = local.camera.is_some(),
-        screen = local.screen.is_some(),
-        "attaching local tracks to the sfu uplinks"
-    );
 
     let publishes_video = role == SfuRole::Speaker;
 
@@ -2460,13 +2398,8 @@ fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: S
         };
 
         let Some(track) = wanted else { continue };
-        match transceiver.sender().set_track(Some(track)) {
-            Ok(()) => tracing::debug!(
-                mid = %mid,
-                direction = ?transceiver.direction(),
-                "local track attached"
-            ),
-            Err(e) => tracing::warn!("failed to attach local track on mid {mid}: {e}"),
+        if let Err(e) = transceiver.sender().set_track(Some(track)) {
+            tracing::warn!("failed to attach local track on mid {mid}: {e}");
         }
     }
 

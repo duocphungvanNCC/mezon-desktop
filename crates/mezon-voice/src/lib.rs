@@ -487,6 +487,7 @@ async fn session_main(
     let (audio_ready_tx, audio_ready_rx) = flume::bounded::<Result<audio::AudioIo>>(1);
     let mut audio_ready_rx = Some(audio_ready_rx);
     let noise_requested = noise.requested();
+    let noise_ready = noise.ready();
     runtime::runtime().spawn(async move {
         let started = tokio::task::spawn_blocking(move || {
             audio::AudioIo::start_with_noise(
@@ -494,6 +495,7 @@ async fn session_main(
                 output_device_id,
                 session_record_taps,
                 noise_requested,
+                noise_ready,
             )
         })
         .await
@@ -1062,12 +1064,15 @@ async fn uplink_pump(
     // that wait off the microphone/Mezon-NS pump so it can service both queues.
     let (uplink_tx, uplink_rx) = flume::bounded::<UplinkFrame>(10);
     let sender_noise_requested = noise_requested.clone();
+    let sender_noise_ready = noise_ready.clone();
     let sender_noise_generation = noise_generation.clone();
     let sender_mic_enabled = mic_enabled.clone();
     let _sender_task = AbortOnDrop(runtime::runtime().spawn(async move {
         let mut seen_noise_generation = sender_noise_generation.load(Ordering::Acquire);
         while let Ok(frame) = uplink_rx.recv_async().await {
             let generation = sender_noise_generation.load(Ordering::Acquire);
+            let filtering = sender_noise_requested.load(Ordering::Acquire)
+                && sender_noise_ready.load(Ordering::Acquire);
             if generation != seen_noise_generation {
                 source.clear_buffer();
                 seen_noise_generation = generation;
@@ -1076,10 +1081,10 @@ async fn uplink_pump(
                 && (!sender_mic_enabled.load(Ordering::Relaxed)
                     || match frame.filtered_generation {
                         Some(filtered_generation) => {
-                            !sender_noise_requested.load(Ordering::Acquire)
+                            !filtering
                                 || filtered_generation != generation
                         }
-                        None => sender_noise_requested.load(Ordering::Acquire),
+                        None => filtering,
                     })
             {
                 continue;
@@ -1103,6 +1108,7 @@ async fn uplink_pump(
             filtered = noise_output.recv_async() => {
                 let Ok(mut frame) = filtered else { break };
                 if !noise_requested.load(Ordering::Acquire)
+                    || !noise_ready.load(Ordering::Acquire)
                     || frame.generation != noise_generation.load(Ordering::Acquire) {
                     continue;
                 }
@@ -1143,7 +1149,9 @@ async fn uplink_pump(
                 let Some(in_fmt) = current_in_fmt else { continue };
 
                 let live = mic_enabled.load(Ordering::Relaxed);
-                let filtering = noise_requested.load(Ordering::Acquire);
+                // Keep sending normal microphone audio while the model loads or fails.
+                let filtering = noise_requested.load(Ordering::Acquire)
+                    && noise_ready.load(Ordering::Acquire);
                 if live && !filtering {
                     record_taps.push(
                         mezon_record::AudioSource::Mic,

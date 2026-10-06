@@ -75,6 +75,7 @@ pub enum NoiseSuppressionStatus {
 }
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+const NOISE_SUPPRESSION_DEFAULT_ENABLED: bool = cfg!(target_os = "linux");
 // The web voice thunk normalizes an empty roomName to "0" before requesting the SFU token.
 const SFU_TOKEN_ROOM_NAME: &str = "0";
 const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
@@ -757,7 +758,7 @@ impl VoiceStore {
             mic_enabled: false,
             camera_enabled: false,
             screen_share_enabled: false,
-            noise_suppression_enabled: false,
+            noise_suppression_enabled: NOISE_SUPPRESSION_DEFAULT_ENABLED,
             noise_suppression_status: None,
             noise_suppression_started: None,
             noise_suppression_generation: 0,
@@ -1725,11 +1726,6 @@ impl VoiceStore {
         let Some(recording) = recording_from_params(&event.params) else {
             return;
         };
-        tracing::debug!(
-            sender_id = event.sender_id,
-            recording,
-            "voice recording signal"
-        );
         let sender_id = event.sender_id.to_string();
         if !recording {
             self.remove_recording_user(&sender_id, cx);
@@ -3149,6 +3145,15 @@ impl VoiceStore {
                 }
             })),
         });
+        // Reapply the current choice to each new session, including reconnects.
+        self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
+        self.noise_suppression_status = None;
+        self.noise_suppression_started = None;
+        if self.noise_suppression_enabled {
+            self.noise_suppression_status = Some(NoiseSuppressionStatus::Applying);
+            self.noise_suppression_started = Some(Instant::now());
+            session.set_noise_suppression(true, self.noise_suppression_generation);
+        }
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);
@@ -4689,7 +4694,7 @@ impl VoiceStore {
         self.ptt_held = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
-        self.noise_suppression_enabled = false;
+        self.noise_suppression_enabled = NOISE_SUPPRESSION_DEFAULT_ENABLED;
         self.noise_suppression_status = None;
         self.noise_suppression_started = None;
         self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);

@@ -2,8 +2,11 @@ use std::collections::HashMap;
 
 use libwebrtc::stats::RtcStats;
 
-const LOSS_RATIO: f64 = 0.05;
+const WARNING_LOSS_RATIO: f64 = 0.10;
+const SEVERE_LOSS_RATIO: f64 = 0.20;
+const RECOVERY_LOSS_RATIO: f64 = 0.05;
 const MIN_PACKETS: u64 = 50;
+const WARNING_SAMPLES: u32 = 2;
 const CLEAR_SAMPLES: u32 = 2;
 
 struct StreamLoss {
@@ -19,8 +22,8 @@ struct LossWindow {
 }
 
 impl LossWindow {
-    fn is_lossy(&self) -> bool {
-        self.expected >= MIN_PACKETS && self.lost as f64 / self.expected as f64 >= LOSS_RATIO
+    fn ratio(&self) -> Option<f64> {
+        (self.expected >= MIN_PACKETS).then(|| self.lost as f64 / self.expected as f64)
     }
 }
 
@@ -28,6 +31,7 @@ impl LossWindow {
 pub(super) struct NetworkQuality {
     streams: HashMap<String, StreamLoss>,
     weak: bool,
+    bad_samples: u32,
     clean_samples: u32,
 }
 
@@ -51,9 +55,32 @@ impl NetworkQuality {
             }
         }
         self.streams = streams;
-        let lossy = received.is_lossy() || sent.is_lossy();
-        self.clean_samples = if lossy { 0 } else { self.clean_samples + 1 };
-        if lossy {
+        self.update_loss(received, sent)
+    }
+
+    fn update_loss(&mut self, received: LossWindow, sent: LossWindow) -> bool {
+        let ratio = received
+            .ratio()
+            .into_iter()
+            .chain(sent.ratio())
+            .reduce(f64::max);
+        let Some(ratio) = ratio else {
+            // Silence or a new stream is not evidence that the network recovered.
+            self.bad_samples = 0;
+            self.clean_samples = 0;
+            return self.weak;
+        };
+        self.bad_samples = if ratio >= WARNING_LOSS_RATIO {
+            self.bad_samples.saturating_add(1)
+        } else {
+            0
+        };
+        self.clean_samples = if ratio < RECOVERY_LOSS_RATIO {
+            self.clean_samples.saturating_add(1)
+        } else {
+            0
+        };
+        if ratio >= SEVERE_LOSS_RATIO || self.bad_samples >= WARNING_SAMPLES {
             self.weak = true;
         } else if self.clean_samples >= CLEAR_SAMPLES {
             self.weak = false;
@@ -66,14 +93,16 @@ fn loss_streams(stats: &[RtcStats]) -> HashMap<String, StreamLoss> {
     let packets_sent: HashMap<&str, u64> = stats
         .iter()
         .filter_map(|stat| match stat {
-            RtcStats::OutboundRtp(out) => Some((out.rtc.id.as_str(), out.sent.packets_sent)),
+            RtcStats::OutboundRtp(out) if out.stream.kind == "audio" => {
+                Some((out.rtc.id.as_str(), out.sent.packets_sent))
+            }
             _ => None,
         })
         .collect();
     stats
         .iter()
         .filter_map(|stat| match stat {
-            RtcStats::InboundRtp(inbound) => Some((
+            RtcStats::InboundRtp(inbound) if inbound.stream.kind == "audio" => Some((
                 inbound.rtc.id.clone(),
                 StreamLoss {
                     upload: false,
