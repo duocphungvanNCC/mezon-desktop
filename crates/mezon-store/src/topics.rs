@@ -27,10 +27,15 @@ const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
 
-fn topic_anonymous_send(existing_topic_id: Option<i64>, clan_id: i64, cx: &App) -> bool {
-    existing_topic_id.is_some()
-        && clan_id != 0
-        && MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).topic_anonymous_mode())
+fn topic_send_flags(
+    clan_id: i64,
+    topic_anonymous_mode: bool,
+    message_code: i32,
+) -> OutgoingMessageFlags {
+    OutgoingMessageFlags {
+        anonymous_message: clan_id != 0 && topic_anonymous_mode,
+        message_code,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1103,11 +1108,13 @@ impl TopicsStore {
         if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
             return;
         }
-        let anonymous = topic_anonymous_send(existing_topic_id, clan_id, cx);
-        let send_flags = OutgoingMessageFlags {
-            anonymous_message: anonymous,
+        let send_flags = topic_send_flags(
+            clan_id,
+            MessagesStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).topic_anonymous_mode()),
             message_code,
-        };
+        );
+        let anonymous = send_flags.anonymous_message;
         let has_attachments = !attachments.is_empty();
         // The reply row is built from the server's echo, which knows nothing about
         // the file on this disk. Keep the paths so the sender sees the picture they
@@ -1634,7 +1641,13 @@ impl TopicsStore {
         if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
             return;
         }
-        let anonymous = topic_anonymous_send(existing_topic_id, clan_id, cx);
+        let send_flags = topic_send_flags(
+            clan_id,
+            MessagesStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).topic_anonymous_mode()),
+            0,
+        );
+        let anonymous = send_flags.anonymous_message;
         let reply_ref =
             self.reply_target
                 .take()
@@ -1697,10 +1710,7 @@ impl TopicsStore {
                     topic_id,
                     vec![attachment],
                     reply_ref,
-                    OutgoingMessageFlags {
-                        anonymous_message: anonymous,
-                        message_code: 0,
-                    },
+                    send_flags,
                 )
                 .await
             {
@@ -2834,5 +2844,15 @@ mod tests {
                 "{code:?} must allow a topic discussion"
             );
         }
+    }
+
+    #[test]
+    fn a_new_clan_topic_sends_anonymously_when_topic_mode_is_enabled() {
+        assert!(topic_send_flags(9, true, 0).anonymous_message);
+    }
+
+    #[test]
+    fn a_clan_topic_does_not_send_anonymously_when_topic_mode_is_disabled() {
+        assert!(!topic_send_flags(9, false, 0).anonymous_message);
     }
 }
