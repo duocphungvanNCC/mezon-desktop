@@ -305,7 +305,7 @@ pub struct OutgoingAttachment {
 }
 
 impl OutgoingAttachment {
-    pub fn into_upload(self) -> UploadFile {
+    pub fn into_upload(self, channel_id: i64) -> UploadFile {
         let thumbnail = self.poster_jpeg.map(|jpeg| UploadThumbnail {
             filename: format!("{}.jpg", self.filename),
             data: jpeg,
@@ -318,6 +318,7 @@ impl OutgoingAttachment {
             height: self.height,
             duration: self.duration,
             thumbnail,
+            channel_id,
         }
     }
 }
@@ -4977,7 +4978,8 @@ impl MessagesStore {
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |_this, _cx| {
-            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+            let uploaded = upload_attachments_now(&api, attachments, channel_num).await;
+            let proto_attachments = match uploaded {
                 Ok(attachments) => attachments,
                 Err(e) => {
                     tracing::error!("send_ephemeral_message attachments failed: {e}");
@@ -5136,7 +5138,8 @@ impl MessagesStore {
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |this, cx| {
-            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+            let uploaded = upload_attachments_now(&api, attachments, channel_num).await;
+            let proto_attachments = match uploaded {
                 Ok(attachments) => attachments,
                 Err(e) => {
                     tracing::error!("send_message_to_bot attachments failed: {e}");
@@ -5841,7 +5844,7 @@ impl MessagesStore {
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(OutgoingAttachment::into_upload)
+                    .map(|attachment| attachment.into_upload(channel_id.get()))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -9168,13 +9171,14 @@ async fn send_anonymous_attachment_message(
 pub(crate) async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
+    channel_id: i64,
 ) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
     let files: Vec<UploadFile> = attachments
         .into_iter()
-        .map(OutgoingAttachment::into_upload)
+        .map(|attachment| attachment.into_upload(channel_id))
         .collect();
     let presigned = api.presign_files(files).await?;
     let uploaded: Vec<mezon_proto::api::MessageAttachment> =

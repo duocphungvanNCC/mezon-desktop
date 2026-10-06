@@ -4698,6 +4698,7 @@ impl MezonTransport {
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
+            "GenerateCDNSignature" => 212,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -7062,6 +7063,21 @@ impl MezonTransport {
         )?)
     }
 
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        if channel_id == 0 {
+            anyhow::bail!("GenerateCDNSignature needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GenerateCdnSignatureRequest { channel_id }.encode_to_vec();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "GenerateCDNSignature", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
     /// Search threads by label within a parent channel.
     pub async fn search_thread(
         &self,
@@ -8091,6 +8107,7 @@ impl MezonTransport {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
@@ -8100,6 +8117,7 @@ impl MezonTransport {
             width,
             height,
             part_count: 0,
+            channel_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -11528,11 +11546,36 @@ mod tests {
                 let counters = counters.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 8192];
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, len);
+                        }
                     };
-                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    while buf.len() < head_end + body_len {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     *counters.lock().entry(path.clone()).or_insert(0) += 1;
 
@@ -11543,6 +11586,13 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("GenerateCDNSignature") {
+                        let request =
+                            api::GenerateCdnSignatureRequest::decode(&buf[head_end..]).unwrap();
+                        api::GenerateCdnSignatureResponse {
+                            signature: format!("1700000000-{}", request.channel_id),
+                        }
+                        .encode_to_vec()
                     } else if path.ends_with("SendChannelMessage") {
                         realtime::ChannelMessageAck {
                             message_id: 42,
@@ -11564,6 +11614,35 @@ mod tests {
             }
         });
         (port, hits)
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_asks_for_the_given_channel_and_returns_the_signature() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fallback));
+
+        let signature = t
+            .generate_cdn_signature(2087764882924507136)
+            .await
+            .expect("the signature request should succeed");
+        assert_eq!(signature, "1700000000-2087764882924507136");
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/GenerateCDNSignature"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .generate_cdn_signature(0)
+            .await
+            .expect_err("channel 0 has no signature");
+        assert!(error.to_string().contains("channel id"), "{error}");
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -11930,6 +12009,7 @@ mod tests {
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
         assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
+        assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
