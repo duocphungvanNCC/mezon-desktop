@@ -4462,10 +4462,14 @@ impl MezonTransport {
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
         let content = pin.content;
-        let content_text = serde_json::from_str::<serde_json::Value>(&content)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| content.clone());
+        let content_text = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(serde_json::Value::Object(fields)) => match fields.get("t") {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(_) => content.clone(),
+                None => String::new(),
+            },
+            _ => content.clone(),
+        };
         let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
@@ -12531,5 +12535,49 @@ mod tests {
         assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ."), None);
         assert_eq!(bare_jwt(b"not a token"), None);
         assert_eq!(bare_jwt(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    #[test]
+    fn pin_message_from_proto_hides_attachment_metadata_without_text() {
+        for content in [
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620}"#,
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620,"fwd":true}"#,
+        ] {
+            let pin = api::PinMessage {
+                content: content.into(),
+                ..Default::default()
+            };
+            let parsed = MezonTransport::pin_message_from_proto(pin);
+            assert!(parsed.content_text.is_empty());
+            assert_eq!(parsed.content, content);
+        }
+    }
+
+    #[test]
+    fn pin_message_from_proto_preserves_visible_text_behavior() {
+        let json_pin = api::PinMessage {
+            content: r#"{"t":"caption","presign_finish":["photo"]}"#.into(),
+            ..Default::default()
+        };
+        let plain_pin = api::PinMessage {
+            content: "legacy plain text".into(),
+            ..Default::default()
+        };
+        let invalid_text_pin = api::PinMessage {
+            content: r#"{"t":123}"#.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(json_pin).content_text,
+            "caption"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(plain_pin).content_text,
+            "legacy plain text"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
+            r#"{"t":123}"#
+        );
     }
 }
