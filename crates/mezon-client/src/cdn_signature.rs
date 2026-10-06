@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -7,7 +8,7 @@ use http_client::http;
 use parking_lot::Mutex;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
-const SIGNATURE_REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
+const SIGNATURE_REFRESH_AFTER: Duration = Duration::from_secs(5 * 60 * 60);
 const REFUSED_RETRY_AFTER: Duration = Duration::from_secs(60);
 const FORBIDDEN_REFETCH_AFTER: Duration = Duration::from_secs(30);
 const SIGNATURE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,6 +38,7 @@ pub struct CdnSigner {
     refetch_forbidden_after: Duration,
     entries: Mutex<HashMap<i64, Entry>>,
     flights: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    generation: AtomicU64,
 }
 
 static SIGNER: OnceLock<Arc<CdnSigner>> = OnceLock::new();
@@ -51,6 +53,12 @@ pub fn installed() -> Option<Arc<CdnSigner>> {
 
 pub async fn sign(url: &str) -> Option<SignedUrl> {
     installed()?.sign(url).await
+}
+
+pub fn clear() {
+    if let Some(signer) = installed() {
+        signer.clear();
+    }
 }
 
 pub fn forget(signed: &SignedUrl) -> bool {
@@ -94,7 +102,14 @@ impl CdnSigner {
             refetch_forbidden_after,
             entries: Mutex::new(HashMap::new()),
             flights: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
+    }
+
+    pub fn clear(&self) {
+        let mut entries = self.entries.lock();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        entries.clear();
     }
 
     pub fn channel_of(&self, url: &str) -> Option<i64> {
@@ -211,6 +226,7 @@ impl CdnSigner {
         if let Some(cached) = self.cached(channel_id) {
             return cached;
         }
+        let generation = self.generation.load(Ordering::Acquire);
         let fetch = (self.fetch)(channel_id);
         let fetched = crate::transport_runtime::handle()
             .spawn(async move { tokio::time::timeout(SIGNATURE_FETCH_TIMEOUT, fetch).await })
@@ -242,7 +258,11 @@ impl CdnSigner {
             },
             None => Entry::Refused { at },
         };
-        self.entries.lock().insert(channel_id, entry);
+        let mut entries = self.entries.lock();
+        if self.generation.load(Ordering::Acquire) != generation {
+            return None;
+        }
+        entries.insert(channel_id, entry);
         signature
     }
 }
@@ -486,6 +506,53 @@ mod tests {
         assert_eq!(a.unwrap().status(), http::StatusCode::OK);
         assert_eq!(b.unwrap().status(), http::StatusCode::OK);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "{:?}", sent.lock());
+    }
+
+    #[tokio::test]
+    async fn clearing_drops_every_signature() {
+        let (fetch, calls) = rotating_fetcher();
+        let signer = signer_for(fetch);
+        let other = "https://cdn.komu.vn/1cfa10eff303ffff/2107323379391401985_other.png";
+        signer.sign(FILE).await.expect("signed");
+        signer.sign(other).await.expect("signed");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        signer.clear();
+        let again = signer.sign(FILE).await.expect("signed after clear");
+        assert_eq!(again.signature, "sig-3");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_signature_that_lands_after_a_clear_is_dropped() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fetch: SignatureFetcher = {
+            let calls = calls.clone();
+            let gate = gate.clone();
+            Arc::new(move |_| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                let gate = gate.clone();
+                Box::pin(async move {
+                    if call == 0 {
+                        gate.notified().await;
+                    }
+                    Ok(format!("sig-{}", call + 1))
+                })
+            })
+        };
+        let signer = Arc::new(signer_for(fetch));
+        let in_flight = tokio::spawn({
+            let signer = signer.clone();
+            async move { signer.sign(FILE).await.map(|signed| signed.signature) }
+        });
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        signer.clear();
+        gate.notify_one();
+        assert_eq!(in_flight.await.unwrap(), None);
+        let fresh = signer.sign(FILE).await.expect("signed for the new session");
+        assert_eq!(fresh.signature, "sig-2");
     }
 
     #[tokio::test]
