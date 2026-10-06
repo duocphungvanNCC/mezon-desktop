@@ -1545,7 +1545,7 @@ pub(crate) async fn upload_image_to_cdn(
     let (width, height) = image_dimensions(&data);
 
     let upload = api
-        .upload_attachment_file(&filename, filetype, size, width, height)
+        .upload_attachment_file(&filename, filetype, size, width, height, 0)
         .await
         .map_err(|e| e.to_string())?;
     mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype)

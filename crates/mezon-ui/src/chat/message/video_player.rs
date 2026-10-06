@@ -7,7 +7,7 @@ use gpui::{
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
     Task, Window, canvas, div, img, prelude::*, px, relative,
 };
-use mezon_store::PlatformStore;
+use mezon_store::open_media_url_external;
 #[cfg(any(windows, target_os = "macos"))]
 use mezon_video::{PreparedWebm, is_webm_url};
 use mezon_video::{VideoFrame, VideoPlayer};
@@ -122,6 +122,8 @@ pub struct VideoPlayerView {
     _open_task: Option<Task<()>>,
     last_seek_at: Option<Instant>,
     pending_seek: Option<f64>,
+    signed: Option<mezon_client::cdn_signature::SignedUrl>,
+    resigned: bool,
 }
 
 impl VideoPlayerView {
@@ -164,6 +166,8 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            signed: None,
+            resigned: false,
         };
         view.start_open(cx);
         view
@@ -191,6 +195,9 @@ impl VideoPlayerView {
                 shared.duration = duration;
             }
             Err(_) => {
+                if self.open_with_fresh_signature(cx) {
+                    return;
+                }
                 self.player = None;
                 self.load_state = VideoLoadState::Failed;
                 let mut shared = self.shared.borrow_mut();
@@ -207,6 +214,11 @@ impl VideoPlayerView {
         let url = self.url.clone();
         let decode_max_size = self.decode_max_size;
         self._open_task = Some(cx.spawn(async move |this, cx| {
+            let signed = mezon_client::cdn_signature::sign(url.as_ref()).await;
+            let url = signed
+                .as_ref()
+                .map_or(url, |signed| SharedString::from(signed.url.clone()));
+            let _ = this.update(cx, |this, _| this.signed = signed);
             #[cfg(any(windows, target_os = "macos"))]
             if is_webm_url(url.as_ref()) {
                 let open_url = url.clone();
@@ -224,6 +236,24 @@ impl VideoPlayerView {
                 this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);
             });
         }));
+    }
+
+    fn open_with_fresh_signature(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.resigned {
+            return false;
+        }
+        let Some(signed) = self.signed.take() else {
+            return false;
+        };
+        self.resigned = true;
+        if !mezon_client::cdn_signature::forget(&signed) {
+            return false;
+        }
+        self.player = None;
+        self.shared.borrow_mut().failed = false;
+        self.start_open(cx);
+        cx.notify();
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -264,6 +294,8 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            signed: None,
+            resigned: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -283,6 +315,9 @@ impl VideoPlayerView {
         let duration = player.duration();
         let muted = player.is_muted();
         let failed = player.failed();
+        if failed && self.open_with_fresh_signature(cx) {
+            return;
+        }
         if playing && duration > 0.0 && current_time >= duration - STUCK_PLAYING_END_SECONDS {
             player.pause();
             playing = false;
@@ -540,9 +575,7 @@ impl VideoPlayerView {
     }
 
     fn open_external(&self, cx: &mut App) {
-        if let Some(store) = PlatformStore::try_global(cx) {
-            let _ = store.read(cx).open_url_external(&self.url);
-        }
+        open_media_url_external(self.url.to_string(), cx);
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

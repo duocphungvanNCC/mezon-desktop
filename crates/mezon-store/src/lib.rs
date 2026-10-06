@@ -235,7 +235,7 @@ pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore,
-    copy_image_url_to_clipboard, download_url_with_dialog,
+    copy_image_url_to_clipboard, download_url_with_dialog, open_media_url_external,
 };
 pub use presence::*;
 pub use quick_menu::{
