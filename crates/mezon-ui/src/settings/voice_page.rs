@@ -305,7 +305,7 @@ impl Render for VoicePage {
                                                             mezon_i18n::t(&locale, "setting.voice.letsCheck")
                                                         })
                                                             .text_sm()
-                                                            .text_color(theme.text_primary),
+                                                            .text_color(gpui::white()),
                                                     )
                                                     .on_click({
                                                         let handle = this_handle.clone();
