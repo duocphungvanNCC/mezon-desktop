@@ -263,13 +263,17 @@ pub fn insert_filter_markup(current: &str, trigger: char, display: &str, id: &st
     if let Some(next) = replace_incomplete_filter_token(current, trigger, &token) {
         return next;
     }
-    if let Some(next) = replace_plain_autocomplete_needle(current, &token) {
+    if let Some(next) = replace_plain_autocomplete_needle(current, display, &token) {
         return next;
     }
     if current.is_empty() {
         token
     } else if current.ends_with(' ') {
-        format!("{current}{token}")
+        if query_has_filter_tokens(current) {
+            current.to_string()
+        } else {
+            format!("{current}{token}")
+        }
     } else {
         format!("{current} {token}")
     }
@@ -329,29 +333,24 @@ fn is_chip_filter_token(token: &str) -> bool {
     is_complete_markup_token(token) || is_complete_colon_filter(token)
 }
 
-fn replace_plain_autocomplete_needle(current: &str, token: &str) -> Option<String> {
-    if active_search_trigger(current).is_some() {
+fn replace_plain_autocomplete_needle(current: &str, display: &str, token: &str) -> Option<String> {
+    if active_search_trigger(current).is_some() || query_has_filter_tokens(current) {
         return None;
     }
     let trimmed_end = current.trim_end();
     if trimmed_end.is_empty() {
         return None;
     }
-    let needle = autocomplete_needle(current);
-    if needle.is_empty() {
-        return None;
+    if trimmed_end.eq_ignore_ascii_case(display) || !trimmed_end.contains(' ') {
+        return Some(token.to_string());
     }
     let word_start = trimmed_end.rfind(' ').map(|index| index + 1).unwrap_or(0);
     let last_word = &trimmed_end[word_start..];
     let prefix = &trimmed_end[..word_start];
-    if last_word != needle {
-        return None;
+    if last_word.eq_ignore_ascii_case(display) {
+        return Some(format!("{prefix}{token}"));
     }
-    if prefix.is_empty() {
-        Some(token.to_string())
-    } else {
-        Some(format!("{prefix}{token}"))
-    }
+    None
 }
 
 fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) -> Option<String> {
@@ -359,6 +358,11 @@ fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) ->
     let word_start = trimmed_end.rfind(' ').map(|index| index + 1).unwrap_or(0);
     let last_word = &trimmed_end[word_start..];
     let prefix = &trimmed_end[..word_start];
+    if query_ends_with_whitespace(current)
+        && (is_complete_colon_filter(last_word) || is_complete_markup_token(last_word))
+    {
+        return None;
+    }
     match trigger {
         '>' => {
             if last_word.starts_with('>') && !is_complete_markup_token(last_word) {
@@ -372,7 +376,7 @@ fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) ->
             if last_word.starts_with('&') && !is_complete_markup_token(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
-            if last_word.starts_with("has:") {
+            if last_word.starts_with("has:") && !is_complete_colon_filter(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
         }
@@ -380,7 +384,9 @@ fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) ->
             if last_word.starts_with('~') && !is_complete_markup_token(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
-            if last_word.starts_with("mentions:") || last_word.starts_with("mention:") {
+            if (last_word.starts_with("mentions:") || last_word.starts_with("mention:"))
+                && !is_complete_colon_filter(last_word)
+            {
                 return Some(format!("{prefix}{token}"));
             }
         }
@@ -753,25 +759,67 @@ mod tests {
 
     #[test]
     fn insert_filter_markup_replaces_plain_text_needle() {
-        let next = insert_filter_markup("vangiachu", '>', "vangiachu", "42");
-        assert_eq!(next, "from:vangiachu ");
+        let next = insert_filter_markup("vangiachu", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
     }
 
     #[test]
     fn insert_filter_markup_replaces_partial_plain_text_needle() {
-        let next = insert_filter_markup("vang", '>', "vangiachu", "42");
-        assert_eq!(next, "from:vangiachu ");
+        let next = insert_filter_markup("van", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
     }
 
     #[test]
-    fn insert_filter_markup_does_not_replace_multi_word_plain_query() {
+    fn insert_filter_markup_replaces_multi_word_display() {
+        let next = insert_filter_markup("Van Gia", '>', "Van Gia", "42");
+        assert_eq!(next, "from:Van Gia ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_last_word_in_multi_word_plain_query() {
         let next = insert_filter_markup("notes vangiachu", '>', "vangiachu", "42");
-        assert_eq!(next, "notes vangiachu from:vangiachu ");
+        assert_eq!(next, "notes from:vangiachu ");
+    }
+
+    #[test]
+    fn insert_filter_markup_mention_uses_display_colon() {
+        let next = insert_filter_markup("~van", '~', "gia.chuvan", "42");
+        assert_eq!(next, "mentions:gia.chuvan ");
+    }
+
+    #[test]
+    fn plain_autocomplete_appends_when_filters_already_present() {
+        let next = insert_filter_markup("from:alice bob", '>', "bob", "9");
+        assert_eq!(next, "from:alice bob from:bob ");
+    }
+
+    #[test]
+    fn incomplete_from_colon_without_user_id_keeps_colon_token() {
+        let next = insert_filter_markup("notes >ali", '>', "alice", "");
+        assert_eq!(next, "notes from:alice ");
+    }
+
+    #[test]
+    fn incomplete_from_colon_uses_display_name() {
+        let next = insert_filter_markup("from:ali", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
+    }
+
+    #[test]
+    fn incomplete_has_trigger_finalizes_to_colon_token() {
+        let next = insert_filter_markup("&im", '&', "image", "image");
+        assert_eq!(next, "has:image ");
     }
 
     #[test]
     fn insert_filter_markup_does_not_corrupt_trailing_space() {
         let next = insert_filter_markup("from:alice ", '>', "alice", "42");
+        assert_eq!(next, "from:alice ");
+    }
+
+    #[test]
+    fn insert_filter_markup_noop_for_completed_from_chip() {
+        let next = insert_filter_markup("from:alice ", '>', "bob", "9");
         assert_eq!(next, "from:alice ");
     }
 

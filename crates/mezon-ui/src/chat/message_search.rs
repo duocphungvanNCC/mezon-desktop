@@ -23,6 +23,7 @@ use ui::WithScrollbar;
 use crate::chat::inbox::render_message_head;
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
+use crate::chat::mention_input::filter_members_for_search;
 use crate::chat::message::{
     RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
     render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
@@ -34,7 +35,6 @@ use crate::image_cache::{
 };
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
-use crate::util::text_utils::normalize_search_string;
 
 pub const MESSAGE_SEARCH_PANEL_WIDTH: f32 = 420.;
 // Derived, not chosen: the channel header packs `| inbox search` flush to the right edge,
@@ -69,7 +69,6 @@ pub enum SearchDropdownItem {
     Member {
         trigger: char,
         display: String,
-        username: String,
         user_id: String,
     },
     Has {
@@ -91,23 +90,21 @@ pub fn search_dropdown_items(query: &str, cx: &App) -> Vec<SearchDropdownItem> {
             .map(SearchDropdownItem::Prefix)
             .collect(),
         SearchDropdownMode::FromUser | SearchDropdownMode::PlainMembers => {
-            filter_members_for_from(&mention_member_pool(cx), &needle, 3)
+            filter_members_for_search(&mention_member_pool(cx), &needle, 3)
                 .into_iter()
                 .map(|member| SearchDropdownItem::Member {
                     trigger: '>',
                     display: member.display.clone(),
-                    username: member.username.clone(),
                     user_id: member.user_id.clone(),
                 })
                 .collect()
         }
         SearchDropdownMode::Mentions => {
-            filter_members_for_mentions(&mention_member_pool(cx), &needle, 3)
+            filter_members_for_search(&mention_member_pool(cx), &needle, 3)
                 .into_iter()
                 .map(|member| SearchDropdownItem::Member {
                     trigger: '~',
                     display: member.display.clone(),
-                    username: member.username.clone(),
                     user_id: member.user_id.clone(),
                 })
                 .collect()
@@ -1703,7 +1700,7 @@ fn render_search_options(
         }
         SearchDropdownMode::FromUser | SearchDropdownMode::PlainMembers => {
             let pool = mention_member_pool(cx);
-            let members = filter_members_for_from(&pool, &needle, 3);
+            let members = filter_members_for_search(&pool, &needle, 3);
             if !members.is_empty() {
                 sections.push(render_member_suggestions(
                     theme,
@@ -1720,7 +1717,7 @@ fn render_search_options(
         }
         SearchDropdownMode::Mentions => {
             let pool = mention_member_pool(cx);
-            let members = filter_members_for_mentions(&pool, &needle, 3);
+            let members = filter_members_for_search(&pool, &needle, 3);
             if !members.is_empty() {
                 sections.push(render_member_suggestions(
                     theme,
@@ -2088,64 +2085,6 @@ fn has_option_label(locale: &str, option: &str) -> String {
         _ => return option.to_string(),
     };
     mezon_i18n::t(locale, key).to_string()
-}
-
-fn member_from_match_fields(member: &MentionMemberRaw) -> [&str; 3] {
-    [
-        member.display_norm.as_str(),
-        member.username_norm.as_str(),
-        member.alt_norm.as_str(),
-    ]
-}
-
-fn filter_members_for_from<'a>(
-    members: &'a [MentionMemberRaw],
-    needle: &str,
-    limit: usize,
-) -> Vec<&'a MentionMemberRaw> {
-    if needle.is_empty() {
-        return members.iter().take(limit).collect();
-    }
-    let needle_norm = normalize_search_string(needle);
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    for member in members {
-        let fields = member_from_match_fields(member);
-        let matches_exact = fields
-            .iter()
-            .any(|field| !field.is_empty() && **field == needle_norm);
-        let matches_partial = fields
-            .iter()
-            .any(|field| !field.is_empty() && field.contains(needle_norm.as_str()));
-        if matches_exact {
-            exact.push(member);
-        } else if matches_partial {
-            partial.push(member);
-        }
-    }
-    exact.into_iter().chain(partial).take(limit).collect()
-}
-
-fn filter_members_for_mentions<'a>(
-    members: &'a [MentionMemberRaw],
-    needle: &str,
-    limit: usize,
-) -> Vec<&'a MentionMemberRaw> {
-    if needle.is_empty() {
-        return members.iter().take(limit).collect();
-    }
-    let needle_lc = needle.to_lowercase();
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    for member in members {
-        if member.username_lc == needle_lc || member.display_lc == needle_lc {
-            exact.push(member);
-        } else if member.username_lc.contains(&needle_lc) || member.display_lc.contains(&needle_lc)
-        {
-            partial.push(member);
-        }
-    }
-    exact.into_iter().chain(partial).take(limit).collect()
 }
 
 fn jump_route_for_hit(hit: &SearchHit) -> Route {

@@ -609,6 +609,12 @@ impl ChatLayout {
             return;
         };
         let query = input.read(cx).value().to_string();
+        if matches!(
+            mezon_store::search_dropdown_mode(&query),
+            mezon_store::SearchDropdownMode::PlainMembers
+        ) {
+            return;
+        }
         let count = crate::chat::message_search::search_dropdown_item_count(&query, cx);
         if count == 0 {
             return;
@@ -662,14 +668,12 @@ impl ChatLayout {
         {
             return false;
         }
-        let Some(index) = self.search_dropdown_index else {
-            return false;
-        };
         let items = crate::chat::message_search::search_dropdown_items(&query, cx);
         if items.is_empty() {
             return false;
         }
-        apply_search_dropdown_item(self, &items[index.min(items.len() - 1)], window, cx);
+        let index = self.search_dropdown_index.unwrap_or(0).min(items.len() - 1);
+        apply_search_dropdown_item(self, &items[index], window, cx);
         true
     }
 
