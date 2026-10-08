@@ -300,7 +300,10 @@ fn main() -> Result<()> {
     configure_linux_session();
 
     install_panic_hook();
-    if let Some(exit_code) = mezon_cli::try_run(std::env::args())? {
+    let args: Vec<String> = std::env::args().collect();
+    if mezon_cli::is_cli_invocation(&args)
+        && let Some(exit_code) = mezon_cli::try_run(&args)?
+    {
         std::process::exit(exit_code);
     }
 
