@@ -56,6 +56,7 @@ pub mod presence;
 pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
+pub mod realtime_server;
 pub mod roles;
 pub mod sprite_atlas;
 pub mod sticker;
@@ -244,6 +245,7 @@ pub use quick_menu::{
     name_exists,
 };
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
@@ -498,6 +500,8 @@ pub struct Settings {
     pub screen_capture_access_requested: bool,
     #[serde(default)]
     pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
+    #[serde(default)]
+    pub realtime_server: RealtimeServer,
 }
 
 impl Default for Settings {
@@ -530,6 +534,7 @@ impl Default for Settings {
             tour_eligible: None,
             screen_capture_access_requested: false,
             activity_strip_dismissals: Vec::new(),
+            realtime_server: RealtimeServer::Auto,
         }
     }
 }
