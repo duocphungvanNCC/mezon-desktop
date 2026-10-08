@@ -1073,6 +1073,8 @@
   "channelTopbar.tooltips.timelineView": "Вакыт сызыгына күчү",
   "channelTopbar.topic": "Тема",
   "channelVoice.addAgent": "AI агент өстәргә",
+  "channelVoice.agentHint.title": "KOMU Agent'ны кабызыгыз",
+  "channelVoice.agentHint.body": "Бу шалтыратуга ЯИ-агентны өстәү өчен KOMU Agent тамгасына басыгыз.",
   "channelVoice.agentActionFailed": "AI агентны яңартып булмады. Сездә рөхсәт булмаска мөмкин.",
   "channelVoice.chat": "Чат",
   "channelVoice.connecting": "Тоташу…",

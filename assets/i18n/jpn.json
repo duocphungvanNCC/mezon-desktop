@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "タイムラインビューに切り替え",
   "channelTopbar.topic": "トピック",
   "channelVoice.addAgent": "AIエージェントを追加",
+  "channelVoice.agentHint.title": "KOMU Agent をオンにする",
+  "channelVoice.agentHint.body": "KOMU Agent のアイコンをクリックすると、この通話に AI エージェントを追加できます。",
   "channelVoice.agentActionFailed": "AIエージェントを更新できませんでした。権限がない可能性があります。",
   "channelVoice.chat": "チャット",
   "channelVoice.connecting": "接続中…",

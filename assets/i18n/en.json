@@ -1098,6 +1098,8 @@
   "channelVoice.networkWarning": "Your internet connection is unstable.",
   "channelVoice.everyoneWaiting": "Everyone is waiting for you inside",
   "channelVoice.addAgent": "Add AI agent",
+  "channelVoice.agentHint.title": "Turn on KOMU Agent",
+  "channelVoice.agentHint.body": "Click the KOMU Agent icon to add the AI agent to this call.",
   "channelVoice.removeAgent": "Remove AI agent",
   "channelVoice.agentActionFailed": "Could not update the AI agent. You may not have permission.",
   "channelVoice.leave": "Leave",

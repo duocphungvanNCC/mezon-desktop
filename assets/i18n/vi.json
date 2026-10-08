@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "Chuyển sang Chế độ Dòng thời gian",
   "channelTopbar.topic": "Chủ đề",
   "channelVoice.addAgent": "Thêm AI agent",
+  "channelVoice.agentHint.title": "Bật KOMU Agent",
+  "channelVoice.agentHint.body": "Bấm vào biểu tượng KOMU Agent để thêm AI agent vào cuộc gọi này.",
   "channelVoice.agentActionFailed": "Không thể cập nhật AI agent. Có thể bạn không có quyền.",
   "channelVoice.chat": "Trò chuyện",
   "channelVoice.connecting": "Đang kết nối…",

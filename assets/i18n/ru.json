@@ -1073,6 +1073,8 @@
   "channelTopbar.tooltips.timelineView": "Переключиться к временной шкале",
   "channelTopbar.topic": "Тема",
   "channelVoice.addAgent": "Добавить ИИ-агента",
+  "channelVoice.agentHint.title": "Включите KOMU Agent",
+  "channelVoice.agentHint.body": "Нажмите на значок KOMU Agent, чтобы добавить ИИ-агента в этот звонок.",
   "channelVoice.agentActionFailed": "Не удалось обновить ИИ-агента. Возможно, у вас нет разрешения.",
   "channelVoice.chat": "Чат",
   "channelVoice.connecting": "Подключение…",

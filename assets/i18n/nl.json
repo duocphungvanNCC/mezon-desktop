@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "Naar tijdlijn-weergave overschakelen",
   "channelTopbar.topic": "Topic",
   "channelVoice.addAgent": "AI-agent toevoegen",
+  "channelVoice.agentHint.title": "KOMU Agent inschakelen",
+  "channelVoice.agentHint.body": "Klik op het KOMU Agent-pictogram om de AI-agent aan dit gesprek toe te voegen.",
   "channelVoice.agentActionFailed": "De AI-agent kon niet worden bijgewerkt. Mogelijk heb je geen toestemming.",
   "channelVoice.chat": "Chat",
   "channelVoice.connecting": "Verbinden…",

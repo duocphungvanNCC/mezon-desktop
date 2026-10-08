@@ -1066,6 +1066,8 @@
   "channelTopbar.tooltips.timelineView": "Cambiar a vista de línea de tiempo",
   "channelTopbar.topic": "Tema",
   "channelVoice.addAgent": "Añadir agente de IA",
+  "channelVoice.agentHint.title": "Activa KOMU Agent",
+  "channelVoice.agentHint.body": "Haz clic en el icono de KOMU Agent para añadir el agente de IA a esta llamada.",
   "channelVoice.addReaction": "Añadir reacción",
   "channelVoice.agentActionFailed": "No se pudo actualizar el agente de IA. Es posible que no tengas permiso.",
   "channelVoice.chat": "Chat",

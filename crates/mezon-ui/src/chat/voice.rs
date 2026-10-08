@@ -3217,6 +3217,9 @@ fn control_bar(
         cx,
     );
 
+    let ptt_hint_visible = is_audience
+        && !store.ptt_hint_dismissed()
+        && store.device_menu() != Some(DeviceMenuKind::Microphone);
     let ptt_button = is_audience.then(|| {
         let (bg, hover, color): (Hsla, Hsla, Hsla) = if ptt_active {
             (
@@ -3233,20 +3236,24 @@ fn control_bar(
             ),
             voice,
         );
+        let button = device_control(
+            button.into_any_element(),
+            theme,
+            locale,
+            voice,
+            settings,
+            store,
+            DeviceMenuKind::Microphone,
+            cx,
+        );
         let callout = if show_network_warning {
             Some(render_network_warning_callout(locale, voice))
         } else {
-            (!store.ptt_hint_dismissed())
-                .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice))
+            ptt_hint_visible.then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice))
         };
         div()
             .relative()
             .child(button)
-            .children(control_bar_permission_badge(
-                theme,
-                Some(MediaDevice::Microphone),
-                cx,
-            ))
             .children(network_weak_dot(theme, network_weak, cx))
             .children(callout)
     });
@@ -3378,7 +3385,14 @@ fn control_bar(
                 .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
         })
     });
+    let agent_hint_visible = can_manage_agent
+        && !agent_active
+        && !store.agent_hint_dismissed()
+        && !ptt_hint_visible
+        && !show_network_warning
+        && store.device_menu().is_none();
     let agent_button = can_manage_agent.then(|| {
+        let hint_voice = voice.clone();
         let voice = voice.clone();
         let (bg, hover, color): (Hsla, Hsla, Hsla) = if agent_active {
             (
@@ -3397,7 +3411,7 @@ fn control_bar(
                 "channelVoice.addAgent"
             },
         );
-        circle_button(
+        let button = circle_button(
             "voice-agent-btn",
             bg,
             hover,
@@ -3405,7 +3419,10 @@ fn control_bar(
             color,
         )
         .tooltip(Tooltip::text(agent_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)));
+        div().relative().child(button).children(
+            agent_hint_visible.then(|| render_agent_hint_callout(theme, locale, &hint_voice)),
+        )
     });
 
     let mut tail = div().flex().flex_row().items_center().gap_1();
@@ -3688,7 +3705,6 @@ fn render_ptt_hint_callout(
     ptt_active: bool,
     voice: &Entity<VoiceStore>,
 ) -> AnyElement {
-    let card_bg = theme.bg_secondary;
     let accent: Hsla = if ptt_active {
         theme.status_online.into()
     } else {
@@ -3704,11 +3720,48 @@ fn render_ptt_hint_callout(
     );
     let body = mezon_i18n::t(locale, "channelVoice.pushToTalk.hintBody");
     let dismiss = voice.clone();
-    div()
-        .id("voice-ptt-hint")
+    render_control_hint_callout(
+        ("voice-ptt-hint", "voice-ptt-hint-close"),
+        theme,
+        (IconName::InPttCall, accent),
+        title,
+        body,
+        move |cx| dismiss.update(cx, |store, cx| store.dismiss_ptt_hint(cx)),
+    )
+}
+
+fn render_agent_hint_callout(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+) -> AnyElement {
+    let title = mezon_i18n::t(locale, "channelVoice.agentHint.title");
+    let body = mezon_i18n::t(locale, "channelVoice.agentHint.body");
+    let dismiss = voice.clone();
+    render_control_hint_callout(
+        ("voice-agent-hint", "voice-agent-hint-close"),
+        theme,
+        (IconName::VoiceAgentIcon, gpui::rgb(ACCENT_BLUE).into()),
+        title,
+        body,
+        move |cx| dismiss.update(cx, |store, cx| store.dismiss_agent_hint(cx)),
+    )
+}
+
+fn render_control_hint_callout(
+    (id, close_id): (&'static str, &'static str),
+    theme: &Theme,
+    (icon, accent): (IconName, Hsla),
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    on_dismiss: impl Fn(&mut App) + 'static,
+) -> AnyElement {
+    let card_bg = theme.bg_secondary;
+    let callout = div()
+        .id(id)
         .occlude()
         .absolute()
-        .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
+        .bottom(px(44.))
         .left(px(-16.))
         .w(px(PTT_HINT_WIDTH_PX))
         .flex()
@@ -3731,11 +3784,7 @@ fn render_ptt_hint_callout(
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .child(
-                            Icon::new(IconName::InPttCall)
-                                .size(px(18.))
-                                .text_color(accent),
-                        )
+                        .child(Icon::new(icon).size(px(18.)).text_color(accent))
                         .child(
                             div()
                                 .flex_1()
@@ -3743,11 +3792,11 @@ fn render_ptt_hint_callout(
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.tokens.text_theme_primary)
-                                .child(title),
+                                .child(title.into()),
                         )
                         .child(
                             div()
-                                .id("voice-ptt-hint-close")
+                                .id(close_id)
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -3760,27 +3809,47 @@ fn render_ptt_hint_callout(
                                         .size(px(16.))
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
-                                .on_click(move |_, _, cx| {
-                                    dismiss.update(cx, |store, cx| store.dismiss_ptt_hint(cx));
-                                }),
+                                .on_click(move |_, _, cx| on_dismiss(cx)),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.tokens.text_secondary)
-                        .child(body),
+                        .child(body.into()),
                 ),
+        )
+        .child(hint_caret(card_bg, theme.border.into()));
+    deferred(callout).into_any_element()
+}
+
+fn hint_caret(fill: impl Into<Hsla>, outline: Hsla) -> gpui::Div {
+    let outer = PTT_HINT_CARET_PX + 2.;
+    div()
+        .relative()
+        .ml(px(16. + 22. - outer / 2.))
+        .w(px(outer))
+        .h(px(outer / 2.))
+        .child(
+            svg()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(outer))
+                .h(px(outer / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(outline),
         )
         .child(
             svg()
-                .ml(px(16. + 22. - PTT_HINT_CARET_PX / 2.))
+                .absolute()
+                .top(px(-1.))
+                .left(px(1.))
                 .w(px(PTT_HINT_CARET_PX))
                 .h(px(PTT_HINT_CARET_PX / 2.))
                 .path("icons/tour-caret-down.svg")
-                .text_color(card_bg),
+                .text_color(fill.into()),
         )
-        .into_any_element()
 }
 
 fn circle_button(
