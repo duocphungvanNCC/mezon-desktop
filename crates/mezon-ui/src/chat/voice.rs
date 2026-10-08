@@ -3387,13 +3387,13 @@ fn control_bar(
     });
     let agent_hint_visible = can_manage_agent
         && !agent_active
-        && !store.agent_hint_dismissed()
+        && !settings.read(cx).agent_hint_dismissed
         && !ptt_hint_visible
         && !show_network_warning
         && store.device_menu().is_none();
     let agent_button = can_manage_agent.then(|| {
-        let hint_voice = voice.clone();
         let voice = voice.clone();
+        let hint_settings = settings.clone();
         let (bg, hover, color): (Hsla, Hsla, Hsla) = if agent_active {
             (
                 gpui::rgb(ACCENT_BLUE).into(),
@@ -3419,9 +3419,14 @@ fn control_bar(
             color,
         )
         .tooltip(Tooltip::text(agent_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)));
+        .on_click(move |_, _, cx| {
+            if !agent_active {
+                dismiss_agent_hint(&hint_settings, cx);
+            }
+            voice.update(cx, |store, cx| store.toggle_agent(cx));
+        });
         div().relative().child(button).children(
-            agent_hint_visible.then(|| render_agent_hint_callout(theme, locale, &hint_voice)),
+            agent_hint_visible.then(|| render_agent_hint_callout(theme, locale, settings)),
         )
     });
 
@@ -3733,19 +3738,30 @@ fn render_ptt_hint_callout(
 fn render_agent_hint_callout(
     theme: &Theme,
     locale: &str,
-    voice: &Entity<VoiceStore>,
+    settings: &Entity<Settings>,
 ) -> AnyElement {
     let title = mezon_i18n::t(locale, "channelVoice.agentHint.title");
     let body = mezon_i18n::t(locale, "channelVoice.agentHint.body");
-    let dismiss = voice.clone();
+    let settings = settings.clone();
     render_control_hint_callout(
         ("voice-agent-hint", "voice-agent-hint-close"),
         theme,
         (IconName::VoiceAgentIcon, gpui::rgb(ACCENT_BLUE).into()),
         title,
         body,
-        move |cx| dismiss.update(cx, |store, cx| store.dismiss_agent_hint(cx)),
+        move |cx| dismiss_agent_hint(&settings, cx),
     )
+}
+
+fn dismiss_agent_hint(settings: &Entity<Settings>, cx: &mut App) {
+    if settings.read(cx).agent_hint_dismissed {
+        return;
+    }
+    settings.update(cx, |settings, cx| {
+        settings.agent_hint_dismissed = true;
+        cx.notify();
+    });
+    mezon_store::schedule_settings_save(settings, cx);
 }
 
 fn render_control_hint_callout(

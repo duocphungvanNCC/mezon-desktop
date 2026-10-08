@@ -437,7 +437,6 @@ pub struct VoiceStore {
     ptt_held: bool,
     hold_to_talk: bool,
     ptt_hint_dismissed: bool,
-    agent_hint_dismissed: bool,
     network_warning_dismissed: bool,
     pending_join_role: SfuRole,
     join_role_menu_open: bool,
@@ -831,7 +830,6 @@ impl VoiceStore {
             ptt_held: false,
             hold_to_talk: false,
             ptt_hint_dismissed: false,
-            agent_hint_dismissed: false,
             network_warning_dismissed: false,
             pending_join_role: SfuRole::Speaker,
             join_role_menu_open: false,
@@ -2979,7 +2977,6 @@ impl VoiceStore {
         self.ptt_held = false;
         self.hold_to_talk = false;
         self.ptt_hint_dismissed = false;
-        self.agent_hint_dismissed = false;
         self.pending_join_role = role;
         self.join_role_menu_open = false;
 
@@ -3764,17 +3761,6 @@ impl VoiceStore {
     pub fn dismiss_ptt_hint(&mut self, cx: &mut Context<Self>) {
         if !self.ptt_hint_dismissed {
             self.ptt_hint_dismissed = true;
-            cx.notify();
-        }
-    }
-
-    pub fn agent_hint_dismissed(&self) -> bool {
-        self.agent_hint_dismissed
-    }
-
-    pub fn dismiss_agent_hint(&mut self, cx: &mut Context<Self>) {
-        if !self.agent_hint_dismissed {
-            self.agent_hint_dismissed = true;
             cx.notify();
         }
     }
