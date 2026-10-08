@@ -2484,7 +2484,7 @@ impl MessagesStore {
     }
 
     pub fn topic_anonymous_mode(&self) -> bool {
-        self.topic_anonymous_mode
+        self.active_topic_id.is_some() && self.topic_anonymous_mode
     }
 
     pub fn is_anonymous_mode(&self) -> bool {
@@ -2493,7 +2493,7 @@ impl MessagesStore {
     }
 
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode);
+        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode());
         if self.last_anonymous_mode == next {
             return;
         }
@@ -3672,6 +3672,7 @@ impl MessagesStore {
         {
             self.retained_topic = None;
         }
+        self.topic_anonymous_mode = false;
         self.active_topic_id = next;
         self.active_topic_parent = None;
         self.pending_topic_jump = None;
@@ -16449,6 +16450,30 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    #[gpui::test]
+    fn topic_anonymous_mode_is_only_active_after_the_topic_exists(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.topic_anonymous_mode = true;
+
+                assert!(!store.topic_anonymous_mode());
+
+                store.set_active_topic(Some(77), cx);
+                assert!(!store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(cx);
+                assert!(store.topic_anonymous_mode());
+
+                store.set_active_topic(None, cx);
+                assert!(!store.topic_anonymous_mode());
+
+                store.set_active_topic(Some(88), cx);
+                assert!(!store.topic_anonymous_mode());
+            });
+        });
     }
 
     #[gpui::test]
