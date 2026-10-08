@@ -137,12 +137,7 @@ fn set_ime_cursor_rectangle(
     text_input: &zwp_text_input_v3::ZwpTextInputV3,
     rectangle: ImeCursorRectangle,
 ) {
-    text_input.set_cursor_rectangle(
-        rectangle.x,
-        rectangle.y,
-        rectangle.width,
-        rectangle.height,
-    );
+    text_input.set_cursor_rectangle(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
 }
 
 #[derive(Clone)]
@@ -318,6 +313,8 @@ pub struct DragState {
     data_offer: Option<wl_data_offer::WlDataOffer>,
     window: Option<WaylandWindowStatePtr>,
     position: Point<Pixels>,
+    entered: bool,
+    pending_drop: bool,
 }
 
 pub struct ClickState {
@@ -908,6 +905,8 @@ impl WaylandClient {
                 data_offer: None,
                 window: None,
                 position: Point::default(),
+                entered: false,
+                pending_drop: false,
             },
             click: ClickState {
                 last_click: Instant::now(),
@@ -1952,9 +1951,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
             }
             zwp_text_input_v3::Event::Done { serial } => {
                 let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
-                state
-                    .serial_tracker
-                    .update(SerialKind::InputMethod, serial);
+                state.serial_tracker.update(SerialKind::InputMethod, serial);
                 let commit_count = state.text_input_commit_count;
                 let Some(window) = state.keyboard_focused_window.clone() else {
                     state.pending_preedit = None;
@@ -2574,6 +2571,13 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     const ACTIONS: DndAction = DndAction::Copy;
                     data_offer.set_actions(ACTIONS, ACTIONS);
 
+                    let position = Point::new(x.into(), y.into());
+                    state.drag.data_offer = Some(data_offer.clone());
+                    state.drag.window = Some(drag_window.clone());
+                    state.drag.position = position;
+                    state.drag.entered = false;
+                    state.drag.pending_drop = false;
+
                     let pipe = Pipe::new().unwrap();
                     data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
                         BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
@@ -2613,9 +2617,16 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 .collect();
                             let position = Point::new(x.into(), y.into());
 
-                            // Prevent dropping text from other programs.
                             if paths.is_empty() {
                                 data_offer.destroy();
+                                let client = this.get_client();
+                                client.borrow_mut().drag = DragState {
+                                    data_offer: None,
+                                    window: None,
+                                    position: Point::default(),
+                                    entered: false,
+                                    pending_drop: false,
+                                };
                                 return;
                             }
 
@@ -2626,12 +2637,24 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
 
                             let client = this.get_client();
                             let mut state = client.borrow_mut();
-                            state.drag.data_offer = Some(data_offer);
-                            state.drag.window = Some(drag_window.clone());
                             state.drag.position = position;
-
+                            state.drag.entered = true;
+                            let pending_drop = state.drag.pending_drop;
                             drop(state);
                             drag_window.handle_input(input);
+                            if pending_drop {
+                                drag_window.request_dnd_activation();
+                                drag_window.handle_input(PlatformInput::FileDrop(
+                                    FileDropEvent::Submit { position },
+                                ));
+                                this.get_client().borrow_mut().drag = DragState {
+                                    data_offer: None,
+                                    window: None,
+                                    position: Point::default(),
+                                    entered: false,
+                                    pending_drop: false,
+                                };
+                            }
                         })
                         .detach();
                 }
@@ -2651,11 +2674,13 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                let data_offer = state.drag.data_offer.clone().unwrap();
-                data_offer.destroy();
+                if let Some(data_offer) = state.drag.data_offer.take() {
+                    data_offer.destroy();
+                }
 
-                state.drag.data_offer = None;
                 state.drag.window = None;
+                state.drag.entered = false;
+                state.drag.pending_drop = false;
 
                 let input = PlatformInput::FileDrop(FileDropEvent::Exited {});
                 drop(state);
@@ -2665,21 +2690,24 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                let data_offer = state.drag.data_offer.clone().unwrap();
-                data_offer.finish();
-                data_offer.destroy();
+                if let Some(data_offer) = state.drag.data_offer.take() {
+                    data_offer.finish();
+                    data_offer.destroy();
+                }
 
-                state.drag.data_offer = None;
-                state.drag.window = None;
-
-                let input = PlatformInput::FileDrop(FileDropEvent::Submit {
-                    position: state.drag.position,
-                });
-                drop(state);
-                // mezon vendor edit: request activation with the drag serial
-                // before dispatching the drop (see request_dnd_activation).
-                drag_window.request_dnd_activation();
-                drag_window.handle_input(input);
+                let position = state.drag.position;
+                let entered = state.drag.entered;
+                if entered {
+                    state.drag.window = None;
+                    state.drag.entered = false;
+                    state.drag.pending_drop = false;
+                    drop(state);
+                    drag_window.request_dnd_activation();
+                    drag_window
+                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Submit { position }));
+                } else {
+                    state.drag.pending_drop = true;
+                }
             }
             _ => {}
         }

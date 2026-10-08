@@ -18,7 +18,8 @@
 use crate::{OngoingScroll, PinchEvent};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
-    Display, Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
+    Display, Element, ElementId, Entity, EntityId, ExternalPaths, FocusHandle, Global,
+    GlobalElementId, Hitbox,
     HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
     KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
@@ -53,6 +54,20 @@ const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 const SCROLL_HOVER_RELEASE_DELAY: Duration = Duration::from_millis(300);
+
+
+fn drop_hitbox_accepts(hitbox: &Hitbox, window: &Window, _cx: &App, drag_type: TypeId) -> bool {
+    if hitbox.is_hovered(window) {
+        return true;
+    }
+    if drag_type != TypeId::of::<ExternalPaths>() {
+        return false;
+    }
+    if hitbox.id.is_hovered_ignoring_last_input(window) {
+        return true;
+    }
+    hitbox.bounds.contains(&window.mouse_position())
+}
 
 /// The styling information for a given group.
 pub struct GroupStyle {
@@ -2767,28 +2782,34 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             window.on_mouse_event({
                 move |_: &MouseUpEvent, phase, window, cx| {
-                    if let Some(drag) = &cx.active_drag
-                        && phase == DispatchPhase::Bubble
-                        && hitbox.is_hovered(window)
-                    {
-                        let drag_state_type = drag.value.as_ref().type_id();
-                        for (drop_state_type, listener) in &drop_listeners {
-                            if *drop_state_type == drag_state_type {
-                                let drag = cx
-                                    .active_drag
-                                    .take()
-                                    .expect("checked for type drag state type above");
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let Some(drag) = &cx.active_drag else {
+                        return;
+                    };
+                    if !drop_hitbox_accepts(&hitbox, window, cx, drag.value.as_ref().type_id()) {
+                        return;
+                    }
+                    let drag_state_type = drag.value.as_ref().type_id();
+                    for (drop_state_type, listener) in &drop_listeners {
+                        if *drop_state_type == drag_state_type {
+                            let drag = cx
+                                .active_drag
+                                .take()
+                                .expect("checked for type drag state type above");
 
-                                let mut can_drop = true;
-                                if let Some(predicate) = &can_drop_predicate {
-                                    can_drop = predicate(drag.value.as_ref(), window, cx);
-                                }
+                            let mut can_drop = true;
+                            if let Some(predicate) = &can_drop_predicate {
+                                can_drop = predicate(drag.value.as_ref(), window, cx);
+                            }
 
-                                if can_drop {
-                                    listener(drag.value.as_ref(), window, cx);
-                                    window.refresh();
-                                    cx.stop_propagation();
-                                }
+                            if can_drop {
+                                listener(drag.value.as_ref(), window, cx);
+                                window.refresh();
+                                cx.stop_propagation();
+                            } else {
+                                cx.active_drag = Some(drag);
                             }
                         }
                     }

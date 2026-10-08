@@ -279,7 +279,9 @@ fn ime_hide_only_should_fall_through(
         && filtered
         && !is_release
         && is_editing_key(keyval)
-        && events.iter().all(|event| matches!(event, ImEvent::HidePreedit))
+        && events
+            .iter()
+            .all(|event| matches!(event, ImEvent::HidePreedit))
 }
 
 #[derive(Debug)]
@@ -317,6 +319,7 @@ pub struct Xdnd {
     other_window: xproto::Window,
     drag_type: u32,
     retrieved: bool,
+    pending_drop: bool,
     position: Point<Pixels>,
     timestamp: u32,
 }
@@ -1277,11 +1280,7 @@ impl X11Client {
                     maybe_append_fcitx_space(keyval, &mut events);
                 }
                 let pass_edit_to_app = ime_hide_only_should_fall_through(
-                    composing,
-                    keyval,
-                    is_release,
-                    filtered,
-                    &events,
+                    composing, keyval, is_release, filtered, &events,
                 );
                 if !events.is_empty() {
                     self.apply_im_events(
@@ -1716,6 +1715,13 @@ impl X11Client {
                             state.xdnd_state.drag_type = atom;
                         }
                     }
+                    if let Ok(pos) = get_reply(
+                        || "Failed to query pointer position",
+                        state.xcb_connection.query_pointer(event.window),
+                    ) {
+                        state.xdnd_state.position =
+                            Point::new(px(pos.win_x as f32), px(pos.win_y as f32));
+                    }
                 } else if event.type_ == state.atoms.XdndLeave {
                     let position = state.xdnd_state.position;
                     drop(state);
@@ -1724,7 +1730,16 @@ impl X11Client {
                     window.handle_input(PlatformInput::FileDrop(FileDropEvent::Exited {}));
                     self.0.borrow_mut().xdnd_state = Xdnd::default();
                 } else if event.type_ == state.atoms.XdndPosition {
-                    if let Ok(pos) = get_reply(
+                    let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+                    if let Some(position) = xdnd_root_to_window_position(
+                        &state.xcb_connection,
+                        root,
+                        event.window,
+                        state.scale_factor,
+                        arg2,
+                    ) {
+                        state.xdnd_state.position = position;
+                    } else if let Ok(pos) = get_reply(
                         || "Failed to query pointer position",
                         state.xcb_connection.query_pointer(event.window),
                     ) {
@@ -1779,10 +1794,16 @@ impl X11Client {
                         drop_time,
                     );
                     let position = state.xdnd_state.position;
-                    drop(state);
-                    window
-                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Submit { position }));
-                    self.0.borrow_mut().xdnd_state = Xdnd::default();
+                    let retrieved = state.xdnd_state.retrieved;
+                    if retrieved {
+                        drop(state);
+                        window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
+                            position,
+                        }));
+                        self.0.borrow_mut().xdnd_state = Xdnd::default();
+                    } else {
+                        state.xdnd_state.pending_drop = true;
+                    }
                 }
             }
             Event::SelectionNotify(event) => {
@@ -1815,13 +1836,24 @@ impl X11Client {
                             }
                         })
                         .collect();
+                    let position = state.xdnd_state.position;
+                    let pending_drop = state.xdnd_state.pending_drop;
                     let input = PlatformInput::FileDrop(FileDropEvent::Entered {
-                        position: state.xdnd_state.position,
+                        position,
                         paths: gpui::ExternalPaths(paths),
                     });
                     drop(state);
                     window.handle_input(input);
-                    self.0.borrow_mut().xdnd_state.retrieved = true;
+                    let mut state = self.0.borrow_mut();
+                    state.xdnd_state.retrieved = true;
+                    if pending_drop {
+                        state.xdnd_state.pending_drop = false;
+                        drop(state);
+                        window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
+                            position,
+                        }));
+                        self.0.borrow_mut().xdnd_state = Xdnd::default();
+                    }
                 }
             }
             Event::ConfigureNotify(event) => {
@@ -3228,6 +3260,26 @@ fn xdnd_is_atom_supported(atom: u32, atoms: &XcbAtoms) -> bool {
         || atom == atoms.TextUriList
 }
 
+fn xdnd_root_to_window_position(
+    connection: &XCBConnection,
+    root: xproto::Window,
+    target: xproto::Window,
+    scale_factor: f32,
+    packed_root_xy: u32,
+) -> Option<Point<Pixels>> {
+    let root_x = (packed_root_xy >> 16) as i16;
+    let root_y = (packed_root_xy & 0xffff) as i16;
+    let reply = get_reply(
+        || "Failed to translate XDND root position to window coordinates",
+        connection.translate_coordinates(root, target, root_x, root_y),
+    )
+    .ok()?;
+    Some(Point::new(
+        px(f32::from(reply.dst_x) / scale_factor),
+        px(f32::from(reply.dst_y) / scale_factor),
+    ))
+}
+
 fn xdnd_get_supported_atom(
     xcb_connection: &XCBConnection,
     supported_atoms: &XcbAtoms,
@@ -4217,7 +4269,11 @@ mod tests {
             &[ImEvent::HidePreedit],
         ));
         assert!(ime_hide_only_should_fall_through(
-            true, BACKSPACE, false, true, &[]
+            true,
+            BACKSPACE,
+            false,
+            true,
+            &[]
         ));
         assert!(!ime_hide_only_should_fall_through(
             true,
