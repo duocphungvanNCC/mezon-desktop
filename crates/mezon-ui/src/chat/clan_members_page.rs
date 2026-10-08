@@ -89,7 +89,12 @@ struct ExtraRolesTooltip {
 
 impl Render for ExtraRolesTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut roles = div().flex().flex_col().items_start().gap_1();
+        let mut roles = div()
+            .font_family(crate::theme::ui_font_family(cx))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap_1();
         for role in &self.roles {
             roles = roles.child(role_badge(role, true, cx.theme(), cx));
         }
@@ -1277,6 +1282,7 @@ fn role_badge(
             element.child(
                 img(crate::util::imgproxy::role_icon_url(cx, &role.icon))
                     .size(px(12.))
+                    .aspect_square()
                     .flex_shrink_0()
                     .when_some(crate::image_cache::role_icon_cache(cx), |el, cache| {
                         el.image_cache(&cache)

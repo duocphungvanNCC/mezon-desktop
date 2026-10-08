@@ -10,7 +10,7 @@ use mezon_client::transport::{
 use crate::album_layout::AlbumLayout;
 use crate::channel::ChannelType;
 use crate::config::AppConfig;
-use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, MessageRef, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -95,23 +95,6 @@ impl MessageAttachment {
         Self::media_is_video(&self.filetype, &self.url)
     }
 
-    /// A Matroska video (`.webm`, and the `video/matroska` MIME a browser
-    /// recorder writes) rides on whatever demuxer the platform player has:
-    /// GStreamer reads it, AVFoundation (macOS) and Media Foundation (Windows)
-    /// do not. There the inline player can only mount, fail, and sit on a play
-    /// button that never does anything, so hand the file to the download box
-    /// instead. Audio `.webm` (voice messages) is decoded in-app by symphonia
-    /// and is deliberately left alone.
-    fn is_undecodable_matroska(&self, ext: Option<&str>) -> bool {
-        if cfg!(target_os = "linux") || self.filetype.contains("audio") {
-            return false;
-        }
-        matches!(
-            self.filetype.as_str(),
-            "video/webm" | "video/matroska" | "video/x-matroska"
-        ) || ext == Some("webm")
-    }
-
     pub fn is_unsupported_media(&self) -> bool {
         if matches!(
             self.filetype.as_str(),
@@ -131,9 +114,6 @@ impl MessageAttachment {
             return true;
         }
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
-        if self.is_undecodable_matroska(ext.as_deref()) {
-            return true;
-        }
         matches!(
             ext.as_deref(),
             Some(
@@ -258,6 +238,24 @@ pub struct MessageReference {
     pub has_attachment: bool,
     pub has_embed: bool,
     pub is_poll: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Waiting,
+    Answered(MessageId),
+    NoResponse,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInvocation {
+    pub menu_name: SharedString,
+    pub arguments: SharedString,
+    pub bot_id: i64,
+    pub bot_name: SharedString,
+    pub status: CommandStatus,
+    pub resendable: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -752,6 +750,7 @@ pub struct Message {
     pub local_date: Option<chrono::NaiveDate>,
     pub code: MessageCode,
     pub is_edited: bool,
+    pub hide_editted: bool,
     pub is_forwarded: bool,
     pub show_forwarded_label: bool,
     pub combined_with_prev: bool,
@@ -781,6 +780,7 @@ pub struct Message {
     /// re-send the whole payload (markdown/emoji/hashtag/embed tokens) rather
     /// than just the plain text. `None` for optimistic messages.
     pub raw_content: Option<Arc<str>>,
+    pub command: Option<Box<CommandInvocation>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1852,6 +1852,7 @@ impl Message {
             local_date: local_datetime(create_time).map(|dt| dt.date_naive()),
             code: MessageCode::Chat,
             is_edited: false,
+            hide_editted: false,
             is_forwarded: false,
             show_forwarded_label: false,
             combined_with_prev: false,
@@ -1878,7 +1879,13 @@ impl Message {
             album_layout: None,
             viewer_media: Vec::new().into(),
             raw_content: None,
+            command: None,
         }
+    }
+
+    pub fn with_command(mut self, command: CommandInvocation) -> Self {
+        self.command = Some(Box::new(command));
+        self
     }
 
     pub fn with_sort_id(mut self, sort_id: i64) -> Self {
@@ -1889,6 +1896,14 @@ impl Message {
     pub fn with_raw_content(mut self, raw: &str) -> Self {
         self.raw_content = (!raw.is_empty()).then(|| Arc::from(raw));
         self
+    }
+
+    pub fn is_sent_by(&self, user_id: &str) -> bool {
+        !user_id.is_empty() && self.sender_id == user_id
+    }
+
+    pub fn message_ref(&self) -> MessageRef {
+        MessageRef::new(self.channel_id, self.id)
     }
 
     pub fn is_sending(&self) -> bool {
@@ -1968,6 +1983,7 @@ impl Message {
 
     pub fn with_edited(mut self, update_time: i64, hide_editted: bool) -> Self {
         self.update_time = update_time;
+        self.hide_editted = hide_editted;
         self.is_edited = update_time > 0 && update_time > self.create_time && !hide_editted;
         self
     }
@@ -2046,6 +2062,31 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_card_groups_with_its_own_senders_messages_only() {
+        let command = || CommandInvocation {
+            menu_name: "roll".into(),
+            arguments: "2d6".into(),
+            bot_id: 9,
+            bot_name: "bot".into(),
+            status: CommandStatus::Waiting,
+            resendable: true,
+        };
+        let mine = Message::new(MessageId(1), "hello", "7", "me", 100);
+        let mut card_after_mine =
+            Message::new(MessageId(2), "*roll 2d6", "7", "me", 101).with_command(command());
+        card_after_mine.code = MessageCode::Ephemeral;
+        let theirs = Message::new(MessageId(3), "hi", "8", "them", 102);
+        let mut card_after_theirs =
+            Message::new(MessageId(4), "*roll 2d6", "7", "me", 103).with_command(command());
+        card_after_theirs.code = MessageCode::Ephemeral;
+        assert!(message_combined_with_prev(Some(&mine), &card_after_mine));
+        assert!(!message_combined_with_prev(
+            Some(&theirs),
+            &card_after_theirs
+        ));
+    }
 
     fn forwarded(id: i64, sender: &str, time: i64) -> Message {
         Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)
@@ -3068,20 +3109,17 @@ mod tests {
     }
 
     #[test]
-    fn matroska_video_is_unsupported_where_the_platform_cannot_demux_it() {
-        // GStreamer reads Matroska; AVFoundation and Media Foundation do not.
-        let expected = !cfg!(target_os = "linux");
-
+    fn matroska_video_is_supported_on_desktop() {
         let webm = attachment("video/webm", "https://cdn.example/x.webm");
-        assert_eq!(webm.is_unsupported_media(), expected);
+        assert!(!webm.is_unsupported_media());
+        assert!(webm.is_video());
 
-        // A browser recorder writes `video/matroska`, and the web client uploads
-        // the bare "video" category instead of a MIME, so the extension has to
-        // carry the decision on its own.
         let matroska = attachment("video/matroska", "https://cdn.example/1234.webm");
-        assert_eq!(matroska.is_unsupported_media(), expected);
+        assert!(!matroska.is_unsupported_media());
+        assert!(matroska.is_video());
         let uploaded = attachment("video", "https://cdn.example/1234.webm");
-        assert_eq!(uploaded.is_unsupported_media(), expected);
+        assert!(!uploaded.is_unsupported_media());
+        assert!(uploaded.is_video());
     }
 
     #[test]

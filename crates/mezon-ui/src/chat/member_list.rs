@@ -11,9 +11,10 @@ use mezon_store::{
     BannedUsersStore, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
     ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
     DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
-    PermissionStore, PresenceEvent, PresenceStore, ProfileContext, RolesEvent, RolesStore,
-    Settings, UserId, current_user_presence, current_user_status, split_members_by_status,
+    GroupMembersEvent, GroupMembersStore, InVoiceInfo, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore, ProfileContext,
+    RolesEvent, RolesStore, Settings, UserId, current_user_presence, current_user_status,
+    split_members_by_status,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -31,6 +32,7 @@ use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
 use crate::util::text_utils::normalize_search_string;
+use crate::util::user_status::VoiceActivityBadge;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemberSource {
@@ -67,7 +69,7 @@ struct MemberRow {
     online: bool,
     presence: DmAvatarPresence,
     user_status: SharedString,
-    in_voice: bool,
+    voice_badge: Option<VoiceActivityBadge>,
     is_owner: bool,
     role_color: Option<Hsla>,
     rcm_id: SharedString,
@@ -80,7 +82,7 @@ struct RawMember {
     online: bool,
     presence: DmAvatarPresence,
     user_status: String,
-    in_voice: bool,
+    voice_badge: Option<VoiceActivityBadge>,
     role_color: Option<Hsla>,
 }
 
@@ -136,17 +138,39 @@ impl MemberListPanel {
 
     fn menu_args(&self, panel: WeakEntity<Self>, cx: &App) -> Option<MemberMenuArgs> {
         let state = self.open_menu.as_ref()?;
-        Some(MemberMenuArgs {
-            user_id: state.user_id,
-            display_name: state.display_name.clone(),
-            position: state.position,
-            ban_sub_open: state.ban_sub_open,
+        let permissions = MemberMenuPermissions::resolve(state.user_id, self.active_context, cx);
+        Some(self.member_menu_args(
+            state.user_id,
+            state.display_name.clone(),
+            state.position,
+            state.ban_sub_open,
+            panel,
+            permissions,
+            cx,
+        ))
+    }
+
+    fn member_menu_args(
+        &self,
+        user_id: UserId,
+        display_name: SharedString,
+        position: Point<Pixels>,
+        ban_sub_open: bool,
+        panel: WeakEntity<Self>,
+        permissions: MemberMenuPermissions,
+        cx: &App,
+    ) -> MemberMenuArgs {
+        MemberMenuArgs {
+            user_id,
+            display_name,
+            position,
+            ban_sub_open,
             context: self.active_context,
             settings: self.settings.clone(),
             locale: self.settings.read(cx).language.clone(),
             panel,
-            permissions: MemberMenuPermissions::resolve(state.user_id, self.active_context, cx),
-        })
+            permissions,
+        }
     }
 
     fn probe_open_menu(
@@ -164,15 +188,41 @@ impl MemberListPanel {
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("user {user_id} is not in the visible member list"))?;
+        self.open_member_menu(user_id, display_name, position, cx);
+        Ok(())
+    }
+
+    fn open_member_menu(
+        &mut self,
+        user_id: UserId,
+        display_name: SharedString,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let permissions = MemberMenuPermissions::resolve(user_id, self.active_context, cx);
+        let args = self.member_menu_args(
+            user_id,
+            display_name.clone(),
+            position,
+            false,
+            cx.entity().downgrade(),
+            permissions,
+            cx,
+        );
+        if build_member_menu(args).is_empty() {
+            if self.open_menu.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
         self.open_menu = Some(MemberMenuState {
             user_id,
             display_name,
             position,
             ban_sub_open: false,
         });
-        self.ensure_ban_list_loaded(user_id, cx);
+        self.ensure_ban_list_loaded(permissions, cx);
         cx.notify();
-        Ok(())
     }
 
     fn probe_close_menu(&mut self, cx: &mut Context<Self>) {
@@ -180,8 +230,11 @@ impl MemberListPanel {
         cx.notify();
     }
 
-    fn ensure_ban_list_loaded(&mut self, user_id: UserId, cx: &mut Context<Self>) {
-        let permissions = MemberMenuPermissions::resolve(user_id, self.active_context, cx);
+    fn ensure_ban_list_loaded(
+        &mut self,
+        permissions: MemberMenuPermissions,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(clan_id), Some(channel_id)) = (permissions.clan_id, permissions.channel_id)
         else {
             return;
@@ -222,6 +275,9 @@ impl MemberListPanel {
             let key = route_key(this.source, cx);
             if key != this.route_key {
                 this.route_key = key;
+                if this.open_menu.take().is_some() {
+                    cx.notify();
+                }
                 this.rebuild(cx);
             }
         }));
@@ -646,13 +702,20 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                         || presence.user_status(member.id()).unwrap_or("").to_string(),
                         |status| status.custom_status.clone(),
                     ),
-                    in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
+                    voice_badge: member_voice_badge(
+                        is_online,
+                        channels.in_voice_status(member.id()),
+                    ),
                     role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
                 }
             })
             .collect()
     };
     (to_raw(&online_ids, true), to_raw(&offline_ids, false))
+}
+
+fn member_voice_badge(is_online: bool, info: Option<InVoiceInfo>) -> Option<VoiceActivityBadge> {
+    is_online.then_some(info).flatten().map(Into::into)
 }
 
 fn raw_member_json(member: &RawMember) -> serde_json::Value {
@@ -662,7 +725,8 @@ fn raw_member_json(member: &RawMember) -> serde_json::Value {
         "online": member.online,
         "presence": format!("{:?}", member.presence),
         "user_status": member.user_status,
-        "in_voice": member.in_voice,
+        "in_voice": member.voice_badge.is_some(),
+        "sharing_screen": member.voice_badge == Some(VoiceActivityBadge::SharingScreen),
     })
 }
 
@@ -836,7 +900,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
                     || presence.user_status(member.id()).unwrap_or("").to_string(),
                     |status| status.custom_status.clone(),
                 ),
-                in_voice: false,
+                voice_badge: None,
                 role_color: None,
             }
         })
@@ -853,6 +917,7 @@ pub(crate) struct MentionMemberRaw {
     pub username_lc: String,
     pub display_norm: String,
     pub username_norm: String,
+    pub alt_norm: String,
 }
 
 fn active_dm(cx: &App) -> Option<ChannelId> {
@@ -877,6 +942,7 @@ fn mention_member_raw(
         username_lc: username.to_lowercase(),
         display_norm: normalize_search_string(name),
         username_norm: normalize_search_string(username),
+        alt_norm: String::new(),
     }
 }
 
@@ -917,6 +983,27 @@ pub(crate) fn mention_direct_id(cx: &App) -> Option<ChannelId> {
 
 pub(crate) fn mention_private_channel(cx: &App) -> Option<ChannelId> {
     mention_channel_context(cx).and_then(|ctx| ctx.private_channel)
+}
+
+pub(crate) fn mention_remote_search_scope(cx: &App) -> Option<(ClanId, Option<ChannelId>)> {
+    let ctx = mention_channel_context(cx)?;
+    ClanMembersStore::global(cx)
+        .read(cx)
+        .roster_capped(ctx.clan_id)
+        .then_some((ctx.clan_id, ctx.private_channel))
+}
+
+pub(crate) fn mention_member_from_clan_member(member: &ClanMember) -> MentionMemberRaw {
+    let mut raw = mention_member_raw(
+        member.user.id.to_string(),
+        member.name(),
+        &member.user.username,
+        member.avatar(),
+    );
+    if !member.clan_nick.is_empty() && !member.user.display_name.is_empty() {
+        raw.alt_norm = normalize_search_string(&member.user.display_name);
+    }
+    raw
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -1004,15 +1091,8 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
             None => store.members(ctx.clan_id),
         };
         members
-            .iter()
-            .map(|m| {
-                mention_member_raw(
-                    m.user.id.to_string(),
-                    m.name(),
-                    &m.user.username,
-                    m.avatar(),
-                )
-            })
+            .into_iter()
+            .map(mention_member_from_clan_member)
             .collect::<Vec<_>>()
     };
     pool.sort_by(|a, b| a.display_lc.cmp(&b.display_lc));
@@ -1053,7 +1133,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         online: raw.online,
         presence: raw.presence,
         user_status: single_line(raw.user_status).into(),
-        in_voice: raw.in_voice,
+        voice_badge: raw.voice_badge,
         is_owner: owner_id == Some(raw.user_id),
         role_color: raw.role_color,
     })
@@ -1110,6 +1190,7 @@ fn render_member(
     theme: &Theme,
     member: &MemberRow,
     in_voice_label: &SharedString,
+    share_screen_label: &SharedString,
     avatar_image_cache: &Entity<LruImageCache>,
     small_avatar_image_cache: &Entity<LruImageCache>,
     context: Option<ProfileContext>,
@@ -1156,14 +1237,17 @@ fn render_member(
         color.a *= 0.6;
         color
     };
-    let status = if member.in_voice {
-        Some((in_voice_label.clone(), status_color))
+    let status = if let Some(voice_badge) = member.voice_badge {
+        let label = voice_badge
+            .member_label(in_voice_label, share_screen_label)
+            .clone();
+        Some((label, status_color))
     } else {
         (!member.user_status.is_empty()).then(|| (member.user_status.clone(), dim(status_color)))
     };
-    let status_icon = member.in_voice.then(|| {
+    let status_icon = member.voice_badge.map(|voice_badge| {
         (
-            IconName::Speaker,
+            voice_badge.icon(),
             crate::util::user_status::in_voice_icon_color(theme).into(),
         )
     });
@@ -1182,14 +1266,7 @@ fn render_member(
             move |position, _window, cx| {
                 if let Some(p) = panel.upgrade() {
                     p.update(cx, |this, cx| {
-                        this.open_menu = Some(MemberMenuState {
-                            user_id,
-                            display_name: display_name.clone(),
-                            position,
-                            ban_sub_open: false,
-                        });
-                        this.ensure_ban_list_loaded(user_id, cx);
-                        cx.notify();
+                        this.open_member_menu(user_id, display_name.clone(), position, cx);
                     });
                 }
             }
@@ -1274,6 +1351,8 @@ impl Render for MemberListPanel {
             .map(|state| (state.popover.clone(), state.position));
 
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
+        let share_screen_label: SharedString =
+            mezon_i18n::t(&locale, "memberPage.shareScreen").into();
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
             let locale = locale.clone();
@@ -1287,6 +1366,7 @@ impl Render for MemberListPanel {
                         &theme,
                         member,
                         &in_voice_label,
+                        &share_screen_label,
                         &avatar_image_cache,
                         &small_avatar_image_cache,
                         context,
@@ -1513,8 +1593,10 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
 
     let mut menu = ContextMenu::new()
         .on_submenu_close(close_member_submenus(panel.clone()))
-        .on_dismiss(dismiss)
-        .item(t("contextMenu.member.profile"), {
+        .on_dismiss(dismiss);
+
+    if !matches!(context, Some(ProfileContext::Direct(_))) {
+        menu = menu.item(t("contextMenu.member.profile"), {
             let panel = panel.clone();
             let settings = settings.clone();
             move |_window: &mut Window, cx: &mut App| {
@@ -1539,6 +1621,7 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
                 });
             }
         });
+    }
 
     if !is_self {
         menu = menu.item(t("contextMenu.member.message"), {
@@ -1793,9 +1876,41 @@ fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &st
 }
 
 #[cfg(test)]
+mod voice_status_tests {
+    use super::member_voice_badge;
+    use crate::util::user_status::VoiceActivityBadge;
+    use mezon_store::{ChannelId, ClanId, InVoiceInfo};
+
+    fn voice_info(sharing_screen: bool) -> InVoiceInfo {
+        InVoiceInfo {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            sharing_screen,
+        }
+    }
+
+    #[test]
+    fn member_voice_badge_distinguishes_screen_share() {
+        assert_eq!(
+            member_voice_badge(true, Some(voice_info(false))),
+            Some(VoiceActivityBadge::InVoice)
+        );
+        assert_eq!(
+            member_voice_badge(true, Some(voice_info(true))),
+            Some(VoiceActivityBadge::SharingScreen)
+        );
+        assert_eq!(member_voice_badge(false, Some(voice_info(true))), None);
+    }
+}
+
+#[cfg(test)]
 mod permission_tests {
-    use super::can_remove_from_group;
-    use mezon_store::{DirectKind, UserId};
+    use super::{
+        MemberListPanel, MemberMenuArgs, MemberMenuPermissions, build_member_menu,
+        can_remove_from_group,
+    };
+    use gpui::{AppContext, SharedString, TestAppContext, WeakEntity, point, px};
+    use mezon_store::{ChannelId, ClanId, DirectKind, ProfileContext, Settings, UserId};
 
     const ME: Option<UserId> = Some(UserId(1));
 
@@ -1832,6 +1947,68 @@ mod permission_tests {
     #[test]
     fn a_signed_out_reader_never_matches_a_missing_creator() {
         assert!(!can_remove_from_group(false, None, DirectKind::Group, None));
+    }
+
+    fn menu_items(
+        context: ProfileContext,
+        permissions: MemberMenuPermissions,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        let settings = cx.update(|cx| cx.new(|_| Settings::default()));
+        build_member_menu(MemberMenuArgs {
+            user_id: UserId(2),
+            display_name: SharedString::from("Member"),
+            position: point(px(0.), px(0.)),
+            ban_sub_open: false,
+            context: Some(context),
+            settings,
+            locale: "en".to_string(),
+            panel: WeakEntity::<MemberListPanel>::new_invalid(),
+            permissions,
+        })
+        .probe_items()
+        .into_iter()
+        .map(|item| item.label)
+        .collect()
+    }
+
+    #[gpui::test]
+    fn group_member_menu_does_not_show_profile(cx: &mut TestAppContext) {
+        let profile = mezon_i18n::t("en", "contextMenu.member.profile");
+        let items = menu_items(
+            ProfileContext::Direct(ChannelId(1)),
+            MemberMenuPermissions::default(),
+            cx,
+        );
+        assert!(!items.is_empty());
+        assert!(!items.iter().any(|item| item == &profile));
+    }
+
+    #[gpui::test]
+    fn clan_member_menu_still_shows_profile(cx: &mut TestAppContext) {
+        let profile = mezon_i18n::t("en", "contextMenu.member.profile");
+        let items = menu_items(
+            ProfileContext::Clan(ClanId(1)),
+            MemberMenuPermissions {
+                is_self: true,
+                ..Default::default()
+            },
+            cx,
+        );
+        assert!(items.iter().any(|item| item == &profile));
+    }
+
+    #[gpui::test]
+    fn group_member_menu_is_empty_when_self_has_no_actions(cx: &mut TestAppContext) {
+        let items = menu_items(
+            ProfileContext::Direct(ChannelId(1)),
+            MemberMenuPermissions {
+                is_self: true,
+                ..Default::default()
+            },
+            cx,
+        );
+        assert!(items.is_empty());
     }
 }
 

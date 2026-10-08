@@ -5,6 +5,7 @@ use crate::auth::login_view::LoginView;
 use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
+use crate::chat::media_permission_prompt::MediaPermissionOverlay;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
@@ -15,8 +16,9 @@ use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
 use gpui::{
-    Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
-    MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
+    Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FocusHandle,
+    FontWeight, MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     AuthState, ChannelList, ClanId, ClanList, ConnectionStore, OnboardingStore, Settings,
@@ -24,6 +26,8 @@ use mezon_store::{
 use std::time::{Duration, Instant};
 
 pub struct RootView {
+    focus_handle: FocusHandle,
+    reclaim_focus_after_route: bool,
     title_bar: Entity<TitleBar>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
@@ -40,6 +44,7 @@ pub struct RootView {
     connecting_since: Option<Instant>,
     network_online: bool,
     call_overlay: Entity<CallOverlay>,
+    media_permission_overlay: Entity<MediaPermissionOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
     tour_autostart: Option<Task<()>>,
@@ -62,6 +67,10 @@ fn surface_voice_toast(
             let key = match cause {
                 mezon_store::RemovalCause::Kicked => "channelVoice.removedFromChannel",
                 mezon_store::RemovalCause::AloneTimeout => "channelVoice.disconnectedAlone",
+                mezon_store::RemovalCause::DuplicateSession => {
+                    "channelVoice.disconnectedOtherDevice"
+                }
+                mezon_store::RemovalCause::Disconnected => "channelVoice.disconnectedRejoin",
             };
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
@@ -167,6 +176,7 @@ impl RootView {
         });
 
         cx.observe(&Router::global(cx), |this, _router, cx| {
+            this.reclaim_focus_after_route = true;
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
@@ -353,8 +363,12 @@ impl RootView {
             (None, None)
         };
         let call_overlay = cx.new(CallOverlay::new);
+        let media_permission_overlay = cx.new(MediaPermissionOverlay::new);
         Self {
+            focus_handle: cx.focus_handle().tab_stop(false),
+            reclaim_focus_after_route: true,
             call_overlay,
+            media_permission_overlay,
             title_bar,
             auth_state,
             login_view,
@@ -483,10 +497,31 @@ impl RootView {
             }
         }
     }
+
+    fn ensure_shell_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+            self.reclaim_focus_after_route = false;
+            return;
+        }
+        if !self.reclaim_focus_after_route {
+            return;
+        }
+        self.reclaim_focus_after_route = false;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                if window.context_stack().is_empty() {
+                    this.focus_handle.focus(window, cx);
+                }
+            });
+        });
+    }
 }
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_shell_focus(window, cx);
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
@@ -505,7 +540,7 @@ impl Render for RootView {
         }
 
         let locale = self.cached_locale.as_str();
-        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
+        let base_font_family = crate::theme::ui_font_family(cx);
         let theme = cx.theme();
 
         let mut preview_bar = None;
@@ -567,6 +602,14 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
+            .key_context(crate::APP_SHELL_KEY_CONTEXT)
+            .child(
+                div()
+                    .id("app-shell-focus")
+                    .absolute()
+                    .size_0()
+                    .track_focus(&self.focus_handle),
+            )
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()
@@ -609,6 +652,7 @@ impl Render for RootView {
             })
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
+            .child(self.media_permission_overlay.clone())
     }
 }
 

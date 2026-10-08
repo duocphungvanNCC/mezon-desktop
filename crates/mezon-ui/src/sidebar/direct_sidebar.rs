@@ -6,8 +6,8 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, ChannelEvent, ChannelId, ChannelList, ClanId, DirectChannel,
-    DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
+    AccountEvent, AccountStore, BuzzStore, ChannelEvent, ChannelId, ChannelList, ClanId,
+    DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
     NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId, UserPresence,
     current_user_presence,
 };
@@ -21,10 +21,11 @@ use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::command_palette::CommandPaletteModal;
-use crate::components::compositions::{DM_ROW_HEIGHT, DmRow, DmVoiceBadge};
+use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::user_status::VoiceActivityBadge;
 
 const PINNED_LIST_MAX_HEIGHT: f32 = 215.;
 
@@ -50,8 +51,9 @@ struct DmItem {
     label: SharedString,
     kind: DirectKind,
     unread: bool,
+    buzz: bool,
     presence_badge: DmAvatarPresence,
-    voice_badge: Option<DmVoiceBadge>,
+    voice_badge: Option<VoiceActivityBadge>,
     muted: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -118,9 +120,18 @@ pub struct DirectSidebar {
     dm_items: Rc<Vec<DmItem>>,
     dm_items_fingerprint: u64,
     pending_rebuild: bool,
+    pending_dm_reveal: Option<ChannelId>,
+    last_revealed_dm: Option<ChannelId>,
     pinned_scroll: gpui::ScrollHandle,
     open_menu: Option<DmMenu>,
     image_cache: Entity<crate::image_cache::LruImageCache>,
+}
+
+fn route_dm_id(cx: &App) -> Option<ChannelId> {
+    match Router::global(cx).read(cx).route() {
+        Route::DirectMessage { direct_id, .. } => Some(direct_id),
+        _ => None,
+    }
 }
 
 fn is_dm_route(cx: &App) -> bool {
@@ -130,17 +141,13 @@ fn is_dm_route(cx: &App) -> bool {
     )
 }
 
-fn dm_voice_badge(ch: &DirectChannel, channels: &ChannelList) -> Option<DmVoiceBadge> {
+fn dm_voice_badge(ch: &DirectChannel, channels: &ChannelList) -> Option<VoiceActivityBadge> {
     if ch.kind != DirectKind::Dm {
         return None;
     }
     let user_id = ch.peer_user_id?;
     let info = channels.in_voice_status(user_id)?;
-    Some(if info.sharing_screen {
-        DmVoiceBadge::SharingScreen
-    } else {
-        DmVoiceBadge::InVoice
-    })
+    Some(info.into())
 }
 
 fn dm_presence_badge(
@@ -170,6 +177,8 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
+    let buzz = BuzzStore::global(cx);
+    let buzz = buzz.read(cx);
     store.channels().iter().fold(FNV_OFFSET, |h, ch| {
         let h = fold(h, &ch.id.0.to_le_bytes());
         let h = fold(
@@ -177,10 +186,11 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
             &[
                 ch.kind as u8,
                 u8::from(ch.is_unread()),
+                u8::from(buzz.has_buzz(ch.id)),
                 dm_presence_badge(ch, presence, own_presence) as u8,
                 dm_voice_badge(ch, channels).map_or(0, |badge| match badge {
-                    DmVoiceBadge::InVoice => 1,
-                    DmVoiceBadge::SharingScreen => 2,
+                    VoiceActivityBadge::InVoice => 1,
+                    VoiceActivityBadge::SharingScreen => 2,
                 }),
                 u8::from(notifications.is_some_and(|store| store.is_time_muted(ch.id))),
                 u8::from(store.is_pinned(ch.id)),
@@ -235,6 +245,7 @@ fn render_dm_row(
     )
     .selected(selected)
     .unread(item.unread)
+    .buzz(item.buzz)
     .presence_badge(item.presence_badge)
     .avatar_src(item.avatar_src.clone())
     .avatar_raw(item.avatar_raw.clone())
@@ -242,10 +253,9 @@ fn render_dm_row(
     .image_cache(image_cache.clone())
     .on_close(item.channel_id, request_dm_close);
     if let Some(badge) = item.voice_badge {
-        let label = match badge {
-            DmVoiceBadge::InVoice => in_voice_label.clone(),
-            DmVoiceBadge::SharingScreen => share_screen_label.clone(),
-        };
+        let label = badge
+            .member_label(in_voice_label, share_screen_label)
+            .clone();
         row = row.voice_badge(badge, label);
     }
     let channel_id = item.channel_id;
@@ -289,6 +299,8 @@ fn build_dm_items(
     let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
+    let buzz = BuzzStore::global(cx);
+    let buzz = buzz.read(cx);
     let all = store.channels();
     let mut ordered: Vec<&DirectChannel> = Vec::with_capacity(all.len());
     ordered.extend(all.iter().filter(|ch| store.is_pinned(ch.id)));
@@ -300,6 +312,7 @@ fn build_dm_items(
         .map(|ch| {
             let pinned = store.is_pinned(ch.id);
             let unread = ch.is_unread();
+            let has_buzz = buzz.has_buzz(ch.id);
             let presence_badge = dm_presence_badge(ch, presence, own_presence);
             let voice_badge = dm_voice_badge(ch, channels);
             let muted = notifications.is_some_and(|store| store.is_time_muted(ch.id));
@@ -313,6 +326,7 @@ fn build_dm_items(
                 label: cached.label.clone(),
                 kind: ch.kind,
                 unread,
+                buzz: has_buzz,
                 presence_badge,
                 voice_badge,
                 muted,
@@ -637,6 +651,11 @@ impl DirectSidebar {
                 this.dm_items_fingerprint = dm_items_fingerprint(store.read(cx), cx);
                 this.dm_items = build_dm_items(&mut this.row_caches, store.read(cx), cx);
             }
+            let active = route_dm_id(cx);
+            if active != this.last_revealed_dm {
+                this.last_revealed_dm = active;
+                this.pending_dm_reveal = active.filter(|id| !this.reveal_dm(*id));
+            }
             cx.notify();
         })
         .detach();
@@ -644,6 +663,10 @@ impl DirectSidebar {
         cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&NotificationSettingStore::global(cx), |this, _, cx| {
+            this.refresh_dm_items(cx)
+        })
+        .detach();
+        cx.observe(&BuzzStore::global(cx), |this, _, cx| {
             this.refresh_dm_items(cx)
         })
         .detach();
@@ -659,6 +682,8 @@ impl DirectSidebar {
             dm_items,
             dm_items_fingerprint,
             pending_rebuild: false,
+            pending_dm_reveal: None,
+            last_revealed_dm: None,
             pinned_scroll: gpui::ScrollHandle::new(),
             open_menu: None,
             image_cache: cx.new(|cx| {
@@ -687,7 +712,35 @@ impl DirectSidebar {
         let items = build_dm_items(&mut self.row_caches, store.read(cx), cx);
         if self.dm_items != items {
             self.dm_items = items;
+            self.flush_dm_reveal();
             cx.notify();
+        }
+    }
+
+    fn reveal_dm(&self, channel_id: ChannelId) -> bool {
+        let Some(ix) = self
+            .dm_items
+            .iter()
+            .position(|item| item.channel_id == channel_id)
+        else {
+            return false;
+        };
+        let pinned_count = self.dm_items.partition_point(|item| item.pinned);
+        if ix < pinned_count {
+            self.pinned_scroll.scroll_to_item(ix);
+        } else {
+            self.list_scroll
+                .scroll_to_item(ix - pinned_count, gpui::ScrollStrategy::Nearest);
+        }
+        true
+    }
+
+    fn flush_dm_reveal(&mut self) {
+        let Some(channel_id) = self.pending_dm_reveal else {
+            return;
+        };
+        if self.reveal_dm(channel_id) {
+            self.pending_dm_reveal = None;
         }
     }
 

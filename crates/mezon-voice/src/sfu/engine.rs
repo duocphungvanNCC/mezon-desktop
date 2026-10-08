@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -8,7 +9,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use libwebrtc::audio_track::RtcAudioTrack;
 use libwebrtc::media_stream_track::{MediaStreamTrack, RtcTrackState};
 use libwebrtc::peer_connection::{
-    AnswerOptions, IceConnectionState, PeerConnection, PeerConnectionState,
+    AnswerOptions, IceConnectionState, PeerConnection, PeerConnectionState, SignalingState,
 };
 use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
@@ -23,11 +24,16 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+use crate::playback_health::{AudioRecoveryProgress, PlaybackRecovery};
+use crate::reconnect::MuteSync;
+use crate::screen_recovery::{FrameReceipt, ScreenRecovery, ScreenSource, ScreenViews};
 use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
+use crate::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
+use super::network_quality::NetworkQuality;
 use super::screen_adaptation::{
     ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
 };
@@ -136,18 +142,19 @@ const LINK_DOWN_TICKS: u32 = 2;
 const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 const ROUTE_PROBE_TARGETS: [&str; 2] = ["203.0.113.9:9", "[2001:db8::9]:9"];
 const MEDIA_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
-const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(6);
+const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 const CONNECT_POLL: Duration = Duration::from_millis(250);
 const RENEGOTIATION_SETTLE: Duration = Duration::from_millis(50);
-const RECONNECT_DELAY_FAST: Duration = Duration::from_millis(400);
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-const RECONNECT_FAST_ATTEMPTS: u32 = 5;
-const MAX_RECONNECT_ATTEMPTS: u32 = 40;
-const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 8;
+const MAX_RECONNECT_ATTEMPTS: u32 = 4;
+const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 3;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
-const SELF_MUTE_CORRELATION: Duration = Duration::from_millis(300);
+const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
+const STATS_TIMEOUT: Duration = Duration::from_secs(2);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNALING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -170,6 +177,7 @@ impl SfuRole {
 
 #[derive(Debug, Clone)]
 pub struct SfuConfig {
+    pub screen_views: Arc<ScreenViews>,
     pub ws_url: String,
     pub token: String,
     pub room: String,
@@ -201,6 +209,8 @@ pub struct ScreenTrack {
 pub enum RemovalCause {
     Kicked,
     AloneTimeout,
+    DuplicateSession,
+    Disconnected,
 }
 
 pub enum SfuEvent {
@@ -217,11 +227,13 @@ pub enum SfuEvent {
     RemoteVideo {
         key: u64,
         stream: NativeVideoStream,
+        receipt: Arc<FrameReceipt>,
     },
     RemoteGone {
         key: u64,
     },
     PttActive(bool),
+    NetworkWeak(bool),
     Reconnecting,
     Reconnected,
     Disconnected {
@@ -237,7 +249,7 @@ pub enum SfuEvent {
 
 enum EngineCommand {
     SetLocalAudio(Option<RtcAudioTrack>),
-    RefreshRemoteAudio(u64),
+    RefreshRemoteAudio(u64, PlaybackRecovery),
     SetLocalCamera(Option<RtcVideoTrack>),
     SetLocalScreen(Option<ScreenTrack>),
     SetMute(bool),
@@ -312,8 +324,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
-    pub(crate) fn refresh_remote_audio(&self, key: u64) {
-        let _ = self.cmd_tx.send(EngineCommand::RefreshRemoteAudio(key));
+    pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
+        let _ = self
+            .cmd_tx
+            .send(EngineCommand::RefreshRemoteAudio(key, recovery));
     }
 
     pub fn close(&self) {
@@ -332,6 +346,7 @@ struct Membership {
     peer_by_mid: HashMap<String, u32>,
     user_by_mid: HashMap<String, String>,
     live_tracks: HashMap<u64, mid::TrackBinding>,
+    video_receipts: HashMap<u64, Arc<FrameReceipt>>,
     retired_mids: HashMap<String, mid::MsidOccupant>,
 }
 
@@ -448,7 +463,7 @@ impl Membership {
                     audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
                     camera: (m.camera_active && m.mid_video != 0)
                         .then(|| remote_frame_key(&camera_mid)),
-                    screenshare: (m.screen_active && m.mid_screen != 0)
+                    screenshare: (m.is_sharing_screen() && m.mid_screen != 0)
                         .then(|| remote_frame_key(&screen_mid)),
                 }
             })
@@ -491,6 +506,7 @@ struct LocalTracks {
     screen: Option<ScreenTrack>,
     screen_audio: bool,
     muted: bool,
+    mute_revision: u64,
     ptt_active: bool,
     ptt_requested: bool,
 }
@@ -503,6 +519,7 @@ impl LocalTracks {
             screen: None,
             screen_audio: false,
             muted,
+            mute_revision: 0,
             ptt_active: false,
             ptt_requested: false,
         }
@@ -633,15 +650,43 @@ async fn engine_main(
     let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
     let mut ever_connected = false;
-    let mut retiring = RetiredPeerConnection(None);
+    let mut retiring = ClosingPeerConnection(None);
     let mut first_session = true;
+    let mut token_rejected = false;
+    let mut auth_rejections = 0u32;
 
     loop {
         if !first_session {
-            ensure_fresh_token(&mut config, &mut token_refreshes).await;
+            let role = config.role;
+            let refresh = ensure_fresh_token(&mut config, &mut token_refreshes, token_rejected);
+            tokio::pin!(refresh);
+            let ready = loop {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv_async() => match command {
+                        Ok(EngineCommand::Close) | Err(_) => {
+                            let _ = evt_tx.send(SfuEvent::Disconnected { reason: "left".into() });
+                            return Ok(());
+                        }
+                        Ok(other) => apply_offline_command(other, &mut local, role, evt_tx),
+                    },
+                    ready = &mut refresh => break ready,
+                }
+            };
+            if !ready {
+                let _ = evt_tx.send(SfuEvent::Disconnected {
+                    reason: if token_rejected {
+                        "invalid_token: SFU token refresh failed".into()
+                    } else {
+                        "SFU token refresh failed".into()
+                    },
+                });
+                return Ok(());
+            }
+            token_rejected = false;
         }
         first_session = false;
-        let (joined, reason, stale_token) = match run_session(
+        let (joined, reason) = match run_session(
             &config,
             &factory,
             &mut local,
@@ -672,8 +717,20 @@ async fn engine_main(
                 let _ = evt_tx.send(SfuEvent::Disconnected { reason });
                 return Ok(());
             }
-            SessionOutcome::Dropped { joined, reason } => (joined, reason, false),
-            SessionOutcome::DroppedStaleToken { joined, reason } => (joined, reason, true),
+            SessionOutcome::RefreshToken { joined, reason } => {
+                auth_rejections += 1;
+                if auth_rejections >= 2 {
+                    tracing::warn!(auth_rejections, %reason, "SFU rejected both the original and refreshed join tokens");
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: format!("{reason}: refreshed token was also rejected"),
+                    });
+                    return Ok(());
+                }
+                token_rejected = true;
+                (joined, reason)
+            }
+            SessionOutcome::Dropped { joined, reason }
+            | SessionOutcome::Retryable { joined, reason } => (joined, reason),
         };
 
         if local.ptt_active {
@@ -685,14 +742,7 @@ async fn engine_main(
         ever_joined |= joined;
         if joined {
             token_refreshes = 0;
-        }
-        let refreshed =
-            stale_token && refresh_session_token(&mut config, &mut token_refreshes).await;
-        let token_retries_spent =
-            stale_token && !refreshed && token_refreshes >= MEET_TOKEN_RETRY_LIMIT;
-        if token_retries_spent || (!ever_joined && !refreshed) {
-            let _ = evt_tx.send(SfuEvent::Disconnected { reason });
-            return Ok(());
+            auth_rejections = 0;
         }
         let _ = evt_tx.send(SfuEvent::Reconnecting);
         if LocalRoutes::probe().is_empty() {
@@ -706,23 +756,52 @@ async fn engine_main(
                     });
                     return Ok(());
                 }
-                OfflineWait::Online => continue,
+                OfflineWait::Online => {}
             }
         }
         attempts += 1;
-        if attempts > attempt_cap(ever_connected) {
+        if attempts > attempt_cap(ever_joined) {
             let _ = evt_tx.send(SfuEvent::Disconnected {
                 reason: "reconnect attempts exhausted".into(),
             });
             return Ok(());
         }
         tracing::warn!("sfu link dropped ({reason}); retry {attempts}");
-        let backoff = if attempts <= RECONNECT_FAST_ATTEMPTS {
-            RECONNECT_DELAY_FAST
-        } else {
-            RECONNECT_DELAY
-        };
-        tokio::time::sleep(backoff).await;
+        if !wait_before_reconnect(
+            &cmd_rx,
+            &mut local,
+            config.role,
+            evt_tx,
+            sfu_reconnect_delay(attempts - 1),
+        )
+        .await
+        {
+            let _ = evt_tx.send(SfuEvent::Disconnected {
+                reason: "left".into(),
+            });
+            return Ok(());
+        }
+    }
+}
+
+async fn wait_before_reconnect(
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+    delay: Duration,
+) -> bool {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv_async() => match command {
+                Ok(EngineCommand::Close) | Err(_) => return false,
+                Ok(other) => apply_offline_command(other, local, role, evt_tx),
+            },
+            _ = &mut sleep => return true,
+        }
     }
 }
 
@@ -790,7 +869,7 @@ fn apply_offline_command(
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
         | EngineCommand::ParticipantAction(_)
-        | EngineCommand::RefreshRemoteAudio(_)
+        | EngineCommand::RefreshRemoteAudio(_, _)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
@@ -800,27 +879,24 @@ fn token_refresh_budget_spent(refreshes: u32) -> bool {
     refreshes >= MEET_TOKEN_RETRY_LIMIT
 }
 
-async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32) {
-    let Some(refresher) = config.refresh_token.clone() else {
-        return;
-    };
+async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32, rejected: bool) -> bool {
     let remaining = token_seconds_left(&config.token);
-    if remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
-        return;
+    if !rejected && remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
+        return true;
     }
+    let Some(refresher) = config.refresh_token.clone() else {
+        return !rejected;
+    };
     if token_refresh_budget_spent(*refreshes) {
-        return;
+        return !rejected;
     }
-    match refresher.mint().await {
-        Some(fresh) if fresh != config.token => {
-            *refreshes += 1;
-            tracing::info!(?remaining, "sfu join token refreshed before reconnecting");
+    *refreshes += 1;
+    match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, refresher.mint()).await {
+        Ok(Some(fresh)) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
             config.token = fresh;
+            true
         }
-        _ => tracing::warn!(
-            ?remaining,
-            "sfu join token refresh failed; reusing the current token"
-        ),
+        _ => !rejected,
     }
 }
 
@@ -838,30 +914,8 @@ fn token_seconds_left(token: &str) -> Option<i64> {
     Some(exp - now)
 }
 
-async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> bool {
-    let Some(refresher) = config.refresh_token.clone() else {
-        return false;
-    };
-    if token_refresh_budget_spent(*refreshes) {
-        tracing::warn!(
-            refreshes = *refreshes,
-            "sfu join token rejected again; refresh limit reached"
-        );
-        return false;
-    }
-    match refresher.mint().await {
-        Some(fresh) if fresh != config.token => {
-            *refreshes += 1;
-            tracing::info!("sfu join token refreshed after the server rejected it");
-            config.token = fresh;
-            true
-        }
-        _ => false,
-    }
-}
-
-fn attempt_cap(ever_connected: bool) -> u32 {
-    if ever_connected {
+fn attempt_cap(ever_joined: bool) -> u32 {
+    if ever_joined {
         MAX_RECONNECT_ATTEMPTS
     } else {
         MAX_INITIAL_CONNECT_ATTEMPTS
@@ -882,13 +936,14 @@ enum SessionOutcome {
     Closed,
     Fatal(String),
     Removed { cause: RemovalCause, reason: String },
+    Retryable { joined: bool, reason: String },
     Dropped { joined: bool, reason: String },
-    DroppedStaleToken { joined: bool, reason: String },
+    RefreshToken { joined: bool, reason: String },
 }
 
-struct RetiredPeerConnection(Option<PeerConnection>);
+struct ClosingPeerConnection(Option<PeerConnection>);
 
-impl Drop for RetiredPeerConnection {
+impl Drop for ClosingPeerConnection {
     fn drop(&mut self) {
         if let Some(pc) = self.0.take() {
             pc.close();
@@ -908,7 +963,9 @@ async fn run_session(
     attempts: &mut u32,
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
-    let mut pc: Option<PeerConnection> = None;
+    // Close the active transport even if the store cancels this session while
+    // signaling/negotiation is pending. Dropping a PC wrapper alone is not Close.
+    let mut pc = ClosingPeerConnection(None);
     let outcome = session_loop(
         config,
         factory,
@@ -918,33 +975,13 @@ async fn run_session(
         resuming,
         ever_connected,
         attempts,
-        &mut pc,
+        &mut pc.0,
         retiring,
     )
     .await;
-    let retryable = matches!(
-        outcome,
-        SessionOutcome::Dropped { .. } | SessionOutcome::DroppedStaleToken { .. }
-    );
-    match pc {
-        Some(pc) if retryable => {
-            if let Some(previous) = retiring.take() {
-                previous.close();
-            }
-            *retiring = Some(pc);
-        }
-        Some(pc) => {
-            if let Some(previous) = retiring.take() {
-                previous.close();
-            }
-            pc.close();
-        }
-        None if retryable => {}
-        None => {
-            if let Some(previous) = retiring.take() {
-                previous.close();
-            }
-        }
+    // Each retry starts with fresh SDP/ICE/DTLS. Never retain a failed PC during backoff.
+    if let Some(previous) = retiring.take() {
+        previous.close();
     }
     outcome
 }
@@ -963,12 +1000,20 @@ async fn session_loop(
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
     let url = build_ws_url(&config.ws_url, &config.token);
-    let ws = match connect_async(url.as_str()).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
+    let ws = match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, connect_async(url.as_str()))
+        .await
+    {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
             return SessionOutcome::Dropped {
                 joined: false,
                 reason: format!("websocket connect failed: {e}"),
+            };
+        }
+        Err(_) => {
+            return SessionOutcome::Dropped {
+                joined: false,
+                reason: "websocket connect timed out".into(),
             };
         }
     };
@@ -989,15 +1034,19 @@ async fn session_loop(
     }
 
     let mut membership = Membership::default();
+    let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
+    let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
+    let mut screen_recovery = ScreenRecovery::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
-    // Coalesce track notifications without blocking WebRTC's callback thread.
     let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_quality = NetworkQuality::default();
+    let mut network_weak = false;
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
-    let mut forced_mute_deadline: Option<tokio::time::Instant> = None;
+    let mut mute_sync = MuteSync::default();
     let mut tiers = PublishTiers::default();
     let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
     let mut screen_adaptation = ScreenAdaptation::default();
@@ -1019,11 +1068,69 @@ async fn session_loop(
     let mut announced_connection = false;
     let mut joined_room = config.room.clone();
     let mut joined = false;
+    let session_started = Instant::now();
+    let mut last_signaling_received = session_started;
 
     loop {
         if joined && transport_connected && !announced_connection {
             announced_connection = true;
             let _ = evt_tx.send(connection_announcement(ever_connected, &joined_room));
+        }
+        let now = Instant::now();
+        membership
+            .video_receipts
+            .retain(|key, _| membership.live_tracks.contains_key(key));
+        let screens = membership
+            .by_peer
+            .values()
+            .filter_map(|member| {
+                if member.peer_id == 0
+                    || member.peer_id == membership.self_peer_id
+                    || !member.is_sharing_screen()
+                    || member.mid_screen == 0
+                {
+                    return None;
+                }
+                let mid = member.mid_screen.to_string();
+                let key = remote_frame_key(&mid);
+                let binding = membership.live_tracks.get(&key)?;
+                if binding.peer_id != Some(member.peer_id)
+                    || membership.peer_by_mid.get(&mid) != Some(&member.peer_id)
+                    || membership.retired_mids.contains_key(&mid)
+                {
+                    return None;
+                }
+                Some(ScreenSource {
+                    key,
+                    publisher: member.peer_id,
+                    receipt: membership.video_receipts.get(&key)?.clone(),
+                })
+            })
+            .collect();
+        screen_recovery.update(screens, &config.screen_views.snapshot(), now);
+        // Negotiation is awaited in this loop; never request while an offer is queued.
+        // The existing 250 ms connection timer also services these bounded retries.
+        let can_request_keyframe = joined
+            && transport_connected
+            && pending_offer.is_none()
+            && offer_reissue_deadline.is_none()
+            && pc.as_ref().is_some_and(|pc| {
+                pc.connection_state() == PeerConnectionState::Connected
+                    && pc.signaling_state() == SignalingState::Stable
+            });
+        if can_request_keyframe && let Some(publisher_id) = screen_recovery.next_request(now) {
+            let request = ClientMessage::RequestKeyframe {
+                kind: "screen",
+                publisher_id,
+            };
+            if send(&mut ws_tx, &request).await.is_err() {
+                tracing::warn!(publisher_id, "sfu keyframe request send failed");
+                return SessionOutcome::Dropped {
+                    joined,
+                    reason: "keyframe request send failed".into(),
+                };
+            }
+            screen_recovery.sent(publisher_id, Instant::now());
         }
         tokio::select! {
             biased;
@@ -1031,10 +1138,13 @@ async fn session_loop(
                 let Some(frame) = incoming else {
                     return SessionOutcome::Dropped { joined, reason: "websocket closed".into() };
                 };
+                last_signaling_received = Instant::now();
                 let text = match frame {
                     Ok(Message::Text(text)) => text,
                     Ok(Message::Ping(payload)) => {
-                        let _ = ws_tx.send(Message::Pong(payload)).await;
+                        if send_frame(&mut ws_tx, Message::Pong(payload)).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "websocket pong send failed".into() };
+                        }
                         continue;
                     }
                     Ok(Message::Close(frame)) => {
@@ -1050,10 +1160,8 @@ async fn session_loop(
                             "sfu closed the link"
                         );
                         return match verdict {
-                            CloseVerdict::Retry => SessionOutcome::Dropped { joined, reason },
-                            CloseVerdict::RetryWithNewToken => {
-                                SessionOutcome::DroppedStaleToken { joined, reason }
-                            }
+                            CloseVerdict::Retry => SessionOutcome::Retryable { joined, reason },
+                            CloseVerdict::RefreshToken => SessionOutcome::RefreshToken { joined, reason },
                             CloseVerdict::Removed(cause) => SessionOutcome::Removed { cause, reason },
                         };
                     }
@@ -1119,7 +1227,6 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::Offer { offer_generation, sdp } => {
-                        tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         pending_offer = Some((offer_generation, sdp));
                         offer_reissue_deadline = None;
                     }
@@ -1132,7 +1239,7 @@ async fn session_loop(
                         }
                         if !announced_state {
                             announced_state = true;
-                            if announce_initial_state(&mut ws_tx, config, local).await.is_err() {
+                            if announce_initial_state(&mut ws_tx, config, local, &mut mute_sync).await.is_err() {
                                 return SessionOutcome::Dropped { joined, reason: "initial state send failed".into() };
                             }
                         }
@@ -1149,14 +1256,8 @@ async fn session_loop(
                     }
                     ServerMessage::PeerUpdated { peer } => {
                         if let Some(peer) = peer {
-                            if joined
-                                && peer.is_mute
-                                && !local.muted
-                                && peer.peer_id == membership.self_peer_id
-                            {
-                                forced_mute_deadline.get_or_insert_with(|| {
-                                    tokio::time::Instant::now() + SELF_MUTE_CORRELATION
-                                });
+                            if joined && peer.peer_id == membership.self_peer_id {
+                                mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
                             }
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
@@ -1169,6 +1270,7 @@ async fn session_loop(
                             "sfu peer left; retiring only its remote media");
                         for mid in released {
                             let key = remote_frame_key(&mid);
+                            audio_recovery.remove(&key);
                             if membership.live_tracks.remove(&key).is_some() {
                                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
                             }
@@ -1183,13 +1285,18 @@ async fn session_loop(
                         local.apply_audio_gate(pc.as_ref(), config.role);
                         let _ = evt_tx.send(SfuEvent::PttActive(active));
                     }
-                    ServerMessage::MuteChanged { .. } => {
-                        forced_mute_deadline = None;
+                    ServerMessage::MuteChanged { is_mute } => {
+                        mute_sync.acknowledge(is_mute);
                     }
-                    ServerMessage::VisibilityChanged { .. }
+                    ServerMessage::KeyframeRequested { .. }
+                    | ServerMessage::VisibilityChanged { .. }
                     | ServerMessage::RoleChanged { .. }
                     | ServerMessage::Unknown => {}
                     ServerMessage::Error { message } => {
+                        if screen_recovery.is_recent_request_error(&message, Instant::now()) {
+                            tracing::warn!(%message, "sfu keyframe request rejected");
+                            continue;
+                        }
                         if matches!(message.as_str(), "invalid_push_to_talk" | "push_to_talk_rejected") {
                             local.ptt_active = false;
                             local.apply_audio_gate(pc.as_ref(), config.role);
@@ -1221,10 +1328,10 @@ async fn session_loop(
                             continue;
                         }
                         tracing::warn!(%message, joined, "sfu reported an error");
-                        let _ = evt_tx.send(SfuEvent::Error(message.clone()));
                         if matches!(message.as_str(), "invalid_token" | "missing_token") {
-                            return SessionOutcome::DroppedStaleToken { joined, reason: message };
+                            return SessionOutcome::RefreshToken { joined, reason: message };
                         }
+                        let _ = evt_tx.send(SfuEvent::Error(message.clone()));
                         if joined || resuming {
                             return SessionOutcome::Dropped { joined, reason: message };
                         }
@@ -1241,12 +1348,41 @@ async fn session_loop(
                         if let Some(pc) = &*pc {
                             pc.close();
                         }
-                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = send_frame(&mut ws_tx, Message::Close(None)).await;
                         return SessionOutcome::Closed;
                     }
-                    EngineCommand::RefreshRemoteAudio(key) => {
+                    EngineCommand::RefreshRemoteAudio(key, recovery) => {
+                        if !recovery.still_stalled() || !membership.live_tracks.contains_key(&key) {
+                            audio_recovery.remove(&key);
+                            continue;
+                        }
                         if let Some(peer_connection) = pc.as_ref() {
-                            sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            if transport_connected {
+                                if recovery_stats.as_ref().is_none_or(|(at, _)| at.elapsed() >= MEDIA_STATS_INTERVAL) {
+                                    let stats = tokio::time::timeout(STATS_TIMEOUT, peer_connection.get_stats())
+                                        .await.ok().and_then(|result| result.ok());
+                                    recovery_stats = Some((Instant::now(), stats));
+                                }
+                                for stat in recovery_stats.as_ref().and_then(|(_, stats)| stats.as_ref()).into_iter().flatten() {
+                                    if let RtcStats::InboundRtp(inbound) = stat
+                                        && inbound.stream.kind == "audio"
+                                        && remote_frame_key(&inbound.inbound.mid) == key
+                                        && audio_recovery.entry(key).or_default().observe(
+                                            &recovery, &inbound.rtc.id, inbound.received.packets_received,
+                                        )
+                                    {
+                                        tracing::warn!(key, attempt = recovery.attempt,
+                                            "audio RTP is arriving without playback callbacks; restarting the sfu session");
+                                        return SessionOutcome::Dropped {
+                                            joined,
+                                            reason: "audio playback stalled despite incoming RTP".into(),
+                                        };
+                                    }
+                                }
+                            }
+                            if recovery.rebind() && recovery.still_stalled() {
+                                sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            }
                         }
                     }
                     EngineCommand::SetLocalAudio(track) => {
@@ -1281,9 +1417,10 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetMute(muted) => {
+                        mute_sync.cancel_inference();
                         local.muted = muted;
                         local.apply_audio_gate(pc.as_ref(), config.role);
-                        if joined && send(&mut ws_tx, &ClientMessage::Mute { is_mute: muted }).await.is_err() {
+                        if joined && send_mute(&mut ws_tx, local, &mut mute_sync, muted).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
                         }
                     }
@@ -1326,7 +1463,11 @@ async fn session_loop(
                             [ClientMessage::PushToTalk { active: false }, ClientMessage::Mute { is_mute: true }]
                         };
                         for message in &ordered {
-                            if send(&mut ws_tx, message).await.is_err() {
+                            let sent = match message {
+                                ClientMessage::Mute { is_mute } => send_mute(&mut ws_tx, local, &mut mute_sync, *is_mute).await,
+                                _ => send(&mut ws_tx, message).await,
+                            };
+                            if sent.is_err() {
                                 return SessionOutcome::Dropped { joined, reason: "push_to_talk send failed".into() };
                             }
                         }
@@ -1358,12 +1499,14 @@ async fn session_loop(
                         media_up_since.get_or_insert_with(Instant::now);
                     }
                     Ok(PeerConnectionState::Disconnected) => {
+                        media_up_since = None;
                         transport_connected = false;
                         media_wait_started.get_or_insert_with(Instant::now);
                         disconnected_since.get_or_insert_with(Instant::now);
                     }
                     Ok(_) => {
                         if transport_connected {
+                            media_up_since = None;
                             transport_connected = false;
                             media_wait_started = Some(Instant::now());
                         }
@@ -1389,6 +1532,25 @@ async fn session_loop(
                 }
             }
             _ = connect_timer.tick() => {
+                if let Some(revision) = mute_sync.timed_out_revision(Instant::now()) {
+                    tracing::warn!(mute_revision = revision, "sfu mute acknowledgement timed out; resynchronizing the session");
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu mute acknowledgement timed out".into(),
+                    };
+                }
+                if !joined && session_started.elapsed() >= JOIN_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu join or room snapshot timed out".into(),
+                    };
+                }
+                if last_signaling_received.elapsed() >= SIGNALING_IDLE_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu signaling heartbeat timed out".into(),
+                    };
+                }
                 if let Some(since) = disconnected_since {
                     let waited = since.elapsed();
                     if waited >= TRANSPORT_DISCONNECTED_GRACE {
@@ -1404,6 +1566,7 @@ async fn session_loop(
                 }
                 if !budget_reset
                     && transport_connected
+                    && pc.as_ref().is_some_and(|pc| pc.connection_state() == PeerConnectionState::Connected)
                     && media_up_since.is_some_and(|since| since.elapsed() >= HEALTHY_SESSION)
                 {
                     budget_reset = true;
@@ -1426,8 +1589,10 @@ async fn session_loop(
                             waited_ms = waited.as_millis(),
                             "sfu media transport stalled; dropping the session to reconnect"
                         );
-                        if let Some(pc) = pc.as_ref() {
-                            let _ = log_media_stats(pc).await;
+                        if let Some(pc) = pc.as_ref()
+                            && let Some(stats) = read_media_stats(pc).await
+                        {
+                            log_media_stats(&stats);
                         }
                         return SessionOutcome::Dropped { joined, reason: reason.into() };
                     }
@@ -1444,12 +1609,24 @@ async fn session_loop(
                             };
                         }
                         PeerConnectionState::Disconnected => {
+                            media_up_since = None;
+                            transport_connected = false;
                             disconnected_since.get_or_insert_with(Instant::now);
                         }
                         PeerConnectionState::Connected => disconnected_since = None,
                         _ => {}
                     }
-                    let stats = log_media_stats(&peer_connection).await;
+                    let media_stats = read_media_stats(&peer_connection).await;
+                    let stats = media_stats.as_deref().and_then(log_media_stats);
+                    if peer_connection.connection_state() == PeerConnectionState::Connected
+                        && let Some(media_stats) = media_stats.as_deref()
+                    {
+                        let weak = network_quality.update(media_stats);
+                        if weak != network_weak {
+                            network_weak = weak;
+                            let _ = evt_tx.send(SfuEvent::NetworkWeak(weak));
+                        }
+                    }
                     if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
                         let profile = screen_profile(screen.mode);
                         if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
@@ -1539,9 +1716,8 @@ async fn session_loop(
                     reason: "sfu never reissued the rejected offer".into(),
                 };
             }
-            () = tokio::time::sleep_until(forced_mute_deadline.unwrap_or_else(tokio::time::Instant::now)), if forced_mute_deadline.is_some() => {
-                forced_mute_deadline = None;
-                if !local.muted {
+            () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
+                if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
                     tracing::info!("sfu moderator muted this device");
                     local.muted = true;
                     local.apply_audio_gate(pc.as_ref(), config.role);
@@ -1556,7 +1732,7 @@ async fn session_loop(
                     tracing::warn!("sfu offered before the joined response; dropping the offer");
                     continue;
                 };
-                match negotiate(
+                match tokio::time::timeout(NEGOTIATION_TIMEOUT, negotiate(
                     &peer_connection,
                     generation,
                     &offer_sdp,
@@ -1566,11 +1742,12 @@ async fn session_loop(
                     &mut ws_tx,
                     &mut membership,
                     evt_tx,
-                )
+                ))
                 .await
+                .context("sfu negotiation timed out")
+                .and_then(|result| result)
                 {
                     Ok(()) => {
-                        tracing::debug!(generation, "sfu answer sent");
                         sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                         if !membership.live_tracks.is_empty()
                             && let Some(previous) = retiring.take()
@@ -1600,25 +1777,40 @@ type WsSink = futures::stream::SplitSink<
 
 async fn send(ws_tx: &mut WsSink, message: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(message).context("serialize signaling message")?;
-    ws_tx
-        .send(Message::Text(text.into()))
+    send_frame(ws_tx, Message::Text(text.into())).await
+}
+
+async fn send_frame(ws_tx: &mut WsSink, message: Message) -> Result<()> {
+    tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, ws_tx.send(message))
         .await
+        .context("send signaling message timed out")?
         .context("send signaling message")
+}
+
+async fn send_mute(
+    ws_tx: &mut WsSink,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
+    is_mute: bool,
+) -> Result<()> {
+    // Diagnostic revision only. Rejecting revisions on the wire requires SFU
+    // protocol support; do not silently add fields the server does not enforce.
+    local.mute_revision = local.mute_revision.wrapping_add(1);
+    send(ws_tx, &ClientMessage::Mute { is_mute }).await?;
+    mute_sync.sent(is_mute, local.mute_revision, Instant::now());
+    Ok(())
 }
 
 async fn announce_initial_state(
     ws_tx: &mut WsSink,
     config: &SfuConfig,
-    local: &LocalTracks,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
 ) -> Result<()> {
     let resume_push_to_talk = local.resumes_push_to_talk(config.role);
-    send(
-        ws_tx,
-        &ClientMessage::Mute {
-            is_mute: local.announced_mute(config.role),
-        },
-    )
-    .await?;
+    if !local.announced_mute(config.role) {
+        send_mute(ws_tx, local, mute_sync, false).await?;
+    }
     if resume_push_to_talk {
         tracing::info!("re-asserting the held push-to-talk turn on the new sfu session");
         send(ws_tx, &ClientMessage::PushToTalk { active: true }).await?;
@@ -1696,19 +1888,20 @@ fn create_peer_connection(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseVerdict {
     Retry,
-    RetryWithNewToken,
+    RefreshToken,
     Removed(RemovalCause),
 }
 
 fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
-    let Some(code) = code else {
-        return CloseVerdict::Retry;
-    };
-    match u16::from(code) {
-        4004 | 4005 => CloseVerdict::RetryWithNewToken,
-        4006 => CloseVerdict::Removed(RemovalCause::Kicked),
-        4011 => CloseVerdict::Removed(RemovalCause::AloneTimeout),
-        _ => CloseVerdict::Retry,
+    match sfu_close_action(code.map(u16::from)) {
+        SfuCloseAction::RefreshToken => CloseVerdict::RefreshToken,
+        SfuCloseAction::Retry | SfuCloseAction::ResetTransport => CloseVerdict::Retry,
+        SfuCloseAction::Stop => CloseVerdict::Removed(match code.map(u16::from) {
+            Some(4006) => RemovalCause::Kicked,
+            Some(4011) => RemovalCause::AloneTimeout,
+            Some(4012) => RemovalCause::DuplicateSession,
+            _ => RemovalCause::Disconnected,
+        }),
     }
 }
 
@@ -1730,6 +1923,8 @@ fn describe_close_code(code: CloseCode) -> Option<&'static str> {
         4009 => "poll start failed",
         4010 => "transport error",
         4011 => "alone participant timeout",
+        4012 => "new session joined with the same user",
+        4013 => "DTLS or transport failure",
         _ => return None,
     })
 }
@@ -1742,13 +1937,17 @@ fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
         .unwrap_or_else(|| "server closed link".to_owned())
 }
 
-async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
-    let Ok(stats) = pc.get_stats().await else {
+async fn read_media_stats(pc: &PeerConnection) -> Option<Vec<RtcStats>> {
+    let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
+        tracing::warn!("sfu media stats unavailable or timed out");
         return None;
     };
+    Some(stats)
+}
 
+fn log_media_stats(stats: &[RtcStats]) -> Option<ScreenStats> {
     let mut codecs: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         if let RtcStats::Codec(codec) = stat {
             let mime = codec
                 .codec
@@ -1769,7 +1968,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     let mut screen_stats = None;
     let mut screen_transport_id = None;
     let mut lines: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::OutboundRtp(out) => {
                 if out.outbound.mid == MID_SCREEN
@@ -1888,7 +2087,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     }
 
     let mut candidates: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::LocalCandidate(c) => {
                 candidates.insert(c.rtc.id.clone(), describe_candidate(&c.local_candidate));
@@ -1906,8 +2105,6 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
             .cloned()
             .unwrap_or_else(|| "?".to_owned())
     };
-    // Only the selected pair belongs to the current screen transport; an old
-    // nominated pair can retain a stale, optimistic bandwidth estimate.
     let selected_pair_id = stats.iter().find_map(|stat| match stat {
         RtcStats::Transport(t) if Some(t.rtc.id.as_str()) == screen_transport_id => {
             Some(t.transport.selected_candidate_pair_id.as_str())
@@ -1916,7 +2113,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     });
     let mut bwe_kbps: u32 = 0;
     let mut pairs: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::Transport(t) => tracing::info!(
                 dtls = ?t.transport.dtls_state,
@@ -1957,7 +2154,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
 
     if let Some(screen) = screen_stats.as_mut() {
         screen.bwe_kbps = bwe_kbps;
-        for stat in &stats {
+        for stat in stats {
             if let RtcStats::OutboundRtp(out) = stat {
                 if out.outbound.mid != MID_SCREEN
                     && Some(out.stream.transport_id.as_str()) == screen_transport_id
@@ -1991,21 +2188,6 @@ fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateSt
     format!("{kind}/{} {address}", candidate.protocol)
 }
 
-fn transceiver_summary(pc: &PeerConnection) -> String {
-    pc.transceivers()
-        .iter()
-        .enumerate()
-        .map(|(index, transceiver)| {
-            format!(
-                "#{index}:{}={:?}",
-                transceiver.mid().unwrap_or_else(|| "-".to_owned()),
-                transceiver.direction(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
@@ -2022,26 +2204,11 @@ async fn negotiate(
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
     let hinted = sdp::munge_uplink_start_bitrate(&stabilized, UPLINK_START_KBPS);
 
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&stabilized),
-        codecs = %sdp::codec_summary(&stabilized),
-        ufrag = %sdp::ice_ufrags(&stabilized),
-        setup = %sdp::setup_roles(&stabilized),
-        "offer m-lines"
-    );
-
     let offer = SessionDescription::parse(&hinted, SdpType::Offer)
         .map_err(|e| anyhow::anyhow!("parse offer: {e}"))?;
     pc.set_remote_description(offer)
         .await
         .context("set remote description")?;
-
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after remote offer"
-    );
 
     attach_local_tracks(Some(pc), local, role);
     open_uplink_directions(pc, &stabilized);
@@ -2053,12 +2220,6 @@ async fn negotiate(
 
     let derived = answer.to_string();
     let opened = sdp::force_uplink_sendonly(&derived, &stabilized);
-    tracing::debug!(
-        generation,
-        derived = %sdp::direction_summary(&derived),
-        opened = %sdp::direction_summary(&opened),
-        "answer uplinks reopened"
-    );
     let answer = SessionDescription::parse(&opened, SdpType::Answer)
         .map_err(|e| anyhow::anyhow!("parse patched answer: {e}"))?;
 
@@ -2069,25 +2230,10 @@ async fn negotiate(
     tune_uplinks(pc, local, tiers);
     local.apply_audio_gate(Some(pc), role);
 
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after local answer"
-    );
-
     let local_sdp = pc
         .current_local_description()
         .map(|d| d.to_string())
         .context("local description missing after set_local_description")?;
-
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&local_sdp),
-        codecs = %sdp::codec_summary(&local_sdp),
-        ufrag = %sdp::ice_ufrags(&local_sdp),
-        setup = %sdp::setup_roles(&local_sdp),
-        "answer m-lines"
-    );
 
     membership.absorb_msids(offer_sdp);
     tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
@@ -2221,23 +2367,14 @@ fn open_uplink_directions(pc: &PeerConnection, offer_sdp: &str) {
         if !invited || transceiver.direction() == RtpTransceiverDirection::SendOnly {
             continue;
         }
-        match transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
-            Ok(()) => tracing::debug!(mid = %mid, "uplink opened for sending"),
-            Err(e) => tracing::warn!("uplink mid {mid} could not be opened for sending: {e}"),
+        if let Err(e) = transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
+            tracing::warn!("uplink mid {mid} could not be opened for sending: {e}");
         }
     }
 }
 
 fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: SfuRole) {
     let Some(pc) = pc else { return };
-
-    tracing::debug!(
-        role = role.wire(),
-        audio = local.audio.is_some(),
-        camera = local.camera.is_some(),
-        screen = local.screen.is_some(),
-        "attaching local tracks to the sfu uplinks"
-    );
 
     let publishes_video = role == SfuRole::Speaker;
 
@@ -2261,13 +2398,8 @@ fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: S
         };
 
         let Some(track) = wanted else { continue };
-        match transceiver.sender().set_track(Some(track)) {
-            Ok(()) => tracing::debug!(
-                mid = %mid,
-                direction = ?transceiver.direction(),
-                "local track attached"
-            ),
-            Err(e) => tracing::warn!("failed to attach local track on mid {mid}: {e}"),
+        if let Err(e) = transceiver.sender().set_track(Some(track)) {
+            tracing::warn!("failed to attach local track on mid {mid}: {e}");
         }
     }
 
@@ -2339,7 +2471,13 @@ fn sync_remote_media(
                 tracing::info!(mid = %mid, key, "remote video attached");
                 // Preserve the latest frame even before the consumer task is scheduled.
                 let stream = NativeVideoStream::new(track);
-                let _ = evt_tx.send(SfuEvent::RemoteVideo { key, stream });
+                let receipt = Arc::new(FrameReceipt::default());
+                membership.video_receipts.insert(key, receipt.clone());
+                let _ = evt_tx.send(SfuEvent::RemoteVideo {
+                    key,
+                    stream,
+                    receipt,
+                });
             }
             (_, kind) => {
                 tracing::warn!("mid {mid} carries a track of the wrong media type for {kind:?}");
@@ -2372,6 +2510,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let config = SfuConfig {
+            screen_views: Arc::default(),
             ws_url: format!("ws://{}/ws", listener.local_addr().unwrap()),
             token: "test-token".into(),
             room: "test-room".into(),
@@ -2458,8 +2597,9 @@ mod tests {
             ))
             .await
             .unwrap();
-        let mut expected = vec![json!({ "type": "mute", "is_mute": !held })];
+        let mut expected = Vec::new();
         if held {
+            expected.push(json!({ "type": "mute", "is_mute": false }));
             expected.push(json!({ "type": "push_to_talk", "active": true }));
         }
         expected.push(json!({ "type": "visibility", "visible": true }));
@@ -2540,6 +2680,7 @@ mod tests {
             role: "speaker".to_owned(),
             is_mute: false,
             camera_active: false,
+            screen_requested: None,
             screen_active: false,
             mid_audio: mids[0],
             mid_video: mids[1],
@@ -2875,48 +3016,45 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_drop_without_a_close_frame_is_retried() {
+    fn a_close_without_a_frame_retries() {
         assert_eq!(classify_close(None), CloseVerdict::Retry);
     }
 
     #[test]
-    fn an_idle_timeout_is_retried() {
-        assert_eq!(
-            classify_close(Some(CloseCode::Library(4001))),
-            CloseVerdict::Retry
-        );
-    }
-
-    #[test]
-    fn token_rejections_are_retried_with_a_fresh_token() {
-        for code in [4004, 4005] {
+    fn only_transient_sfu_reasons_are_retried() {
+        for code in [1001, 1006, 1011, 4001, 4002, 4008, 4010, 4013, 4999] {
             assert_eq!(
                 classify_close(Some(CloseCode::Library(code))),
-                CloseVerdict::RetryWithNewToken,
-                "{code} is the server complaining about the token itself"
+                CloseVerdict::Retry
             );
         }
     }
 
     #[test]
-    fn a_server_without_a_jwt_secret_is_retried_without_minting() {
-        assert_eq!(
-            classify_close(Some(CloseCode::Library(4003))),
-            CloseVerdict::Retry
-        );
+    fn normal_closure_ends_the_call() {
+        for code in [1000] {
+            assert_eq!(
+                classify_close(Some(CloseCode::Library(code))),
+                CloseVerdict::Removed(RemovalCause::Disconnected),
+                "close code {code} should end the call"
+            );
+        }
     }
 
     #[test]
-    fn a_kick_is_not_retried() {
+    fn kick_alone_timeout_and_duplicate_session_have_distinct_causes() {
         assert_eq!(
             classify_close(Some(CloseCode::Library(4006))),
             CloseVerdict::Removed(RemovalCause::Kicked)
         );
-    }
-
-    #[test]
-    fn a_normal_closure_is_still_retried() {
-        assert_eq!(classify_close(Some(CloseCode::Normal)), CloseVerdict::Retry);
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4011))),
+            CloseVerdict::Removed(RemovalCause::AloneTimeout)
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4012))),
+            CloseVerdict::Removed(RemovalCause::DuplicateSession)
+        );
     }
 
     fn jwt_with_exp(exp: i64, padded: bool) -> String {
@@ -2967,6 +3105,7 @@ mod tests {
 
     fn config_with_refresher(token: &str, refresher: TokenRefresher) -> SfuConfig {
         SfuConfig {
+            screen_views: Arc::default(),
             ws_url: String::new(),
             token: token.into(),
             room: "test-room".into(),
@@ -2978,27 +3117,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejected_token_is_refreshed_at_most_the_retry_limit() {
+    async fn an_auth_close_forces_refresh_of_an_unexpired_token() {
         let (refresher, calls) = counting_refresher(true);
-        let mut config = config_with_refresher("rejected-token", refresher);
-        let mut refreshes = 0;
-        for _ in 0..MEET_TOKEN_RETRY_LIMIT {
-            assert!(refresh_session_token(&mut config, &mut refreshes).await);
-        }
-        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
-        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 3_600, false), refresher);
+        assert!(ensure_fresh_token(&mut config, &mut 0, true).await);
+        assert_eq!(calls(), 1);
+        assert_eq!(config.token, "fresh-token-1");
     }
 
     #[tokio::test]
-    async fn a_failed_refresh_before_a_reconnect_does_not_spend_the_budget() {
+    async fn a_rejected_token_is_not_reused_after_refresh_failure() {
+        let (refresher, calls) = counting_refresher(false);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 3_600, false), refresher);
+        assert!(!ensure_fresh_token(&mut config, &mut 0, true).await);
+        assert_eq!(calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_before_a_reconnect_is_bounded() {
         let (refresher, calls) = counting_refresher(false);
         let mut config = config_with_refresher("not-a-jwt", refresher);
         let mut refreshes = 0;
         for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
-            ensure_fresh_token(&mut config, &mut refreshes).await;
+            ensure_fresh_token(&mut config, &mut refreshes, false).await;
         }
-        assert_eq!(refreshes, 0);
-        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT + 2);
+        assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
     }
 
     #[tokio::test]
@@ -3007,7 +3151,7 @@ mod tests {
         let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 5, false), refresher);
         let mut refreshes = 0;
         for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
-            ensure_fresh_token(&mut config, &mut refreshes).await;
+            ensure_fresh_token(&mut config, &mut refreshes, false).await;
         }
         assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
         assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);

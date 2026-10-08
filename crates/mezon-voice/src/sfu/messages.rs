@@ -28,6 +28,10 @@ pub enum ClientMessage {
     Visibility {
         visible: bool,
     },
+    RequestKeyframe {
+        kind: &'static str,
+        publisher_id: u32,
+    },
     ParticipantAction {
         token: String,
     },
@@ -80,6 +84,11 @@ pub enum ServerMessage {
         #[serde(default)]
         active: bool,
     },
+    KeyframeRequested {
+        success: bool,
+        cached: bool,
+        kind: String,
+    },
     VisibilityChanged {
         #[serde(default)]
         visible: bool,
@@ -121,6 +130,8 @@ pub struct SnapshotMember {
     #[serde(default)]
     pub camera_active: bool,
     #[serde(default)]
+    pub screen_requested: Option<bool>,
+    #[serde(default)]
     pub screen_active: bool,
     #[serde(default, deserialize_with = "flexible_mid")]
     pub mid_audio: u32,
@@ -131,6 +142,10 @@ pub struct SnapshotMember {
 }
 
 impl SnapshotMember {
+    pub fn is_sharing_screen(&self) -> bool {
+        self.screen_active && self.screen_requested.unwrap_or(true)
+    }
+
     pub fn is_audience(&self) -> bool {
         self.role == "audience"
     }
@@ -208,6 +223,31 @@ mod tests {
         assert_eq!(
             got,
             serde_json::json!({"type": "push_to_talk", "active": true})
+        );
+    }
+
+    #[test]
+    fn screen_keyframe_request_uses_numeric_publisher_id() {
+        let value = serde_json::to_value(ClientMessage::RequestKeyframe {
+            kind: "screen",
+            publisher_id: 31,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"type": "request_keyframe", "kind": "screen", "publisher_id": 31})
+        );
+    }
+
+    #[test]
+    fn keyframe_ack_parses_without_inventing_a_publisher_id() {
+        assert_eq!(
+            parse(r#"{"type":"keyframe_requested","success":true,"cached":false,"kind":"screen"}"#),
+            ServerMessage::KeyframeRequested {
+                success: true,
+                cached: false,
+                kind: "screen".into()
+            }
         );
     }
 

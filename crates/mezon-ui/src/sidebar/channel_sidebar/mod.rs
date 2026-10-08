@@ -8,9 +8,10 @@ use gpui::{
     WeakEntity, Window, div, ease_in_out, list, prelude::*, px, relative,
 };
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN,
-    PermissionStore, Settings, SidebarOrderKey, StreamMember, StreamStore, VoiceMember,
+    BadgeService, BuzzStore, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
+    ClanMembersStore, EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR,
+    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, SidebarOrderKey, StreamMember, StreamStore,
+    VoiceMember,
 };
 
 use crate::channel_app::launch_channel_app_from_store;
@@ -138,6 +139,8 @@ pub struct ChannelSidebar {
     _skeleton_timer: Option<Task<()>>,
     last_locale: String,
     last_route_channel: Option<ChannelId>,
+    pending_route_channel: Option<ChannelId>,
+    route_reveal_queued: bool,
     last_clan_inputs: (Option<ClanId>, u64),
     _clan_observe: Subscription,
     _channel_observe: Subscription,
@@ -146,6 +149,7 @@ pub struct ChannelSidebar {
     _members_observe: Subscription,
     _events_observe: Subscription,
     _stream_observe: Subscription,
+    _buzz_observe: Subscription,
     _permissions_observe: Subscription,
     _channel_permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
@@ -314,7 +318,9 @@ impl ChannelSidebar {
                 return;
             }
             this.last_route_channel = active;
-            if this.rebuild_items(cx) {
+            let changed = this.rebuild_items(cx);
+            this.pending_route_channel = active.filter(|id| !this.reveal_route_channel(*id));
+            if changed || this.pending_route_channel.is_some() {
                 cx.notify();
             }
         });
@@ -339,6 +345,11 @@ impl ChannelSidebar {
         });
         let events_observe = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
         let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
+        let buzz_observe = cx.observe(&BuzzStore::global(cx), |this, _, cx| {
             if this.rebuild_items(cx) {
                 cx.notify();
             }
@@ -399,6 +410,8 @@ impl ChannelSidebar {
             _skeleton_timer: None,
             last_locale: initial_locale,
             last_route_channel: initial_route_channel,
+            pending_route_channel: None,
+            route_reveal_queued: false,
             last_clan_inputs: initial_clan_inputs,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
@@ -407,6 +420,7 @@ impl ChannelSidebar {
             _members_observe: members_observe,
             _events_observe: events_observe,
             _stream_observe: stream_observe,
+            _buzz_observe: buzz_observe,
             _permissions_observe: permissions_observe,
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
@@ -663,6 +677,8 @@ impl ChannelSidebar {
         }
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
+        let buzz_store = BuzzStore::global(cx);
+        let buzz = buzz_store.read(cx);
 
         let new_clan_id = clans.active_clan_id;
         let clan_changed = self.active_clan_id != new_clan_id;
@@ -816,7 +832,9 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
+                                buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
+                                age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
                                 badge_count,
                                 badge_label,
@@ -846,8 +864,7 @@ impl ChannelSidebar {
                         let mut parents_with_unread_thread: HashSet<ChannelId> = HashSet::new();
                         for ch in &ch_slice {
                             if let Some(pid) = ch.parent_id
-                                && ch.is_unread()
-                                && !ch.muted
+                                && ((ch.is_unread() && !ch.muted) || buzz.has_buzz(ch.id))
                             {
                                 parents_with_unread_thread.insert(pid);
                             }
@@ -856,7 +873,9 @@ impl ChannelSidebar {
                         for ch in ch_slice {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             if is_thread {
-                                if (ch.is_unread() && !ch.muted) || active_channel_id == Some(ch.id)
+                                if (ch.is_unread() && !ch.muted)
+                                    || buzz.has_buzz(ch.id)
+                                    || active_channel_id == Some(ch.id)
                                 {
                                     kept.push((ch, Vec::new(), true));
                                 }
@@ -870,6 +889,7 @@ impl ChannelSidebar {
                             let has_members_in_voice =
                                 is_voice_or_streaming && !sidebar_members.is_empty();
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                                || buzz.has_buzz(ch.id)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
                                 || parents_with_unread_thread.contains(&ch.id)
@@ -916,7 +936,9 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
+                                buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
+                                age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
                                 badge_count,
                                 badge_label,
@@ -1001,6 +1023,44 @@ impl ChannelSidebar {
                     if id.as_str() == id_str && (!exclude_favorites || !is_favorite)
             )
         })
+    }
+
+    fn reveal_route_channel(&self, channel_id: ChannelId) -> bool {
+        let Some(ix) = self.channel_row_index(channel_id, false) else {
+            return false;
+        };
+        if self.list_state.viewport_bounds().size.height <= px(0.) {
+            return false;
+        }
+        self.list_state.scroll_to_reveal_item(ix);
+        true
+    }
+
+    fn flush_route_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.pending_route_channel else {
+            return;
+        };
+        if self.reveal_route_channel(channel_id) {
+            self.pending_route_channel = None;
+            return;
+        }
+        if self.route_reveal_queued || self.channel_row_index(channel_id, false).is_none() {
+            return;
+        }
+        self.route_reveal_queued = true;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.route_reveal_queued = false;
+                let Some(channel_id) = this.pending_route_channel else {
+                    return;
+                };
+                if this.reveal_route_channel(channel_id) {
+                    this.pending_route_channel = None;
+                    cx.notify();
+                }
+            });
+        });
     }
 
     fn scroll_to_channel_row(
@@ -1211,6 +1271,7 @@ impl ChannelSidebar {
 impl Render for ChannelSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
+        self.flush_route_reveal(window, cx);
         if self.pending_ctrlk_scroll {
             self.try_scroll_ctrlk_focus(cx);
         }
@@ -2363,7 +2424,12 @@ fn render_banner_and_events(
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
                 div()
                     .image_cache(icon_cache.clone())
-                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
+                    .child(
+                        gpui::img(logo.clone())
+                            .w(px(24.))
+                            .h(px(24.))
+                            .aspect_square(),
+                    )
                     .into_any_element()
             } else {
                 gpui::svg()
@@ -2696,7 +2762,9 @@ fn render_sidebar_item(
             name,
             channel_type,
             unread,
+            buzz,
             private,
+            age_restricted,
             selected,
             badge_count,
             badge_label: _badge_label,
@@ -2719,7 +2787,7 @@ fn render_sidebar_item(
             let settings_channel_id = menu_channel_id;
 
             let make_channel_element = || {
-                let icon = channel_type_icon(*channel_type, *private);
+                let icon = channel_type_icon(*channel_type, *private, *age_restricted);
                 let highlight_type = shows_left_unread_nub(*channel_type);
                 let text_bright = *selected || ((*unread || *badge_count > 0) && highlight_type);
                 let bold = (*selected || *unread) && highlight_type;
@@ -2772,7 +2840,8 @@ fn render_sidebar_item(
                             })
                         } else {
                             None
-                        });
+                        })
+                        .buzz(*buzz);
                 if show_settings_gear {
                     let gear_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
                     element = element.trailing_action(Some(ChannelRowTrailingAction {
@@ -2829,6 +2898,7 @@ fn render_sidebar_item(
                     } else {
                         None
                     })
+                    .buzz(*buzz)
                     .connector(Some(ThreadConnector {
                         line_above: *line_above,
                         line_below: *line_below,

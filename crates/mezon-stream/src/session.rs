@@ -13,7 +13,10 @@ use libwebrtc::peer_connection_factory::{
 };
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
-use mezon_voice::{StreamAudioOutput, stabilize_inactive_video_sections};
+use mezon_voice::{
+    AudioFormat, SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
+    stabilize_inactive_video_sections,
+};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
@@ -23,8 +26,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
-const MAX_RECONNECT_ATTEMPTS: u32 = 40;
+const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_TOKEN_REFRESH_ATTEMPTS: u32 = 3;
+const OUTPUT_RECOVERY_DELAY: Duration = Duration::from_millis(500);
+const MAX_OUTPUT_RECOVERY_DELAY: Duration = Duration::from_secs(5);
 
 pub type StreamTokenProvider =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String>> + Send + Sync + 'static>;
@@ -42,6 +47,7 @@ pub enum StreamEvent {
     Live,
     NoBroadcast,
     RemoteAudio(bool),
+    OutputDevice(Option<String>),
     PlaybackBlocked,
     Error(String),
     Disconnected,
@@ -50,6 +56,7 @@ pub enum StreamEvent {
 pub struct StreamSession {
     stop_tx: Sender<()>,
     event_rx: Receiver<StreamEvent>,
+    output_device_tx: Sender<Option<String>>,
     audio: Arc<Mutex<Option<Arc<StreamAudioOutput>>>>,
 }
 
@@ -62,6 +69,7 @@ impl StreamSession {
     ) -> Self {
         let (stop_tx, stop_rx) = flume::bounded(1);
         let (event_tx, event_rx) = flume::unbounded();
+        let (output_device_tx, output_device_rx) = flume::unbounded();
         let audio = Arc::new(Mutex::new(None));
         let audio_for_thread = audio.clone();
         std::thread::spawn(move || {
@@ -74,6 +82,7 @@ impl StreamSession {
                 }
             };
             *audio_for_thread.lock() = Some(audio_output.clone());
+            let _ = event_tx.send(StreamEvent::OutputDevice(audio_output.device_id()));
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -83,13 +92,24 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
+            let output_follower = runtime.spawn(follow_output_device(
+                audio_output.clone(),
+                output_device_rx,
+                event_tx.clone(),
+            ));
             runtime.block_on(run_session(config, audio_output, stop_rx, event_tx));
+            output_follower.abort();
         });
         Self {
             stop_tx,
             event_rx,
+            output_device_tx,
             audio,
         }
+    }
+
+    pub fn set_output_device(&self, output_device_id: Option<String>) {
+        let _ = self.output_device_tx.send(output_device_id);
     }
 
     pub fn audio(&self) -> Option<Arc<StreamAudioOutput>> {
@@ -111,6 +131,65 @@ impl Drop for StreamSession {
     }
 }
 
+enum OutputTask {
+    Switch(Option<String>),
+    Recover(u32),
+}
+
+async fn follow_output_device(
+    audio: Arc<StreamAudioOutput>,
+    requests: Receiver<Option<String>>,
+    event_tx: Sender<StreamEvent>,
+) {
+    let failures = audio.failures();
+    let mut recovery: Option<u32> = None;
+    loop {
+        let task = tokio::select! {
+            request = requests.recv_async() => {
+                let Ok(mut output_device_id) = request else {
+                    break;
+                };
+                while let Ok(newer) = requests.try_recv() {
+                    output_device_id = newer;
+                }
+                OutputTask::Switch(output_device_id)
+            }
+            Ok(()) = failures.recv_async(), if recovery.is_none() => {
+                recovery = Some(0);
+                continue;
+            }
+            _ = tokio::time::sleep(output_recovery_delay(recovery.unwrap_or(0))), if recovery.is_some() => {
+                OutputTask::Recover(recovery.unwrap_or(0))
+            }
+        };
+        let recovering = match task {
+            OutputTask::Recover(attempt) => Some(attempt),
+            OutputTask::Switch(_) => None,
+        };
+        let worker = audio.clone();
+        let outcome = tokio::task::spawn_blocking(move || match task {
+            OutputTask::Switch(output_device_id) => worker.set_output_device(output_device_id),
+            OutputTask::Recover(attempt) => worker.recover(attempt),
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
+            Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
+        }
+        recovery = audio
+            .is_failed()
+            .then(|| recovering.map_or(0, |attempt| attempt.saturating_add(1)));
+        let _ = event_tx.send(StreamEvent::OutputDevice(audio.device_id()));
+    }
+}
+
+fn output_recovery_delay(attempt: u32) -> Duration {
+    OUTPUT_RECOVERY_DELAY
+        .saturating_mul(2u32.saturating_pow(attempt))
+        .min(MAX_OUTPUT_RECOVERY_DELAY)
+}
+
 async fn run_session(
     config: StreamSessionConfig,
     audio: Arc<StreamAudioOutput>,
@@ -123,7 +202,7 @@ async fn run_session(
     let factory = PeerConnectionFactory::default();
 
     loop {
-        match run_session_once(
+        let outcome = run_session_once(
             &config,
             &token,
             audio.clone(),
@@ -132,8 +211,11 @@ async fn run_session(
             &factory,
             &mut reconnect_attempt,
         )
-        .await
-        {
+        .await;
+        if reconnect_attempt == 0 {
+            token_refresh_attempt = 0;
+        }
+        match outcome {
             Ok(()) => break,
             Err(SessionFailure::Fatal(reason)) => {
                 let _ = event_tx.send(StreamEvent::Error(reason));
@@ -148,6 +230,12 @@ async fn run_session(
                     break;
                 }
                 reconnect_attempt = reconnect_attempt.saturating_add(1);
+                if reconnect_attempt > MAX_RECONNECT_ATTEMPTS {
+                    let _ = event_tx.send(StreamEvent::Error(
+                        "SFU stream reconnect limit reached".into(),
+                    ));
+                    break;
+                }
                 tracing::warn!(
                     attempt = reconnect_attempt,
                     "SFU stream session refreshing token"
@@ -155,12 +243,6 @@ async fn run_session(
                 match refresh_token(&config, &stop_rx, reconnect_attempt).await {
                     Some(next_token) => {
                         token = next_token;
-                        token_refresh_attempt = 0;
-                    }
-                    None if token_refresh_attempt < MAX_TOKEN_REFRESH_ATTEMPTS => {
-                        if !wait_before_retry(&stop_rx, reconnect_attempt).await {
-                            break;
-                        }
                     }
                     None => break,
                 }
@@ -214,8 +296,7 @@ async fn wait_before_retry(stop_rx: &Receiver<()>, reconnect_attempt: u32) -> bo
 }
 
 fn reconnect_delay(attempt: u32) -> Duration {
-    Duration::from_millis(1_000u64.saturating_mul(2u64.saturating_pow(attempt.min(4))))
-        .min(Duration::from_secs(15))
+    sfu_reconnect_delay(attempt.saturating_sub(1))
 }
 
 #[derive(Debug)]
@@ -292,7 +373,10 @@ async fn run_session_once(
                     Ok(PeerConnectionState::Closed) => {
                         return Err(SessionFailure::Retry("SFU peer connection closed".into()));
                     }
-                    Ok(PeerConnectionState::New | PeerConnectionState::Connecting | PeerConnectionState::Disconnected) => {}
+                    Ok(PeerConnectionState::New | PeerConnectionState::Connecting | PeerConnectionState::Disconnected) => {
+                        connected = false;
+                        healthy_since = None;
+                    }
                     Err(_) => {}
                 }
             }
@@ -400,10 +484,10 @@ enum CloseVerdict {
 }
 
 fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
-    match code.map(u16::from) {
-        Some(4004 | 4005) => CloseVerdict::RefreshToken,
-        Some(4006 | 4011) => CloseVerdict::Fatal,
-        _ => CloseVerdict::Retry,
+    match sfu_close_action(code.map(u16::from)) {
+        SfuCloseAction::RefreshToken => CloseVerdict::RefreshToken,
+        SfuCloseAction::Stop => CloseVerdict::Fatal,
+        SfuCloseAction::Retry | SfuCloseAction::ResetTransport => CloseVerdict::Retry,
     }
 }
 
@@ -459,11 +543,13 @@ impl AudioPumpRegistry {
         let weak_registry = Arc::downgrade(self);
         let registry = Arc::clone(self);
         let handle = runtime.spawn(async move {
-            let format = audio.format();
-            let mut stream =
-                NativeAudioStream::new(track, format.sample_rate as i32, format.channels as i32);
+            let mut format = audio.format();
+            let mut stream = track_stream(&track, format);
             while let Some(frame) = stream.next().await {
-                audio.push_track(key, &frame.data);
+                if !audio.push_track(key, format, &frame.data) {
+                    format = audio.format();
+                    stream = track_stream(&track, format);
+                }
             }
             audio.clear_track(key);
             let _ = event_tx.send(StreamEvent::RemoteAudio(false));
@@ -482,6 +568,17 @@ impl AudioPumpRegistry {
             pump.abort();
         }
     }
+}
+
+fn track_stream(
+    track: &libwebrtc::audio_track::RtcAudioTrack,
+    format: AudioFormat,
+) -> NativeAudioStream {
+    NativeAudioStream::new(
+        track.clone(),
+        format.sample_rate as i32,
+        format.channels as i32,
+    )
 }
 
 struct PeerConnectionGuard {
@@ -651,7 +748,8 @@ fn media_sections(sdp: &str) -> Vec<MediaSection> {
         } else if matches!(
             line,
             "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
-        ) && let Some(section) = current.as_mut() {
+        ) && let Some(section) = current.as_mut()
+        {
             section.direction = Some(line.to_owned());
         }
     }
@@ -748,6 +846,15 @@ fn build_ws_url(base: &str, token: &str) -> Result<url::Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_recovery_backs_off_up_to_a_cap() {
+        assert_eq!(output_recovery_delay(0), Duration::from_millis(500));
+        assert_eq!(output_recovery_delay(1), Duration::from_secs(1));
+        assert_eq!(output_recovery_delay(2), Duration::from_secs(2));
+        assert_eq!(output_recovery_delay(4), Duration::from_secs(5));
+        assert_eq!(output_recovery_delay(40), Duration::from_secs(5));
+    }
 
     const OFFER: &str = concat!(
         "v=0\r\n",

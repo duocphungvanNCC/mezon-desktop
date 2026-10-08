@@ -6,6 +6,7 @@ pub mod audit_log;
 pub mod auto_update;
 pub mod badge;
 pub mod banned_users;
+pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
@@ -37,6 +38,8 @@ pub mod ids;
 pub mod inbox;
 pub mod invite;
 pub mod login;
+pub mod media_permission;
+pub mod mention_search;
 pub mod message;
 pub mod message_search;
 pub mod message_time;
@@ -62,9 +65,9 @@ pub mod threads;
 pub mod topic_badges;
 pub mod topics;
 pub mod ui_state;
+pub mod upload_jobs;
 pub mod user_profile;
 pub mod users_by_user;
-mod voice_presence;
 pub mod voice;
 pub mod wallet;
 mod wallet_persist;
@@ -76,6 +79,7 @@ use dirs::config_dir;
 pub use mezon_client::Session;
 pub use mezon_client::data_image;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
+pub use mezon_client::{MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS};
 pub use mezon_client::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
@@ -105,6 +109,7 @@ pub use banned_users::{
     BAN_LABEL_MINUTE_SECS, BannedEntry, BannedUsersEvent, BannedUsersStore,
     seconds_until_ban_label_changes,
 };
+pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
@@ -135,6 +140,7 @@ pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_d
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
+    SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
@@ -172,10 +178,12 @@ pub use gifts::{
 pub use group_members::{
     AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
 };
-pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
+pub use ids::{ChannelId, ClanId, MessageId, MessageRef, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
+pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
+pub use mention_search::{MentionSearchEvent, MentionSearchKey, MentionSearchStore};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
@@ -197,7 +205,11 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
-pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
+pub use mmn_client::{
+    DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
+    MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
+};
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
     is_valid_name_content, prepare_display_name_for_update,
@@ -223,7 +235,7 @@ pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore,
-    copy_image_url_to_clipboard, download_url_with_dialog,
+    copy_image_url_to_clipboard, download_url_with_dialog, open_media_url_external,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -247,8 +259,8 @@ pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
-    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
-    resolve_user_profile,
+    ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
+    resolve_avatar_url, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]
@@ -257,13 +269,14 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, PickedScreen, RecordingState, RecordingToast, RemovalCause,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
+    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, screen_tile_id, system_screen_share_pick,
-    upload_sound_file, validate_sound_file,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
+    validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -335,6 +348,29 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     }
 }
 
+pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_output_device(output_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.output_device_id = output_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_output_device(output_device_id.clone(), cx)
+        });
+    }
+    if let Some(stream) = StreamStore::try_global(cx) {
+        stream.update(cx, |stream, cx| {
+            stream.set_output_device(output_device_id, cx)
+        });
+    }
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
@@ -386,6 +422,17 @@ pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::
 }
 
 pub const DEFAULT_MCP_PORT: u16 = 3179;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityStripDismissal {
+    pub user_id: i64,
+    pub clan_id: i64,
+    pub channel_id: i64,
+    #[serde(default)]
+    pub newest_topic_id: Option<i64>,
+    #[serde(default)]
+    pub pin_record_ids: Vec<i64>,
+}
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +494,10 @@ pub struct Settings {
     pub tour_done_tracks: Vec<String>,
     #[serde(default)]
     pub tour_eligible: Option<bool>,
+    #[serde(default)]
+    pub screen_capture_access_requested: bool,
+    #[serde(default)]
+    pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
 }
 
 impl Default for Settings {
@@ -477,6 +528,8 @@ impl Default for Settings {
             tour_seen_version: 0,
             tour_done_tracks: Vec::new(),
             tour_eligible: None,
+            screen_capture_access_requested: false,
+            activity_strip_dismissals: Vec::new(),
         }
     }
 }
@@ -679,7 +732,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod settings_tests {
-    use super::Settings;
+    use super::{ActivityStripDismissal, Settings};
 
     #[test]
     fn a_settings_file_written_before_the_tour_existed_still_parses() {
@@ -709,6 +762,26 @@ mod settings_tests {
         let restored: Settings = serde_json::from_str(&json).expect("decode");
         assert_eq!(restored.tour_seen_version, 1);
         assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn activity_strip_dismissal_survives_a_roundtrip() {
+        let settings = Settings {
+            activity_strip_dismissals: vec![ActivityStripDismissal {
+                user_id: 1,
+                clan_id: 2,
+                channel_id: 3,
+                newest_topic_id: Some(4),
+                pin_record_ids: vec![5, 6],
+            }],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(
+            restored.activity_strip_dismissals,
+            settings.activity_strip_dismissals
+        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(target_os = "linux", test))]
+mod hang_probe;
 mod mcp;
 
 use anyhow::Result;
@@ -298,7 +300,10 @@ fn main() -> Result<()> {
     configure_linux_session();
 
     install_panic_hook();
-    if let Some(exit_code) = mezon_cli::try_run(std::env::args())? {
+    let args: Vec<String> = std::env::args().collect();
+    if mezon_cli::is_cli_invocation(&args)
+        && let Some(exit_code) = mezon_cli::try_run(&args)?
+    {
         std::process::exit(exit_code);
     }
 
@@ -489,7 +494,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn capture_hang_sample(stalled_secs: u64) {
+    for line in hang_probe::report(stalled_secs) {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
@@ -545,6 +558,19 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let api = Arc::new(AppApi::new(
         transport.clone(),
         app_config.base_img_url.clone(),
+    ));
+    let signer_api = api.clone();
+    mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+        app_config
+            .media_origins()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        vec![app_config.imgproxy_base_url.clone()],
+        Arc::new(move |channel_id| {
+            let api = signer_api.clone();
+            Box::pin(async move { api.generate_cdn_signature(channel_id).await })
+        }),
     ));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
@@ -648,6 +674,16 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             } else {
                 tracing::info!("Registered gg sans font ({} weights)", gg_sans_paths.len());
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Err(e) = cx
+            .text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+            ))])
+        {
+            tracing::error!("Failed to register IBM Plex Sans: {e}");
         }
 
         init_ui(cx);
@@ -963,12 +999,14 @@ fn open_main_window(
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::BuzzStore::init(cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::CallStore::init(api.clone(), cx);
+    mezon_store::MediaPermissionStore::init(cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
     mezon_store::StickerStore::init(api.clone(), cx);
@@ -980,6 +1018,7 @@ fn open_main_window(
     mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
+    mezon_store::MentionSearchStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::EventsStore::init(api.clone(), cx);
@@ -1086,14 +1125,17 @@ fn open_main_window(
     mezon_store::AudioStore::set_device_enumerator(
         &audio_store,
         std::sync::Arc::new(|| {
-            let inputs = mezon_native::audio::enumerate_input_devices()
+            let snapshot = mezon_native::audio::audio_device_snapshot();
+            let inputs = snapshot
+                .inputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
                     name: d.name,
                 })
                 .collect::<Vec<_>>();
-            let outputs = mezon_native::audio::enumerate_output_devices()
+            let outputs = snapshot
+                .outputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
@@ -1103,8 +1145,8 @@ fn open_main_window(
             mezon_store::DeviceSnapshot {
                 inputs,
                 outputs,
-                default_input_name: mezon_native::audio::default_input_device_name(),
-                default_output_name: mezon_native::audio::default_output_device_name(),
+                default_input_name: snapshot.default_input_name,
+                default_output_name: snapshot.default_output_name,
             }
         }),
         cx,

@@ -145,6 +145,7 @@ pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     } else {
         img(crate::util::imgproxy::role_icon_url(cx, &row.icon))
             .size(px(20.0))
+            .aspect_square()
             .flex_shrink_0()
             .rounded(px(4.0))
             .image_cache(&crate::image_cache::shared_role_icon_cache(cx))
@@ -208,8 +209,20 @@ impl PermissionsTab {
         ChannelUsersStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(channel_id, cx);
         });
+        // Only the member who adds or removes a role updates its channel list
+        // here; every other member keeps the list fetched at startup for hours.
+        // Ask the server which roles reach a private channel each time the tab
+        // opens, so a member granted access through a role sees that role.
+        let private = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .is_some_and(|channel| channel.private);
         RolesStore::global(cx).update(cx, |store, cx| {
-            store.ensure_loaded(clan_id, cx);
+            if private {
+                store.reload(clan_id, cx);
+            } else {
+                store.ensure_loaded(clan_id, cx);
+            }
         });
         ClanMembersStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, cx);
@@ -229,11 +242,16 @@ impl PermissionsTab {
             }),
             cx.subscribe(
                 &ChannelUsersStore::global(cx),
-                |this, _, event: &ChannelUsersEvent, cx| {
-                    let ChannelUsersEvent::Changed { channel_id } = event;
-                    if *channel_id == this.channel_id {
+                |this, _, event: &ChannelUsersEvent, cx| match event {
+                    ChannelUsersEvent::Changed { channel_id } if *channel_id == this.channel_id => {
                         this.refresh(cx);
                     }
+                    ChannelUsersEvent::MembershipChanged { channel_id }
+                        if *channel_id == this.channel_id =>
+                    {
+                        this.reload_access_lists(cx);
+                    }
+                    _ => {}
                 },
             ),
             cx.observe(&RolesStore::global(cx), |this, _, cx| this.refresh(cx)),
@@ -421,6 +439,18 @@ impl PermissionsTab {
         self.member_search = Some(input);
     }
 
+    fn reload_access_lists(&self, cx: &mut Context<Self>) {
+        let channel_id = self.channel_id;
+        ChannelUsersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(channel_id, cx);
+        });
+        if !self.persisted_private(cx) {
+            return;
+        }
+        let clan_id = self.clan_id;
+        RolesStore::global(cx).update(cx, |store, cx| store.reload(clan_id, cx));
+    }
+
     fn persisted_private(&self, cx: &App) -> bool {
         ChannelList::global(cx)
             .read(cx)
@@ -540,8 +570,11 @@ impl PermissionsTab {
         let role_ids = channel_acl::acl_role_ids(private_enabled, &self.selected_role_ids);
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
-        let staged_users = self.selected_user_ids.clone();
-        let staged_roles = self.selected_role_ids.clone();
+        let granted_roles = if private_enabled {
+            self.selected_role_ids.clone()
+        } else {
+            Vec::new()
+        };
 
         cx.spawn(async move |this, cx| {
             let result = api
@@ -561,14 +594,12 @@ impl PermissionsTab {
                 this.private_initial = private_enabled;
                 this.selected_user_ids.clear();
                 this.selected_role_ids.clear();
-                if private_enabled {
-                    ChannelUsersStore::global(cx).update(cx, |store, cx| {
-                        store.add_users(channel_id, &staged_users, cx);
-                    });
-                    RolesStore::global(cx).update(cx, |store, cx| {
-                        store.add_roles_to_channel(clan_id, channel_id, &staged_roles, cx);
-                    });
-                }
+                ChannelUsersStore::global(cx).update(cx, |store, cx| {
+                    store.apply_privacy_change(channel_id, private_enabled, cx);
+                });
+                RolesStore::global(cx).update(cx, |store, cx| {
+                    store.set_channel_roles(clan_id, channel_id, &granted_roles, cx);
+                });
                 this.refresh(cx);
             });
         })
