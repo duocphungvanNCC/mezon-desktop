@@ -13,10 +13,10 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
-    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
-    SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
+    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
+    OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
     build_share_contact_content_json, detect_markdown, emoji_content_tokens,
     hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
     with_create_time_seconds,
@@ -1011,7 +1011,7 @@ async fn send_forward(
                 dest.is_public,
                 dest.mode,
                 Vec::new(),
-                Vec::new(),
+                OutgoingHashtags::default(),
                 Vec::new(),
                 None,
             )
@@ -2735,7 +2735,9 @@ impl MessagesStore {
             });
         let message_code = edit_meta.map_or(0, |(_, _, message_code)| message_code);
         let (spans, transport_mentions, _transport_hashtags, _transport_emojis, raw_content) =
-            edit_content_spans(&content, content_tokens, message_code);
+            edit_content_spans(&content, content_tokens, message_code, |tokens| {
+                channel_link_metas(&content, tokens, cx)
+            });
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -3347,7 +3349,9 @@ impl MessagesStore {
             .as_deref()
             .filter(|raw| !raw.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| build_send_content(&msg.content, &[], &[], &[]).json);
+            .unwrap_or_else(|| {
+                build_send_content(&msg.content, &[], &OutgoingHashtags::default(), &[]).json
+            });
         let mentions: Vec<mezon_proto::api::MessageMention> = msg
             .mention_targets
             .iter()
@@ -5065,10 +5069,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5218,10 +5226,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5816,10 +5828,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -6067,7 +6083,8 @@ impl MessagesStore {
                     is_public,
                     content: content.clone(),
                     mentions: update_mentions,
-                    hashtags: update_hashtags,
+                    hashtags: update_hashtags.tokens,
+                    hashtag_channels: update_hashtags.channels,
                     emojis: update_emojis,
                     create_time_seconds,
                     started_at: now_unix_seconds(),
@@ -9169,7 +9186,7 @@ pub(crate) async fn run_upload_job(
             job.message_id,
             &job.content,
             job.mentions,
-            job.hashtags,
+            OutgoingHashtags::new(job.hashtags, job.hashtag_channels),
             job.emojis,
             job.create_time_seconds,
             presigned,
@@ -9242,7 +9259,7 @@ struct AnonymousAttachmentSend<'a> {
     keys: Vec<String>,
     reply_ref: Option<OutgoingReply>,
     mentions: Vec<TransportMention>,
-    hashtags: Vec<TransportHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<TransportEmoji>,
     flags: OutgoingMessageFlags,
 }
@@ -10055,10 +10072,30 @@ type EditTransportTokens = (
     String,
 );
 
+pub(crate) fn outgoing_hashtags(
+    content: &str,
+    tokens: Vec<TransportHashtag>,
+    cx: &App,
+) -> OutgoingHashtags {
+    let channels = channel_link_metas(content, &tokens, cx);
+    OutgoingHashtags::new(tokens, channels)
+}
+
+fn channel_link_metas(
+    content: &str,
+    tokens: &[TransportHashtag],
+    cx: &App,
+) -> Vec<ChannelLinkMeta> {
+    crate::ChannelList::try_global(cx)
+        .map(|channels| channels.read(cx).channel_link_metas(content, tokens))
+        .unwrap_or_default()
+}
+
 fn edit_content_spans(
     content: &str,
     content_tokens: OutgoingContent,
     message_code: i32,
+    link_metas: impl FnOnce(&[TransportHashtag]) -> Vec<ChannelLinkMeta>,
 ) -> EditTransportTokens {
     let OutgoingContent {
         mentions,
@@ -10077,6 +10114,8 @@ fn edit_content_spans(
         .into_iter()
         .map(OutgoingEmoji::into_transport)
         .collect();
+    let channels = link_metas(&transport_hashtags);
+    let transport_hashtags = OutgoingHashtags::new(transport_hashtags, channels);
     let sent = build_send_content_with_code(
         content,
         &transport_mentions,
@@ -10084,6 +10123,7 @@ fn edit_content_spans(
         &transport_emojis,
         message_code,
     );
+    let transport_hashtags = transport_hashtags.tokens;
     let raw_content = sent.json;
     let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
@@ -13319,8 +13359,12 @@ mod tests {
         .into_iter()
         .map(OutgoingMention::into_transport)
         .collect();
-        let sent =
-            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let sent = mezon_client::transport::build_send_content(
+            "@Everyone hi",
+            &transport,
+            &Default::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(parsed.mentions.len(), 1);
@@ -13382,7 +13426,7 @@ mod tests {
             emojis: Vec::new(),
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans("@bob hi", content_tokens, 0);
+            edit_content_spans("@bob hi", content_tokens, 0, |_| Vec::new());
 
         assert!(
             transport_mentions.iter().any(|m| m.user_id == "42"),
@@ -13433,7 +13477,7 @@ mod tests {
             }],
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE);
+            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE, |_| Vec::new());
         let parsed: ApiMessageContent =
             serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
 
@@ -14479,7 +14523,7 @@ mod tests {
 
     #[test]
     fn optimistic_markdown_content_matches_stripped_echo() {
-        let optimistic_text = build_send_content("**bold**", &[], &[], &[]).text;
+        let optimistic_text = build_send_content("**bold**", &[], &Default::default(), &[]).text;
         assert_eq!(
             optimistic_text, "bold",
             "optimistic text must be stripped like the server-stored text"
@@ -16090,7 +16134,12 @@ mod tests {
             store.update(cx, |store, cx| {
                 let channel = ChannelId(500);
                 open_command_channel(store, channel);
-                let sent = mezon_client::transport::build_send_content("*roll 2d6", &[], &[], &[]);
+                let sent = mezon_client::transport::build_send_content(
+                    "*roll 2d6",
+                    &[],
+                    &Default::default(),
+                    &[],
+                );
                 let command = command_card(1, 9).command.map(|command| *command).unwrap();
                 store.record_failed_command(
                     channel,
@@ -16281,6 +16330,7 @@ mod tests {
             content: "clip".into(),
             mentions: Vec::new(),
             hashtags: Vec::new(),
+            hashtag_channels: Vec::new(),
             emojis: Vec::new(),
             create_time_seconds: 0,
             started_at: now_unix_seconds(),

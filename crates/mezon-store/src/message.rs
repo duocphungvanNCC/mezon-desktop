@@ -8,8 +8,9 @@ use mezon_client::transport::{
 };
 
 use crate::album_layout::AlbumLayout;
+use crate::channel::ChannelType;
 use crate::config::AppConfig;
-use crate::ids::{ChannelId, MessageId, MessageRef, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, MessageRef, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -365,6 +366,7 @@ pub enum MessageSpan {
     Hashtag {
         display: SharedString,
         channel_id: Option<String>,
+        meta: Option<Box<HashtagMeta>>,
     },
     Emoji {
         name: SharedString,
@@ -381,6 +383,15 @@ pub enum MessageSpan {
         level: u8,
         text: SharedString,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashtagMeta {
+    pub label: SharedString,
+    pub clan_id: ClanId,
+    pub parent_id: Option<ChannelId>,
+    pub channel_type: ChannelType,
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,7 +695,7 @@ pub enum RichRunKind {
 pub enum RichClick {
     Link(SharedString),
     Mention(UserId),
-    Channel(ChannelId),
+    Channel(ChannelId, Option<ClanId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1081,6 +1092,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             Kind::Hashtag => spans.push(MessageSpan::Hashtag {
                 display: inner.into(),
                 channel_id: tok.channel_id.clone(),
+                meta: hashtag_meta(&tok),
             }),
             Kind::Emoji => spans.push(MessageSpan::Emoji {
                 name: inner.into(),
@@ -1094,6 +1106,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                     url,
                     link_kind,
                     &content.cvtt,
+                    hashtag_meta(&tok),
                 ));
             }
             Kind::Markdown => {
@@ -1116,6 +1129,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                             url,
                             link_kind_from_marker(ty),
                             &content.cvtt,
+                            hashtag_meta(&tok),
                         ));
                     }
                     "lk_ogp" => {
@@ -1195,6 +1209,14 @@ struct ChannelUrlIds {
     canvas_id: Option<String>,
 }
 
+pub fn channel_url_clan_id(url: &str) -> Option<ClanId> {
+    extract_channel_url_ids(url)?
+        .clan_id
+        .parse::<i64>()
+        .ok()
+        .map(ClanId)
+}
+
 fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
     let marker = "/chat/clans/";
     let idx = url.find(marker)?;
@@ -1225,11 +1247,42 @@ fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
     })
 }
 
+fn hashtag_meta(tok: &ContentToken) -> Option<Box<HashtagMeta>> {
+    let label = tok
+        .channel_label
+        .as_deref()
+        .filter(|label| !label.is_empty())?;
+    let clan_id = tok
+        .clan_id
+        .as_deref()?
+        .parse::<i64>()
+        .ok()
+        .map(ClanId)
+        .filter(|clan_id| !clan_id.is_zero())?;
+    let channel_type = u32::try_from(tok.channel_type?)
+        .ok()
+        .map(ChannelType::from_raw)?;
+    let parent_id = tok
+        .parent_id
+        .as_deref()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(ChannelId)
+        .filter(|parent_id| !parent_id.is_zero());
+    Some(Box::new(HashtagMeta {
+        label: label.to_string().into(),
+        clan_id,
+        parent_id,
+        channel_type,
+        private: tok.channel_private.is_some_and(|private| private != 0),
+    }))
+}
+
 fn resolve_link_span(
     text: SharedString,
     url: String,
     kind: LinkKind,
     cvtt: &HashMap<String, String>,
+    meta: Option<Box<HashtagMeta>>,
 ) -> MessageSpan {
     if let Some(ids) = extract_channel_url_ids(&url) {
         if let Some(canvas_id) = ids.canvas_id {
@@ -1243,9 +1296,11 @@ fn resolve_link_span(
             }
             return MessageSpan::Link { text, url, kind };
         }
+        let meta = meta.filter(|meta| meta.clan_id.get().to_string() == ids.clan_id);
         return MessageSpan::Hashtag {
             display: text,
             channel_id: Some(ids.channel_id),
+            meta,
         };
     }
     MessageSpan::Link { text, url, kind }
@@ -1457,7 +1512,8 @@ pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
-            } => builder.push_hashtag(display, channel_id.clone()),
+                meta,
+            } => builder.push_hashtag(display, channel_id.clone(), meta.clone()),
             MessageSpan::Emoji {
                 name,
                 emoji_id,
@@ -1515,7 +1571,12 @@ impl ReplyPreviewBuilder {
         self.needs_space |= text.chars().last().is_some_and(char::is_whitespace);
     }
 
-    fn push_hashtag(&mut self, display: &str, channel_id: Option<String>) {
+    fn push_hashtag(
+        &mut self,
+        display: &str,
+        channel_id: Option<String>,
+        meta: Option<Box<HashtagMeta>>,
+    ) {
         let label: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
         let separator = usize::from(self.needs_space);
         if self.chars + separator + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
@@ -1530,6 +1591,7 @@ impl ReplyPreviewBuilder {
         self.out.push(MessageSpan::Hashtag {
             display: label.into(),
             channel_id,
+            meta,
         });
         self.needs_space = false;
     }
@@ -1705,13 +1767,16 @@ pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 let start = text.len();
                 text.push_str(display);
                 let click = channel_id
                     .as_deref()
                     .and_then(rich_channel_id)
-                    .map(RichClick::Channel);
+                    .map(|channel_id| {
+                        RichClick::Channel(channel_id, meta.as_ref().map(|meta| meta.clan_id))
+                    });
                 runs.push(RichRun {
                     range: start..text.len(),
                     kind: RichRunKind::Hashtag,
@@ -2116,6 +2181,7 @@ mod tests {
         MessageSpan::Hashtag {
             display: display.into(),
             channel_id: Some(channel_id.into()),
+            meta: None,
         }
     }
 
@@ -2373,6 +2439,78 @@ mod tests {
         ));
     }
 
+    fn channel_meta_token(s: i64, e: i64, clan_id: &str) -> ContentToken {
+        ContentToken {
+            channel_id: Some("900".into()),
+            channel_label: Some("voice elsewhere".into()),
+            clan_id: Some(clan_id.into()),
+            channel_type: Some(10),
+            ..token(s, e)
+        }
+    }
+
+    #[test]
+    fn parse_spans_reads_channel_meta_from_hashtags_and_channel_links() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let mut link = channel_meta_token(7, 7 + url.len() as i64, "5");
+        link.kind = Some("lk".into());
+        let content = ApiMessageContent {
+            t: format!("#voice {url}"),
+            hg: vec![channel_meta_token(0, 6, "5")],
+            mk: vec![link],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        let metas: Vec<&HashtagMeta> = spans
+            .iter()
+            .filter_map(|span| match span {
+                MessageSpan::Hashtag {
+                    meta: Some(meta), ..
+                } => Some(meta.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(metas.len(), 2);
+        for meta in metas {
+            assert_eq!(meta.label.as_ref(), "voice elsewhere");
+            assert_eq!(meta.clan_id, ClanId(5));
+            assert_eq!(meta.channel_type, ChannelType::Voice);
+            assert!(!meta.private);
+        }
+    }
+
+    #[test]
+    fn parse_spans_reads_the_private_flag_from_channel_meta() {
+        let content = ApiMessageContent {
+            t: "#voice".into(),
+            hg: vec![ContentToken {
+                channel_private: Some(1),
+                ..channel_meta_token(0, 6, "5")
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag { meta: Some(meta), .. }] if meta.private
+        ));
+    }
+
+    #[test]
+    fn parse_spans_drops_link_meta_naming_another_clan() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let mut link = channel_meta_token(0, url.len() as i64, "6");
+        link.kind = Some("lk".into());
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![link],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag { meta: None, .. }]
+        ));
+    }
+
     fn token(s: i64, e: i64) -> ContentToken {
         ContentToken {
             s: Some(s),
@@ -2404,7 +2542,7 @@ mod tests {
     }
 
     fn edit_source_for_composer_text(raw: &str) -> (String, Option<String>) {
-        let sent = mezon_client::transport::build_send_content(raw, &[], &[], &[]);
+        let sent = mezon_client::transport::build_send_content(raw, &[], &Default::default(), &[]);
         let content: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("send content json");
         let spans = parse_spans(&content);

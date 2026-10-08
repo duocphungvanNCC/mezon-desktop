@@ -10,9 +10,10 @@ use gpui::{
     relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
-    MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
-    RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, HashtagMeta, LinkKind, Message,
+    MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout,
+    RichRunKind, RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url,
+    is_here_user_id,
 };
 
 use ui::Clickable;
@@ -527,8 +528,8 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                         };
                         match action {
                             RichClick::Link(url) => open_message_link(url.to_string(), cx),
-                            RichClick::Channel(channel_id) => {
-                                navigate_to_channel(*channel_id, locale.as_ref(), cx)
+                            RichClick::Channel(channel_id, clan_hint) => {
+                                navigate_to_channel(*channel_id, *clan_hint, locale.as_ref(), cx)
                             }
                             RichClick::Mention(user_id) => {
                                 let Some(context) = profile_context else {
@@ -559,7 +560,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                                         return None;
                                     }
                                     match action {
-                                        RichClick::Link(_) | RichClick::Channel(_) => {
+                                        RichClick::Link(_) | RichClick::Channel(..) => {
                                             Some((message_id, range.clone()))
                                         }
                                         RichClick::Mention(_) => None,
@@ -940,8 +941,15 @@ fn render_selectable_segmented_spans(
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 let end = base + INLINE_ICON_PLACEHOLDER.len_utf8() + chip.label.len();
                 let is_selected = selected
                     .as_ref()
@@ -1161,9 +1169,13 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 text.push(INLINE_ICON_PLACEHOLDER);
-                text.push_str(&hashtag_chip(display, channel_id.as_deref(), locale, cx).label);
+                text.push_str(
+                    &hashtag_chip(display, channel_id.as_deref(), meta.as_deref(), locale, cx)
+                        .label,
+                );
             }
             MessageSpan::Canvas { title, .. } => text.push_str(title),
         }
@@ -1859,8 +1871,15 @@ fn append_span(
         MessageSpan::Hashtag {
             display,
             channel_id,
+            meta,
         } => row.child(render_hashtag_chip(
-            hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app),
+            hashtag_chip(
+                display,
+                channel_id.as_deref(),
+                meta.as_deref(),
+                ctx.locale,
+                ctx.app,
+            ),
             ctx,
         )),
         MessageSpan::Emoji {
@@ -2372,11 +2391,12 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
         Some(channel_id) => {
             let locale = ctx.locale.to_string();
             let selection = ctx.selection.clone();
+            let clan_hint = chip.clan_hint;
             base.id(("msg-hashtag", channel_id.get() as usize))
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        navigate_to_channel(channel_id, &locale, cx);
+                        navigate_to_channel(channel_id, clan_hint, &locale, cx);
                     }
                 })
                 .into_any_element()
@@ -2390,6 +2410,7 @@ pub(super) struct HashtagChip {
     pub(super) icon: IconName,
     italic: bool,
     channel_id: Option<ChannelId>,
+    clan_hint: Option<ClanId>,
 }
 
 struct ResolvedHashtag {
@@ -2400,12 +2421,22 @@ struct ResolvedHashtag {
 pub(super) fn hashtag_chip(
     display: &str,
     channel_id: Option<&str>,
+    meta: Option<&HashtagMeta>,
     locale: &str,
     cx: &App,
 ) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
-    hashtag_chip_for(display, parsed_channel, resolved, locale)
+    let resolved = parsed_channel
+        .and_then(|cid| hashtag_channel(cid, cx))
+        .or_else(|| {
+            meta.map(|meta| ResolvedHashtag {
+                name: Some(meta.label.clone()),
+                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
+            })
+        });
+    let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);
+    chip.clan_hint = meta.map(|meta| meta.clan_id);
+    chip
 }
 
 fn hashtag_chip_for(
@@ -2422,6 +2453,7 @@ fn hashtag_chip_for(
             icon: resolved.icon,
             italic: false,
             channel_id: parsed_channel,
+            clan_hint: None,
         };
     }
     if display.starts_with("http://") || display.starts_with("https://") {
@@ -2430,6 +2462,7 @@ fn hashtag_chip_for(
             icon: IconName::Hashtag,
             italic: true,
             channel_id: None,
+            clan_hint: None,
         };
     }
     if parsed_channel.is_some() {
@@ -2438,6 +2471,7 @@ fn hashtag_chip_for(
             icon: IconName::LockedPrivate,
             italic: false,
             channel_id: None,
+            clan_hint: None,
         };
     }
     HashtagChip {
@@ -2445,6 +2479,7 @@ fn hashtag_chip_for(
         icon: IconName::Hashtag,
         italic: false,
         channel_id: None,
+        clan_hint: None,
     }
 }
 
@@ -2539,8 +2574,15 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 let icon_index = text.len();
                 text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
@@ -2568,9 +2610,12 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 });
                 if let Some(cid) = chip.channel_id {
                     let locale = ctx.locale.to_string();
+                    let clan_hint = chip.clan_hint;
                     clicks.push(ClickRegion {
                         range: icon_index..end,
-                        action: Box::new(move |_, cx| navigate_to_channel(cid, &locale, cx)),
+                        action: Box::new(move |_, cx| {
+                            navigate_to_channel(cid, clan_hint, &locale, cx)
+                        }),
                     });
                 }
             }
@@ -2611,16 +2656,9 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
 }
 
 fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
-    let channels = ChannelList::global(cx);
-    let store = channels.read(cx);
-    store
-        .find_channel_in_active_clan(channel_id)
-        .or_else(|| {
-            store
-                .clan_id_for_channel(channel_id)
-                .and_then(|clan_id| store.channel(clan_id, channel_id))
-        })
-        .or_else(|| store.user_channel(channel_id))
+    ChannelList::global(cx)
+        .read(cx)
+        .linkable_channel(channel_id)
         .map(|channel| ResolvedHashtag {
             name: (!channel.name.is_empty()).then(|| SharedString::from(channel.name.as_str())),
             icon: mention_channel_icon(
@@ -2673,8 +2711,13 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
         .filter(|id| !id.is_zero())
 }
 
-fn navigate_to_channel(channel_id: ChannelId, locale: &str, cx: &mut App) {
-    let Some(clan_id) = clan_for_channel(channel_id, cx) else {
+fn navigate_to_channel(
+    channel_id: ChannelId,
+    clan_hint: Option<ClanId>,
+    locale: &str,
+    cx: &mut App,
+) {
+    let Some(clan_id) = clan_for_channel(channel_id, cx).or(clan_hint) else {
         Shell::global(cx).update(cx, |shell, cx| {
             shell.info(mezon_i18n::t(locale, "message.noAccess"), cx);
         });
@@ -2695,8 +2738,60 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
     store.clan_id_for_channel(channel_id).or_else(|| {
         store
             .user_channel(channel_id)
+            .or_else(|| store.linked_channel(channel_id))
             .map(|channel| channel.clan_id)
     })
+}
+
+pub(super) fn channel_links_needing_detail(_spans: &[MessageSpan], _cx: &App) -> Vec<ChannelId> {
+    Vec::new()
+}
+
+// linked-channel-api: re-add ClanList and channel_url_clan_id to the imports above when restoring.
+// linked-channel-api: pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
+// linked-channel-api:     let mut channel_ids = Vec::new();
+// linked-channel-api:     for span in spans {
+// linked-channel-api:         let MessageSpan::Hashtag {
+// linked-channel-api:             display,
+// linked-channel-api:             channel_id: Some(raw),
+// linked-channel-api:             meta: None,
+// linked-channel-api:         } = span
+// linked-channel-api:         else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         let Some(channel_id) = parse_channel_id(raw) else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         if ChannelList::global(cx)
+// linked-channel-api:             .read(cx)
+// linked-channel-api:             .can_resolve_linked_channel(channel_id)
+// linked-channel-api:             && is_in_linked_clan(display, cx)
+// linked-channel-api:             && hashtag_channel(channel_id, cx).is_none()
+// linked-channel-api:             && !channel_ids.contains(&channel_id)
+// linked-channel-api:         {
+// linked-channel-api:             channel_ids.push(channel_id);
+// linked-channel-api:         }
+// linked-channel-api:     }
+// linked-channel-api:     channel_ids
+// linked-channel-api: }
+// linked-channel-api:
+// linked-channel-api: fn is_in_linked_clan(display: &str, cx: &App) -> bool {
+// linked-channel-api:     let Some(clan_id) = channel_url_clan_id(display) else {
+// linked-channel-api:         return true;
+// linked-channel-api:     };
+// linked-channel-api:     let clans = ClanList::global(cx).read(cx);
+// linked-channel-api:     clans.has_listed() && clans.clan(clan_id).is_some()
+// linked-channel-api: }
+
+pub(super) fn defer_linked_channel_resolve(channel_ids: Vec<ChannelId>, cx: &mut App) {
+    if channel_ids.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.resolve_linked_channels(channel_ids, cx);
+        });
+    });
 }
 
 fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> AnyElement {

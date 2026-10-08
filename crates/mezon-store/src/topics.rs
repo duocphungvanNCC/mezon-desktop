@@ -1144,11 +1144,15 @@ impl TopicsStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<mezon_client::transport::OutgoingHashtag> = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &content,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<mezon_client::transport::OutgoingEmoji> = content_tokens
             .emojis
             .into_iter()
@@ -1380,7 +1384,8 @@ impl TopicsStore {
                 is_public,
                 content: content.clone(),
                 mentions: update_mentions,
-                hashtags: update_hashtags,
+                hashtags: update_hashtags.tokens,
+                hashtag_channels: update_hashtags.channels,
                 emojis: update_emojis,
                 create_time_seconds,
                 started_at: unix_now_seconds(),
@@ -1436,11 +1441,15 @@ impl TopicsStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<mezon_client::transport::OutgoingHashtag> = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &content,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<mezon_client::transport::OutgoingEmoji> = content_tokens
             .emojis
             .into_iter()
