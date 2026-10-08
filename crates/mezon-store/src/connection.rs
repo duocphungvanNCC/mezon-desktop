@@ -1076,11 +1076,8 @@ impl ConnectionStore {
                     || (refused && use_jwt && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE);
                 if node_is_not_serving {
                     endpoint_health.lock().record_disconnected();
-                    pending_endpoint_refresh = Some(EndpointRefreshRequest {
-                        endpoint: endpoint.clone(),
-                        reason: HealthyEndpointReason::Unreachable,
-                        generation,
-                    });
+                    pending_endpoint_refresh =
+                        unreachable_report(realtime_server, &endpoint, generation);
                 }
 
                 if reached_failure_limit(consecutive_failures) {
@@ -1851,6 +1848,18 @@ fn backoff_delay(secs: u64) -> Duration {
     Duration::from_millis(base_ms + jitter_ms)
 }
 
+fn unreachable_report(
+    realtime_server: RealtimeServer,
+    endpoint: &RealtimeEndpoint,
+    generation: u64,
+) -> Option<EndpointRefreshRequest> {
+    (realtime_server == RealtimeServer::Auto).then(|| EndpointRefreshRequest {
+        endpoint: endpoint.clone(),
+        reason: HealthyEndpointReason::Unreachable,
+        generation,
+    })
+}
+
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
 async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
     wait_or_wake(exec, wake, backoff_delay(secs)).await;
@@ -2017,6 +2026,23 @@ mod tests {
             worst <= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS * 5 / 4),
             "worst-case recovery stretched to {worst:?}; jitter is meant to stay within a quarter"
         );
+    }
+
+    #[test]
+    fn a_pinned_server_never_queues_a_gateway_report() {
+        let endpoint = RealtimeEndpoint {
+            id: 3,
+            host: "sock3.mezon.ai".to_string(),
+            port: 443,
+        };
+        for pinned in [RealtimeServer::Vn1, RealtimeServer::Vn2, RealtimeServer::Us] {
+            assert!(unreachable_report(pinned, &endpoint, 7).is_none());
+        }
+        let report = unreachable_report(RealtimeServer::Auto, &endpoint, 7)
+            .expect("auto asks the gateway about a node that is not serving");
+        assert_eq!(report.endpoint, endpoint);
+        assert_eq!(report.reason, HealthyEndpointReason::Unreachable);
+        assert_eq!(report.generation, 7);
     }
 
     #[test]
