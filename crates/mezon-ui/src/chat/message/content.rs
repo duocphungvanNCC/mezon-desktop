@@ -2417,7 +2417,7 @@ pub(super) fn hashtag_chip(
         .or_else(|| {
             meta.map(|meta| ResolvedHashtag {
                 name: Some(meta.label.clone()),
-                icon: mention_channel_icon(meta.channel_type, false, 0),
+                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
             })
         });
     let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);

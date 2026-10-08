@@ -1974,9 +1974,7 @@ impl ChannelList {
         channel_ids
             .into_iter()
             .filter_map(|channel_id| self.linkable_channel(channel_id))
-            .filter(|channel| {
-                !channel.private && !channel.clan_id.is_zero() && !channel.name.is_empty()
-            })
+            .filter(|channel| !channel.clan_id.is_zero() && !channel.name.is_empty())
             .map(|channel| mezon_client::transport::ChannelLinkMeta {
                 channel_id: channel.id.get().to_string(),
                 channel_label: channel.name.clone(),
@@ -1986,6 +1984,7 @@ impl ChannelList {
                     .filter(|parent_id| !parent_id.is_zero())
                     .map(|parent_id| parent_id.get().to_string()),
                 channel_type: channel.channel_type.as_raw(),
+                private: channel.private,
             })
             .collect()
     }
@@ -15029,9 +15028,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn channel_link_metas_cover_hashtags_and_links_but_not_private_channels(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn channel_link_metas_cover_hashtags_links_and_private_channels(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
@@ -15050,17 +15047,25 @@ mod tests {
                      https://mezon.ai/chat/clans/5/channels/999",
                     &hashtags,
                 );
-                let resolved: Vec<(&str, &str, &str)> = metas
+                let resolved: Vec<(&str, &str, &str, bool)> = metas
                     .iter()
                     .map(|meta| {
                         (
                             meta.channel_id.as_str(),
                             meta.channel_label.as_str(),
                             meta.clan_id.as_str(),
+                            meta.private,
                         )
                     })
                     .collect();
-                assert_eq!(resolved, vec![("1", "normal", "1"), ("2", "fav-ch", "1")]);
+                assert_eq!(
+                    resolved,
+                    vec![
+                        ("1", "normal", "1", false),
+                        ("2", "fav-ch", "1", false),
+                        ("910", "voice elsewhere", "5", true),
+                    ]
+                );
             });
         });
     }

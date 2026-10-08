@@ -195,6 +195,7 @@ fn channel_link_metas<'a>(tokens: impl Iterator<Item = &'a ContentToken>) -> Vec
             clan_id: clan_id.clone(),
             parent_id: token.parent_id.clone(),
             channel_type: u32::try_from(channel_type).unwrap_or_default(),
+            private: token.channel_private.is_some_and(|private| private != 0),
         });
     }
     metas

@@ -2083,6 +2083,13 @@ pub struct ContentToken {
         deserialize_with = "opt_i64_flex::deserialize"
     )]
     pub channel_type: Option<i64>,
+    #[serde(
+        default,
+        rename = "channelPrivate",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_private: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3081,6 +3088,8 @@ pub struct ChannelLinkMeta {
     pub clan_id: String,
     pub parent_id: Option<String>,
     pub channel_type: u32,
+    #[serde(default)]
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3144,6 +3153,9 @@ fn insert_channel_link_meta(
     object.insert("channelType".into(), meta.channel_type.into());
     if let Some(parent_id) = &meta.parent_id {
         object.insert("parentId".into(), parent_id.clone().into());
+    }
+    if meta.private {
+        object.insert("channelPrivate".into(), 1.into());
     }
 }
 
@@ -11240,6 +11252,7 @@ mod tests {
             clan_id: "5".into(),
             parent_id: None,
             channel_type: 10,
+            private: false,
         }
     }
 
@@ -11261,6 +11274,41 @@ mod tests {
             channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
             None
         );
+    }
+
+    #[test]
+    fn content_json_marks_private_channel_meta_only() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé {url}");
+        let hashtag = OutgoingHashtag {
+            channel_id: "900".into(),
+            s: 0,
+            e: 3,
+        };
+        let public = OutgoingHashtags::new(vec![hashtag.clone()], vec![voice_link_meta()]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &public, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, None);
+        let private = OutgoingHashtags::new(
+            vec![hashtag],
+            vec![ChannelLinkMeta {
+                private: true,
+                ..voice_link_meta()
+            }],
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &private, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, Some(1));
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        let channel_link = parsed
+            .mk
+            .iter()
+            .find(|token| token.channel_id.as_deref() == Some("900"))
+            .expect("channel link");
+        assert_eq!(channel_link.channel_private, Some(1));
     }
 
     #[test]
