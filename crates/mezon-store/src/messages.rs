@@ -9366,6 +9366,7 @@ fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
     msg.sender_name = ANONYMOUS_SENDER_NAME.into();
     msg.avatar_url = SharedString::default();
     msg.avatar_proxied = SharedString::default();
+    msg.anonymous_sender = true;
     true
 }
 
@@ -9373,6 +9374,7 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
         incoming.sender_id = prior.sender_id.clone();
         incoming.sender_user_id = prior.sender_user_id;
+        incoming.anonymous_sender = prior.anonymous_sender;
     }
     if incoming.sender_name.is_empty() {
         incoming.sender_name = prior.sender_name.clone();
@@ -9691,6 +9693,9 @@ fn now_unix_seconds() -> i64 {
 }
 
 fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<UserId>) -> Message {
+    let anonymous_sender = cfg.is_some_and(|c| {
+        !c.anonymous_user_id.is_empty() && c.anonymous_user_id == m.sender_id.to_string()
+    });
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
@@ -9786,6 +9791,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     .with_viewer_highlight(highlight)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
+    .with_anonymous_sender(anonymous_sender)
     .with_attachments(attachments)
     .with_media_presentation(album_layout, viewer_media)
 }
@@ -13867,6 +13873,58 @@ mod tests {
         assert!(message_from_api(reply(), None, Some(UserId(42))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, Some(UserId(7))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, None).highlights_viewer_direct);
+    }
+
+    fn anonymous_api_message(sender_id: i64, name: &str, avatar: &str) -> ApiMessage {
+        ApiMessage {
+            message_id: 1,
+            content: "hi".into(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                ..Default::default()
+            },
+            code: 0,
+            sender_id,
+            sender_name: name.into(),
+            avatar: avatar.into(),
+            create_time: 100,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        }
+    }
+
+    #[test]
+    fn message_from_api_marks_the_anonymous_sender_and_keeps_its_persona() {
+        let cfg = AppConfig {
+            anonymous_user_id: "9876".into(),
+            ..Default::default()
+        };
+        let persona = message_from_api(
+            anonymous_api_message(9876, "money", "https://cdn/money.webp"),
+            Some(&cfg),
+            None,
+        );
+        assert!(persona.anonymous_sender);
+        assert_eq!(persona.sender_name, "money");
+        assert_eq!(persona.avatar_url, "https://cdn/money.webp");
+
+        let named = message_from_api(anonymous_api_message(42, "Alice", ""), Some(&cfg), None);
+        assert!(!named.anonymous_sender);
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_the_anonymous_flag_of_the_row_it_fills() {
+        let mut optimistic =
+            Message::new(MessageId::next_optimistic(), "hi", "9876", "Anonymous", 100);
+        optimistic.anonymous_sender = true;
+        let sparse_ack = Message::new(MessageId(99), "hi", "0", String::new(), 0);
+        assert!(merge_sparse_sender(&optimistic, sparse_ack).anonymous_sender);
     }
 
     #[test]
