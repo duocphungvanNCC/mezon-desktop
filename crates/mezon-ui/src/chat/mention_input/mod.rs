@@ -3694,10 +3694,13 @@ fn role_suggest_pool(cx: &App) -> Vec<RoleSuggestRaw> {
     let Some(store) = RolesStore::try_global(cx) else {
         return Vec::new();
     };
+    let store = store.read(cx);
+    // everyone-mention: the Everyone role is hidden from suggestions for now (it notifies like @here); drop this filter to restore it.
+    let everyone_role_id = store.everyone_role_id(clan_id);
     store
-        .read(cx)
         .roles_in_clan(clan_id)
         .into_iter()
+        .filter(|(role_id, _)| Some(*role_id) != everyone_role_id)
         .map(|(role_id, role)| RoleSuggestRaw {
             role_id: role_id.to_string(),
             title: role.name.clone(),
