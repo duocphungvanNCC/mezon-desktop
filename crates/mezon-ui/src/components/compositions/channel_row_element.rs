@@ -410,7 +410,8 @@ impl Element for ChannelRowElement {
                 } else {
                     NAME_LEFT_INSET
                 };
-                let trailing_reserve = if self.trailing_action.is_some() && !is_thread {
+                let show_trailing_action = self.trailing_action.is_some() && !is_thread;
+                let trailing_reserve = if show_trailing_action {
                     TRAILING_ACTION_RESERVE
                 } else {
                     px(0.)
@@ -432,12 +433,7 @@ impl Element for ChannelRowElement {
                             .badge
                             .as_ref()
                             .map_or(px(0.), |badge| count_badge_width(badge.count) + BUZZ_GAP);
-                    let gear_reserve = if self.trailing_action.is_some() && !is_thread {
-                        GEAR_RIGHT_GAP + GEAR_SIZE + BUZZ_GAP
-                    } else {
-                        px(0.)
-                    };
-                    let pill_x = left + width - count_reserve.max(gear_reserve) - pill_width;
+                    let pill_x = left + width - count_reserve - pill_width;
                     (buzz_line, pill_x, pill_width)
                 });
                 let mut name_max_width =
@@ -508,7 +504,7 @@ impl Element for ChannelRowElement {
                     );
                 }
 
-                if let Some((buzz_line, pill_x, pill_width)) = buzz_pill {
+                if !hovered && let Some((buzz_line, pill_x, pill_width)) = buzz_pill {
                     let pill_y = top + (row_height - BADGE_HEIGHT) / 2.;
                     let pill_bounds = Bounds {
                         origin: point(pill_x, pill_y),
@@ -529,7 +525,7 @@ impl Element for ChannelRowElement {
                 }
 
                 if hovered
-                    && !is_thread
+                    && show_trailing_action
                     && let Some(action) = &self.trailing_action
                 {
                     let gear_bounds = gear_bounds(bounds);
@@ -551,7 +547,7 @@ impl Element for ChannelRowElement {
                 // A row that shows voice occupants leaves navigation to the
                 // column wrapping it and sets no `on_click` here; the gear
                 // still needs its own listener, or it paints but never fires.
-                let has_trailing = self.trailing_action.is_some() && !is_thread;
+                let has_trailing = show_trailing_action;
                 if self.on_click.is_some() || self.on_right_click.is_some() || has_trailing {
                     let hitbox_down = hitbox.clone();
                     let mouse_down = state.mouse_down.clone();
