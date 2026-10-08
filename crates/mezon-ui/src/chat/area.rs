@@ -928,7 +928,7 @@ fn latest_activity_strip(
                             mezon_i18n::t(locale, "message.poll.pollLabel")
                         )
                     })
-                    .or_else(|| Some(pin.content.trim().to_string()))
+                    .or_else(|| pin.compact_preview_text())
             })
             .filter(|text| !text.trim().is_empty())
             // Pinned code blocks and long text commonly contain newlines. A compact rail must

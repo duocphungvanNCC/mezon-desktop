@@ -1192,7 +1192,7 @@ impl TopicsStore {
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(OutgoingAttachment::into_upload)
+                    .map(|attachment| attachment.into_upload(parent_channel_id))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -1505,7 +1505,9 @@ impl TopicsStore {
                 });
             });
             let proto_attachments =
-                match crate::messages::upload_attachments_now(&api, attachments).await {
+                match crate::messages::upload_attachments_now(&api, attachments, parent_channel_id)
+                    .await
+                {
                     Ok(attachments) => attachments,
                     Err(e) => {
                         tracing::error!("submit_ephemeral_reply attachments failed: {e}");

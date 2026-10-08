@@ -5,6 +5,7 @@ pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
+pub mod cdn_signature;
 pub mod channel_app_launch;
 pub mod data_image;
 pub mod endpoint_health;
@@ -27,7 +28,8 @@ pub mod transport_runtime;
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, PresignedAttachment, ResumableUpload,
-    UploadFile, UploadThumbnail, UrlAttachment, sanitize_upload_filename,
+    UploadFile, UploadThumbnail, UrlAttachment, attachment_cdn_url_for_upload, cdn_read_base_url,
+    sanitize_upload_filename,
 };
 pub use attachment_download::{
     clean_download_url, download_url_to_downloads, reserve_path_in, resolve_download_filename,

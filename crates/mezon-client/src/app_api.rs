@@ -16,8 +16,12 @@ use crate::{
 const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
+const UPLOAD_NAME_MAX_LEN: usize = 100;
+const UPLOAD_EXTENSION_MAX_LEN: usize = 16;
+
 pub fn sanitize_upload_filename(name: &str) -> String {
-    name.chars()
+    let clean: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' {
                 c
@@ -25,7 +29,20 @@ pub fn sanitize_upload_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if clean.len() <= UPLOAD_NAME_MAX_LEN {
+        return clean;
+    }
+    match clean.rfind('.') {
+        Some(dot) if clean.len() - dot <= UPLOAD_EXTENSION_MAX_LEN => {
+            let extension = &clean[dot..];
+            format!(
+                "{}{extension}",
+                &clean[..UPLOAD_NAME_MAX_LEN - extension.len()]
+            )
+        }
+        _ => clean[..UPLOAD_NAME_MAX_LEN].to_string(),
+    }
 }
 
 pub fn upload_attachment_type(filetype: &str) -> &'static str {
@@ -56,21 +73,48 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
     ranges
 }
 
-fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
+const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
+const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
+
+pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {
+    match type_cdn {
+        1 => CDN_MEZON_MINIO,
+        2 => CDN_R2_CLOUDFLARE,
+        _ => fallback.trim_end_matches('/'),
+    }
+}
+
+fn upload_push_host(url: &str) -> Option<&str> {
+    let authority = url.split('?').next()?.split("//").nth(1).unwrap_or(url);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    (!host.is_empty()).then_some(host)
+}
+
+pub fn attachment_cdn_url_for_upload(
+    type_cdn: i32,
+    fallback_base: &str,
+    filename: &str,
+) -> Result<String> {
     if filename.is_empty() {
         anyhow::bail!("attachment upload returned an empty filename");
     }
-    Ok(format!(
-        "{}/{}",
-        base_img_url.trim_end_matches('/'),
-        filename
-    ))
+    let cdn_base = cdn_read_base_url(type_cdn, fallback_base);
+    let view_url = format!("{cdn_base}/{filename}");
+    tracing::debug!(
+        type_cdn,
+        filename,
+        cdn_base,
+        view_url = %view_url,
+        "attachment view URL built from type_cdn"
+    );
+    Ok(view_url)
 }
 
 fn emoticon_id_from_filename(filename: &str) -> Option<i64> {
     let file_name = filename.rsplit('/').next().filter(|s| !s.is_empty())?;
     let stem = file_name.rsplit_once('.').map(|(stem, _)| stem)?;
-    stem.parse().ok()
+    stem.split_once('_').map_or(stem, |(id, _)| id).parse().ok()
 }
 
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
@@ -126,6 +170,7 @@ pub struct UploadFile {
     pub height: i32,
     pub duration: i32,
     pub thumbnail: Option<UploadThumbnail>,
+    pub channel_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +632,10 @@ impl AppApi {
         self.transport
             .search_mention_users(clan_id, channel_id, text)
             .await
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        self.transport.generate_cdn_signature(channel_id).await
     }
 
     pub async fn check_duplicate_thread_name(
@@ -1591,13 +1640,14 @@ impl AppApi {
         };
         let upload = self
             .transport
-            .upload_attachment_file(&filename, filetype, size, width, height)
+            .upload_attachment_file(&filename, filetype, size, width, height, 0)
             .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
         let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
             anyhow::anyhow!("invalid emoticon upload filename: {}", upload.filename)
         })?;
-        let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
+        let url =
+            attachment_cdn_url_for_upload(upload.type_cdn, &self.base_img_url, &upload.filename)?;
         Ok((resolved_id, url))
     }
 
@@ -1967,7 +2017,7 @@ impl AppApi {
             let api = self.clone();
             futures::stream::iter(media_urls.iter().cloned().map(move |url| {
                 let api = api.clone();
-                async move { api.upload_media_from_url(&url).await }
+                async move { api.upload_media_from_url(&url, channel_id).await }
             }))
             .buffer_unordered(4)
             .collect::<Vec<_>>()
@@ -2002,6 +2052,7 @@ impl AppApi {
             height,
             duration,
             thumbnail,
+            channel_id,
         } = file;
         let upload_name = sanitize_upload_filename(&filename);
         let upload_type = upload_attachment_type(&filetype);
@@ -2009,7 +2060,7 @@ impl AppApi {
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
         let thumbnail_url = match thumbnail {
-            Some(thumb) => self.upload_thumbnail(thumb).await,
+            Some(thumb) => self.upload_thumbnail(thumb, channel_id).await,
             None => String::new(),
         };
         let (url, plan) = if size as u64 >= MULTIPART_MIN_FILE_SIZE {
@@ -2023,6 +2074,7 @@ impl AppApi {
                     width,
                     height,
                     part_count: ranges.len() as i32,
+                    channel_id,
                 })
                 .await?;
             if started.urls.len() != ranges.len() {
@@ -2032,7 +2084,18 @@ impl AppApi {
                     ranges.len()
                 );
             }
-            let url = attachment_cdn_url(&self.base_img_url, &started.filename)?;
+            tracing::debug!(
+                type_cdn = started.type_cdn,
+                filename = %started.filename,
+                part_count = started.urls.len(),
+                push_host = ?started.urls.first().and_then(|u| upload_push_host(u)),
+                "MultipartUploadAttachmentFileStart presign response"
+            );
+            let url = attachment_cdn_url_for_upload(
+                started.type_cdn,
+                &self.base_img_url,
+                &started.filename,
+            )?;
             (
                 url,
                 UploadPlan::Multipart {
@@ -2047,9 +2110,19 @@ impl AppApi {
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&upload_name, upload_type, size, width, height)
+                .upload_attachment_file(&upload_name, upload_type, size, width, height, channel_id)
                 .await?;
-            let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
+            tracing::debug!(
+                type_cdn = upload.type_cdn,
+                filename = %upload.filename,
+                push_host = ?upload_push_host(&upload.url),
+                "UploadAttachmentFile presign response"
+            );
+            let url = attachment_cdn_url_for_upload(
+                upload.type_cdn,
+                &self.base_img_url,
+                &upload.filename,
+            )?;
             (
                 url,
                 UploadPlan::Single {
@@ -2098,8 +2171,14 @@ impl AppApi {
                 // is how every attachment under MULTIPART_MIN_FILE_SIZE ended up
                 // as application/octet-stream — the multipart arm always got
                 // this right.
+                tracing::debug!(
+                    push_host = ?upload_push_host(&put_url),
+                    bytes = data.len(),
+                    "attachment PUT upload (push URL host only, presign query omitted)"
+                );
                 crate::transport_runtime::put_bytes_to_content_type(&put_url, data, &content_type)
                     .await?;
+                tracing::debug!("attachment PUT upload finished");
                 Ok(())
             }
             UploadPlan::Multipart {
@@ -2547,7 +2626,7 @@ impl AppApi {
         Ok(sent)
     }
 
-    async fn upload_thumbnail(&self, thumbnail: UploadThumbnail) -> String {
+    async fn upload_thumbnail(&self, thumbnail: UploadThumbnail, channel_id: i64) -> String {
         let filename = sanitize_upload_filename(&thumbnail.filename);
         let size = clamp_i32(thumbnail.data.len());
         match self
@@ -2559,6 +2638,7 @@ impl AppApi {
                 0,
                 0,
                 thumbnail.data,
+                channel_id,
             )
             .await
         {
@@ -2585,19 +2665,21 @@ impl AppApi {
         width: i32,
         height: i32,
         data: Vec<u8>,
+        channel_id: i64,
     ) -> Result<String> {
         let upload = self
             .transport
-            .upload_attachment_file(filename, filetype, size, width, height)
+            .upload_attachment_file(filename, filetype, size, width, height, channel_id)
             .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, content_type)
             .await?;
-        attachment_cdn_url(&self.base_img_url, &upload.filename)
+        attachment_cdn_url_for_upload(upload.type_cdn, &self.base_img_url, &upload.filename)
     }
 
     async fn upload_media_from_url(
         &self,
         url: &str,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::MessageAttachment> {
         let (data, content_type) = crate::transport_runtime::fetch_bytes(url).await?;
         let filetype = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
@@ -2637,6 +2719,7 @@ impl AppApi {
                 width,
                 height,
                 data,
+                channel_id,
             )
             .await?;
 
@@ -2713,9 +2796,10 @@ impl AppApi {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         self.transport
-            .upload_attachment_file(filename, filetype, size, width, height)
+            .upload_attachment_file(filename, filetype, size, width, height, channel_id)
             .await
     }
 
@@ -2806,7 +2890,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, filetype, size, width, height, data)
+            .upload_bytes(&filename, filetype, filetype, size, width, height, data, 0)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
@@ -3251,9 +3335,30 @@ impl AppApi {
 #[cfg(test)]
 mod tests {
     use super::{
-        MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan, attachment_cdn_url,
+        MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan,
+        attachment_cdn_url_for_upload, cdn_read_base_url, emoticon_id_from_filename,
         multipart_part_ranges, sanitize_upload_filename, upload_attachment_type,
     };
+
+    #[test]
+    fn emoticon_id_is_the_server_snowflake_in_every_key_layout() {
+        assert_eq!(
+            emoticon_id_from_filename("emojis/2107140000000000000.webp"),
+            Some(2107140000000000000)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("1767478432163199777/2107140000000000001.mp3"),
+            Some(2107140000000000001)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("0000000000000000/2107140000000000002_1840651253227.mp3"),
+            Some(2107140000000000002)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("0000000000000000/sound_clip.mp3"),
+            None
+        );
+    }
 
     fn presigned(plan: UploadPlan) -> PresignedAttachment {
         PresignedAttachment {
@@ -3345,6 +3450,12 @@ mod tests {
     fn upload_filename_keeps_ascii_stem_and_extension() {
         assert_eq!(sanitize_upload_filename("report-v2.pdf"), "report_v2.pdf");
         assert_eq!(sanitize_upload_filename("a b.PNG"), "a_b.PNG");
+        let long = format!("{}.pdf", "x".repeat(150));
+        let cut = sanitize_upload_filename(&long);
+        assert_eq!(cut.len(), 100);
+        assert!(cut.ends_with(".pdf"), "{cut}");
+        let no_extension = "y".repeat(150);
+        assert_eq!(sanitize_upload_filename(&no_extension).len(), 100);
     }
 
     #[test]
@@ -3380,27 +3491,52 @@ mod tests {
     }
 
     #[test]
-    fn attachment_url_uses_base_img_host_not_presigned() {
+    fn attachment_url_uses_type_cdn_minio() {
         assert_eq!(
-            attachment_cdn_url(
+            attachment_cdn_url_for_upload(
+                1,
                 "https://cdn.example",
                 "mezon/1826814768338440192/2074336632294608896.png",
             )
             .unwrap(),
-            "https://cdn.example/mezon/1826814768338440192/2074336632294608896.png"
+            "https://cdn.mezon.ai/mezon/1826814768338440192/2074336632294608896.png"
         );
     }
 
     #[test]
-    fn attachment_url_trims_trailing_slash_on_base() {
+    fn attachment_url_uses_type_cdn_r2() {
         assert_eq!(
-            attachment_cdn_url("https://cdn.example/", "x.png").unwrap(),
+            attachment_cdn_url_for_upload(2, "https://cdn.example", "x.png").unwrap(),
+            "https://cdn.komu.vn/x.png"
+        );
+    }
+
+    #[test]
+    fn attachment_url_falls_back_to_base_when_type_cdn_unknown() {
+        assert_eq!(
+            attachment_cdn_url_for_upload(0, "https://cdn.example/", "x.png").unwrap(),
             "https://cdn.example/x.png"
         );
     }
 
     #[test]
     fn attachment_url_errors_when_filename_empty() {
-        assert!(attachment_cdn_url("https://cdn.example", "").is_err());
+        assert!(attachment_cdn_url_for_upload(1, "https://cdn.example", "").is_err());
+    }
+
+    #[test]
+    fn cdn_read_base_url_maps_known_types() {
+        assert_eq!(
+            cdn_read_base_url(1, "https://fallback"),
+            "https://cdn.mezon.ai"
+        );
+        assert_eq!(
+            cdn_read_base_url(2, "https://fallback"),
+            "https://cdn.komu.vn"
+        );
+        assert_eq!(
+            cdn_read_base_url(0, "https://fallback/"),
+            "https://fallback"
+        );
     }
 }
