@@ -1344,6 +1344,8 @@ pub struct ChannelMessages {
     _highlight_timer: Option<Task<()>>,
     last_seen_at_bottom: Option<MessageId>,
     fab_scroll_pending: bool,
+    reopen_read_armed: bool,
+    reopen_read_pending: bool,
     scroll_anchors: HashMap<ChannelId, SavedScrollAnchor>,
     last_scroll_sync: Option<(ChannelId, usize, u32, usize, u32, u32, bool)>,
     current_channel: Option<ChannelId>,
@@ -1996,6 +1998,8 @@ impl ChannelMessages {
             _highlight_timer: None,
             last_seen_at_bottom: None,
             fab_scroll_pending: false,
+            reopen_read_armed: false,
+            reopen_read_pending: false,
             scroll_anchors: HashMap::new(),
             last_scroll_sync: None,
             current_channel: None,
@@ -2800,6 +2804,9 @@ impl ChannelMessages {
                 }
                 return;
             }
+            if std::mem::take(&mut self.reopen_read_pending) {
+                MessagesStore::global(cx).update(cx, |store, cx| store.note_reopened_seen(cx));
+            }
             if self
                 .list_state
                 .is_scrolled_to_end()
@@ -3588,6 +3595,8 @@ impl ChannelMessages {
         let new_channel = store.read(cx).active_channel_id();
         if new_channel != self.current_channel {
             self.last_seen_at_bottom = None;
+            self.reopen_read_armed = true;
+            self.reopen_read_pending = false;
         }
         let is_loading = store.read(cx).is_loading();
         let transition = reset_transition(new_channel, self.fab_scroll_pending);
@@ -3639,6 +3648,27 @@ impl ChannelMessages {
             }
             self.sync_channel_seen(cx);
         }
+        let (mark_read, still_armed) = reopen_read_after_reset(self.reopen_read_armed, decision);
+        self.reopen_read_armed = still_armed;
+        if mark_read && !self.is_topic_box {
+            self.mark_reopened_channel_read(store, cx);
+        }
+    }
+
+    fn mark_reopened_channel_read(
+        &mut self,
+        store: &Entity<MessagesStore>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_seen_at_bottom.is_none() {
+            self.last_seen_at_bottom = store.read(cx).last_read_message_id();
+        }
+        if cx.active_window().is_none() {
+            self.reopen_read_pending = true;
+            return;
+        }
+        self.reopen_read_pending = false;
+        store.update(cx, |store, cx| store.note_reopened_seen(cx));
     }
 
     fn sync_header(&mut self, is_empty: bool, has_more_top: bool) {
@@ -5535,6 +5565,14 @@ enum ResetScroll {
     Defer,
 }
 
+fn reopen_read_after_reset(armed: bool, decision: ResetScroll) -> (bool, bool) {
+    match decision {
+        ResetScroll::Defer => (false, armed),
+        ResetScroll::Restore { .. } => (armed, false),
+        ResetScroll::ToBottom => (false, false),
+    }
+}
+
 fn decide_reset_scroll(
     want_restore: bool,
     is_loading: bool,
@@ -6015,7 +6053,8 @@ mod topic_row_tests {
 mod scroll_restore_tests {
     use super::{
         AnchorUpdate, ResetScroll, ResetTransition, SavedScrollAnchor, capture_anchor,
-        decide_reset_scroll, reset_transition, saved_message_scroll_anchor, shifted_scroll_anchor,
+        decide_reset_scroll, reopen_read_after_reset, reset_transition,
+        saved_message_scroll_anchor, shifted_scroll_anchor,
     };
     use gpui::{ListOffset, px};
     use mezon_store::{ChannelId, Message, MessageId};
@@ -6044,6 +6083,24 @@ mod scroll_restore_tests {
             item_ix,
             offset_in_item: px(offset_in_item),
         }
+    }
+
+    #[test]
+    fn reopening_at_a_saved_position_marks_read_once() {
+        let restore = ResetScroll::Restore {
+            item_ix: 2,
+            offset_in_item: px(7.),
+        };
+        assert_eq!(
+            reopen_read_after_reset(true, ResetScroll::Defer),
+            (false, true)
+        );
+        assert_eq!(reopen_read_after_reset(true, restore), (true, false));
+        assert_eq!(reopen_read_after_reset(false, restore), (false, false));
+        assert_eq!(
+            reopen_read_after_reset(true, ResetScroll::ToBottom),
+            (false, false)
+        );
     }
 
     #[test]
