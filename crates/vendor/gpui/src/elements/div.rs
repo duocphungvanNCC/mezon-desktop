@@ -15,19 +15,17 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
-use crate::{OngoingScroll, PinchEvent};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
     Display, Element, ElementId, Entity, EntityId, ExternalPaths, FocusHandle, Global,
-    GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
-    KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
-    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
-    size,
+    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero,
+    KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId,
+    ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size,
 };
+use crate::{OngoingScroll, PinchEvent};
 use collections::HashMap;
 use gpui_util::ResultExt;
 use refineable::Refineable;
@@ -55,7 +53,6 @@ const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 const SCROLL_HOVER_RELEASE_DELAY: Duration = Duration::from_millis(300);
 
-
 fn drop_hitbox_accepts(hitbox: &Hitbox, window: &Window, _cx: &App, drag_type: TypeId) -> bool {
     if hitbox.is_hovered(window) {
         return true;
@@ -63,10 +60,7 @@ fn drop_hitbox_accepts(hitbox: &Hitbox, window: &Window, _cx: &App, drag_type: T
     if drag_type != TypeId::of::<ExternalPaths>() {
         return false;
     }
-    if hitbox.id.is_hovered_ignoring_last_input(window) {
-        return true;
-    }
-    hitbox.bounds.contains(&window.mouse_position())
+    hitbox.id.is_hovered_ignoring_last_input(window)
 }
 
 /// The styling information for a given group.
@@ -1989,8 +1983,7 @@ fn start_smooth_scroll_handle(
             let (_, velocity, _) = animation.sample(now);
             (animation.target - animation.applied, velocity)
         });
-        let target = (current + remaining + delta.as_f32())
-            .clamp(-state.max_offset.y.as_f32(), 0.);
+        let target = (current + remaining + delta.as_f32()).clamp(-state.max_offset.y.as_f32(), 0.);
         if (target - current).abs() <= f32::EPSILON {
             state.wheel_scroll_animation = None;
             return;
@@ -2222,12 +2215,7 @@ impl Interactivity {
             && let Some(handle) = self.tracked_scroll_handle.as_ref()
         {
             handle.0.borrow_mut().suppress_hover_while_scrolling = true;
-            ensure_scroll_handle_hover_release_task(
-                handle,
-                window.current_view(),
-                window,
-                cx,
-            );
+            ensure_scroll_handle_hover_release_task(handle, window.current_view(), window, cx);
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -2300,10 +2288,8 @@ impl Interactivity {
                                     handle.0.borrow().is_scroll_hover_active()
                                 })
                             {
-                                window.insert_hitbox(
-                                    bounds,
-                                    HitboxBehavior::BlockMouseExceptScroll,
-                                );
+                                window
+                                    .insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
                             }
                             (result, element_state)
                         },
@@ -2808,8 +2794,6 @@ impl Interactivity {
                                 listener(drag.value.as_ref(), window, cx);
                                 window.refresh();
                                 cx.stop_propagation();
-                            } else {
-                                cx.active_drag = Some(drag);
                             }
                         }
                     }
@@ -3198,7 +3182,9 @@ impl Interactivity {
                         && event.delta.precise()
                         && let Some(ongoing_scroll) = &ongoing_scroll
                     {
-                        ongoing_scroll.borrow_mut().filter(&mut delta, event.touch_phase);
+                        ongoing_scroll
+                            .borrow_mut()
+                            .filter(&mut delta, event.touch_phase);
                     }
 
                     let mut delta_x = Pixels::ZERO;

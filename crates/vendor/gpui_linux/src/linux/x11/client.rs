@@ -1700,6 +1700,7 @@ impl X11Client {
                 }
 
                 if event.type_ == state.atoms.XdndEnter {
+                    state.xdnd_state = Xdnd::default();
                     state.xdnd_state.other_window = atom;
                     if (arg1 & 0x1) == 0x1 {
                         state.xdnd_state.drag_type = xdnd_get_supported_atom(
@@ -1714,13 +1715,6 @@ impl X11Client {
                         {
                             state.xdnd_state.drag_type = atom;
                         }
-                    }
-                    if let Ok(pos) = get_reply(
-                        || "Failed to query pointer position",
-                        state.xcb_connection.query_pointer(event.window),
-                    ) {
-                        state.xdnd_state.position =
-                            Point::new(px(pos.win_x as f32), px(pos.win_y as f32));
                     }
                 } else if event.type_ == state.atoms.XdndLeave {
                     let position = state.xdnd_state.position;
@@ -1779,12 +1773,6 @@ impl X11Client {
                     } else {
                         state.xdnd_state.timestamp
                     };
-                    xdnd_send_finished(
-                        &state.xcb_connection,
-                        &state.atoms,
-                        event.window,
-                        state.xdnd_state.other_window,
-                    );
                     let root = state.xcb_connection.setup().roots[state.x_root_index].root;
                     xdnd_request_activation(
                         &state.xcb_connection,
@@ -1795,11 +1783,21 @@ impl X11Client {
                     );
                     let position = state.xdnd_state.position;
                     let retrieved = state.xdnd_state.retrieved;
+                    let source_window = event.window;
+                    let other_window = state.xdnd_state.other_window;
                     if retrieved {
                         drop(state);
                         window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
                             position,
                         }));
+                        let state = self.0.borrow();
+                        xdnd_send_finished(
+                            &state.xcb_connection,
+                            &state.atoms,
+                            source_window,
+                            other_window,
+                        );
+                        drop(state);
                         self.0.borrow_mut().xdnd_state = Xdnd::default();
                     } else {
                         state.xdnd_state.pending_drop = true;
@@ -1822,6 +1820,7 @@ impl X11Client {
                 )
                 .log_err();
                 let Some(reply) = reply else {
+                    self.0.borrow_mut().xdnd_state = Xdnd::default();
                     return Some(());
                 };
                 if let Ok(file_list) = str::from_utf8(&reply.value) {
@@ -1847,13 +1846,25 @@ impl X11Client {
                     let mut state = self.0.borrow_mut();
                     state.xdnd_state.retrieved = true;
                     if pending_drop {
+                        let source_window = event.requestor;
+                        let other_window = state.xdnd_state.other_window;
                         state.xdnd_state.pending_drop = false;
                         drop(state);
                         window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
                             position,
                         }));
+                        let state = self.0.borrow();
+                        xdnd_send_finished(
+                            &state.xcb_connection,
+                            &state.atoms,
+                            source_window,
+                            other_window,
+                        );
+                        drop(state);
                         self.0.borrow_mut().xdnd_state = Xdnd::default();
                     }
+                } else {
+                    self.0.borrow_mut().xdnd_state = Xdnd::default();
                 }
             }
             Event::ConfigureNotify(event) => {

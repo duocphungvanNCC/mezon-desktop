@@ -2392,6 +2392,7 @@ impl ChatArea {
                         }
                     },
                 )
+                .when_some(activity_strip, |col, strip| col.child(strip))
                 .child(
                     div()
                         .flex_1()
@@ -2434,7 +2435,6 @@ impl ChatArea {
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .when_some(activity_strip, |col, strip| col.child(strip))
                 .child(drop_body)
         };
 

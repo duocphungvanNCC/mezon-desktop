@@ -278,6 +278,7 @@ pub(crate) struct WaylandClientState {
     keymap_state: Option<xkb::State>,
     compose_state: Option<xkb::compose::State>,
     drag: DragState,
+    drag_session: u64,
     click: ClickState,
     repeat: KeyRepeat,
     pub modifiers: Modifiers,
@@ -908,6 +909,7 @@ impl WaylandClient {
                 entered: false,
                 pending_drop: false,
             },
+            drag_session: 0,
             click: ClickState {
                 last_click: Instant::now(),
                 last_mouse_button: None,
@@ -2572,6 +2574,8 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     data_offer.set_actions(ACTIONS, ACTIONS);
 
                     let position = Point::new(x.into(), y.into());
+                    state.drag_session = state.drag_session.wrapping_add(1);
+                    let session = state.drag_session;
                     state.drag.data_offer = Some(data_offer.clone());
                     state.drag.window = Some(drag_window.clone());
                     state.drag.position = position;
@@ -2600,6 +2604,17 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 Ok(list) => list,
                                 Err(err) => {
                                     log::error!("error reading drag and drop pipe: {err:?}");
+                                    let client = this.get_client();
+                                    let mut state = client.borrow_mut();
+                                    if state.drag_session != session {
+                                        return;
+                                    }
+                                    if let Some(data_offer) = state.drag.data_offer.take() {
+                                        data_offer.destroy();
+                                    }
+                                    state.drag.pending_drop = false;
+                                    state.drag.entered = false;
+                                    state.drag.window = None;
                                     return;
                                 }
                             };
@@ -2617,16 +2632,24 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 .collect();
                             let position = Point::new(x.into(), y.into());
 
+                            let client = this.get_client();
+                            {
+                                let state = client.borrow();
+                                if state.drag_session != session {
+                                    return;
+                                }
+                            }
+
                             if paths.is_empty() {
                                 data_offer.destroy();
-                                let client = this.get_client();
-                                client.borrow_mut().drag = DragState {
-                                    data_offer: None,
-                                    window: None,
-                                    position: Point::default(),
-                                    entered: false,
-                                    pending_drop: false,
-                                };
+                                let mut state = client.borrow_mut();
+                                if state.drag_session != session {
+                                    return;
+                                }
+                                state.drag.data_offer = None;
+                                state.drag.window = None;
+                                state.drag.pending_drop = false;
+                                state.drag.entered = false;
                                 return;
                             }
 
@@ -2635,25 +2658,30 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 paths: gpui::ExternalPaths(paths),
                             });
 
-                            let client = this.get_client();
                             let mut state = client.borrow_mut();
+                            if state.drag_session != session {
+                                return;
+                            }
                             state.drag.position = position;
                             state.drag.entered = true;
                             let pending_drop = state.drag.pending_drop;
                             drop(state);
                             drag_window.handle_input(input);
                             if pending_drop {
+                                data_offer.finish();
+                                data_offer.destroy();
                                 drag_window.request_dnd_activation();
                                 drag_window.handle_input(PlatformInput::FileDrop(
                                     FileDropEvent::Submit { position },
                                 ));
-                                this.get_client().borrow_mut().drag = DragState {
-                                    data_offer: None,
-                                    window: None,
-                                    position: Point::default(),
-                                    entered: false,
-                                    pending_drop: false,
-                                };
+                                let mut state = client.borrow_mut();
+                                if state.drag_session != session {
+                                    return;
+                                }
+                                state.drag.data_offer = None;
+                                state.drag.window = None;
+                                state.drag.pending_drop = false;
+                                state.drag.entered = false;
                             }
                         })
                         .detach();
@@ -2671,9 +2699,13 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 drag_window.handle_input(input);
             }
             wl_data_device::Event::Leave => {
+                if state.drag.pending_drop {
+                    return;
+                }
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
+                state.drag_session = state.drag_session.wrapping_add(1);
                 if let Some(data_offer) = state.drag.data_offer.take() {
                     data_offer.destroy();
                 }
@@ -2690,14 +2722,14 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                if let Some(data_offer) = state.drag.data_offer.take() {
-                    data_offer.finish();
-                    data_offer.destroy();
-                }
 
                 let position = state.drag.position;
                 let entered = state.drag.entered;
                 if entered {
+                    if let Some(data_offer) = state.drag.data_offer.take() {
+                        data_offer.finish();
+                        data_offer.destroy();
+                    }
                     state.drag.window = None;
                     state.drag.entered = false;
                     state.drag.pending_drop = false;
