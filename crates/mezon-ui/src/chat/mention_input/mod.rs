@@ -2374,6 +2374,7 @@ impl MentionInput {
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
                     ChannelEvent::ArchivedByAdministrator { .. }
                     | ChannelEvent::AccessLost(_)
+                    | ChannelEvent::LinkedChannelResolved(_)
                     | ChannelEvent::PrivacyChanged { .. } => {}
                 },
             ),
@@ -3862,6 +3863,7 @@ fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedTo
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                ..
             } => (
                 display.to_string(),
                 TokenKind::Hashtag {
