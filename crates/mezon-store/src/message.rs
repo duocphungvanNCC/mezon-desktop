@@ -744,6 +744,7 @@ pub struct Message {
     pub sender_name: SharedString,
     pub avatar_url: SharedString,
     pub avatar_proxied: SharedString,
+    pub anonymous_sender: bool,
     pub create_time: i64,
     pub update_time: i64,
     pub day_label: String,
@@ -794,6 +795,17 @@ pub struct ViewerMedia {
 pub const COMBINE_TIME_WINDOW: i64 = 600;
 
 pub fn same_message_sender(a: &Message, b: &Message) -> bool {
+    same_sender_id(a, b) && same_anonymous_persona(a, b)
+}
+
+fn same_anonymous_persona(a: &Message, b: &Message) -> bool {
+    if !a.anonymous_sender && !b.anonymous_sender {
+        return true;
+    }
+    a.sender_name == b.sender_name && a.avatar_url == b.avatar_url
+}
+
+fn same_sender_id(a: &Message, b: &Message) -> bool {
     if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b))
         && au == bu
     {
@@ -1858,6 +1870,7 @@ impl Message {
             is_forwarded: false,
             show_forwarded_label: false,
             combined_with_prev: false,
+            anonymous_sender: false,
             highlights_viewer_direct: false,
             send_failed: false,
             ogp: None,
@@ -1980,6 +1993,11 @@ impl Message {
 
     pub fn with_reactions(mut self, reactions: Vec<Reaction>) -> Self {
         self.reactions = reactions;
+        self
+    }
+
+    pub fn with_anonymous_sender(mut self, anonymous_sender: bool) -> Self {
+        self.anonymous_sender = anonymous_sender;
         self
     }
 
@@ -2888,6 +2906,35 @@ mod tests {
         let ack = Message::new(MessageId(1), "a", "42", "U1", 105);
         let optimistic = Message::new(MessageId::next_optimistic(), "b", "42", "U1", 101);
         assert!(message_combined_with_prev(Some(&ack), &optimistic));
+    }
+
+    fn anonymous(id: i64, name: &str, avatar: &str, at: i64) -> Message {
+        Message::new(MessageId(id), "a", "9876", name, at)
+            .with_avatar(avatar)
+            .with_anonymous_sender(true)
+    }
+
+    #[test]
+    fn different_anonymous_personas_do_not_combine() {
+        let money = anonymous(1, "money", "https://cdn/money.webp", 100);
+        let saumui = anonymous(2, "saumui", "https://cdn/saumui.webp", 105);
+        assert!(!same_message_sender(&money, &saumui));
+        assert!(!message_combined_with_prev(Some(&money), &saumui));
+    }
+
+    #[test]
+    fn the_same_anonymous_persona_still_combines() {
+        let first = anonymous(1, "money", "https://cdn/money.webp", 100);
+        let second = anonymous(2, "money", "https://cdn/money.webp", 105);
+        assert!(message_combined_with_prev(Some(&first), &second));
+    }
+
+    #[test]
+    fn a_named_sender_combines_across_name_changes() {
+        let before = Message::new(MessageId(1), "a", "42", "old.name", 100);
+        let after = Message::new(MessageId(2), "b", "42", "New Name", 105)
+            .with_avatar("https://cdn/new.webp");
+        assert!(message_combined_with_prev(Some(&before), &after));
     }
 
     #[test]
