@@ -2157,12 +2157,20 @@ pub(super) fn render_emoji_span(
         .map_or(image_size, |image| {
             emoji_width(image.size(0), image_size, size)
         });
-    let image = emoji_image_in_box(src, width, image_size, size).with_fallback(
-        super::reaction_detail::emoji_error_fallback(image_size, ctx.theme.text_muted),
-    );
     let image = match animation_key {
-        Some(key) => image.id(("msg-emoji-frames", key)).into_any_element(),
-        None => image.into_any_element(),
+        Some(key) => emoji_image_in_box(src, width, image_size, size)
+            .id(("msg-emoji-frames", key))
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                image_size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
+        None => emoji_image(src, width, image_size)
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                image_size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
     };
     emoji_box(size, width)
         .image_cache(ctx.icon_cache.clone())
