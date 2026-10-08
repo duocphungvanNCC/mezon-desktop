@@ -914,6 +914,9 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                     if let Some(parent_id) = meta.parent_id {
                         item.insert("parentId".into(), parent_id.get().to_string().into());
                     }
+                    if meta.private {
+                        item.insert("channelPrivate".into(), 1.into());
+                    }
                 }
                 hg.push(serde_json::Value::Object(item));
             }

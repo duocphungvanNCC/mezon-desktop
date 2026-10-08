@@ -391,6 +391,7 @@ pub struct HashtagMeta {
     pub clan_id: ClanId,
     pub parent_id: Option<ChannelId>,
     pub channel_type: ChannelType,
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1272,6 +1273,7 @@ fn hashtag_meta(tok: &ContentToken) -> Option<Box<HashtagMeta>> {
         clan_id,
         parent_id,
         channel_type,
+        private: tok.channel_private.is_some_and(|private| private != 0),
     }))
 }
 
@@ -2273,7 +2275,24 @@ mod tests {
             assert_eq!(meta.label.as_ref(), "voice elsewhere");
             assert_eq!(meta.clan_id, ClanId(5));
             assert_eq!(meta.channel_type, ChannelType::Voice);
+            assert!(!meta.private);
         }
+    }
+
+    #[test]
+    fn parse_spans_reads_the_private_flag_from_channel_meta() {
+        let content = ApiMessageContent {
+            t: "#voice".into(),
+            hg: vec![ContentToken {
+                channel_private: Some(1),
+                ..channel_meta_token(0, 6, "5")
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag { meta: Some(meta), .. }] if meta.private
+        ));
     }
 
     #[test]

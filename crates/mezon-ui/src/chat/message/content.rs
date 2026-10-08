@@ -10,10 +10,10 @@ use gpui::{
     relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanList, Embed, HashtagMeta, LinkKind,
-    Message, MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick,
-    RichLayout, RichRunKind, RichToken, UserId, channel_url_clan_id, invite_id_from_url,
-    is_age_restricted, is_clan_invite_url, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, HashtagMeta, LinkKind, Message,
+    MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout,
+    RichRunKind, RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url,
+    is_here_user_id,
 };
 
 use ui::Clickable;
@@ -2417,7 +2417,7 @@ pub(super) fn hashtag_chip(
         .or_else(|| {
             meta.map(|meta| ResolvedHashtag {
                 name: Some(meta.label.clone()),
-                icon: mention_channel_icon(meta.channel_type, false, 0),
+                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
             })
         });
     let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);
@@ -2729,40 +2729,45 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
     })
 }
 
-pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
-    let mut channel_ids = Vec::new();
-    for span in spans {
-        let MessageSpan::Hashtag {
-            display,
-            channel_id: Some(raw),
-            meta: None,
-        } = span
-        else {
-            continue;
-        };
-        let Some(channel_id) = parse_channel_id(raw) else {
-            continue;
-        };
-        if ChannelList::global(cx)
-            .read(cx)
-            .can_resolve_linked_channel(channel_id)
-            && is_in_linked_clan(display, cx)
-            && hashtag_channel(channel_id, cx).is_none()
-            && !channel_ids.contains(&channel_id)
-        {
-            channel_ids.push(channel_id);
-        }
-    }
-    channel_ids
+pub(super) fn channel_links_needing_detail(_spans: &[MessageSpan], _cx: &App) -> Vec<ChannelId> {
+    Vec::new()
 }
 
-fn is_in_linked_clan(display: &str, cx: &App) -> bool {
-    let Some(clan_id) = channel_url_clan_id(display) else {
-        return true;
-    };
-    let clans = ClanList::global(cx).read(cx);
-    clans.has_listed() && clans.clan(clan_id).is_some()
-}
+// linked-channel-api: re-add ClanList and channel_url_clan_id to the imports above when restoring.
+// linked-channel-api: pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
+// linked-channel-api:     let mut channel_ids = Vec::new();
+// linked-channel-api:     for span in spans {
+// linked-channel-api:         let MessageSpan::Hashtag {
+// linked-channel-api:             display,
+// linked-channel-api:             channel_id: Some(raw),
+// linked-channel-api:             meta: None,
+// linked-channel-api:         } = span
+// linked-channel-api:         else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         let Some(channel_id) = parse_channel_id(raw) else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         if ChannelList::global(cx)
+// linked-channel-api:             .read(cx)
+// linked-channel-api:             .can_resolve_linked_channel(channel_id)
+// linked-channel-api:             && is_in_linked_clan(display, cx)
+// linked-channel-api:             && hashtag_channel(channel_id, cx).is_none()
+// linked-channel-api:             && !channel_ids.contains(&channel_id)
+// linked-channel-api:         {
+// linked-channel-api:             channel_ids.push(channel_id);
+// linked-channel-api:         }
+// linked-channel-api:     }
+// linked-channel-api:     channel_ids
+// linked-channel-api: }
+// linked-channel-api:
+// linked-channel-api: fn is_in_linked_clan(display: &str, cx: &App) -> bool {
+// linked-channel-api:     let Some(clan_id) = channel_url_clan_id(display) else {
+// linked-channel-api:         return true;
+// linked-channel-api:     };
+// linked-channel-api:     let clans = ClanList::global(cx).read(cx);
+// linked-channel-api:     clans.has_listed() && clans.clan(clan_id).is_some()
+// linked-channel-api: }
 
 pub(super) fn defer_linked_channel_resolve(channel_ids: Vec<ChannelId>, cx: &mut App) {
     if channel_ids.is_empty() {
