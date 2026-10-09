@@ -541,6 +541,22 @@ fn at_suggestion_matches(suggestion: &Suggestion, needle: &str) -> bool {
     }
 }
 
+pub(crate) fn filter_members_for_search<'a>(
+    members: &'a [MentionMemberRaw],
+    query_needle: &str,
+    limit: usize,
+) -> Vec<&'a MentionMemberRaw> {
+    if query_needle.is_empty() {
+        return members.iter().take(limit).collect();
+    }
+    let needle = search_needle(query_needle);
+    members
+        .iter()
+        .filter(|member| member_matches(member, &needle))
+        .take(limit)
+        .collect()
+}
+
 fn member_matches(member: &MentionMemberRaw, needle: &str) -> bool {
     [
         member.display_norm.as_str(),
@@ -2358,6 +2374,7 @@ impl MentionInput {
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
                     ChannelEvent::ArchivedByAdministrator { .. }
                     | ChannelEvent::AccessLost(_)
+                    | ChannelEvent::LinkedChannelResolved(_)
                     | ChannelEvent::PrivacyChanged { .. } => {}
                 },
             ),
@@ -3677,10 +3694,13 @@ fn role_suggest_pool(cx: &App) -> Vec<RoleSuggestRaw> {
     let Some(store) = RolesStore::try_global(cx) else {
         return Vec::new();
     };
+    let store = store.read(cx);
+    // everyone-mention: the Everyone role is hidden from suggestions for now (it notifies like @here); drop this filter to restore it.
+    let everyone_role_id = store.everyone_role_id(clan_id);
     store
-        .read(cx)
         .roles_in_clan(clan_id)
         .into_iter()
+        .filter(|(role_id, _)| Some(*role_id) != everyone_role_id)
         .map(|(role_id, role)| RoleSuggestRaw {
             role_id: role_id.to_string(),
             title: role.name.clone(),
@@ -3846,6 +3866,7 @@ fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedTo
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                ..
             } => (
                 display.to_string(),
                 TokenKind::Hashtag {

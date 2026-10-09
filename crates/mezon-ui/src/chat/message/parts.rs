@@ -58,7 +58,7 @@ pub fn resolve_pin_sender_label_with_message(
         && !config.anonymous_user_id.is_empty()
         && sender_id == config.anonymous_user_id
     {
-        return SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME);
+        return anonymous_sender_label(fallback_name);
     }
 
     let clan_id = effective_clan_id(clan_id, cx);
@@ -247,7 +247,23 @@ pub fn resolve_message_role_style(
     resolved
 }
 
+fn anonymous_sender_label(name: &str) -> SharedString {
+    if name.trim().is_empty() {
+        SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME)
+    } else {
+        SharedString::from(name.to_string())
+    }
+}
+
+fn anonymous_display_name(msg: &Message, cx: &App) -> Option<SharedString> {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+        .then(|| anonymous_sender_label(&msg.sender_name))
+}
+
 pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
+    if let Some(name) = anonymous_display_name(msg, cx) {
+        return name;
+    }
     let user_id = message_sender_user_id(msg);
     let clan_id = role_scope(ctx.profile_context);
     if let Some(user_id) = user_id {
@@ -330,8 +346,8 @@ fn resolve_reference_identity(
     let baked_avatar = || SharedString::from(reference.sender_avatar.clone());
     if is_anonymous {
         return (
-            SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME),
-            SharedString::default(),
+            anonymous_sender_label(&reference.sender_name),
+            SharedString::from(reference.sender_avatar.clone()),
         );
     }
     if reference.sender_id.is_zero() && reference.sender_avatar.is_empty() {
@@ -365,17 +381,19 @@ fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
 }
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
-    let is_anonymous = mezon_store::is_anonymous_sender_id(&msg.sender_id, cx);
-    let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(display_name)
         .with_size(Size::Small)
-        .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
-    if is_anonymous {
-        return avatar.into_any_element();
-    }
+    let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
+        if msg.avatar_url.is_empty() {
+            return avatar.anonymous(true).into_any_element();
+        }
+        anonymous_message_avatar_urls(msg)
+    } else {
+        resolve_message_avatar_urls(msg, ctx, cx)
+    };
     if let Some(proxied) = proxied {
         avatar = avatar.src(proxied);
         if !raw_url.is_empty() {
@@ -385,6 +403,11 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         avatar = avatar.src(raw_url);
     }
     avatar.into_any_element()
+}
+
+fn anonymous_message_avatar_urls(msg: &Message) -> (SharedString, Option<SharedString>) {
+    let proxied = (!msg.avatar_proxied.is_empty()).then(|| msg.avatar_proxied.clone());
+    (msg.avatar_url.clone(), proxied)
 }
 
 fn resolve_message_avatar_urls(
@@ -551,7 +574,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
     let is_anonymous = mezon_store::is_anonymous_user_id(reference.sender_id, ctx.app);
     let (sender_name, sender_avatar) =
         resolve_reference_identity(reference, is_anonymous, ctx, ctx.app);
-    let avatar = if is_anonymous {
+    let avatar = if is_anonymous && sender_avatar.is_empty() {
         Avatar::new()
             .name(sender_name.clone())
             .size_px(px(20.))
@@ -676,8 +699,15 @@ fn render_reply_preview_spans(
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 if !text.is_empty() && !text.ends_with(' ') {
                     text.push(' ');
                 }
@@ -2404,4 +2434,101 @@ pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod anonymous_persona_tests {
+    use std::sync::Arc;
+
+    use gpui::{App, SharedString, TestAppContext};
+    use mezon_store::{AppConfig, Message, MessageId};
+
+    use super::{
+        anonymous_display_name, anonymous_message_avatar_urls,
+        resolve_pin_sender_label_with_message,
+    };
+
+    const ANONYMOUS_ID: &str = "9876";
+
+    fn install_config(cx: &mut App) {
+        AppConfig::init_global(
+            Arc::new(AppConfig {
+                anonymous_user_id: ANONYMOUS_ID.into(),
+                ..Default::default()
+            }),
+            cx,
+        );
+    }
+
+    fn message(id: i64, sender_id: &str, sender_name: &str) -> Message {
+        Message::new(MessageId(id), "hi", sender_id, sender_name, 0)
+    }
+
+    #[gpui::test]
+    fn each_anonymous_row_keeps_its_own_persona_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                anonymous_display_name(&message(1, ANONYMOUS_ID, "money"), cx),
+                Some(SharedString::from("money"))
+            );
+            assert_eq!(
+                anonymous_display_name(&message(2, ANONYMOUS_ID, "saumui"), cx),
+                Some(SharedString::from("saumui"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_anonymous_row_without_a_persona_reads_anonymous(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                anonymous_display_name(&message(1, ANONYMOUS_ID, ""), cx),
+                Some(SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_named_sender_is_left_to_the_member_lookup(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(anonymous_display_name(&message(1, "42", "alice"), cx), None);
+        });
+    }
+
+    #[test]
+    fn an_anonymous_avatar_comes_from_the_message_itself() {
+        let bare =
+            message(1, ANONYMOUS_ID, "money").with_avatar("https://cdn.mezon.ai/stickers/1.webp");
+        assert_eq!(
+            anonymous_message_avatar_urls(&bare),
+            (
+                SharedString::from("https://cdn.mezon.ai/stickers/1.webp"),
+                None
+            )
+        );
+
+        let proxied = bare.with_avatar_proxied("https://imgproxy/1.webp");
+        assert_eq!(
+            anonymous_message_avatar_urls(&proxied).1,
+            Some(SharedString::from("https://imgproxy/1.webp"))
+        );
+    }
+
+    #[gpui::test]
+    fn an_anonymous_pin_shows_the_persona_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                resolve_pin_sender_label_with_message(ANONYMOUS_ID, "money", None, None, None, cx),
+                SharedString::from("money")
+            );
+            assert_eq!(
+                resolve_pin_sender_label_with_message(ANONYMOUS_ID, "", None, None, None, cx),
+                SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME)
+            );
+        });
+    }
 }
