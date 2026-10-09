@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "Przełącz na widok linii czasu",
   "channelTopbar.topic": "Temat",
   "channelVoice.addAgent": "Dodaj agenta AI",
+  "channelVoice.agentHint.title": "Włącz KOMU Agent",
+  "channelVoice.agentHint.body": "Kliknij ikonę KOMU Agent, aby dodać agenta AI do tego połączenia.",
   "channelVoice.agentActionFailed": "Nie udało się zaktualizować agenta AI. Możesz nie mieć uprawnień.",
   "channelVoice.chat": "Czat",
   "channelVoice.connecting": "Łączenie…",

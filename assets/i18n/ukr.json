@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "Перейти в режим Хронології",
   "channelTopbar.topic": "Тема",
   "channelVoice.addAgent": "Додати ШІ-агента",
+  "channelVoice.agentHint.title": "Увімкніть KOMU Agent",
+  "channelVoice.agentHint.body": "Натисніть на значок KOMU Agent, щоб додати ШІ-агента до цього дзвінка.",
   "channelVoice.agentActionFailed": "Не вдалося оновити ШІ-агента. Можливо, у вас немає прав.",
   "channelVoice.chat": "Чат",
   "channelVoice.connecting": "Підключення…",

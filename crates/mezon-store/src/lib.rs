@@ -502,6 +502,8 @@ pub struct Settings {
     pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
     #[serde(default)]
     pub realtime_server: RealtimeServer,
+    #[serde(default)]
+    pub agent_hint_dismissed: bool,
 }
 
 impl Default for Settings {
@@ -535,6 +537,7 @@ impl Default for Settings {
             screen_capture_access_requested: false,
             activity_strip_dismissals: Vec::new(),
             realtime_server: RealtimeServer::Auto,
+            agent_hint_dismissed: false,
         }
     }
 }

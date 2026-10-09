@@ -1064,6 +1064,8 @@
   "channelTopbar.tooltips.timelineView": "In Timeline-Ansicht wechseln",
   "channelTopbar.topic": "Thema",
   "channelVoice.addAgent": "KI-Agent hinzufügen",
+  "channelVoice.agentHint.title": "KOMU Agent einschalten",
+  "channelVoice.agentHint.body": "Klicke auf das KOMU-Agent-Symbol, um den KI-Agenten zu diesem Anruf hinzuzufügen.",
   "channelVoice.agentActionFailed": "Der KI-Agent konnte nicht aktualisiert werden. Möglicherweise fehlt dir die Berechtigung.",
   "channelVoice.chat": "Chat",
   "channelVoice.connecting": "Verbinden…",
