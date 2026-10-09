@@ -1115,15 +1115,13 @@ fn pin_card(
     let mut avatar = Avatar::new()
         .name(&sender_label)
         .with_size(Size::Small)
-        .anonymous(vm.is_anonymous)
+        .anonymous(vm.is_anonymous && avatar_src.is_none())
         .image_cache(avatar_cache.clone());
-    if !vm.is_anonymous {
-        if let Some(src) = &avatar_src {
-            avatar = avatar.src(src.clone());
-        }
-        if let Some(fallback) = &avatar_fallback {
-            avatar = avatar.fallback_src(fallback.clone());
-        }
+    if let Some(src) = &avatar_src {
+        avatar = avatar.src(src.clone());
+    }
+    if let Some(fallback) = &avatar_fallback {
+        avatar = avatar.fallback_src(fallback.clone());
     }
 
     let name_row = h_flex()

@@ -13,10 +13,10 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
-    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
-    SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
+    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
+    OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
     build_share_contact_content_json, detect_markdown, emoji_content_tokens,
     hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
     with_create_time_seconds,
@@ -1011,7 +1011,7 @@ async fn send_forward(
                 dest.is_public,
                 dest.mode,
                 Vec::new(),
-                Vec::new(),
+                OutgoingHashtags::default(),
                 Vec::new(),
                 None,
             )
@@ -1694,6 +1694,95 @@ impl MessagesStore {
         self.set_pending_last_seen(pending, cx);
     }
 
+    pub fn note_reopened_seen(&mut self, cx: &mut Context<Self>) {
+        let (Some(channel_id), Some(clan_id)) = (self.active_channel_id, self.active_clan_id)
+        else {
+            return;
+        };
+        let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        if live_badge == 0 && !self.channel_is_unread(channel_id, clan_id, cx) {
+            return;
+        }
+        let Some((message_id, create_time)) = self.newest_known_message(channel_id, clan_id, cx)
+        else {
+            return;
+        };
+        if !should_write_last_seen(
+            self.known_last_seen_id(channel_id, cx),
+            self.last_message_by_channel.get(&channel_id).copied(),
+            message_id,
+        ) {
+            return;
+        }
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            message = message_id.get(),
+            badge_count = live_badge,
+            "reopened at a saved scroll position — marking the channel read"
+        );
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id,
+            create_time,
+            mode: self.mode,
+            badge_count: live_badge,
+        };
+        self.apply_local_last_seen(&pending, cx);
+        self.set_pending_last_seen(pending, cx);
+    }
+
+    fn newest_known_message(
+        &self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cx: &App,
+    ) -> Option<(MessageId, i64)> {
+        let buffered = self.cache.get(&channel_id).and_then(|channel| {
+            channel
+                .messages
+                .as_slice()
+                .iter()
+                .rev()
+                .find(|m| !m.id.is_optimistic())
+                .map(|m| (m.id, m.create_time))
+        });
+        if !self.tail_detached(channel_id) {
+            return buffered;
+        }
+        let Some(tail) = self
+            .last_message_by_channel
+            .get(&channel_id)
+            .copied()
+            .filter(|id| !id.is_zero() && !id.is_optimistic())
+        else {
+            return buffered;
+        };
+        let buffered_time = buffered.map_or(0, |(_, time)| time);
+        let tail_time = self
+            .channel_last_sent_timestamp(channel_id, clan_id, cx)
+            .max(buffered_time);
+        Some((tail, tail_time))
+    }
+
+    fn channel_last_sent_timestamp(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> i64 {
+        if self.is_dm {
+            DirectMessageStore::try_global(cx)
+                .and_then(|dm| dm.read(cx).find(channel_id).map(|c| c.last_sent_timestamp))
+                .unwrap_or(0)
+        } else {
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|c| c.last_sent_timestamp)
+                })
+                .unwrap_or(0)
+        }
+    }
+
     fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
         if self.is_dm {
             DirectMessageStore::try_global(cx).is_some_and(|dm| {
@@ -1751,13 +1840,24 @@ impl MessagesStore {
         if self.api.connection_status() != ConnectionStatus::Connected {
             return;
         }
-        let queue = std::mem::take(&mut self.queued_last_seen);
+        let queue = last_seen_retries(
+            std::mem::take(&mut self.queued_last_seen),
+            &self.last_read_message_by_channel,
+        );
         for pending in queue {
             self.send_last_seen(pending, cx);
         }
     }
 
     fn send_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        if pending.message_id.get() <= 0 {
+            tracing::debug!(
+                target: "badge_flow",
+                channel = pending.channel_id.get(),
+                "send_last_seen skipped: the server rejects a last seen without a message id"
+            );
+            return;
+        }
         let fingerprint = format!(
             "{}|{}|{}|{}|{}",
             pending.clan_id.get(),
@@ -1872,6 +1972,10 @@ impl MessagesStore {
             return false;
         };
         self.tail_detached(channel_id)
+    }
+
+    pub fn is_reading_live_tail(&self, channel_id: ChannelId) -> bool {
+        !self.is_viewing_older(channel_id) && !self.tail_detached(channel_id)
     }
 
     fn tail_detached(&self, channel_id: ChannelId) -> bool {
@@ -2618,7 +2722,9 @@ impl MessagesStore {
             });
         let message_code = edit_meta.map_or(0, |(_, _, message_code)| message_code);
         let (spans, transport_mentions, _transport_hashtags, _transport_emojis, raw_content) =
-            edit_content_spans(&content, content_tokens, message_code);
+            edit_content_spans(&content, content_tokens, message_code, |tokens| {
+                channel_link_metas(&content, tokens, cx)
+            });
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -3224,7 +3330,9 @@ impl MessagesStore {
             .as_deref()
             .filter(|raw| !raw.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| build_send_content(&msg.content, &[], &[], &[]).json);
+            .unwrap_or_else(|| {
+                build_send_content(&msg.content, &[], &OutgoingHashtags::default(), &[]).json
+            });
         let mentions: Vec<mezon_proto::api::MessageMention> = msg
             .mention_targets
             .iter()
@@ -4942,10 +5050,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5095,10 +5207,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5693,10 +5809,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5944,7 +6064,8 @@ impl MessagesStore {
                     is_public,
                     content: content.clone(),
                     mentions: update_mentions,
-                    hashtags: update_hashtags,
+                    hashtags: update_hashtags.tokens,
+                    hashtag_channels: update_hashtags.channels,
                     emojis: update_emojis,
                     create_time_seconds,
                     started_at: now_unix_seconds(),
@@ -6507,6 +6628,13 @@ impl MessagesStore {
         }
         if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
+        }
+        if let Some(previous) = self
+            .active_channel_id
+            .filter(|previous| *previous != channel_id)
+            && !self.tail_detached(previous)
+        {
+            self.viewing_older_by_channel.remove(&previous);
         }
         self.active_channel_id = Some(channel_id);
         self.active_clan_id = Some(clan_id);
@@ -8402,6 +8530,34 @@ pub(crate) fn snowflake_seq(id: MessageId) -> i64 {
     id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
+fn last_seen_retries(
+    queue: Vec<PendingLastSeen>,
+    last_read: &HashMap<ChannelId, MessageId>,
+) -> Vec<PendingLastSeen> {
+    let mut newest: Vec<PendingLastSeen> = Vec::new();
+    for pending in queue {
+        let superseded = last_read
+            .get(&pending.channel_id)
+            .is_some_and(|read| snowflake_seq(pending.message_id) < snowflake_seq(*read));
+        if superseded {
+            continue;
+        }
+        match newest
+            .iter_mut()
+            .find(|queued| queued.channel_id == pending.channel_id)
+        {
+            Some(queued)
+                if snowflake_seq(pending.message_id) >= snowflake_seq(queued.message_id) =>
+            {
+                *queued = pending;
+            }
+            Some(_) => {}
+            None => newest.push(pending),
+        }
+    }
+    newest
+}
+
 fn should_write_last_seen(
     last_seen_id: Option<MessageId>,
     channel_tail: Option<MessageId>,
@@ -9005,7 +9161,7 @@ pub(crate) async fn run_upload_job(
             job.message_id,
             &job.content,
             job.mentions,
-            job.hashtags,
+            OutgoingHashtags::new(job.hashtags, job.hashtag_channels),
             job.emojis,
             job.create_time_seconds,
             presigned,
@@ -9078,7 +9234,7 @@ struct AnonymousAttachmentSend<'a> {
     keys: Vec<String>,
     reply_ref: Option<OutgoingReply>,
     mentions: Vec<TransportMention>,
-    hashtags: Vec<TransportHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<TransportEmoji>,
     flags: OutgoingMessageFlags,
 }
@@ -9210,6 +9366,7 @@ fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
     msg.sender_name = ANONYMOUS_SENDER_NAME.into();
     msg.avatar_url = SharedString::default();
     msg.avatar_proxied = SharedString::default();
+    msg.anonymous_sender = true;
     true
 }
 
@@ -9217,6 +9374,7 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
         incoming.sender_id = prior.sender_id.clone();
         incoming.sender_user_id = prior.sender_user_id;
+        incoming.anonymous_sender = prior.anonymous_sender;
     }
     if incoming.sender_name.is_empty() {
         incoming.sender_name = prior.sender_name.clone();
@@ -9535,6 +9693,9 @@ fn now_unix_seconds() -> i64 {
 }
 
 fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<UserId>) -> Message {
+    let anonymous_sender = cfg.is_some_and(|c| {
+        !c.anonymous_user_id.is_empty() && c.anonymous_user_id == m.sender_id.to_string()
+    });
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
@@ -9630,6 +9791,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     .with_viewer_highlight(highlight)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
+    .with_anonymous_sender(anonymous_sender)
     .with_attachments(attachments)
     .with_media_presentation(album_layout, viewer_media)
 }
@@ -9891,10 +10053,30 @@ type EditTransportTokens = (
     String,
 );
 
+pub(crate) fn outgoing_hashtags(
+    content: &str,
+    tokens: Vec<TransportHashtag>,
+    cx: &App,
+) -> OutgoingHashtags {
+    let channels = channel_link_metas(content, &tokens, cx);
+    OutgoingHashtags::new(tokens, channels)
+}
+
+fn channel_link_metas(
+    content: &str,
+    tokens: &[TransportHashtag],
+    cx: &App,
+) -> Vec<ChannelLinkMeta> {
+    crate::ChannelList::try_global(cx)
+        .map(|channels| channels.read(cx).channel_link_metas(content, tokens))
+        .unwrap_or_default()
+}
+
 fn edit_content_spans(
     content: &str,
     content_tokens: OutgoingContent,
     message_code: i32,
+    link_metas: impl FnOnce(&[TransportHashtag]) -> Vec<ChannelLinkMeta>,
 ) -> EditTransportTokens {
     let OutgoingContent {
         mentions,
@@ -9913,6 +10095,8 @@ fn edit_content_spans(
         .into_iter()
         .map(OutgoingEmoji::into_transport)
         .collect();
+    let channels = link_metas(&transport_hashtags);
+    let transport_hashtags = OutgoingHashtags::new(transport_hashtags, channels);
     let sent = build_send_content_with_code(
         content,
         &transport_mentions,
@@ -9920,6 +10104,7 @@ fn edit_content_spans(
         &transport_emojis,
         message_code,
     );
+    let transport_hashtags = transport_hashtags.tokens;
     let raw_content = sent.json;
     let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
@@ -13150,8 +13335,12 @@ mod tests {
         .into_iter()
         .map(OutgoingMention::into_transport)
         .collect();
-        let sent =
-            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let sent = mezon_client::transport::build_send_content(
+            "@Everyone hi",
+            &transport,
+            &Default::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(parsed.mentions.len(), 1);
@@ -13213,7 +13402,7 @@ mod tests {
             emojis: Vec::new(),
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans("@bob hi", content_tokens, 0);
+            edit_content_spans("@bob hi", content_tokens, 0, |_| Vec::new());
 
         assert!(
             transport_mentions.iter().any(|m| m.user_id == "42"),
@@ -13264,7 +13453,7 @@ mod tests {
             }],
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE);
+            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE, |_| Vec::new());
         let parsed: ApiMessageContent =
             serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
 
@@ -13684,6 +13873,58 @@ mod tests {
         assert!(message_from_api(reply(), None, Some(UserId(42))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, Some(UserId(7))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, None).highlights_viewer_direct);
+    }
+
+    fn anonymous_api_message(sender_id: i64, name: &str, avatar: &str) -> ApiMessage {
+        ApiMessage {
+            message_id: 1,
+            content: "hi".into(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                ..Default::default()
+            },
+            code: 0,
+            sender_id,
+            sender_name: name.into(),
+            avatar: avatar.into(),
+            create_time: 100,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        }
+    }
+
+    #[test]
+    fn message_from_api_marks_the_anonymous_sender_and_keeps_its_persona() {
+        let cfg = AppConfig {
+            anonymous_user_id: "9876".into(),
+            ..Default::default()
+        };
+        let persona = message_from_api(
+            anonymous_api_message(9876, "money", "https://cdn/money.webp"),
+            Some(&cfg),
+            None,
+        );
+        assert!(persona.anonymous_sender);
+        assert_eq!(persona.sender_name, "money");
+        assert_eq!(persona.avatar_url, "https://cdn/money.webp");
+
+        let named = message_from_api(anonymous_api_message(42, "Alice", ""), Some(&cfg), None);
+        assert!(!named.anonymous_sender);
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_the_anonymous_flag_of_the_row_it_fills() {
+        let mut optimistic =
+            Message::new(MessageId::next_optimistic(), "hi", "9876", "Anonymous", 100);
+        optimistic.anonymous_sender = true;
+        let sparse_ack = Message::new(MessageId(99), "hi", "0", String::new(), 0);
+        assert!(merge_sparse_sender(&optimistic, sparse_ack).anonymous_sender);
     }
 
     #[test]
@@ -14267,7 +14508,7 @@ mod tests {
 
     #[test]
     fn optimistic_markdown_content_matches_stripped_echo() {
-        let optimistic_text = build_send_content("**bold**", &[], &[], &[]).text;
+        let optimistic_text = build_send_content("**bold**", &[], &Default::default(), &[]).text;
         assert_eq!(
             optimistic_text, "bold",
             "optimistic text must be stripped like the server-stored text"
@@ -15878,7 +16119,12 @@ mod tests {
             store.update(cx, |store, cx| {
                 let channel = ChannelId(500);
                 open_command_channel(store, channel);
-                let sent = mezon_client::transport::build_send_content("*roll 2d6", &[], &[], &[]);
+                let sent = mezon_client::transport::build_send_content(
+                    "*roll 2d6",
+                    &[],
+                    &Default::default(),
+                    &[],
+                );
                 let command = command_card(1, 9).command.map(|command| *command).unwrap();
                 store.record_failed_command(
                     channel,
@@ -16069,6 +16315,7 @@ mod tests {
             content: "clip".into(),
             mentions: Vec::new(),
             hashtags: Vec::new(),
+            hashtag_channels: Vec::new(),
             emojis: Vec::new(),
             create_time_seconds: 0,
             started_at: now_unix_seconds(),
@@ -16768,5 +17015,269 @@ mod tests {
             "a stale index after a mid-list delete renders the WRONG row"
         );
         assert_eq!(list.remove_id(MessageId(404)), None);
+    }
+
+    mod reopen_read {
+        use super::*;
+        use crate::channel::{CHANNEL_ACTIVE_JOINED, Category, Channel, ChannelType};
+
+        const CLAN: ClanId = ClanId(1);
+        const LEFT_SCROLLED_UP: ChannelId = ChannelId(10);
+        const ELSEWHERE: ChannelId = ChannelId(20);
+
+        fn msg(seq: i64) -> MessageId {
+            MessageId(seq << 22)
+        }
+
+        fn row(id: ChannelId, seen: (i64, i64), sent: (i64, i64)) -> Channel {
+            Channel {
+                id,
+                name: id.get().to_string(),
+                channel_type: ChannelType::Text,
+                private: false,
+                clan_id: CLAN,
+                clan_name: String::new(),
+                category_name: String::new(),
+                category_id: Some("5".into()),
+                member_count: 0,
+                badge_count: 0,
+                muted: false,
+                parent_id: None,
+                last_seen_message_id: msg(seen.0),
+                last_seen_timestamp: seen.1,
+                last_sent_message_id: msg(sent.0),
+                last_sent_timestamp: sent.1,
+                voice_members: Vec::new(),
+                is_favorite: false,
+                creator_id: UserId(0),
+                active: CHANNEL_ACTIVE_JOINED,
+                avatar_url: String::new(),
+                topic: String::new(),
+                age_restricted: 0,
+                e2ee: 0,
+                app_id: 0,
+            }
+        }
+
+        fn rows(seqs: &[i64]) -> Vec<Message> {
+            seqs.iter()
+                .map(|seq| Message::new(msg(*seq), "hi", "7", "Ann", seq * 100))
+                .collect()
+        }
+
+        fn seed(
+            cx: &mut App,
+            seen: (i64, i64),
+            sent: (i64, i64),
+            cached: &[i64],
+        ) -> Entity<MessagesStore> {
+            let store = test_store(cx);
+            ChannelList::global(cx).update(cx, |channels, _| {
+                channels.seed_clan_channels_for_test(
+                    CLAN,
+                    vec![Category {
+                        id: "5".into(),
+                        clan_id: CLAN,
+                        name: "5".into(),
+                        order: 0,
+                        channels: vec![
+                            row(LEFT_SCROLLED_UP, seen, sent),
+                            row(ELSEWHERE, (1, 100), (1, 100)),
+                        ],
+                    }],
+                );
+            });
+            store.update(cx, |store, cx| {
+                store.set_channel(LEFT_SCROLLED_UP, rows(cached));
+                store.set_channel(ELSEWHERE, rows(&[1]));
+                store.open_channel_in_clan(CLAN, LEFT_SCROLLED_UP, cx);
+            });
+            store
+        }
+
+        fn unread(cx: &App) -> bool {
+            ChannelList::global(cx)
+                .read(cx)
+                .channel(CLAN, LEFT_SCROLLED_UP)
+                .is_some_and(|c| c.is_unread())
+        }
+
+        #[gpui::test]
+        fn reopening_at_a_saved_position_marks_the_cached_tail_read(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                assert!(unread(cx));
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(!unread(cx), "reopening must clear the unread row");
+                let pending = store
+                    .read(cx)
+                    .pending_last_seen
+                    .get(&LEFT_SCROLLED_UP)
+                    .cloned();
+                assert_eq!(
+                    pending.map(|p| (p.message_id, p.create_time)),
+                    Some((msg(3), 300))
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn reopening_with_a_detached_tail_marks_read_up_to_the_known_tail(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (5, 500), &[1, 2]);
+                store.update(cx, |store, _| {
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(5))
+                });
+                assert!(store.read(cx).has_more_bottom());
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(
+                    !unread(cx),
+                    "the tail outside the buffer still counts as read"
+                );
+                let pending = store
+                    .read(cx)
+                    .pending_last_seen
+                    .get(&LEFT_SCROLLED_UP)
+                    .cloned();
+                assert_eq!(
+                    pending.map(|p| (p.message_id, p.create_time)),
+                    Some((msg(5), 500))
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn reopening_a_read_channel_writes_nothing(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(
+                    !store
+                        .read(cx)
+                        .pending_last_seen
+                        .contains_key(&LEFT_SCROLLED_UP)
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn leaving_a_channel_scrolled_up_lets_new_messages_reach_its_cache(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    assert!(!store.is_viewing_older(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn leaving_a_detached_channel_keeps_it_viewing_older(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (9, 900), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(9));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    assert!(store.is_viewing_older(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn opening_through_a_jump_marks_read_like_a_plain_open(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    store.request_jump(LEFT_SCROLLED_UP, msg(2), cx);
+                    store.open_channel_in_clan(CLAN, LEFT_SCROLLED_UP, cx);
+                    store.note_reopened_seen(cx);
+                });
+                assert!(!unread(cx));
+            });
+        }
+
+        #[gpui::test]
+        fn only_the_live_tail_counts_as_reading(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, _| {
+                    assert!(store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    assert!(!store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, false);
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(9));
+                    assert!(!store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn a_last_seen_without_a_message_id_is_never_sent(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    let pending = |id| PendingLastSeen {
+                        clan_id: CLAN,
+                        channel_id: LEFT_SCROLLED_UP,
+                        message_id: id,
+                        create_time: 0,
+                        mode: 2,
+                        badge_count: 0,
+                    };
+                    store.send_last_seen(pending(MessageId(0)), cx);
+                    assert!(store.queued_last_seen.is_empty());
+                    store.send_last_seen(pending(msg(3)), cx);
+                    assert_eq!(store.queued_last_seen.len(), 1);
+                });
+            });
+        }
+
+        #[test]
+        fn retries_keep_only_the_newest_unsuperseded_last_seen() {
+            let pending = |channel: ChannelId, seq: i64| PendingLastSeen {
+                clan_id: CLAN,
+                channel_id: channel,
+                message_id: msg(seq),
+                create_time: seq * 100,
+                mode: 2,
+                badge_count: 0,
+            };
+            let queue = vec![
+                pending(LEFT_SCROLLED_UP, 5),
+                pending(LEFT_SCROLLED_UP, 7),
+                pending(LEFT_SCROLLED_UP, 6),
+                pending(ELSEWHERE, 3),
+            ];
+            let read = HashMap::from([(LEFT_SCROLLED_UP, msg(5)), (ELSEWHERE, msg(4))]);
+            let sent: Vec<(ChannelId, MessageId)> = last_seen_retries(queue, &read)
+                .into_iter()
+                .map(|p| (p.channel_id, p.message_id))
+                .collect();
+            assert_eq!(sent, vec![(LEFT_SCROLLED_UP, msg(7))]);
+        }
+
+        #[gpui::test]
+        fn reopening_never_writes_an_id_older_than_the_last_seen(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (5, 500), (6, 600), &[1, 2]);
+                store.update(cx, |store, cx| {
+                    store.last_message_by_channel.remove(&LEFT_SCROLLED_UP);
+                    store.note_reopened_seen(cx);
+                });
+                assert!(
+                    !store
+                        .read(cx)
+                        .pending_last_seen
+                        .contains_key(&LEFT_SCROLLED_UP)
+                );
+            });
+        }
     }
 }
