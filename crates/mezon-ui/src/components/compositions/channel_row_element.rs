@@ -504,7 +504,9 @@ impl Element for ChannelRowElement {
                     );
                 }
 
-                if !hovered && let Some((buzz_line, pill_x, pill_width)) = buzz_pill {
+                if !(hovered && show_trailing_action)
+                    && let Some((buzz_line, pill_x, pill_width)) = buzz_pill
+                {
                     let pill_y = top + (row_height - BADGE_HEIGHT) / 2.;
                     let pill_bounds = Bounds {
                         origin: point(pill_x, pill_y),
@@ -547,8 +549,8 @@ impl Element for ChannelRowElement {
                 // A row that shows voice occupants leaves navigation to the
                 // column wrapping it and sets no `on_click` here; the gear
                 // still needs its own listener, or it paints but never fires.
-                let has_trailing = show_trailing_action;
-                if self.on_click.is_some() || self.on_right_click.is_some() || has_trailing {
+                if self.on_click.is_some() || self.on_right_click.is_some() || show_trailing_action
+                {
                     let hitbox_down = hitbox.clone();
                     let mouse_down = state.mouse_down.clone();
                     let on_right_click = self.on_right_click.clone();
@@ -584,7 +586,7 @@ impl Element for ChannelRowElement {
                                 if !hitbox_up.is_hovered(window) {
                                     return;
                                 }
-                                if has_trailing
+                                if show_trailing_action
                                     && hovered_cell.get()
                                     && gear_bounds(hitbox_up.bounds).contains(&event.position)
                                     && let Some(action) = trailing_action.as_ref()
