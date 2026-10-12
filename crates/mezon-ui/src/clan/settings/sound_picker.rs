@@ -1,12 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
-    SharedString, Subscription, Task, Window, div, prelude::*, px, relative,
+    App, AsyncApp, Bounds, Context, DragMoveEvent, Empty, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
 };
-use mezon_audio::{AudioPlayer, DecodedPcm};
+use mezon_audio::{AudioPlayer, DecodedPcm, process_pcm, process_pcm_to_wav};
 use mezon_store::{
     ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, Settings, StickerStore, VoiceStore,
     is_valid_emoticon_shortname, validate_sound_file,
@@ -20,6 +20,333 @@ use crate::theme::{ActiveTheme, Theme};
 
 const FORM_CONTROL_H: f32 = 34.0;
 const PREVIEW_TICK: Duration = Duration::from_millis(250);
+const WAVEFORM_BARS: usize = 144;
+const MIN_TRIM_PERCENT: f32 = 1.0;
+const DEFAULT_VOLUME_PERCENT: f32 = 100.0;
+const MAX_VOLUME_PERCENT: f32 = 100.0;
+
+#[derive(Clone)]
+struct TrimThumb((EntityId, bool));
+
+impl Render for TrimThumb {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+enum TrimRangeEvent {
+    Change,
+}
+
+struct TrimRangeState {
+    start: f32,
+    end: f32,
+    bounds: Bounds<Pixels>,
+}
+
+impl TrimRangeState {
+    fn new() -> Self {
+        Self {
+            start: 0.0,
+            end: 1.0,
+            bounds: Bounds::default(),
+        }
+    }
+
+    fn value(&self) -> (f32, f32) {
+        (self.start * 100.0, self.end * 100.0)
+    }
+
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.start = 0.0;
+        self.end = 1.0;
+        cx.emit(TrimRangeEvent::Change);
+        cx.notify();
+    }
+
+    fn update_from_position(&mut self, position: Pixels, is_start: bool, cx: &mut Context<Self>) {
+        let width = self.bounds.size.width;
+        if width <= px(0.0) {
+            return;
+        }
+        let percentage = ((position - self.bounds.left()) / width).clamp(0.0, 1.0);
+        let min_range = MIN_TRIM_PERCENT / 100.0;
+        if is_start {
+            self.start = percentage.min(self.end - min_range);
+        } else {
+            self.end = percentage.max(self.start + min_range);
+        }
+        cx.emit(TrimRangeEvent::Change);
+        cx.notify();
+    }
+}
+
+impl EventEmitter<TrimRangeEvent> for TrimRangeState {}
+
+impl Render for TrimRangeState {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(IntoElement)]
+struct WaveformTrimSlider {
+    state: Entity<TrimRangeState>,
+    disabled: bool,
+}
+
+impl WaveformTrimSlider {
+    fn new(state: &Entity<TrimRangeState>) -> Self {
+        Self {
+            state: state.clone(),
+            disabled: false,
+        }
+    }
+
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    fn thumb(
+        &self,
+        position: f32,
+        is_start: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let entity_id = self.state.entity_id();
+        div()
+            .id(("waveform-trim-thumb", is_start as u32))
+            .absolute()
+            .top_0()
+            .left(gpui::relative(position))
+            .ml(-px(2.0))
+            .w(px(4.0))
+            .h_full()
+            .rounded_sm()
+            .bg(Hsla::from(cx.theme().text_primary))
+            .when(!self.disabled, |this| {
+                this.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_drag(TrimThumb((entity_id, is_start)), |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| drag.clone())
+                    })
+                    .on_drag_move(window.listener_for(
+                        &self.state,
+                        move |state, event: &DragMoveEvent<TrimThumb>, _, cx| {
+                            let TrimThumb((id, is_start)) = event.drag(cx);
+                            if *id == entity_id {
+                                state.update_from_position(event.event.position.x, *is_start, cx);
+                            }
+                        },
+                    ))
+            })
+    }
+}
+
+impl RenderOnce for WaveformTrimSlider {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let start = state.start;
+        let end = state.end;
+        let entity_id = self.state.entity_id();
+        div()
+            .id(("waveform-trim-slider", entity_id))
+            .relative()
+            .size_full()
+            .when(!self.disabled, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    window.listener_for(
+                        &self.state,
+                        move |state, event: &MouseDownEvent, _, cx| {
+                            let center = (state.start + state.end) / 2.0;
+                            let percentage = ((event.position.x - state.bounds.left())
+                                / state.bounds.size.width)
+                                .clamp(0.0, 1.0);
+                            state.update_from_position(event.position.x, percentage < center, cx);
+                        },
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(gpui::relative(start))
+                    .bg(Hsla::from(cx.theme().bg_primary).opacity(0.62)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(gpui::relative(1.0 - end))
+                    .bg(Hsla::from(cx.theme().bg_primary).opacity(0.62)),
+            )
+            .when(!self.disabled, |this| {
+                this.child(self.thumb(start, true, window, cx))
+                    .child(self.thumb(end, false, window, cx))
+            })
+            .child({
+                let state = self.state.clone();
+                canvas(
+                    move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            })
+    }
+}
+
+#[derive(Clone)]
+struct VolumeThumb(EntityId);
+
+impl Render for VolumeThumb {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+enum SoundVolumeEvent {
+    Change(f32),
+}
+
+struct SoundVolumeState {
+    percentage: f32,
+    bounds: Bounds<Pixels>,
+}
+
+impl SoundVolumeState {
+    fn new() -> Self {
+        Self {
+            percentage: DEFAULT_VOLUME_PERCENT,
+            bounds: Bounds::default(),
+        }
+    }
+
+    fn value(&self) -> f32 {
+        self.percentage
+    }
+
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.percentage = DEFAULT_VOLUME_PERCENT;
+        cx.emit(SoundVolumeEvent::Change(self.percentage));
+        cx.notify();
+    }
+
+    fn update_from_position(&mut self, position: Pixels, cx: &mut Context<Self>) {
+        let width = self.bounds.size.width;
+        if width <= px(0.0) {
+            return;
+        }
+        self.percentage = (((position - self.bounds.left()) / width).clamp(0.0, 1.0)
+            * MAX_VOLUME_PERCENT)
+            .round();
+        cx.emit(SoundVolumeEvent::Change(self.percentage));
+        cx.notify();
+    }
+}
+
+impl EventEmitter<SoundVolumeEvent> for SoundVolumeState {}
+
+impl Render for SoundVolumeState {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(IntoElement)]
+struct SoundVolumeSlider {
+    state: Entity<SoundVolumeState>,
+}
+
+impl SoundVolumeSlider {
+    fn new(state: &Entity<SoundVolumeState>) -> Self {
+        Self {
+            state: state.clone(),
+        }
+    }
+}
+
+impl RenderOnce for SoundVolumeSlider {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let ratio = state.percentage / MAX_VOLUME_PERCENT;
+        let entity_id = self.state.entity_id();
+        let bar_color = Hsla::from(cx.theme().brand);
+        let thumb_color = cx.theme().text_primary;
+
+        div()
+            .id(("sound-volume-slider", entity_id))
+            .relative()
+            .w_full()
+            .h_6()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                window.listener_for(&self.state, |state, event: &MouseDownEvent, _, cx| {
+                    state.update_from_position(event.position.x, cx)
+                }),
+            )
+            .on_drag(VolumeThumb(entity_id), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(window.listener_for(
+                &self.state,
+                move |state, event: &DragMoveEvent<VolumeThumb>, _, cx| {
+                    if event.drag(cx).0 == entity_id {
+                        state.update_from_position(event.event.position.x, cx);
+                    }
+                },
+            ))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h_1p5()
+                    .rounded_full()
+                    .bg(bar_color.opacity(0.2))
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(gpui::relative(ratio))
+                            .rounded_full()
+                            .bg(bar_color),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(-5.0))
+                            .left(gpui::relative(ratio))
+                            .ml(-px(8.0))
+                            .size_4()
+                            .rounded_full()
+                            .bg(thumb_color),
+                    )
+                    .child({
+                        let state = self.state.clone();
+                        canvas(
+                            move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
+                    }),
+            )
+    }
+}
 
 fn default_voice_shortname() -> String {
     let timestamp = std::time::SystemTime::now()
@@ -32,24 +359,6 @@ fn default_voice_shortname() -> String {
 fn format_mmss(secs: f64) -> String {
     let total = secs.max(0.0).round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
-}
-
-fn clone_pcm(pcm: &DecodedPcm) -> DecodedPcm {
-    DecodedPcm {
-        samples: Arc::clone(&pcm.samples),
-        channels: pcm.channels,
-        sample_rate: pcm.sample_rate,
-    }
-}
-
-fn audio_time_label(current: f64, duration: f64) -> SharedString {
-    let duration_secs = duration.max(0.0).round() as u64;
-    let label = if duration_secs == 0 {
-        format_mmss(current)
-    } else {
-        format!("{} / {}", format_mmss(current), format_mmss(duration))
-    };
-    label.into()
 }
 
 #[derive(Clone)]
@@ -75,8 +384,12 @@ pub struct SoundPicker {
     preview_url: Option<SharedString>,
     local_pcm: Option<DecodedPcm>,
     local_player: Option<AudioPlayer>,
+    trim_slider: Entity<TrimRangeState>,
+    volume_slider: Entity<SoundVolumeState>,
     submitting: bool,
     _name_sub: Subscription,
+    _trim_sub: Subscription,
+    _volume_sub: Subscription,
     _voice_observe: Subscription,
     _submit_task: Option<Task<()>>,
     _decode_task: Option<Task<()>>,
@@ -132,6 +445,18 @@ impl SoundPicker {
             .as_ref()
             .map(|e| SharedString::from(e.source.clone()));
         let voice_observe = cx.observe(&VoiceStore::global(cx), |_, _, cx| cx.notify());
+        let trim_slider = cx.new(|_| TrimRangeState::new());
+        let trim_sub = cx.subscribe(&trim_slider, |this, _, _: &TrimRangeEvent, cx| {
+            this.stop_local_preview(cx);
+        });
+        let volume_slider = cx.new(|_| SoundVolumeState::new());
+        let volume_sub = cx.subscribe(&volume_slider, |this, _, event, cx| {
+            let SoundVolumeEvent::Change(value) = event;
+            if let Some(player) = &this.local_player {
+                player.set_volume(*value / DEFAULT_VOLUME_PERCENT);
+            }
+            cx.notify();
+        });
         Self {
             clan_id,
             editing,
@@ -143,8 +468,12 @@ impl SoundPicker {
             preview_url,
             local_pcm: None,
             local_player: None,
+            trim_slider,
+            volume_slider,
             submitting: false,
             _name_sub: name_sub,
+            _trim_sub: trim_sub,
+            _volume_sub: volume_sub,
             _voice_observe: voice_observe,
             _submit_task: None,
             _decode_task: None,
@@ -153,7 +482,7 @@ impl SoundPicker {
     }
 
     fn can_preview(&self) -> bool {
-        self.picked_path.is_some()
+        self.picked_path.is_some() && self.local_pcm.is_some()
             || self
                 .preview_url
                 .as_ref()
@@ -179,7 +508,8 @@ impl SoundPicker {
                 return (player.position_secs(), player.duration_secs());
             }
             if let Some(pcm) = &self.local_pcm {
-                return (0.0, pcm.duration_secs());
+                let (start, end) = self.trim_times(cx);
+                return (0.0, (end - start).max(0.0).min(pcm.duration_secs()));
             }
             return (0.0, 0.0);
         }
@@ -194,6 +524,28 @@ impl SoundPicker {
                 .unwrap_or((0.0, voice.cached_sound_duration(url).unwrap_or(0.0)));
         }
         (0.0, 0.0)
+    }
+
+    fn trim_times(&self, cx: &App) -> (f64, f64) {
+        let Some(pcm) = &self.local_pcm else {
+            return (0.0, 0.0);
+        };
+        let duration = pcm.duration_secs();
+        let (start, end) = self.trim_slider.read(cx).value();
+        (
+            duration * f64::from(start / 100.0),
+            duration * f64::from(end / 100.0),
+        )
+    }
+
+    fn volume_gain(&self, cx: &App) -> f32 {
+        self.volume_slider.read(cx).value() / DEFAULT_VOLUME_PERCENT
+    }
+
+    fn processed_pcm(&self, cx: &App) -> Option<DecodedPcm> {
+        let pcm = self.local_pcm.as_ref()?;
+        let (start, end) = self.trim_times(cx);
+        process_pcm(pcm, start, end, 1.0).ok()
     }
 
     fn stop_local_preview(&mut self, cx: &mut Context<Self>) {
@@ -250,14 +602,15 @@ impl SoundPicker {
                 return;
             }
         }
-        let Some(pcm) = self.local_pcm.as_ref() else {
+        let Some(pcm) = self.processed_pcm(cx) else {
             return;
         };
         let Ok(player) = AudioPlayer::new() else {
             tracing::warn!("audio output unavailable");
             return;
         };
-        player.set_data(clone_pcm(pcm));
+        player.set_data(pcm);
+        player.set_volume(self.volume_gain(cx));
         player.play();
         self.local_player = Some(player);
         self.start_preview_tick(cx);
@@ -300,57 +653,30 @@ impl SoundPicker {
         }));
     }
 
-    fn render_preview_playbar(
-        &self,
-        previewing: bool,
-        theme: &Theme,
-        cx: &App,
-    ) -> impl IntoElement {
-        let (position, duration) = self.preview_timeline(cx);
-        let progress = if duration > 0.0 {
-            (position / duration).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
-        };
-        let time_label = audio_time_label(if previewing { position } else { 0.0 }, duration);
-
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .h(px(36.0))
-            .px(px(10.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_tertiary)
-            .flex()
+    fn render_waveform(&self, theme: &Theme) -> impl IntoElement {
+        let amplitudes = self
+            .local_pcm
+            .as_ref()
+            .map(waveform_amplitudes)
+            .unwrap_or_else(|| vec![0.08; WAVEFORM_BARS]);
+        h_flex()
+            .w_full()
+            .h(px(52.0))
             .items_center()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h(px(4.0))
-                    .rounded_full()
-                    .bg(theme.border)
-                    .overflow_hidden()
-                    .when(progress > 0.0, |track| {
-                        track.child(
-                            div()
-                                .h_full()
-                                .w(relative(progress))
-                                .rounded_full()
-                                .bg(theme.brand),
-                        )
+            .gap(px(0.75))
+            .children(
+                amplitudes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, amplitude)| {
+                        div()
+                            .id(("sound-waveform-bar", index))
+                            .flex_1()
+                            .min_w(px(0.25))
+                            .h(px(3.0 + amplitude * 47.0))
+                            .rounded_full()
+                            .bg(theme.text_primary)
                     }),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .whitespace_nowrap()
-                    .text_color(theme.tokens.text_theme_primary)
-                    .child(time_label),
             )
     }
 
@@ -365,7 +691,8 @@ impl SoundPicker {
         if let Some(editing) = &self.editing {
             return editing.shortname != name;
         }
-        self.picked_path.is_some()
+        let (start, end) = self.trim_slider.read(cx).value();
+        self.picked_path.is_some() && self.local_pcm.is_some() && end > start
     }
 
     fn pick_file(&mut self, cx: &mut Context<Self>) {
@@ -411,6 +738,8 @@ impl SoundPicker {
                 this.preview_url = Some(preview.into());
                 this.local_pcm = None;
                 this.stop_local_preview(cx);
+                this.trim_slider.update(cx, |slider, cx| slider.reset(cx));
+                this.volume_slider.update(cx, |slider, cx| slider.reset(cx));
                 if this.editing.is_none() {
                     this.name_input.update(cx, |state, cx| {
                         state.set_value(default_name, window, cx);
@@ -458,9 +787,50 @@ impl SoundPicker {
         let clan_id = self.clan_id;
         let editing = self.editing.clone();
         let picked_path = self.picked_path.clone();
+        let processed = self.local_pcm.as_ref().map(|pcm| {
+            let (start, end) = self.trim_times(cx);
+            process_pcm_to_wav(pcm, start, end, self.volume_gain(cx))
+        });
 
         self._submit_task = Some(cx.spawn(async move |this, cx| {
-            let task = match (editing.as_ref(), picked_path.as_ref()) {
+            let processed_path = match processed {
+                Some(Ok(bytes)) if bytes.len() as u64 <= MAX_SOUND_BYTES => {
+                    let path = processed_sound_path();
+                    match std::fs::write(&path, bytes) {
+                        Ok(()) => Some(ProcessedSoundFile(path)),
+                        Err(_) => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.submitting = false;
+                                cx.notify();
+                            });
+                            show_error(cx, sound_error_message(&locale, "invalid_file"));
+                            return;
+                        }
+                    }
+                }
+                Some(Ok(_)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.submitting = false;
+                        cx.notify();
+                    });
+                    show_error(cx, sound_error_message(&locale, "size_limit"));
+                    return;
+                }
+                Some(Err(_)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.submitting = false;
+                        cx.notify();
+                    });
+                    show_error(cx, sound_error_message(&locale, "decode_failed"));
+                    return;
+                }
+                None => None,
+            };
+            let upload_path = processed_path
+                .as_ref()
+                .map(|file| &file.0)
+                .or(picked_path.as_ref());
+            let task = match (editing.as_ref(), upload_path) {
                 (Some(target), _) => cx.update(|cx| {
                     StickerStore::global(cx).update(cx, |store, cx| {
                         store.update_sound(&target.id, clan_id, &target.source, &name, cx)
@@ -513,6 +883,45 @@ impl SoundPicker {
     }
 }
 
+fn processed_sound_path() -> PathBuf {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "mezon-sound-edit-{}-{nonce}.wav",
+        std::process::id()
+    ))
+}
+
+struct ProcessedSoundFile(PathBuf);
+
+impl Drop for ProcessedSoundFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
+    let frames = pcm.frames();
+    if frames == 0 {
+        return vec![0.08; WAVEFORM_BARS];
+    }
+    (0..WAVEFORM_BARS)
+        .map(|bar| {
+            let start = bar * frames / WAVEFORM_BARS;
+            let end = ((bar + 1) * frames / WAVEFORM_BARS)
+                .max(start + 1)
+                .min(frames);
+            let peak = (start..end)
+                .flat_map(|frame| {
+                    let offset = frame * pcm.channels;
+                    pcm.samples[offset..offset + pcm.channels].iter()
+                })
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+            peak.max(0.08)
+        })
+        .collect()
+}
+
 fn sound_error_message(locale: &str, code: &str) -> String {
     match code {
         "size_limit" => mezon_i18n::t(locale, "clanSoundSetting.toast.errorSizeLimit").to_string(),
@@ -549,6 +958,7 @@ impl Render for SoundPicker {
         let preview_label = mezon_i18n::t(&locale, "clanSoundSetting.modal.preview");
         let audio_label = mezon_i18n::t(&locale, "clanSoundSetting.modal.audioFile");
         let name_label = mezon_i18n::t(&locale, "clanSoundSetting.modal.soundName");
+        let volume_label = mezon_i18n::t(&locale, "clanSoundSetting.modal.soundVolume");
         let browse = mezon_i18n::t(&locale, "clanSoundSetting.modal.browse");
         let cancel = mezon_i18n::t(&locale, "clanSoundSetting.modal.cancel");
         let submit = mezon_i18n::t(
@@ -565,12 +975,15 @@ impl Render for SoundPicker {
         let can_preview = self.can_preview();
         let name_len = self.name_input.read(cx).value().trim().chars().count();
         let previewing = self.is_previewing(cx);
+        let (trim_start, trim_end) = self.trim_times(cx);
+        let (preview_position, preview_duration) = self.preview_timeline(cx);
+        let volume_percent = self.volume_slider.read(cx).value().round() as u32;
 
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| this.close(cx)))
-            .w(px(520.))
+            .w(px(720.))
             .gap_4()
             .p(px(24.))
             .rounded_lg()
@@ -579,12 +992,14 @@ impl Render for SoundPicker {
             .bg(theme.bg_floating)
             .shadow_lg()
             .child(
-                h_flex()
+                div()
                     .w_full()
-                    .justify_between()
-                    .items_start()
+                    .relative()
+                    .flex()
+                    .justify_center()
                     .child(
                         v_flex()
+                            .items_center()
                             .gap_1()
                             .child(
                                 div()
@@ -603,6 +1018,9 @@ impl Render for SoundPicker {
                     .child(
                         div()
                             .id("sound-picker-close")
+                            .absolute()
+                            .top_0()
+                            .right_0()
                             .p_1()
                             .rounded_full()
                             .cursor_pointer()
@@ -615,6 +1033,7 @@ impl Render for SoundPicker {
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),
             )
+            .child(div().w_full().h(px(1.0)).bg(theme.border))
             .child(
                 v_flex()
                     .gap_2()
@@ -625,44 +1044,137 @@ impl Render for SoundPicker {
                             .text_color(theme.text_secondary)
                             .child(preview_label.to_uppercase()),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .p(px(16.0))
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg_secondary)
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .id("sound-picker-play")
-                                    .size(px(36.0))
-                                    .rounded_full()
-                                    .bg(theme.brand)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when(can_preview, |el| {
-                                        el.cursor_pointer().on_click(
-                                            cx.listener(|this, _, _, cx| this.toggle_preview(cx)),
-                                        )
-                                    })
-                                    .when(!can_preview, |el| el.opacity(0.5))
-                                    .child(
-                                        Icon::new(if previewing {
-                                            IconName::AudioPause
-                                        } else {
-                                            IconName::AudioPlay
+                    .when(can_preview, |section| {
+                        section.child(
+                            h_flex()
+                                .w_full()
+                                .p(px(16.0))
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.bg_secondary)
+                                .items_center()
+                                .gap(px(12.0))
+                                .child(
+                                    div()
+                                        .id("sound-picker-play")
+                                        .size(px(36.0))
+                                        .rounded_full()
+                                        .bg(theme.brand)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .when(can_preview, |el| {
+                                            el.cursor_pointer().on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.toggle_preview(cx)
+                                                }),
+                                            )
                                         })
-                                        .size(px(16.0))
-                                        .text_color(gpui::white()),
-                                    ),
-                            )
-                            .child(self.render_preview_playbar(previewing, &theme, cx)),
-                    ),
+                                        .when(!can_preview, |el| el.opacity(0.5))
+                                        .child(
+                                            Icon::new(if previewing {
+                                                IconName::AudioPause
+                                            } else {
+                                                IconName::AudioPlay
+                                            })
+                                            .size(px(16.0))
+                                            .text_color(gpui::white()),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .w_full()
+                                                .h(px(64.0))
+                                                .flex()
+                                                .items_center()
+                                                .child(self.render_waveform(&theme))
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_0()
+                                                        .right_0()
+                                                        .bottom_0()
+                                                        .left_0()
+                                                        .child(
+                                                            WaveformTrimSlider::new(
+                                                                &self.trim_slider,
+                                                            )
+                                                            .disabled(!can_preview),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .justify_between()
+                                                .text_xs()
+                                                .text_color(theme.text_muted)
+                                                .child(format_mmss(trim_start))
+                                                .child(if previewing {
+                                                    format!(
+                                                        "{} / {}",
+                                                        format_mmss(preview_position),
+                                                        format_mmss(preview_duration)
+                                                    )
+                                                } else {
+                                                    format_mmss(trim_end)
+                                                }),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(!can_preview, |section| {
+                        section.child(
+                            div()
+                                .w_full()
+                                .h(px(90.0))
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.bg_secondary)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::UploadSoundIcon)
+                                        .size(px(48.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    }),
             )
+            .when(can_preview, |root| {
+                root.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme.text_secondary)
+                                        .child(volume_label.to_uppercase()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_muted)
+                                        .child(format!("{volume_percent}%")),
+                                ),
+                        )
+                        .child(SoundVolumeSlider::new(&self.volume_slider)),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
