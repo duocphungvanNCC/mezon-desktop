@@ -29,7 +29,7 @@ use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
-use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::chat::pinned_popover::{PinnedPopoverPanel, pinned_message_for_display};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
@@ -687,7 +687,15 @@ fn latest_activity_strip(
                 .max_by_key(|pin| pin.create_time)
                 .cloned()
         })
-        .flatten();
+        .flatten()
+        .map(|pin| {
+            let live_message = pin
+                .message_id
+                .parse::<MessageId>()
+                .ok()
+                .and_then(|message_id| messages.message_in_channel(context.channel_id, message_id));
+            pinned_message_for_display(&pin, live_message)
+        });
     let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
     if !has_topic && !has_pin {
@@ -1237,14 +1245,24 @@ impl LatestActivityStripView {
         let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
             this.refresh_snapshot(cx)
         });
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
-            if matches!(
-                event,
-                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
-            ) {
-                this.refresh_snapshot(cx);
-            }
-        });
+        let messages_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |this, _, event, cx| match event {
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. } => {
+                    this.refresh_snapshot(cx)
+                }
+                MessagesEvent::Updated { message_id }
+                    if message_id.is_none_or(|message_id| {
+                        PinnedMessagesStore::global(cx)
+                            .read(cx)
+                            .is_pinned(&message_id.to_string())
+                    }) =>
+                {
+                    cx.notify()
+                }
+                _ => {}
+            },
+        );
         let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
         let badge_sub = BadgeService::try_global(cx)
             .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
