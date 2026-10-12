@@ -215,7 +215,7 @@ pub use mmn_client::{
 };
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
-    is_valid_name_content, prepare_display_name_for_update,
+    is_valid_clan_nickname, is_valid_name_content, prepare_display_name_for_update,
 };
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};

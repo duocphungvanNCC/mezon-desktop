@@ -7906,11 +7906,7 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
-            ));
+            return Err(api_status_error(code));
         }
         Ok(())
     }

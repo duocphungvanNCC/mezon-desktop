@@ -6,7 +6,9 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
 use mezon_client::transport::LinkPhoneError;
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError};
+use mezon_client::{
+    AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError, api_status_from_error,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
@@ -71,7 +73,7 @@ pub enum AccountEvent {
     ClanProfileLoaded,
     ClanProfileLoadFailed(String),
     ClanProfileSaved,
-    ClanProfileSaveFailed(String),
+    ClanProfileSaveFailed(ClanProfileSaveError),
     NicknameDuplicateChecked(bool),
     StatusUpdated,
     AccountDeleted,
@@ -86,6 +88,12 @@ pub enum AccountEvent {
 pub enum PhoneLinkError {
     AlreadyLinkedToAnother,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClanProfileSaveError {
+    InvalidInput,
+    Other(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -919,8 +927,9 @@ impl AccountStore {
                     });
                 }
                 Err(e) => {
+                    let mapped = map_clan_profile_save_error(e);
                     let _ = this.update(cx, |_, cx| {
-                        cx.emit(AccountEvent::ClanProfileSaveFailed(e.to_string()));
+                        cx.emit(AccountEvent::ClanProfileSaveFailed(mapped));
                         cx.notify();
                     });
                 }
@@ -949,6 +958,14 @@ impl AccountStore {
             });
         })
         .detach();
+    }
+}
+
+fn map_clan_profile_save_error(err: anyhow::Error) -> ClanProfileSaveError {
+    if api_status_from_error(&err).is_some_and(|status| status.is_invalid_argument()) {
+        ClanProfileSaveError::InvalidInput
+    } else {
+        ClanProfileSaveError::Other(err.to_string())
     }
 }
 

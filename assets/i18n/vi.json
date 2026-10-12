@@ -4124,6 +4124,7 @@
   "setting.clanProfile.nicknameExists": "Biệt danh đã tồn tại",
   "setting.clanProfile.nicknamePlaceholder": "Biệt danh clan",
   "setting.clanProfile.saveFailed": "Lưu hồ sơ clan thất bại:",
+  "setting.clanProfile.invalidNickname": "Biệt danh clan tối đa 64 ký tự. Chỉ dùng chữ cái, số, khoảng trắng và _ - . +. Không được bắt đầu bằng _ hoặc -.",
   "setting.clanProfile.saved": "Đã lưu hồ sơ clan",
   "setting.deviceSettings.current": "Hiện tại",
   "setting.deviceSettings.currentDevice": "Thiết bị hiện tại",

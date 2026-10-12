@@ -4125,6 +4125,7 @@
   "setting.clanProfile.nicknameExists": "ニックネームはすでに存在します",
   "setting.clanProfile.nicknamePlaceholder": "クランのニックネーム",
   "setting.clanProfile.saveFailed": "クランプロフィールの保存に失敗しました:",
+  "setting.clanProfile.invalidNickname": "クランニックネームは最大64文字まで。使用できるのは文字、数字、スペース、および _ - . + のみです。_ または - で始めることはできません。",
   "setting.clanProfile.saved": "クランプロフィールを保存しました",
   "setting.deviceSettings.current": "現在",
   "setting.deviceSettings.currentDevice": "現在のデバイス",

@@ -4135,6 +4135,7 @@
   "setting.clanProfile.nicknameExists": "Бу кушамат инде бар",
   "setting.clanProfile.nicknamePlaceholder": "Клан кушаматы",
   "setting.clanProfile.saveFailed": "Клан профилен саклап булмады:",
+  "setting.clanProfile.invalidNickname": "Клан кушаматы 64 символдан артык булмаска тиеш. Бары тик хәрефләр, саннар, бушлыклар һәм _ - . + кулланыгыз. _ яки - белән башлана алмый.",
   "setting.clanProfile.saved": "Клан профиле сакланды",
   "setting.deviceSettings.current": "Агымдагы",
   "setting.deviceSettings.currentDevice": "Агымдагы корама",

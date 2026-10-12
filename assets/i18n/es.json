@@ -4159,6 +4159,7 @@
   "setting.clanProfile.nicknameExists": "El apodo ya existe",
   "setting.clanProfile.nicknamePlaceholder": "Apodo en el clan",
   "setting.clanProfile.saveFailed": "No se pudo guardar el perfil del clan:",
+  "setting.clanProfile.invalidNickname": "El apodo del clan debe tener como máximo 64 caracteres. Usa solo letras, números, espacios y _ - . +. No puede empezar con _ o -.",
   "setting.clanProfile.saved": "Perfil del clan guardado",
   "setting.deviceSettings.current": "Actual",
   "setting.deviceSettings.currentDevice": "Dispositivo actual",

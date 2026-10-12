@@ -47,6 +47,10 @@ pub fn is_valid_menu_name(name: &str) -> bool {
         && is_valid_name_content(name)
 }
 
+pub fn is_valid_clan_nickname(name: &str) -> bool {
+    is_valid_menu_name(name.trim())
+}
+
 pub fn is_valid_clan_name(name: &str) -> bool {
     if name.is_empty() || name.chars().count() > CLAN_NAME_MAX_CHARS {
         return false;
@@ -158,5 +162,11 @@ mod tests {
         assert!(!is_valid_clan_name(" hello"));
         assert!(!is_valid_clan_name("it's"));
         assert!(is_valid_clan_name("hello world"));
+    }
+
+    #[test]
+    fn clan_nickname_rejects_stacked_combining_marks() {
+        let zalgo = "ค\u{0e47}".repeat(40);
+        assert!(!is_valid_clan_nickname(&zalgo));
     }
 }

@@ -4123,6 +4123,7 @@
   "setting.clanProfile.nicknameExists": "Il soprannome esiste già",
   "setting.clanProfile.nicknamePlaceholder": "Soprannome nel clan",
   "setting.clanProfile.saveFailed": "Impossibile salvare il profilo del clan:",
+  "setting.clanProfile.invalidNickname": "Il nickname del clan deve contenere al massimo 64 caratteri. Usa solo lettere, numeri, spazi e _ - . +. Non può iniziare con _ o -.",
   "setting.clanProfile.saved": "Profilo del clan salvato",
   "setting.deviceSettings.current": "Attualmente",
   "setting.deviceSettings.currentDevice": "Dispositivo attuale",

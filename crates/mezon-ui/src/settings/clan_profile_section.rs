@@ -9,7 +9,9 @@ use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
+use mezon_store::{
+    AccountEvent, AccountStore, ClanList, ClanProfileSaveError, Settings, is_valid_clan_nickname,
+};
 
 use super::edit_avatar::EditAvatar;
 use crate::app::shell::Shell;
@@ -111,16 +113,22 @@ impl ClanProfileSection {
                     let message = mezon_i18n::t(&locale, "setting.clanProfile.saved");
                     Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 }
-                AccountEvent::ClanProfileSaveFailed(msg) => {
+                AccountEvent::ClanProfileSaveFailed(err) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
                     }
                     let locale = this.settings.read(cx).language.clone();
-                    let message = format!(
-                        "{} {}",
-                        mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
-                        msg
-                    );
+                    let message = match err {
+                        ClanProfileSaveError::InvalidInput => {
+                            mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname")
+                                .to_string()
+                        }
+                        ClanProfileSaveError::Other(msg) => format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                            msg
+                        ),
+                    };
                     Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
                 AccountEvent::ClanProfileLoadFailed(msg) => {
@@ -284,11 +292,20 @@ impl ClanProfileSection {
         if state.saving || state.duplicate_error {
             return;
         }
+
+        let nick_name: String = state.nick_name.to_string();
+        let nick_trimmed = nick_name.trim();
+        if !nick_trimmed.is_empty() && !is_valid_clan_nickname(nick_trimmed) {
+            let locale = self.settings.read(cx).language.clone();
+            let message = mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname");
+            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+            return;
+        }
+
         state.saving = true;
         cx.notify();
 
         let clan_id: String = state.selected_clan_id.to_string();
-        let nick_name: String = state.nick_name.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
 
         AccountStore::global(cx).update(cx, |store, cx| {

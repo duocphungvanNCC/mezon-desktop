@@ -4122,6 +4122,7 @@
   "setting.clanProfile.nicknameExists": "Taki pseudonim już istnieje",
   "setting.clanProfile.nicknamePlaceholder": "Przydomek Clanu",
   "setting.clanProfile.saveFailed": "Nie udało się zapisać profilu klanu:",
+  "setting.clanProfile.invalidNickname": "Przydomek klanu może mieć maksymalnie 64 znaki. Dozwolone są tylko litery, cyfry, spacje oraz _ - . +. Nie może zaczynać się od _ ani -.",
   "setting.clanProfile.saved": "Profil klanu zapisany",
   "setting.deviceSettings.current": "Aktualne",
   "setting.deviceSettings.currentDevice": "Aktualne urządzenie",

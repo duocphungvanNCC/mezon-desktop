@@ -4123,6 +4123,7 @@
   "setting.clanProfile.nicknameExists": "O apelido já existe",
   "setting.clanProfile.nicknamePlaceholder": "Apelido no clã",
   "setting.clanProfile.saveFailed": "Falha ao salvar o perfil do clã:",
+  "setting.clanProfile.invalidNickname": "O apelido do clã deve ter no máximo 64 caracteres. Use apenas letras, números, espaços e _ - . +. Não pode começar com _ ou -.",
   "setting.clanProfile.saved": "Perfil do clã salvo",
   "setting.deviceSettings.current": "Atual",
   "setting.deviceSettings.currentDevice": "Dispositivo atual",
