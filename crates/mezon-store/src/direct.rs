@@ -1048,6 +1048,7 @@ impl DirectMessageStore {
             channel_id: Some(channel_id),
         });
         cx.notify();
+        crate::platform::PlatformStore::dismiss_channel_notification(cx, None, channel_id.get());
         true
     }
 

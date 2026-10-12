@@ -2956,6 +2956,11 @@ impl ChannelList {
         if should_notify || cleared_badge > 0 {
             self.reseed_unknown_clan(clan_id, cx);
         }
+        crate::platform::PlatformStore::dismiss_channel_notification(
+            cx,
+            Some(clan_id.get()),
+            channel_id.get(),
+        );
     }
 
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -3841,6 +3846,11 @@ impl ChannelList {
             self.sync_clan_after_read(clan_id, badge_delta, cx);
             self.reseed_unknown_clan(clan_id, cx);
         }
+        crate::platform::PlatformStore::dismiss_channel_notification(
+            cx,
+            Some(clan_id.get()),
+            channel_id.get(),
+        );
     }
 
     pub fn increment_channel_for_topic(

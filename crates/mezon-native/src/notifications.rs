@@ -734,11 +734,146 @@ fn escape_xml(s: &str) -> String {
 const LINUX_DESKTOP_ENTRY: &str = "mezon";
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn linux_replace_id(key: &str) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    (hasher.finish() as u32).max(1)
+struct CloseGate {
+    signaled: std::sync::atomic::AtomicBool,
+    waker: std::sync::Mutex<Option<std::task::Waker>>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl CloseGate {
+    fn new() -> Self {
+        Self {
+            signaled: std::sync::atomic::AtomicBool::new(false),
+            waker: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn signal(&self) {
+        self.signaled
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(mut slot) = self.waker.lock()
+            && let Some(waker) = slot.take()
+        {
+            waker.wake();
+        }
+    }
+
+    fn is_signaled(&self) -> bool {
+        self.signaled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct CloseWait {
+    gate: std::sync::Arc<CloseGate>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl std::future::Future for CloseWait {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.gate.is_signaled() {
+            return std::task::Poll::Ready(());
+        }
+        if let Ok(mut slot) = self.gate.waker.lock() {
+            *slot = Some(cx.waker().clone());
+        }
+        if self.gate.is_signaled() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn live_gates()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CloseGate>>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CloseGate>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn replace_gate(key: &str, gate: std::sync::Arc<CloseGate>) -> Option<std::sync::Arc<CloseGate>> {
+    live_gates()
+        .lock()
+        .ok()
+        .and_then(|mut gates| gates.insert(key.to_owned(), gate))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn take_gate(key: &str) -> Option<std::sync::Arc<CloseGate>> {
+    live_gates()
+        .lock()
+        .ok()
+        .and_then(|mut gates| gates.remove(key))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn release_gate(key: &str, gate: &std::sync::Arc<CloseGate>) {
+    if let Ok(mut gates) = live_gates().lock()
+        && gates
+            .get(key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, gate))
+    {
+        gates.remove(key);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn notification_clicked(response: &notify_rust::NotificationResponse) -> bool {
+    match response {
+        notify_rust::NotificationResponse::Default => true,
+        notify_rust::NotificationResponse::Action(action) => action == "default",
+        _ => false,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn close_shown(handle: &notify_rust::NotificationHandle) {
+    pollster::block_on(handle.close_async());
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn drive_shown(
+    handle: notify_rust::NotificationHandle,
+    gate: std::sync::Arc<CloseGate>,
+    target: Option<NotificationTarget>,
+) {
+    if gate.is_signaled() {
+        close_shown(&handle);
+        return;
+    }
+    let close_requested = pollster::block_on(async {
+        let gate = std::sync::Arc::clone(&gate);
+        let mut wait = std::pin::pin!(handle.wait_for_action_async(move |response| {
+            if notification_clicked(response)
+                && let Some(target) = target
+            {
+                dispatch_click(target);
+            }
+        }));
+        let mut close = std::pin::pin!(CloseWait { gate });
+        std::future::poll_fn(|cx| {
+            if close.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(true)
+            } else if wait.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(false)
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    });
+    if close_requested {
+        close_shown(&handle);
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -746,13 +881,17 @@ fn show_linux(n: &Notification) {
     let title = n.title.clone();
     let body = n.body.clone();
     let key = replacement_key(n);
-    let replace_id = key.as_deref().map(linux_replace_id);
     let activation_target = key.as_deref().and_then(build_target);
-    // Prefer the downloaded sender avatar; fall back to the installed app icon.
     let icon = n
         .icon_path
         .clone()
         .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned());
+    let gate = std::sync::Arc::new(CloseGate::new());
+    if let Some(key) = key.clone()
+        && let Some(previous) = replace_gate(&key, std::sync::Arc::clone(&gate))
+    {
+        previous.signal();
+    }
 
     std::thread::spawn(move || {
         let mut notification = notify_rust::Notification::new();
@@ -765,25 +904,43 @@ fn show_linux(n: &Notification) {
             .hint(notify_rust::Hint::DesktopEntry(
                 LINUX_DESKTOP_ENTRY.to_owned(),
             ));
-        if let Some(id) = replace_id {
-            notification.id(id);
-        }
         if activation_target.is_some() {
             notification.action("default", "Open");
         }
         match notification.show() {
             Ok(handle) => {
-                if let Some(target) = activation_target {
-                    handle.wait_for_action(|action| {
-                        if action == "default" {
-                            dispatch_click(target);
-                        }
-                    });
+                drive_shown(handle, gate.clone(), activation_target);
+                if let Some(key) = key.as_deref() {
+                    release_gate(key, &gate);
                 }
             }
-            Err(e) => tracing::warn!("Linux notification failed: {e}"),
+            Err(e) => {
+                if let Some(key) = key.as_deref() {
+                    release_gate(key, &gate);
+                }
+                tracing::warn!("Linux notification failed: {e}");
+            }
         }
     });
+}
+
+pub fn close_channel(clan_id: Option<&str>, channel_id: &str) {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    close_linux_channel(clan_id, channel_id);
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let _ = (clan_id, channel_id);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn close_linux_channel(clan_id: Option<&str>, channel_id: &str) {
+    let clan = clan_id.map(str::to_owned);
+    let key = encode_identifier(clan.as_ref(), channel_id);
+    let Some(gate) = take_gate(&key) else {
+        return;
+    };
+    gate.signal();
 }
 
 #[cfg(test)]
@@ -870,19 +1027,5 @@ mod tests {
         assert_eq!(decode_identifier("mezon-notify-77"), None);
         assert_eq!(decode_identifier("mezon-notify-77-"), None);
         assert_eq!(decode_identifier(""), None);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn linux_replace_id_is_stable_and_never_zero() {
-        assert_eq!(
-            linux_replace_id("mezon-channel-1"),
-            linux_replace_id("mezon-channel-1")
-        );
-        assert_ne!(
-            linux_replace_id("mezon-channel-1"),
-            linux_replace_id("mezon-channel-2")
-        );
-        assert!(linux_replace_id("mezon-channel-1") > 0);
     }
 }

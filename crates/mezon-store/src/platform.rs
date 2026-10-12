@@ -200,6 +200,7 @@ pub type OpenManagedAppWindowFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> +
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
+pub type DismissChannelNotificationFn = Arc<dyn Fn(Option<String>, String) + Send + Sync>;
 pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
@@ -256,6 +257,7 @@ pub struct PlatformStore {
     open_managed_app_window: Option<OpenManagedAppWindowFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
+    dismiss_channel_notification: Option<DismissChannelNotificationFn>,
     cli_install: Option<CliInstallHooks>,
     mcp_server: Option<McpServerHooks>,
     notification_permit: Option<NotificationPermitFn>,
@@ -270,6 +272,7 @@ impl PlatformStore {
             open_managed_app_window: None,
             save_attachment: None,
             notifier: None,
+            dismiss_channel_notification: None,
             cli_install: None,
             mcp_server: None,
             notification_permit: None,
@@ -373,6 +376,30 @@ impl PlatformStore {
         if let Some(f) = &self.notifier {
             f(notification);
         }
+    }
+
+    pub fn set_dismiss_channel_notification(
+        entity: &Entity<Self>,
+        f: DismissChannelNotificationFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.dismiss_channel_notification = Some(f);
+        });
+    }
+
+    pub fn dismiss_channel_notification(cx: &App, clan_id: Option<i64>, channel_id: i64) {
+        if channel_id == 0 {
+            return;
+        }
+        let Some(platform) = Self::try_global(cx) else {
+            return;
+        };
+        let Some(dismiss) = platform.read(cx).dismiss_channel_notification.clone() else {
+            return;
+        };
+        let clan = clan_id.and_then(|id| (id != 0).then(|| id.to_string()));
+        dismiss(clan, channel_id.to_string());
     }
 
     pub fn set_cli_install(entity: &Entity<Self>, hooks: CliInstallHooks, cx: &mut App) {
