@@ -284,8 +284,9 @@ fn log_pipeline_error(error: &gst::message::Error, what: &str) {
     if error.error().matches(gst::CoreError::MissingPlugin) {
         tracing::warn!(
             target: "mezon_video",
-            "no gstreamer decoder installed for this video: install gstreamer1.0-libav \
-             (Debian/Ubuntu), gstreamer1-plugin-libav (Fedora) or gst-libav (Arch)"
+            "no gstreamer plugin installed for this video: install gstreamer1.0-libav and \
+             gstreamer1.0-plugins-bad (Debian/Ubuntu), gstreamer1-plugin-libav and \
+             gstreamer1-plugins-bad-free (Fedora) or gst-libav and gst-plugins-bad (Arch)"
         );
     }
 }

@@ -42,17 +42,31 @@ video_decoder_installed() {
   return 1
 }
 
+hls_demuxer_installed() {
+  local dir
+  if command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 tsdemux >/dev/null 2>&1; then
+    return 0
+  fi
+  for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
+             /usr/lib/*/gstreamer-1.0 /usr/local/lib/gstreamer-1.0; do
+    if [[ -e "${dir}/libgstmpegtsdemux.so" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 video_decoder_hint() {
   if command -v apt-get >/dev/null 2>&1; then
-    echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-good"
+    echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad"
   elif command -v dnf >/dev/null 2>&1; then
-    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good"
+    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good gstreamer1-plugins-bad-free"
   elif command -v pacman >/dev/null 2>&1; then
-    echo "sudo pacman -S --needed gst-libav gst-plugins-good"
+    echo "sudo pacman -S --needed gst-libav gst-plugins-good gst-plugins-bad"
   elif command -v zypper >/dev/null 2>&1; then
-    echo "sudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good"
+    echo "sudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good gstreamer-plugins-bad"
   else
-    echo "install your distribution's GStreamer libav (or openh264) plugin"
+    echo "install your distribution's GStreamer libav (or openh264) and plugins-bad packages"
   fi
 }
 
@@ -65,13 +79,13 @@ install_video_decoder() {
       echo "warning: apt-get update failed; installing against a stale package index" >&2
     fi
     $maysudo apt-get install -y --no-install-recommends \
-      gstreamer1.0-libav gstreamer1.0-plugins-good
+      gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
   elif command -v dnf >/dev/null 2>&1; then
-    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good
+    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good gstreamer1-plugins-bad-free
   elif command -v pacman >/dev/null 2>&1; then
-    $maysudo pacman -S --needed --noconfirm gst-libav gst-plugins-good
+    $maysudo pacman -S --needed --noconfirm gst-libav gst-plugins-good gst-plugins-bad
   elif command -v zypper >/dev/null 2>&1; then
-    $maysudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good
+    $maysudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good gstreamer-plugins-bad
   else
     return 1
   fi
@@ -151,15 +165,15 @@ command -v update-desktop-database >/dev/null 2>&1 &&
 command -v gtk-update-icon-cache >/dev/null 2>&1 &&
   gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
-if ! video_decoder_installed; then
+if ! video_decoder_installed || ! hls_demuxer_installed; then
   echo ""
-  echo "==> No GStreamer H.264 decoder found; installing one (videos need it)."
+  echo "==> GStreamer video plugins missing; installing them (videos need them)."
   echo "    This needs root, so you may be asked for your password."
-  if install_video_decoder && video_decoder_installed; then
-    echo "==> Video decoder installed"
+  if install_video_decoder && video_decoder_installed && hls_demuxer_installed; then
+    echo "==> Video plugins installed"
   else
     echo ""
-    echo "Warning: could not install a GStreamer H.264 decoder automatically."
+    echo "Warning: could not install the GStreamer video plugins automatically."
     echo "Videos will not play, and videos you send will have no thumbnail, until you run:"
     echo "    $(video_decoder_hint)"
   fi

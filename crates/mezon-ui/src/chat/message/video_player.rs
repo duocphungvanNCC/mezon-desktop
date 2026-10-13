@@ -214,6 +214,9 @@ impl VideoPlayerView {
         let url = self.url.clone();
         let decode_max_size = self.decode_max_size;
         self._open_task = Some(cx.spawn(async move |this, cx| {
+            let url = mezon_client::video_source::transcoded_hls_playlist(url.as_ref())
+                .await
+                .map_or(url, SharedString::from);
             let signed = mezon_client::cdn_signature::sign(url.as_ref()).await;
             let url = signed
                 .as_ref()
