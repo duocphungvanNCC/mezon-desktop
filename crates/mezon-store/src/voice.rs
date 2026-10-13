@@ -75,7 +75,7 @@ pub enum NoiseSuppressionStatus {
 }
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
-const NOISE_SUPPRESSION_DEFAULT_ENABLED: bool = cfg!(target_os = "linux");
+const NOISE_SUPPRESSION_DEFAULT_ENABLED: bool = true;
 // The web voice thunk normalizes an empty roomName to "0" before requesting the SFU token.
 const SFU_TOKEN_ROOM_NAME: &str = "0";
 const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
