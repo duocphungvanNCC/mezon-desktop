@@ -29,7 +29,7 @@ use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
-use crate::chat::pinned_popover::{PinnedPopoverPanel, pinned_message_for_display};
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
@@ -680,22 +680,8 @@ fn latest_activity_strip(
     let active_clan_id = clan_id.parse::<ClanId>().ok();
     let latest_pin = (pinned.clan_id() == active_clan_id
         && pinned.channel_id() == active_channel_id)
-        .then(|| {
-            pinned
-                .pinned()
-                .iter()
-                .max_by_key(|pin| pin.create_time)
-                .cloned()
-        })
-        .flatten()
-        .map(|pin| {
-            let live_message = pin
-                .message_id
-                .parse::<MessageId>()
-                .ok()
-                .and_then(|message_id| messages.message_in_channel(context.channel_id, message_id));
-            pinned_message_for_display(&pin, live_message)
-        });
+        .then(|| pinned.pinned().iter().max_by_key(|pin| pin.create_time))
+        .flatten();
     let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
     if !has_topic && !has_pin {
@@ -963,6 +949,19 @@ fn latest_activity_strip(
         .as_ref()
         .and_then(|pin| pin.message_id.parse::<MessageId>().ok());
     let pin_media = pin_attachment.as_ref().map(|attachment| {
+        if attachment.source_denied
+            || mezon_store::hides_media(&attachment.url, context.channel_id.get())
+        {
+            return div()
+                .flex_none()
+                .size(px(32.))
+                .rounded(px(7.))
+                .overflow_hidden()
+                .child(crate::chat::message::parts::render_private_media_tile(
+                    theme, 32., 32.,
+                ))
+                .into_any_element();
+        }
         if attachment.is_image() {
             let source = if !attachment.thumbnail_proxied.is_empty() {
                 attachment.thumbnail_proxied.clone()
@@ -1250,15 +1249,6 @@ impl LatestActivityStripView {
             |this, _, event, cx| match event {
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. } => {
                     this.refresh_snapshot(cx)
-                }
-                MessagesEvent::Updated { message_id }
-                    if message_id.is_none_or(|message_id| {
-                        PinnedMessagesStore::global(cx)
-                            .read(cx)
-                            .is_pinned(&message_id.to_string())
-                    }) =>
-                {
-                    cx.notify()
                 }
                 _ => {}
             },
