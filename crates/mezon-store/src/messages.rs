@@ -4706,10 +4706,19 @@ impl MessagesStore {
             let probes = due.into_iter().enumerate().map(|(index, url)| {
                 let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
                 async move {
-                    let exists = mezon_client::transport_runtime::object_exists(
+                    let mut exists = mezon_client::transport_runtime::object_exists(
                         &presign_probe_url(&url, nonce),
                     )
                     .await;
+                    if !exists
+                        && let Some(playlist) =
+                            mezon_client::video_source::master_playlist_url(&url)
+                    {
+                        exists = mezon_client::transport_runtime::object_exists(
+                            &presign_probe_url(&playlist, nonce),
+                        )
+                        .await;
+                    }
                     tracing::debug!(url = %url, exists, "presign probe");
                     exists.then_some(url)
                 }

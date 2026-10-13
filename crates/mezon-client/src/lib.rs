@@ -24,6 +24,7 @@ pub mod tls_crypto;
 pub mod transport;
 pub mod transport_adapter;
 pub mod transport_runtime;
+pub mod video_source;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{

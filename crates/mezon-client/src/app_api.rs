@@ -73,7 +73,7 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
     ranges
 }
 
-const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
+pub(crate) const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
 const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
 
 pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {

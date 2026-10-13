@@ -239,7 +239,7 @@ pub use platform::{
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
     PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
-    download_url_with_dialog, open_media_url_external,
+    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
 };
 pub use presence::*;
 pub use quick_menu::{
