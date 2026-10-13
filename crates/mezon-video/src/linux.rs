@@ -26,10 +26,45 @@ fn ensure_gstreamer() -> Result<(), PlayerError> {
     }
 }
 
+const PLUGIN_INSTALL_COMMANDS: [(&str, &str); 4] = [
+    (
+        "/usr/bin/apt-get",
+        "sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-libav",
+    ),
+    (
+        "/usr/bin/dnf",
+        "sudo dnf install gstreamer1-plugins-bad-free gstreamer1-plugin-libav",
+    ),
+    (
+        "/usr/bin/pacman",
+        "sudo pacman -S gst-plugins-bad gst-libav",
+    ),
+    (
+        "/usr/bin/zypper",
+        "sudo zypper install gstreamer-plugins-bad gstreamer-plugins-libav",
+    ),
+];
+
+pub fn plugin_install_command() -> Option<&'static str> {
+    PLUGIN_INSTALL_COMMANDS
+        .iter()
+        .find(|(manager, _)| std::path::Path::new(manager).exists())
+        .map(|(_, command)| *command)
+}
+
+pub fn rescan_plugins() {
+    if ensure_gstreamer().is_ok()
+        && let Err(error) = gst::Registry::update()
+    {
+        tracing::warn!(target: "mezon_video", %error, "gstreamer plugin rescan failed");
+    }
+}
+
 pub struct PlayerImpl {
     playbin: gst::Element,
     appsink: gst_app::AppSink,
     failed: Cell<bool>,
+    missing_plugin: Cell<bool>,
 }
 
 impl PlayerImpl {
@@ -69,6 +104,7 @@ impl PlayerImpl {
             playbin,
             appsink,
             failed: Cell::new(false),
+            missing_plugin: Cell::new(false),
         })
     }
 
@@ -87,9 +123,17 @@ impl PlayerImpl {
     }
 
     fn note_error(&self, error: &gst::message::Error) {
+        if error.error().matches(gst::CoreError::MissingPlugin) {
+            self.missing_plugin.set(true);
+        }
         if !self.failed.replace(true) {
             log_pipeline_error(error, "playback");
         }
+    }
+
+    pub fn missing_plugin(&self) -> bool {
+        self.drain_bus();
+        self.missing_plugin.get()
     }
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {

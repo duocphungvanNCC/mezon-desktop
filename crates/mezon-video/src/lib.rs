@@ -211,6 +211,33 @@ impl VideoPlayer {
     pub fn failed(&self) -> bool {
         self.inner.failed()
     }
+
+    pub fn missing_plugin(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.missing_plugin()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+pub fn plugin_install_command() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::plugin_install_command()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+pub fn rescan_plugins() {
+    #[cfg(target_os = "linux")]
+    linux::rescan_plugins();
 }
 
 #[cfg(any(windows, target_os = "macos"))]
