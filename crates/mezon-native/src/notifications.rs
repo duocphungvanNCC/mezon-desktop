@@ -734,8 +734,13 @@ fn escape_xml(s: &str) -> String {
 const LINUX_DESKTOP_ENTRY: &str = "mezon";
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const GATE_WAITING: u8 = 0;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const GATE_CLOSE: u8 = 1;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct CloseGate {
-    signaled: std::sync::atomic::AtomicBool,
+    action: std::sync::atomic::AtomicU8,
     waker: std::sync::Mutex<Option<std::task::Waker>>,
 }
 
@@ -743,23 +748,26 @@ struct CloseGate {
 impl CloseGate {
     fn new() -> Self {
         Self {
-            signaled: std::sync::atomic::AtomicBool::new(false),
+            action: std::sync::atomic::AtomicU8::new(GATE_WAITING),
             waker: std::sync::Mutex::new(None),
         }
     }
 
-    fn signal(&self) {
-        self.signaled
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Ok(mut slot) = self.waker.lock()
-            && let Some(waker) = slot.take()
+    fn request(&self, action: u8) {
+        self.action
+            .store(action, std::sync::atomic::Ordering::Release);
+        if let Some(waker) = self
+            .waker
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
         {
             waker.wake();
         }
     }
 
-    fn is_signaled(&self) -> bool {
-        self.signaled.load(std::sync::atomic::Ordering::Acquire)
+    fn action(&self) -> u8 {
+        self.action.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -770,20 +778,24 @@ struct CloseWait {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl std::future::Future for CloseWait {
-    type Output = ();
+    type Output = u8;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<()> {
-        if self.gate.is_signaled() {
-            return std::task::Poll::Ready(());
+    ) -> std::task::Poll<u8> {
+        let action = self.gate.action();
+        if action == GATE_CLOSE {
+            return std::task::Poll::Ready(action);
         }
-        if let Ok(mut slot) = self.gate.waker.lock() {
-            *slot = Some(cx.waker().clone());
-        }
-        if self.gate.is_signaled() {
-            std::task::Poll::Ready(())
+        *self
+            .gate
+            .waker
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(cx.waker().clone());
+        let action = self.gate.action();
+        if action == GATE_CLOSE {
+            std::task::Poll::Ready(action)
         } else {
             std::task::Poll::Pending
         }
@@ -792,37 +804,51 @@ impl std::future::Future for CloseWait {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn live_gates()
--> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CloseGate>>> {
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<std::sync::Arc<CloseGate>>>> {
     static GATES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CloseGate>>>,
+        std::sync::Mutex<std::collections::HashMap<String, Vec<std::sync::Arc<CloseGate>>>>,
     > = std::sync::OnceLock::new();
     GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn replace_gate(key: &str, gate: std::sync::Arc<CloseGate>) -> Option<std::sync::Arc<CloseGate>> {
+fn lock_gates()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<String, Vec<std::sync::Arc<CloseGate>>>>
+{
     live_gates()
         .lock()
-        .ok()
-        .and_then(|mut gates| gates.insert(key.to_owned(), gate))
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn take_gate(key: &str) -> Option<std::sync::Arc<CloseGate>> {
-    live_gates()
-        .lock()
-        .ok()
-        .and_then(|mut gates| gates.remove(key))
+fn push_gate(key: &str, gate: std::sync::Arc<CloseGate>) {
+    lock_gates().entry(key.to_owned()).or_default().push(gate);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn take_gates(key: &str) -> Vec<std::sync::Arc<CloseGate>> {
+    lock_gates().remove(key).unwrap_or_default()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn release_gate(key: &str, gate: &std::sync::Arc<CloseGate>) {
-    if let Ok(mut gates) = live_gates().lock()
-        && gates
-            .get(key)
-            .is_some_and(|current| std::sync::Arc::ptr_eq(current, gate))
-    {
+    let mut gates = lock_gates();
+    let Some(live) = gates.get_mut(key) else {
+        return;
+    };
+    live.retain(|current| !std::sync::Arc::ptr_eq(current, gate));
+    if live.is_empty() {
         gates.remove(key);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn gate_channel_key(channel_id: &str) -> Option<String> {
+    let id = channel_id.trim();
+    if id.is_empty() || id == "0" {
+        None
+    } else {
+        Some(id.to_owned())
     }
 }
 
@@ -841,16 +867,70 @@ fn close_shown(handle: &notify_rust::NotificationHandle) {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct ShownToasts<H> {
+    live: usize,
+    anchor_toast: Option<u64>,
+    anchor: Option<H>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl<H> ShownToasts<H> {
+    const fn new() -> Self {
+        Self {
+            live: 0,
+            anchor_toast: None,
+            anchor: None,
+        }
+    }
+
+    fn register(&mut self, toast: u64) {
+        self.live += 1;
+        if self.anchor_toast.is_none() {
+            self.anchor_toast = Some(toast);
+        }
+    }
+
+    fn retire(&mut self, toast: u64, handle: H) -> Vec<H> {
+        self.live = self.live.saturating_sub(1);
+        if self.live == 0 {
+            self.anchor_toast = None;
+            let mut released: Vec<H> = self.anchor.take().into_iter().collect();
+            released.push(handle);
+            return released;
+        }
+        if self.anchor_toast == Some(toast) {
+            self.anchor = Some(handle);
+            return Vec::new();
+        }
+        vec![handle]
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn shown_toasts() -> std::sync::MutexGuard<'static, ShownToasts<notify_rust::NotificationHandle>> {
+    static SHOWN: std::sync::Mutex<ShownToasts<notify_rust::NotificationHandle>> =
+        std::sync::Mutex::new(ShownToasts::new());
+    SHOWN.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn next_toast_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn drive_shown(
-    handle: notify_rust::NotificationHandle,
+    handle: &notify_rust::NotificationHandle,
     gate: std::sync::Arc<CloseGate>,
     target: Option<NotificationTarget>,
-) {
-    if gate.is_signaled() {
-        close_shown(&handle);
-        return;
+) -> u8 {
+    let pending = gate.action();
+    if pending == GATE_CLOSE {
+        close_shown(handle);
+        return pending;
     }
-    let close_requested = pollster::block_on(async {
+    let action = pollster::block_on(async {
         let gate = std::sync::Arc::clone(&gate);
         let mut wait = std::pin::pin!(handle.wait_for_action_async(move |response| {
             if notification_clicked(response)
@@ -860,66 +940,94 @@ fn drive_shown(
             }
         }));
         let mut close = std::pin::pin!(CloseWait { gate });
-        std::future::poll_fn(|cx| {
-            if close.as_mut().poll(cx).is_ready() {
-                std::task::Poll::Ready(true)
-            } else if wait.as_mut().poll(cx).is_ready() {
-                std::task::Poll::Ready(false)
-            } else {
-                std::task::Poll::Pending
+        std::future::poll_fn(|cx| match close.as_mut().poll(cx) {
+            std::task::Poll::Ready(action) => std::task::Poll::Ready(action),
+            std::task::Poll::Pending => {
+                if wait.as_mut().poll(cx).is_ready() {
+                    std::task::Poll::Ready(GATE_WAITING)
+                } else {
+                    std::task::Poll::Pending
+                }
             }
         })
         .await
     });
-    if close_requested {
-        close_shown(&handle);
+    if action == GATE_CLOSE {
+        close_shown(handle);
     }
+    action
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn show_in_arrival_order(
+    notification: &notify_rust::Notification,
+) -> Option<(u64, notify_rust::NotificationHandle)> {
+    static ARRIVAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _arrival = ARRIVAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    match notification.show() {
+        Ok(handle) => {
+            let toast = next_toast_id();
+            shown_toasts().register(toast);
+            Some((toast, handle))
+        }
+        Err(e) => {
+            tracing::warn!("Linux notification failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn retire_shown(toast: u64, handle: notify_rust::NotificationHandle) {
+    let released = shown_toasts().retire(toast, handle);
+    drop(released);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn show_linux(n: &Notification) {
     let title = n.title.clone();
     let body = n.body.clone();
-    let key = replacement_key(n);
-    let activation_target = key.as_deref().and_then(build_target);
+    let channel_key = n.channel_id.as_deref().and_then(gate_channel_key);
+    let activation_target = replacement_key(n).as_deref().and_then(build_target);
     let icon = n
         .icon_path
         .clone()
         .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned());
     let gate = std::sync::Arc::new(CloseGate::new());
-    if let Some(key) = key.clone()
-        && let Some(previous) = replace_gate(&key, std::sync::Arc::clone(&gate))
-    {
-        previous.signal();
+    if let Some(channel_key) = channel_key.clone() {
+        push_gate(&channel_key, std::sync::Arc::clone(&gate));
     }
 
     std::thread::spawn(move || {
+        if gate.action() == GATE_CLOSE {
+            if let Some(channel_key) = channel_key.as_deref() {
+                release_gate(channel_key, &gate);
+            }
+            return;
+        }
         let mut notification = notify_rust::Notification::new();
         notification
             .appname("Mezon")
             .summary(&title)
             .body(&body)
             .icon(&icon)
-            .sound_name("message-new-instant")
             .hint(notify_rust::Hint::DesktopEntry(
                 LINUX_DESKTOP_ENTRY.to_owned(),
-            ));
+            ))
+            .sound_name("message-new-instant");
         if activation_target.is_some() {
             notification.action("default", "Open");
         }
-        match notification.show() {
-            Ok(handle) => {
-                drive_shown(handle, gate.clone(), activation_target);
-                if let Some(key) = key.as_deref() {
-                    release_gate(key, &gate);
-                }
+        let Some((toast, handle)) = show_in_arrival_order(&notification) else {
+            if let Some(channel_key) = channel_key.as_deref() {
+                release_gate(channel_key, &gate);
             }
-            Err(e) => {
-                if let Some(key) = key.as_deref() {
-                    release_gate(key, &gate);
-                }
-                tracing::warn!("Linux notification failed: {e}");
-            }
+            return;
+        };
+        drive_shown(&handle, std::sync::Arc::clone(&gate), activation_target);
+        retire_shown(toast, handle);
+        if let Some(channel_key) = channel_key.as_deref() {
+            release_gate(channel_key, &gate);
         }
     });
 }
@@ -935,12 +1043,13 @@ pub fn close_channel(clan_id: Option<&str>, channel_id: &str) {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn close_linux_channel(clan_id: Option<&str>, channel_id: &str) {
-    let clan = clan_id.map(str::to_owned);
-    let key = encode_identifier(clan.as_ref(), channel_id);
-    let Some(gate) = take_gate(&key) else {
+    let _ = clan_id;
+    let Some(key) = gate_channel_key(channel_id) else {
         return;
     };
-    gate.signal();
+    for gate in take_gates(&key) {
+        gate.request(GATE_CLOSE);
+    }
 }
 
 #[cfg(test)]
@@ -957,6 +1066,40 @@ mod tests {
             topic_reply: None,
             icon_path: None,
         }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn dock_gate_key_ignores_the_clan_resolved_at_show_time() {
+        assert_eq!(gate_channel_key("12345").as_deref(), Some("12345"));
+        assert_eq!(gate_channel_key(" 12345 ").as_deref(), Some("12345"));
+        assert_eq!(gate_channel_key("0"), None);
+        assert_eq!(gate_channel_key(""), None);
+        assert_eq!(gate_channel_key("12345"), gate_channel_key("12345"));
+        assert_ne!(
+            replacement_key(&notification(Some("12345"), None)),
+            replacement_key(&notification(Some("12345"), Some("77")))
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn the_connection_gnome_watches_outlives_the_other_toasts() {
+        let mut shown = ShownToasts::<&str>::new();
+        shown.register(1);
+        shown.register(2);
+        shown.register(3);
+
+        assert!(shown.retire(1, "first").is_empty());
+        assert_eq!(shown.retire(2, "second"), vec!["second"]);
+        shown.register(4);
+        assert_eq!(shown.retire(3, "third"), vec!["third"]);
+        assert_eq!(shown.retire(4, "fourth"), vec!["first", "fourth"]);
+
+        shown.register(5);
+        assert_eq!(shown.retire(5, "fifth"), vec!["fifth"]);
+        assert!(shown.anchor.is_none());
+        assert_eq!(shown.anchor_toast, None);
     }
 
     #[test]

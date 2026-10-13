@@ -2523,7 +2523,32 @@ impl ChannelList {
         }
     }
 
+    fn unread_channel_ids(&self, clan_id: ClanId) -> Vec<ChannelId> {
+        self.cache
+            .get(&clan_id)
+            .map(|categories| {
+                categories
+                    .iter()
+                    .flat_map(|category| &category.channels)
+                    .filter(|ch| ch.badge_count > 0 || ch.is_unread())
+                    .map(|ch| ch.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn dismiss_channel_ids(&self, clan_id: ClanId, ids: &[ChannelId], cx: &App) {
+        for id in ids {
+            crate::platform::PlatformStore::dismiss_channel_notification(
+                cx,
+                Some(clan_id.get()),
+                id.get(),
+            );
+        }
+    }
+
     pub fn apply_mark_as_read_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let unread_ids = self.unread_channel_ids(clan_id);
         tracing::debug!(target: "badge_flow", clan = clan_id.get(), "apply_mark_as_read_clan");
         let mut cleared_badge = 0;
         let mut should_notify = false;
@@ -2545,6 +2570,7 @@ impl ChannelList {
         if should_notify || cleared_badge > 0 {
             self.reseed_unknown_clan(clan_id, cx);
         }
+        self.dismiss_channel_ids(clan_id, &unread_ids, cx);
     }
 
     pub fn apply_mark_as_read_category(
@@ -2563,10 +2589,14 @@ impl ChannelList {
         let mut cleared_badge = 0;
         let mut should_notify = false;
         let mut parent_ids = Vec::new();
+        let mut unread_ids = Vec::new();
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for category in categories.iter_mut().filter(|c| c.id == category_key) {
                 for ch in &category.channels {
                     should_notify = should_notify || ch.is_unread();
+                    if ch.badge_count > 0 || ch.is_unread() {
+                        unread_ids.push(ch.id);
+                    }
                     parent_ids.push(ch.id);
                 }
                 cleared_badge += Self::mark_channels_read(&mut category.channels);
@@ -2594,6 +2624,7 @@ impl ChannelList {
         if should_notify || cleared_badge > 0 {
             self.reseed_unknown_clan(clan_id, cx);
         }
+        self.dismiss_channel_ids(clan_id, &unread_ids, cx);
     }
 
     pub fn note_channel_message(
@@ -2964,6 +2995,7 @@ impl ChannelList {
     }
 
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let unread_ids = self.unread_channel_ids(clan_id);
         let mut changed = false;
         self.pending_badge_seed.remove(&clan_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
@@ -2980,6 +3012,7 @@ impl ChannelList {
         if changed {
             self.notify_channel_list(clan_id, cx);
         }
+        self.dismiss_channel_ids(clan_id, &unread_ids, cx);
     }
 
     fn drop_pending_badges_for_clan(&mut self, clan_id: ClanId) {
@@ -3896,6 +3929,16 @@ impl ChannelList {
             self.sync_clan_after_read(tracked.clan_id, cleared, cx);
             self.reseed_unknown_clan(tracked.clan_id, cx);
         }
+        crate::platform::PlatformStore::dismiss_channel_notification(
+            cx,
+            Some(tracked.clan_id.get()),
+            topic_id.get(),
+        );
+        crate::platform::PlatformStore::dismiss_channel_notification(
+            cx,
+            Some(tracked.clan_id.get()),
+            tracked.parent_id.get(),
+        );
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {

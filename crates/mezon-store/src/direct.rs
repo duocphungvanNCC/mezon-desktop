@@ -1039,6 +1039,7 @@ impl DirectMessageStore {
     }
 
     pub fn note_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) -> bool {
+        crate::platform::PlatformStore::dismiss_channel_notification(cx, None, channel_id.get());
         let Some(ch) = self.channels.find_mut(channel_id) else {
             return false;
         };
@@ -1048,7 +1049,6 @@ impl DirectMessageStore {
             channel_id: Some(channel_id),
         });
         cx.notify();
-        crate::platform::PlatformStore::dismiss_channel_notification(cx, None, channel_id.get());
         true
     }
 

@@ -186,11 +186,14 @@ impl NotificationPushStore {
                     let prepared = this
                         .update(cx, |_, cx| {
                             note_dm_unread(cx, &user_id, &notification);
-                            prepare(cx, &user_id, &notification)
+                            let prepared = prepare(cx, &user_id, &notification)?;
+                            let armed =
+                                PlatformStore::arm_channel_show(prepared.channel_id.as_deref());
+                            Some((prepared, armed))
                         })
                         .ok()
                         .flatten();
-                    let Some(prepared) = prepared else {
+                    let Some((prepared, armed)) = prepared else {
                         if this.update(cx, |_, _| {}).is_err() {
                             return;
                         }
@@ -205,7 +208,15 @@ impl NotificationPushStore {
                         None => None,
                     };
                     if this
-                        .update(cx, |_, cx| show_prepared(cx, prepared, icon_path))
+                        .update(cx, |_, cx| {
+                            if PlatformStore::channel_show_cancelled(
+                                prepared.channel_id.as_deref(),
+                                armed,
+                            ) {
+                                return;
+                            }
+                            show_prepared(cx, prepared, icon_path);
+                        })
                         .is_err()
                     {
                         return;
