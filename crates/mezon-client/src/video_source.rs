@@ -9,6 +9,7 @@ const TRANSCODING_ORIGINS: [&str; 4] = [
     "http://cdn.mezon.vn",
 ];
 const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
+const HLS_PLAYLIST_SUFFIX: &str = ".m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
 const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -17,7 +18,7 @@ pub fn master_playlist_url(url: &str) -> Option<String> {
 }
 
 pub fn may_be_transcoded(url: &str) -> bool {
-    master_playlist_url(url).is_some()
+    transcodable_file(url, &TRANSCODING_ORIGINS)
 }
 
 pub async fn transcoded_hls_playlist(url: &str) -> Option<String> {
@@ -36,17 +37,22 @@ async fn hls_playlist_on(url: &str, origins: &[&str], nonce: u64) -> Option<Stri
 }
 
 fn hls_playlist_candidate(url: &str, origins: &[&str]) -> Option<String> {
-    let path = origins
+    transcodable_file(url, origins).then(|| format!("{url}/{HLS_MASTER_PLAYLIST}"))
+}
+
+fn transcodable_file(url: &str, origins: &[&str]) -> bool {
+    let Some(path) = origins
         .iter()
-        .find_map(|origin| url.strip_prefix(origin)?.strip_prefix('/'))?;
-    if path.contains(['?', '#']) {
-        return None;
-    }
-    let file = path.rsplit('/').next()?;
-    if file.is_empty() || file.to_ascii_lowercase().ends_with(".m3u8") {
-        return None;
-    }
-    Some(format!("{url}/{HLS_MASTER_PLAYLIST}"))
+        .find_map(|origin| url.strip_prefix(origin)?.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let file = path.rsplit('/').next().unwrap_or_default();
+    !path.contains(['?', '#'])
+        && !file.is_empty()
+        && !file
+            .get(file.len().saturating_sub(HLS_PLAYLIST_SUFFIX.len())..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(HLS_PLAYLIST_SUFFIX))
 }
 
 fn probe_nonce() -> u64 {
@@ -127,6 +133,7 @@ mod tests {
             format!("{CDN_MEZON_MINIO}/{VIDEO}?1700000000-mac"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}#t=3"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}/master.m3u8"),
+            format!("{CDN_MEZON_MINIO}/{VIDEO}/INDEX.M3U8"),
             format!("{CDN_MEZON_MINIO}/1cf93b197d401000/"),
             CDN_MEZON_MINIO.to_string(),
         ] {
