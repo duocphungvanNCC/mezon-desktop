@@ -22,6 +22,7 @@ const SEEK_MIN_INTERVAL: Duration = Duration::from_millis(80);
 const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
 const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
 const THEATER_FILL: f32 = 0.92;
+const COMPACT_CARD_MAX_HEIGHT: f32 = 260.;
 const CONTROL_TINT: Rgba = Rgba {
     r: 1.0,
     g: 1.0,
@@ -215,7 +216,10 @@ impl VideoPlayerView {
                 shared.failed = false;
                 shared.duration = duration;
             }
-            Err(_) => {
+            Err(error) => {
+                if matches!(error, mezon_video::PlayerError::MissingPlugin) {
+                    self.note_missing_plugin(cx);
+                }
                 if self.retry_open(cx) {
                     return;
                 }
@@ -286,8 +290,22 @@ impl VideoPlayerView {
         self.open_with_fresh_signature(cx) || self.open_other_source(cx)
     }
 
+    fn owns_player(&self) -> bool {
+        !(self.theater && self.fullscreen_mode == VideoFullscreenMode::ShellModal)
+    }
+
+    fn reset_source_plan(&mut self) {
+        self.signed = None;
+        self.resigned = false;
+        self.source = VideoSource::Detect;
+        self.playing_playlist = false;
+        self.source_switched = false;
+        self.missing_plugin = false;
+        self.command_copied = false;
+    }
+
     fn open_other_source(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.source_switched || !may_be_transcoded(self.url.as_ref()) {
+        if self.source_switched || !self.owns_player() || !may_be_transcoded(self.url.as_ref()) {
             return false;
         }
         self.source_switched = true;
@@ -334,19 +352,16 @@ impl VideoPlayerView {
     }
 
     fn retry_after_plugin_install(&mut self, cx: &mut Context<Self>) {
+        if !self.owns_player() {
+            return;
+        }
+        self.autoplay_when_ready = true;
         self._plugin_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn(async { mezon_video::rescan_plugins() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.missing_plugin = false;
-                this.command_copied = false;
-                this.signed = None;
-                this.resigned = false;
-                this.source = VideoSource::Detect;
-                this.playing_playlist = false;
-                this.source_switched = false;
-                this.autoplay_when_ready = true;
+                this.reset_source_plan();
                 this.restart_open(cx);
             });
         }));
@@ -409,7 +424,7 @@ impl VideoPlayerView {
             resigned: false,
             source: VideoSource::Detect,
             playing_playlist: false,
-            source_switched: true,
+            source_switched: false,
             missing_plugin: false,
             plugin_command: None,
             command_copied: false,
@@ -509,13 +524,7 @@ impl VideoPlayerView {
         self.last_label_seconds = (0, 0);
         self.last_seek_at = None;
         self.pending_seek = None;
-        self.signed = None;
-        self.resigned = false;
-        self.source = VideoSource::Detect;
-        self.playing_playlist = false;
-        self.source_switched = false;
-        self.missing_plugin = false;
-        self.command_copied = false;
+        self.reset_source_plan();
         {
             let mut shared = self.shared.borrow_mut();
             shared.current_time = 0.0;
@@ -529,6 +538,7 @@ impl VideoPlayerView {
 
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self._open_task = None;
+        self._plugin_task = None;
         self.pending_seek = None;
         self.load_state = VideoLoadState::Loading;
         self.autoplay_when_ready = false;
@@ -925,6 +935,10 @@ impl VideoPlayerView {
         let locale = self.locale.as_ref();
         let missing_plugin = self.missing_plugin;
         let plugin_command = self.plugin_command.filter(|_| missing_plugin);
+        let compact = missing_plugin
+            && self.layout == VideoLayout::Fixed
+            && !self.theater
+            && self.height < COMPACT_CARD_MAX_HEIGHT;
         let body = if missing_plugin {
             "media.video.error.missingPlugin"
         } else {
@@ -935,28 +949,33 @@ impl VideoPlayerView {
         } else {
             (IconName::CopyIcon, "common.copy")
         };
+        let colors = (button_bg, title_color);
         div()
+            .id("video-unplayable-card")
             .absolute()
             .inset_0()
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
+            .when(compact, |card| {
+                card.justify_start().overflow_y_scroll().p_2().gap_1()
+            })
+            .when(!compact, |card| card.justify_center().p_4().gap_2())
             .bg(SCRIM)
-            .child(
-                Icon::new(IconName::TriangleAlert)
-                    .size(px(22.))
-                    .text_color(body_color),
-            )
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(title_color)
-                    .child(mezon_i18n::t(locale, "media.video.error.title")),
-            )
+            .when(!compact, |card| {
+                card.child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(px(22.))
+                        .text_color(body_color),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(title_color)
+                        .child(mezon_i18n::t(locale, "media.video.error.title")),
+                )
+            })
             .child(
                 div()
                     .max_w(px(260.))
@@ -967,14 +986,20 @@ impl VideoPlayerView {
             .when_some(plugin_command, |card, command| {
                 card.child(
                     div()
+                        .id("video-unplayable-command")
                         .max_w_full()
                         .px_2()
                         .py_1()
                         .rounded_md()
                         .bg(button_bg)
+                        .cursor_pointer()
                         .font_family("monospace")
                         .text_size(px(11.))
                         .text_color(title_color)
+                        .on_click(cx.listener(|view, _, _window, cx| {
+                            cx.stop_propagation();
+                            view.copy_plugin_command(cx);
+                        }))
                         .child(command),
                 )
             })
@@ -988,19 +1013,21 @@ impl VideoPlayerView {
                             "video-unplayable-copy-command",
                             copy_icon,
                             mezon_i18n::t(locale, copy_label),
-                            (button_bg, title_color),
+                            colors,
+                            compact,
                             cx.listener(|view, _, _window, cx| {
                                 cx.stop_propagation();
                                 view.copy_plugin_command(cx);
                             }),
                         ))
                     })
-                    .when(missing_plugin, |row| {
+                    .when(missing_plugin && self.owns_player(), |row| {
                         row.child(card_button(
                             "video-unplayable-retry",
                             IconName::ReloadIcon,
                             mezon_i18n::t(locale, "media.video.error.retryButton"),
-                            (button_bg, title_color),
+                            colors,
+                            compact,
                             cx.listener(|view, _, _window, cx| {
                                 cx.stop_propagation();
                                 view.retry_after_plugin_install(cx);
@@ -1011,7 +1038,8 @@ impl VideoPlayerView {
                         "video-unplayable-download",
                         IconName::Download,
                         mezon_i18n::t(locale, "media.video.error.downloadButton"),
-                        (button_bg, title_color),
+                        colors,
+                        compact,
                         cx.listener(|view, _, _window, cx| {
                             cx.stop_propagation();
                             crate::util::download::save_with_progress_toast(
@@ -1232,20 +1260,23 @@ fn card_button(
     icon: IconName,
     label: impl IntoElement,
     (bg, fg): (Rgba, Rgba),
+    compact: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     h_flex()
         .id(id)
         .gap_1p5()
-        .px_3()
-        .py_1p5()
+        .when(compact, |button| button.p_1p5())
+        .when(!compact, |button| button.px_3().py_1p5())
         .rounded_md()
         .bg(bg)
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .on_click(on_click)
         .child(Icon::new(icon).size(px(14.)).text_color(fg))
-        .child(div().text_size(px(12.)).text_color(fg).child(label))
+        .when(!compact, |button| {
+            button.child(div().text_size(px(12.)).text_color(fg).child(label))
+        })
 }
 
 fn control_button(

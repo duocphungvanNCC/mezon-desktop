@@ -46,7 +46,7 @@ video_decoder_hint() {
   if command -v apt-get >/dev/null 2>&1; then
     echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-good"
   elif command -v dnf >/dev/null 2>&1; then
-    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good"
+    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugin-openh264 gstreamer1-plugins-good"
   elif command -v pacman >/dev/null 2>&1; then
     echo "sudo pacman -S --needed gst-libav gst-plugins-good"
   elif command -v zypper >/dev/null 2>&1; then
@@ -67,7 +67,7 @@ install_video_decoder() {
     $maysudo apt-get install -y --no-install-recommends \
       gstreamer1.0-libav gstreamer1.0-plugins-good
   elif command -v dnf >/dev/null 2>&1; then
-    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugins-good
+    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugin-openh264 gstreamer1-plugins-good
   elif command -v pacman >/dev/null 2>&1; then
     $maysudo pacman -S --needed --noconfirm gst-libav gst-plugins-good
   elif command -v zypper >/dev/null 2>&1; then

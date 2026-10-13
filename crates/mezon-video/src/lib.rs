@@ -48,6 +48,8 @@ pub enum PlayerError {
     InvalidUrl,
     #[error("could not open media for playback")]
     Open,
+    #[error("a gstreamer plugin needed for playback is missing")]
+    MissingPlugin,
 }
 
 #[derive(Debug, Clone)]

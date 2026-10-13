@@ -40,6 +40,16 @@ pub const STICKER_FILETYPE: &str = "sticker";
 
 const TRANSCODED_CONTAINERS: [&str; 4] = ["avi", "flv", "mkv", "wmv"];
 
+fn has_transcoded_container_extension(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        TRANSCODED_CONTAINERS
+            .iter()
+            .any(|container| ext.eq_ignore_ascii_case(container))
+    })
+}
+
 pub fn url_extension(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next()?;
     let name = path.rsplit('/').next()?;
@@ -99,18 +109,17 @@ impl MessageAttachment {
     }
 
     pub fn is_video(&self) -> bool {
-        Self::media_is_video(&self.filetype, &self.url)
+        Self::media_is_video(&self.filetype, &self.url) || self.is_transcoded_container()
     }
 
-    fn plays_once_transcoded(&self) -> bool {
-        let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
-        ext.is_some_and(|ext| TRANSCODED_CONTAINERS.contains(&ext.as_str()))
-            && self.is_video()
-            && mezon_client::video_source::may_be_transcoded(&self.url)
+    fn is_transcoded_container(&self) -> bool {
+        (has_transcoded_container_extension(&self.filename)
+            || has_transcoded_container_extension(&self.url))
+            && crate::platform::may_be_transcoded(&self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
-        if self.plays_once_transcoded() {
+        if self.is_transcoded_container() {
             return false;
         }
         if matches!(
@@ -3399,6 +3408,10 @@ mod tests {
                 "video/x-flv",
                 "https://cdn.mezon.ai/1cf93b197d401000/2081_stream.flv",
             ),
+            (
+                "application/octet-stream",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_sent_from_desktop.mkv",
+            ),
         ] {
             let att = attachment(filetype, url);
             assert!(!att.is_unsupported_media(), "{url}");
@@ -3428,7 +3441,7 @@ mod tests {
             ),
             (
                 "application/octet-stream",
-                "https://cdn.mezon.ai/1cf93b197d401000/2081_movie.mkv",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
             ),
         ] {
             assert!(attachment(filetype, url).is_unsupported_media(), "{url}");
