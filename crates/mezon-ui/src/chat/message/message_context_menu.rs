@@ -109,16 +109,16 @@ fn close_quick_menu_submenu(
 }
 
 fn is_first_topic_message(msg: &Message, cx: &App) -> bool {
-    let topics = TopicsStore::global(cx).read(cx);
-    if topics
-        .active_topic_id()
-        .is_some_and(|topic_id| msg.channel_id == ChannelId(topic_id))
-    {
+    let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
         return false;
-    }
-    topics
-        .origin_message()
-        .is_some_and(|origin| origin.id == msg.id)
+    };
+    let topic_id = ChannelId(topic_id);
+    let messages = MessagesStore::global(cx).read(cx);
+    is_first_topic_message_in(msg, topic_id, messages.messages_in_channel(topic_id))
+}
+
+fn is_first_topic_message_in(msg: &Message, topic_id: ChannelId, messages: &[Message]) -> bool {
+    msg.channel_id == topic_id && messages.first().is_some_and(|first| first.id == msg.id)
 }
 
 fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
@@ -959,7 +959,44 @@ mod menu_image_tests {
 
 #[cfg(test)]
 mod delete_permission_tests {
-    use super::delete_message_allowed;
+    use super::{delete_message_allowed, is_first_topic_message_in};
+    use mezon_store::{ChannelId, Message, MessageId};
+
+    fn message(id: i64, channel_id: i64) -> Message {
+        let mut message = Message::new(MessageId(id), "content", "1", "Alice", 0);
+        message.channel_id = ChannelId(channel_id);
+        message
+    }
+
+    #[test]
+    fn only_the_message_that_created_the_topic_is_protected() {
+        let topic_id = ChannelId(20);
+        let root = message(1, 10);
+        let initial_topic_message = message(2, 20);
+        let later_reply = message(3, 20);
+        let messages = [initial_topic_message.clone(), later_reply.clone()];
+
+        assert!(!is_first_topic_message_in(&root, topic_id, &messages));
+        assert!(is_first_topic_message_in(
+            &initial_topic_message,
+            topic_id,
+            &messages
+        ));
+        assert!(!is_first_topic_message_in(
+            &later_reply,
+            topic_id,
+            &messages
+        ));
+    }
+
+    #[test]
+    fn no_topic_message_is_protected_before_replies_are_loaded() {
+        assert!(!is_first_topic_message_in(
+            &message(2, 20),
+            ChannelId(20),
+            &[]
+        ));
+    }
 
     #[test]
     fn own_message_is_always_deletable() {
