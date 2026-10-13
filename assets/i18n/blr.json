@@ -2812,6 +2812,7 @@
   "file.dialogPortalMissing": "Не ўдалося адкрыць дыялог выбару файла. Усталюйце партал працоўнага стала (xdg-desktop-portal-gtk) і паспрабуйце зноў.",
   "file.dialogUnavailable": "Не ўдалося адкрыць дыялог выбару файла",
   "forwardMessage.errorMessage": "Не атрымалася пераслаць паведамленне",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Дадатковае паведамленне (неабавязкова)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Увядзіце дадатковае паведамленне...",
   "forwardMessage.modal.cancel": "Скасаваць",

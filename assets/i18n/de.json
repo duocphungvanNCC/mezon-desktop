@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "Der Dateidialog konnte nicht geöffnet werden. Installiere ein Desktop-Portal (xdg-desktop-portal-gtk) und versuche es erneut.",
   "file.dialogUnavailable": "Der Dateidialog konnte nicht geöffnet werden",
   "forwardMessage.errorMessage": "Nachricht konnte nicht weitergeleitet werden",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Zusätzliche Nachricht (optional)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Nachricht zum Weiterleiten eingeben...",
   "forwardMessage.modal.cancel": "Abbrechen",

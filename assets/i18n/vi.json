@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "Không mở được hộp thoại chọn tệp. Hãy cài desktop portal (xdg-desktop-portal-gtk) rồi thử lại.",
   "file.dialogUnavailable": "Không mở được hộp thoại chọn tệp",
   "forwardMessage.errorMessage": "Không thể chuyển tiếp tin nhắn",
+  "forwardMessage.payloadTooLarge": "Không thể chuyển tiếp tin nhắn này vì nội dung hoặc tệp đính kèm quá lớn. Hãy sao chép nội dung hoặc gửi file bằng cách tải lên như tin nhắn thường.",
   "forwardMessage.modal.additionalMessage": "Tin nhắn kèm theo (tùy chọn)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Nhập tin nhắn muốn gửi kèm...",
   "forwardMessage.modal.cancel": "Hủy",

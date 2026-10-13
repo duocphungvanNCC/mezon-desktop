@@ -130,7 +130,8 @@ const CODE_FIN: u16 = 0xff;
 const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 11;
-const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
+pub const MAX_REALTIME_FRAME_PAYLOAD: usize = 1 << 20;
+const MAX_REALTIME_FRAME_LEN: usize = MAX_REALTIME_FRAME_PAYLOAD;
 const MAX_API_RESPONSE_LEN: usize = 16 << 20;
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
 const ENVELOPE_CID_TAG: u8 = 0x08;
@@ -505,6 +506,16 @@ impl IoLoopState {
                     }
                     FrameStep::Reset(reason) => {
                         let abandoned: Vec<u16> = self.streams.keys().copied().collect();
+                        if reason.contains("too large") {
+                            tracing::error!(
+                                target: "mezon.forward",
+                                reason,
+                                buffered_bytes = self.read_buffer.len(),
+                                partial_api_responses = abandoned.len(),
+                                cap = MAX_REALTIME_FRAME_PAYLOAD,
+                                "inbound realtime frame exceeded cap — forcing reconnect"
+                            );
+                        }
                         tracing::error!(
                             "frame desync ({reason}); dropping {} buffered bytes and {} partial response(s) {abandoned:?} — forcing reconnect",
                             self.read_buffer.len(),
@@ -875,6 +886,14 @@ impl TransportAdapter for AbridgedTcpAdapter {
             final_payload.len(),
             padding_needed
         );
+        if final_payload.len() > MAX_REALTIME_FRAME_PAYLOAD {
+            tracing::warn!(
+                target: "mezon.forward",
+                padded_payload_bytes = final_payload.len(),
+                cap = MAX_REALTIME_FRAME_PAYLOAD,
+                "outbound realtime frame exceeds cap (mezon-js rejects sends this size)"
+            );
+        }
 
         let len_div4 = final_payload.len() / 4;
         let header = if len_div4 < 127 {

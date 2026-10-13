@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "Não foi possível abrir a caixa de diálogo de arquivos. Instale um portal de desktop (xdg-desktop-portal-gtk) e tente novamente.",
   "file.dialogUnavailable": "Não foi possível abrir a caixa de diálogo de arquivos",
   "forwardMessage.errorMessage": "Não foi possível encaminhar a mensagem",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Mensagem adicional (opcional)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Digite a mensagem que deseja enviar junto...",
   "forwardMessage.modal.cancel": "Cancelar",

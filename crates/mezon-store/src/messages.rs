@@ -714,6 +714,13 @@ pub struct MessagesStore {
 /// (React `MAX_FORWARD_MESSAGE_LENGTH`).
 pub const MAX_FORWARD_MESSAGE_LENGTH: usize = 2000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardStart {
+    Started,
+    NotStarted,
+    PayloadTooLarge,
+}
+
 /// A forward destination. A friend has no channel yet — the DM is created on
 /// send (React `createDirectMessageWithUser`).
 #[derive(Debug, Clone)]
@@ -976,6 +983,17 @@ async fn send_forward(
     let same_channel = dest.channel_id == source_channel_id.get();
     let mut failures = 0usize;
     for source in sources {
+        tracing::info!(
+            target: "mezon.forward",
+            dest_channel_id = dest.channel_id,
+            dest_clan_id = dest.clan_id,
+            content_raw_bytes = source.content_raw.len(),
+            plain_text_chars = source.text.chars().count(),
+            attachment_count = source.attachments.len(),
+            has_embed_json = source.content_raw.contains("\"embed\""),
+            has_data_image_uri = source.content_raw.contains("data:image"),
+            "send_forward item"
+        );
         let mentions = if same_channel {
             source.mentions.clone()
         } else {
@@ -4422,21 +4440,22 @@ impl MessagesStore {
     /// the copies land in order (React awaits each `forwardToSingleDestination`).
     /// The note rides along after the last message of each destination.
     ///
-    /// Returns `false` when nothing was started — the caller must not enter a
-    /// "sending" state it would never be released from, since `ForwardProgress`
-    /// / `ForwardFinished` are only emitted for a send that actually began.
+    /// Returns [`ForwardStart::NotStarted`] or [`ForwardStart::PayloadTooLarge`]
+    /// when nothing was started — the caller must not enter a "sending" state it
+    /// would never be released from, since `ForwardProgress` / `ForwardFinished`
+    /// are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
         messages: Vec<MessageRef>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> ForwardStart {
         if messages.is_empty() || targets.is_empty() || self.forward_in_flight {
-            return false;
+            return ForwardStart::NotStarted;
         }
         let Some(source_channel_id) = self.active_channel_id else {
-            return false;
+            return ForwardStart::NotStarted;
         };
         let sources: Vec<ForwardSource> = messages
             .iter()
@@ -4444,7 +4463,16 @@ impl MessagesStore {
             .map(forward_source)
             .collect();
         if sources.is_empty() {
-            return false;
+            return ForwardStart::NotStarted;
+        }
+        if sources.iter().any(|source| {
+            mezon_client::transport::forward_blocked_for_realtime(
+                &source.content_raw,
+                &source.text,
+                &source.attachments,
+            )
+        }) {
+            return ForwardStart::PayloadTooLarge;
         }
         let note = note
             .map(|n| n.trim().to_string())
@@ -4486,7 +4514,7 @@ impl MessagesStore {
             });
         });
         self.forward_task = Some(task);
-        true
+        ForwardStart::Started
     }
 
     /// Re-run the presign gate so attachments whose upload never completed are
@@ -11540,7 +11568,7 @@ mod tests {
                     cx,
                 )
             });
-            assert!(started);
+            assert_eq!(started, ForwardStart::Started);
             let channels = channels.read(cx);
             assert!(
                 channels.is_loading_clan(ClanId(2)) && channels.is_loading_clan(ClanId(3)),
@@ -13032,6 +13060,24 @@ mod tests {
         assert_eq!(source.mentions[0].user_id, "77");
         assert_eq!(source.mentions[0].s, 4);
         assert_eq!(source.mentions[0].e, 8);
+    }
+
+    #[test]
+    fn forward_rejects_inline_data_attachment_before_send() {
+        let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+        msg.raw_content = Some(r#"{"t":"report"}"#.into());
+        msg.attachments = vec![MessageAttachment {
+            url: "data:image/png;base64,YWJj".into(),
+            filename: "chart.png".into(),
+            filetype: "image/png".into(),
+            ..Default::default()
+        }];
+        let source = forward_source(&msg);
+        assert!(mezon_client::transport::forward_blocked_for_realtime(
+            &source.content_raw,
+            &source.text,
+            &source.attachments,
+        ));
     }
 
     #[test]

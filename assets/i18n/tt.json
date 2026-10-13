@@ -2821,6 +2821,7 @@
   "file.dialogPortalMissing": "Файл сайлау тәрәзәсен ачып булмады. Эш өстәле порталын (xdg-desktop-portal-gtk) урнаштырыгыз һәм кабат карагыз.",
   "file.dialogUnavailable": "Файл сайлау тәрәзәсен ачып булмады",
   "forwardMessage.errorMessage": "Хәбәрне юнәлтеп булмады",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Өстәмә хәбәр (мәҗбүри түгел)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Бергә җибәрергә теләгән хәбәрегезне керетегез...",
   "forwardMessage.modal.cancel": "Кире кагу",

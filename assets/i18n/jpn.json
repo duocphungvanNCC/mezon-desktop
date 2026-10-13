@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "ファイルダイアログを開けませんでした。デスクトップポータル (xdg-desktop-portal-gtk) をインストールしてから再試行してください。",
   "file.dialogUnavailable": "ファイルダイアログを開けませんでした",
   "forwardMessage.errorMessage": "メッセージを転送できません",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "添付メッセージ（オプション）",
   "forwardMessage.modal.additionalMessagePlaceholder": "送信する添付メッセージを入力...",
   "forwardMessage.modal.cancel": "キャンセル",

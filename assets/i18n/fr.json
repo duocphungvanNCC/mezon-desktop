@@ -2812,6 +2812,7 @@
   "file.dialogPortalMissing": "Impossible d'ouvrir la boîte de dialogue de fichiers. Installez un portail de bureau (xdg-desktop-portal-gtk) puis réessayez.",
   "file.dialogUnavailable": "Impossible d'ouvrir la boîte de dialogue de fichiers",
   "forwardMessage.errorMessage": "Impossible de transférer le message",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Message joint (facultatif)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Entrez le message que vous souhaitez envoyer en plus...",
   "forwardMessage.modal.cancel": "Annuler",

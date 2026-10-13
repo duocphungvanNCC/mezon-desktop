@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "Det gick inte att öppna fildialogrutan. Installera en skrivbordsportal (xdg-desktop-portal-gtk) och försök igen.",
   "file.dialogUnavailable": "Det gick inte att öppna fildialogrutan",
   "forwardMessage.errorMessage": "Kunde inte vidarebefordra meddelande",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Bifogat meddelande (valfri)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Ange önskat meddelande...",
   "forwardMessage.modal.cancel": "Avbryt",

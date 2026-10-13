@@ -3056,6 +3056,64 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
+fn url_is_inline_data(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("data:")
+}
+
+fn content_has_inline_data_uri(content_raw: &str) -> bool {
+    content_raw.contains("data:image") || content_raw.contains("data:application")
+}
+
+fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
+    api::MessageAttachment {
+        url: a.url.clone(),
+        filename: a.filename.clone(),
+        filetype: a.filetype.clone(),
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail.clone(),
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+pub fn forward_realtime_envelope_bytes(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+) -> usize {
+    let content_json = forward_content_json(content_raw, text);
+    let message = realtime::ChannelMessageSend {
+        content: content_json,
+        attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        ..Default::default()
+    };
+    encode_envelope_cid_last(realtime::Envelope {
+        cid: 1,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+    })
+    .len()
+}
+
+pub fn forward_blocked_for_realtime(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+) -> bool {
+    if attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    if content_has_inline_data_uri(content_raw) {
+        return true;
+    }
+    forward_realtime_envelope_bytes(content_raw, text, attachments)
+        > crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -6712,6 +6770,8 @@ impl MezonTransport {
             .iter()
             .filter_map(OutgoingMention::to_proto)
             .collect();
+        let attachment_url_bytes: usize = attachments.iter().map(|a| a.url.len()).sum();
+        let attachment_count = attachments.len();
         let message = realtime::ChannelMessageSend {
             clan_id,
             channel_id,
@@ -6723,6 +6783,39 @@ impl MezonTransport {
             mention_everyone,
             ..Default::default()
         };
+        if tracing::enabled!(target: "mezon.forward", tracing::Level::INFO) {
+            let proto_bytes = message.encode_to_vec().len();
+            let envelope_bytes = encode_envelope_cid_last(realtime::Envelope {
+                cid: 1,
+                message: Some(realtime::envelope::Message::ChannelMessageSend(
+                    message.clone(),
+                )),
+            })
+            .len();
+            tracing::info!(
+                target: "mezon.forward",
+                clan_id,
+                channel_id,
+                content_json_bytes = message.content.len(),
+                content_raw_bytes = content_raw.len(),
+                attachment_count,
+                attachment_url_bytes,
+                channel_message_send_proto_bytes = proto_bytes,
+                envelope_bytes,
+                cap = crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD,
+                has_embed_json = content_raw.contains("\"embed\""),
+                has_data_image_uri = content_raw.contains("data:image"),
+                "forward_channel_message wire sizes"
+            );
+            if envelope_bytes > crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD {
+                tracing::warn!(
+                    target: "mezon.forward",
+                    envelope_bytes,
+                    cap = crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD,
+                    "forward payload likely exceeds realtime frame cap — expect socket disconnect on server push"
+                );
+            }
+        }
         let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
@@ -11121,6 +11214,32 @@ mod tests {
 
         assert_eq!(value["t"], "hello");
         assert_eq!(value["fwd"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn forward_blocked_for_inline_attachment_data_uri() {
+        let attachments = vec![ApiAttachment {
+            url: "data:image/png;base64,abcd".into(),
+            ..Default::default()
+        }];
+        assert!(forward_blocked_for_realtime(
+            r#"{"t":"hi"}"#,
+            "hi",
+            &attachments
+        ));
+    }
+
+    #[test]
+    fn forward_allowed_for_small_https_attachment() {
+        let attachments = vec![ApiAttachment {
+            url: "https://cdn.example/a.png".into(),
+            ..Default::default()
+        }];
+        assert!(!forward_blocked_for_realtime(
+            r#"{"t":"hi"}"#,
+            "hi",
+            &attachments
+        ));
     }
 
     #[test]

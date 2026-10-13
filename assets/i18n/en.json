@@ -2811,6 +2811,7 @@
   "file.dialogPortalMissing": "Could not open the file dialog. Install a desktop portal (xdg-desktop-portal-gtk) and try again.",
   "file.dialogUnavailable": "Could not open the file dialog",
   "forwardMessage.errorMessage": "Failed to forward message",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Additional message (optional)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Enter message to send with...",
   "forwardMessage.modal.cancel": "Cancel",
