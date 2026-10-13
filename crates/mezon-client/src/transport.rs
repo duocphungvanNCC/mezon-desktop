@@ -7906,7 +7906,10 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(api_status_error(code));
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
+            ));
         }
         Ok(())
     }

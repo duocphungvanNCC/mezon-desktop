@@ -16,6 +16,11 @@ pub enum DisplayNameError {
     InvalidChars,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClanNicknameError {
+    InvalidChars,
+}
+
 pub fn prepare_display_name_for_update(name: &str) -> Result<Option<String>, DisplayNameError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -47,8 +52,28 @@ pub fn is_valid_menu_name(name: &str) -> bool {
         && is_valid_name_content(name)
 }
 
-pub fn is_valid_clan_nickname(name: &str) -> bool {
-    is_valid_menu_name(name.trim())
+pub fn prepare_clan_nickname_for_update(name: &str) -> Result<Option<String>, ClanNicknameError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        return Err(ClanNicknameError::InvalidChars);
+    }
+    let normalized: String = trimmed.nfc().collect();
+    if !is_valid_menu_name(&normalized) {
+        return Err(ClanNicknameError::InvalidChars);
+    }
+    Ok(Some(normalized))
+}
+
+pub fn clan_nickname_rejected_by_server_rules(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized: String = trimmed.nfc().collect();
+    !is_valid_menu_name(&normalized)
 }
 
 pub fn is_valid_clan_name(name: &str) -> bool {
@@ -166,7 +191,25 @@ mod tests {
 
     #[test]
     fn clan_nickname_rejects_stacked_combining_marks() {
-        let zalgo = "ค\u{0e47}".repeat(40);
-        assert!(!is_valid_clan_nickname(&zalgo));
+        let zalgo = "ค\u{0e47}".repeat(16);
+        assert!(matches!(
+            prepare_clan_nickname_for_update(&zalgo),
+            Err(ClanNicknameError::InvalidChars)
+        ));
+    }
+
+    #[test]
+    fn clan_nickname_normalizes_decomposed_vietnamese_to_nfc() {
+        let decomposed = "e\u{0302}\u{0303}";
+        let prepared = prepare_clan_nickname_for_update(decomposed).unwrap();
+        assert_eq!(prepared, Some("\u{1EC5}".into()));
+    }
+
+    #[test]
+    fn clan_nickname_rejects_whitespace_only() {
+        assert!(matches!(
+            prepare_clan_nickname_for_update("   "),
+            Err(ClanNicknameError::InvalidChars)
+        ));
     }
 }
