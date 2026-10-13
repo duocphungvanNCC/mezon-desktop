@@ -12,8 +12,12 @@ const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
 const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn master_playlist_url(url: &str) -> Option<String> {
+    hls_playlist_candidate(url, &TRANSCODING_ORIGINS)
+}
+
 pub fn may_be_transcoded(url: &str) -> bool {
-    hls_playlist_candidate(url, &TRANSCODING_ORIGINS).is_some()
+    master_playlist_url(url).is_some()
 }
 
 pub async fn transcoded_hls_playlist(url: &str) -> Option<String> {

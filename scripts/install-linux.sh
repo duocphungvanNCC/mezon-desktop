@@ -94,8 +94,7 @@ gst_plugin_file_installed() {
 
 hls_demuxer_installed() {
   { gst_element_installed tsdemux || gst_plugin_file_installed libgstmpegtsdemux.so; } &&
-    { gst_element_installed hlsdemux || gst_element_installed hlsdemux2 ||
-      gst_plugin_file_installed libgsthls.so || gst_plugin_file_installed libgstadaptivedemux2.so; }
+    { gst_element_installed hlsdemux || gst_plugin_file_installed libgsthls.so; }
 }
 
 hls_demuxer_hint() {

@@ -7,7 +7,7 @@ use gpui::{
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
     Task, Window, canvas, div, img, prelude::*, px, relative,
 };
-use mezon_store::open_media_url_external;
+use mezon_store::{may_be_transcoded, open_media_url_external, transcoded_hls_playlist};
 #[cfg(any(windows, target_os = "macos"))]
 use mezon_video::{PreparedWebm, is_webm_url};
 use mezon_video::{VideoFrame, VideoPlayer};
@@ -84,6 +84,13 @@ struct SharedPlayback {
 type Shared = Rc<RefCell<SharedPlayback>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoSource {
+    Detect,
+    Playlist,
+    Original,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum VideoLoadState {
     Loading,
     Ready,
@@ -124,8 +131,9 @@ pub struct VideoPlayerView {
     pending_seek: Option<f64>,
     signed: Option<mezon_client::cdn_signature::SignedUrl>,
     resigned: bool,
-    source_is_hls: bool,
-    re_resolved: bool,
+    source: VideoSource,
+    playing_playlist: bool,
+    source_switched: bool,
 }
 
 impl VideoPlayerView {
@@ -170,8 +178,9 @@ impl VideoPlayerView {
             pending_seek: None,
             signed: None,
             resigned: false,
-            source_is_hls: false,
-            re_resolved: false,
+            source: VideoSource::Detect,
+            playing_playlist: false,
+            source_switched: false,
         };
         view.start_open(cx);
         view
@@ -202,24 +211,41 @@ impl VideoPlayerView {
                 if self.retry_open(cx) {
                     return;
                 }
-                self.player = None;
-                self.load_state = VideoLoadState::Failed;
-                let mut shared = self.shared.borrow_mut();
-                shared.playing = false;
-                shared.failed = true;
+                self.mark_failed();
             }
         }
         cx.notify();
+    }
+
+    fn mark_failed(&mut self) {
+        self.player = None;
+        self.load_state = VideoLoadState::Failed;
+        let mut shared = self.shared.borrow_mut();
+        shared.playing = false;
+        shared.failed = true;
     }
 
     fn start_open(&mut self, cx: &mut Context<Self>) {
         self.load_state = VideoLoadState::Loading;
         self._open_task = None;
         let url = self.url.clone();
+        let source = self.source;
         let decode_max_size = self.decode_max_size;
         self._open_task = Some(cx.spawn(async move |this, cx| {
-            let playlist = mezon_client::video_source::transcoded_hls_playlist(url.as_ref()).await;
-            let source_is_hls = playlist.is_some();
+            let playlist = match source {
+                VideoSource::Original => None,
+                VideoSource::Detect | VideoSource::Playlist => {
+                    transcoded_hls_playlist(url.as_ref()).await
+                }
+            };
+            if source == VideoSource::Playlist && playlist.is_none() {
+                let _ = this.update(cx, |this, cx| {
+                    this.mark_failed();
+                    cx.notify();
+                });
+                return;
+            }
+            let playing_playlist = playlist.is_some();
             let url = playlist.map_or(url, SharedString::from);
             let signed = mezon_client::cdn_signature::sign(url.as_ref()).await;
             let url = signed
@@ -227,7 +253,7 @@ impl VideoPlayerView {
                 .map_or(url, |signed| SharedString::from(signed.url.clone()));
             let _ = this.update(cx, |this, _| {
                 this.signed = signed;
-                this.source_is_hls = source_is_hls;
+                this.playing_playlist = playing_playlist;
             });
             #[cfg(any(windows, target_os = "macos"))]
             if is_webm_url(url.as_ref()) {
@@ -249,22 +275,28 @@ impl VideoPlayerView {
     }
 
     fn retry_open(&mut self, cx: &mut Context<Self>) -> bool {
-        self.open_with_fresh_signature(cx) || self.open_transcoded_source(cx)
+        self.open_with_fresh_signature(cx) || self.open_other_source(cx)
     }
 
-    fn open_transcoded_source(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.re_resolved
-            || self.source_is_hls
-            || !mezon_client::video_source::may_be_transcoded(self.url.as_ref())
-        {
+    fn open_other_source(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.source_switched || !may_be_transcoded(self.url.as_ref()) {
             return false;
         }
-        self.re_resolved = true;
+        self.source_switched = true;
+        self.source = if self.playing_playlist {
+            VideoSource::Original
+        } else {
+            VideoSource::Playlist
+        };
+        self.restart_open(cx);
+        true
+    }
+
+    fn restart_open(&mut self, cx: &mut Context<Self>) {
         self.player = None;
         self.shared.borrow_mut().failed = false;
         self.start_open(cx);
         cx.notify();
-        true
     }
 
     fn open_with_fresh_signature(&mut self, cx: &mut Context<Self>) -> bool {
@@ -278,10 +310,7 @@ impl VideoPlayerView {
         if !mezon_client::cdn_signature::forget(&signed) {
             return false;
         }
-        self.player = None;
-        self.shared.borrow_mut().failed = false;
-        self.start_open(cx);
-        cx.notify();
+        self.restart_open(cx);
         true
     }
 
@@ -325,8 +354,9 @@ impl VideoPlayerView {
             pending_seek: None,
             signed: None,
             resigned: false,
-            source_is_hls: false,
-            re_resolved: true,
+            source: VideoSource::Detect,
+            playing_playlist: false,
+            source_switched: true,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -419,8 +449,11 @@ impl VideoPlayerView {
         self.last_label_seconds = (0, 0);
         self.last_seek_at = None;
         self.pending_seek = None;
-        self.source_is_hls = false;
-        self.re_resolved = false;
+        self.signed = None;
+        self.resigned = false;
+        self.source = VideoSource::Detect;
+        self.playing_playlist = false;
+        self.source_switched = false;
         {
             let mut shared = self.shared.borrow_mut();
             shared.current_time = 0.0;
