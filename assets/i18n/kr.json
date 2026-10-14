@@ -2813,6 +2813,7 @@
   "file.dialogPortalMissing": "파일 대화 상자를 열 수 없습니다. 데스크톱 포털(xdg-desktop-portal-gtk)을 설치한 뒤 다시 시도하세요.",
   "file.dialogUnavailable": "파일 대화 상자를 열 수 없습니다",
   "forwardMessage.errorMessage": "메시지轉送 실패",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "동봉 메시지 (선택)",
   "forwardMessage.modal.additionalMessagePlaceholder": "동봉할 메시지 입력...",
   "forwardMessage.modal.cancel": "취소",

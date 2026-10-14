@@ -2812,6 +2812,7 @@
   "file.dialogPortalMissing": "Nie można otworzyć okna dialogowego plików. Zainstaluj portal pulpitu (xdg-desktop-portal-gtk) i spróbuj ponownie.",
   "file.dialogUnavailable": "Nie można otworzyć okna dialogowego plików",
   "forwardMessage.errorMessage": "Nie można przekierować wiadomości",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Wiadomość dołączenia (opcjonalna)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Wpisz wiadomość, którą chcesz wysłać dołączoną...",
   "forwardMessage.modal.cancel": "Anuluj",

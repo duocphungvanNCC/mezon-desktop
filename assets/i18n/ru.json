@@ -3051,6 +3051,7 @@
   "file.dialogPortalMissing": "Не удалось открыть диалог выбора файла. Установите портал рабочего стола (xdg-desktop-portal-gtk) и повторите попытку.",
   "file.dialogUnavailable": "Не удалось открыть диалог выбора файла",
   "forwardMessage.errorMessage": "Не удалось перенаправить сообщение",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Дополнительное сообщение (необязательно)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Введите сообщение, которое хотите отправить вместе с...",
   "forwardMessage.modal.cancel": "Отменить",

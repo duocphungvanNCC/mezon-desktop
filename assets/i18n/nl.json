@@ -2812,6 +2812,7 @@
   "file.dialogPortalMissing": "Kan het bestandsvenster niet openen. Installeer een desktopportal (xdg-desktop-portal-gtk) en probeer het opnieuw.",
   "file.dialogUnavailable": "Kan het bestandsvenster niet openen",
   "forwardMessage.errorMessage": "Berichten konden niet worden doorgestuurd",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Toegevoegd bericht (optioneel)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Voer bijvoegend bericht in...",
   "forwardMessage.modal.cancel": "Annuleren",

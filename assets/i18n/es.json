@@ -2839,6 +2839,7 @@
   "file.dialogUnavailable": "No se pudo abrir el cuadro de diálogo de archivos",
   "forwardMessage.addReaction": "Añadir reacción",
   "forwardMessage.errorMessage": "Error al reenviar mensaje",
+  "forwardMessage.payloadTooLarge": "Cannot forward this message because the content or attachment is too large. Copy the content or send the file by uploading it as a normal message.",
   "forwardMessage.modal.additionalMessage": "Mensaje adicional (opcional)",
   "forwardMessage.modal.additionalMessagePlaceholder": "Introduce un mensaje para enviar junto con...",
   "forwardMessage.modal.cancel": "Cancelar",
