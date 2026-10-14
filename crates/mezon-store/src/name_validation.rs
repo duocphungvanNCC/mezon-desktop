@@ -67,15 +67,6 @@ pub fn prepare_clan_nickname_for_update(name: &str) -> Result<Option<String>, Cl
     Ok(Some(normalized))
 }
 
-pub fn clan_nickname_rejected_by_server_rules(name: &str) -> bool {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let normalized: String = trimmed.nfc().collect();
-    !is_valid_menu_name(&normalized)
-}
-
 pub fn is_valid_clan_name(name: &str) -> bool {
     if name.is_empty() || name.chars().count() > CLAN_NAME_MAX_CHARS {
         return false;

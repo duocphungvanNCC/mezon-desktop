@@ -3479,17 +3479,21 @@ impl TransportClient {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let nick_name = nick_name.to_string();
+        let nick_name = nick_name.map(str::to_string);
         let avatar_url = avatar_url.map(str::to_string);
 
         runtime()
             .spawn(async move {
                 transport
-                    .update_user_profile_by_clan(clan_id, &nick_name, avatar_url.as_deref())
+                    .update_user_profile_by_clan(
+                        clan_id,
+                        nick_name.as_deref(),
+                        avatar_url.as_deref(),
+                    )
                     .await
             })
             .await

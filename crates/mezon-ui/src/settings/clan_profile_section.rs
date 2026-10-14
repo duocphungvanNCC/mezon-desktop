@@ -117,27 +117,33 @@ impl ClanProfileSection {
                 AccountEvent::ClanProfileSaveFailed(err) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
+                        if matches!(err, ClanProfileSaveError::DuplicateNickname) {
+                            state.duplicate_error = true;
+                            AccountStore::global(cx).update(cx, |store, cx| {
+                                store.nickname_duplicate = true;
+                                cx.notify();
+                            });
+                        }
                     }
                     cx.notify();
                     let locale = this.settings.read(cx).language.clone();
-                    let message = match err {
+                    let message = match &err {
                         ClanProfileSaveError::DuplicateNickname => {
                             mezon_i18n::t(&locale, "setting.clanProfile.nicknameExists").to_string()
-                        }
-                        ClanProfileSaveError::InvalidNickname => {
-                            mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname")
-                                .to_string()
                         }
                         ClanProfileSaveError::Api(code) => format!(
                             "{} {}",
                             mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
                             mezon_i18n::api_error(&locale, *code)
                         ),
-                        ClanProfileSaveError::Other(_) => format!(
-                            "{} {}",
-                            mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
-                            mezon_i18n::t(&locale, "errors.error_2")
-                        ),
+                        ClanProfileSaveError::Other(msg) => {
+                            tracing::error!("clan profile save failed: {msg}");
+                            format!(
+                                "{} {}",
+                                mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                                msg
+                            )
+                        }
                     };
                     Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
@@ -303,35 +309,42 @@ impl ClanProfileSection {
             return;
         }
 
-        let nick_name = match prepare_clan_nickname_for_update(&state.nick_name) {
-            Ok(Some(prepared)) => {
-                state.nick_name = prepared.clone().into();
-                prepared
+        let nick_changed = state.nick_name != state.original_nick_name;
+        let avatar_changed = state.avatar_url != state.original_avatar_url;
+
+        let nick_name = if nick_changed {
+            match prepare_clan_nickname_for_update(&state.nick_name) {
+                Ok(Some(prepared)) => {
+                    state.nick_name = prepared.clone().into();
+                    Some(prepared)
+                }
+                Ok(None) => None,
+                Err(_) => {
+                    let locale = self.settings.read(cx).language.clone();
+                    let message = mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname");
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    return;
+                }
             }
-            Ok(None) => String::new(),
-            Err(_) => {
-                let locale = self.settings.read(cx).language.clone();
-                let message = mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname");
-                Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
-                return;
-            }
+        } else {
+            None
         };
 
         state.saving = true;
         cx.notify();
 
         let clan_id: String = state.selected_clan_id.to_string();
-        let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
-        let duplicate_hint = state.duplicate_error;
-        let nick_changed = state.nick_name != state.original_nick_name;
-        let avatar_changed = state.avatar_url != state.original_avatar_url;
+        let avatar_url = if avatar_changed {
+            state.avatar_url.as_ref().map(|s| s.to_string())
+        } else {
+            None
+        };
 
         AccountStore::global(cx).update(cx, |store, cx| {
             store.save_clan_profile(
                 clan_id.parse().unwrap_or_default(),
                 nick_name,
                 avatar_url,
-                duplicate_hint,
                 nick_changed,
                 avatar_changed,
                 cx,

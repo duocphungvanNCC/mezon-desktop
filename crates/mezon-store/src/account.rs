@@ -12,9 +12,7 @@ use mezon_client::{
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
-use crate::name_validation::{
-    clan_nickname_rejected_by_server_rules, prepare_display_name_for_update,
-};
+use crate::name_validation::prepare_display_name_for_update;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
@@ -95,7 +93,6 @@ pub enum PhoneLinkError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClanProfileSaveError {
     DuplicateNickname,
-    InvalidNickname,
     Api(u32),
     Other(String),
 }
@@ -905,42 +902,46 @@ impl AccountStore {
     pub fn save_clan_profile(
         &mut self,
         clan_id: ClanId,
-        nick_name: String,
+        nick_name: Option<String>,
         avatar_url: Option<String>,
-        duplicate_hint: bool,
         nick_changed: bool,
         avatar_changed: bool,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
+        let nick_for_store = nick_name.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_user_clan_profile(
                     clan_id.get(),
-                    &nick_name,
-                    Some(avatar_url.as_deref().unwrap_or_default()),
+                    nick_name.as_deref(),
+                    avatar_url.as_deref(),
                 )
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.clan_profile = Some(UserClanProfile {
-                            clan_id,
-                            nick_name: nick_name.clone(),
-                            avatar_url: avatar_url.clone(),
-                        });
+                        if this.clan_profile.as_ref().map(|p| p.clan_id) == Some(clan_id) {
+                            let mut profile = this.clan_profile.take().unwrap_or(UserClanProfile {
+                                clan_id,
+                                nick_name: String::new(),
+                                avatar_url: None,
+                            });
+                            if let Some(nick) = nick_for_store {
+                                profile.nick_name = nick;
+                            }
+                            if avatar_changed {
+                                profile.avatar_url = avatar_url.clone();
+                            }
+                            this.clan_profile = Some(profile);
+                        }
                         cx.emit(AccountEvent::ClanProfileSaved);
                         cx.notify();
                     });
                 }
                 Err(e) => {
-                    let mapped = map_clan_profile_save_error(
-                        e,
-                        &nick_name,
-                        duplicate_hint,
-                        nick_changed,
-                        avatar_changed,
-                    );
+                    tracing::error!("save clan profile failed: {e:#}");
+                    let mapped = map_clan_profile_save_error(e, nick_changed, avatar_changed);
                     let _ = this.update(cx, |_, cx| {
                         cx.emit(AccountEvent::ClanProfileSaveFailed(mapped));
                         cx.notify();
@@ -976,23 +977,12 @@ impl AccountStore {
 
 fn map_clan_profile_save_error(
     err: anyhow::Error,
-    nick_name: &str,
-    duplicate_hint: bool,
     nick_changed: bool,
     avatar_changed: bool,
 ) -> ClanProfileSaveError {
     if let Some(status) = api_status_from_error(&err) {
-        if status.is_invalid_argument() {
-            if duplicate_hint {
-                return ClanProfileSaveError::DuplicateNickname;
-            }
-            if clan_nickname_rejected_by_server_rules(nick_name) {
-                return ClanProfileSaveError::InvalidNickname;
-            }
-            if nick_changed && !avatar_changed {
-                return ClanProfileSaveError::DuplicateNickname;
-            }
-            return ClanProfileSaveError::Api(status.code);
+        if status.is_invalid_argument() && nick_changed && !avatar_changed {
+            return ClanProfileSaveError::DuplicateNickname;
         }
         return ClanProfileSaveError::Api(status.code);
     }
@@ -1343,29 +1333,10 @@ mod tests {
     }
 
     #[test]
-    fn clan_profile_save_error_maps_invalid_argument_with_duplicate_hint() {
+    fn clan_profile_save_error_maps_invalid_argument_with_nick_only_change_to_duplicate() {
         let err = mezon_client::ApiStatusError { code: 3 }.into();
         assert_eq!(
-            map_clan_profile_save_error(err, "Alice", true, true, false),
-            ClanProfileSaveError::DuplicateNickname
-        );
-    }
-
-    #[test]
-    fn clan_profile_save_error_maps_invalid_argument_with_bad_nick() {
-        let err = mezon_client::ApiStatusError { code: 3 }.into();
-        let zalgo = "ค\u{0e47}".repeat(16);
-        assert_eq!(
-            map_clan_profile_save_error(err, &zalgo, false, true, false),
-            ClanProfileSaveError::InvalidNickname
-        );
-    }
-
-    #[test]
-    fn clan_profile_save_error_maps_invalid_argument_with_valid_nick_only_change_to_duplicate() {
-        let err = mezon_client::ApiStatusError { code: 3 }.into();
-        assert_eq!(
-            map_clan_profile_save_error(err, "Alice", false, true, false),
+            map_clan_profile_save_error(err, true, false),
             ClanProfileSaveError::DuplicateNickname
         );
     }
@@ -1374,7 +1345,7 @@ mod tests {
     fn clan_profile_save_error_maps_invalid_argument_with_avatar_change_to_api_code() {
         let err = mezon_client::ApiStatusError { code: 3 }.into();
         assert_eq!(
-            map_clan_profile_save_error(err, "Alice", false, false, true),
+            map_clan_profile_save_error(err, false, true),
             ClanProfileSaveError::Api(3)
         );
     }
@@ -1383,7 +1354,7 @@ mod tests {
     fn clan_profile_save_error_maps_internal_to_api_code() {
         let err = mezon_client::ApiStatusError { code: 13 }.into();
         assert_eq!(
-            map_clan_profile_save_error(err, "Alice", false, true, false),
+            map_clan_profile_save_error(err, true, false),
             ClanProfileSaveError::Api(13)
         );
     }
