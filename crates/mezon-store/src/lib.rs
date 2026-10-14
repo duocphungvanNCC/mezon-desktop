@@ -214,8 +214,9 @@ pub use mmn_client::{
     MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
 };
 pub use name_validation::{
-    CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
-    is_valid_name_content, prepare_display_name_for_update,
+    CLAN_NAME_MAX_CHARS, ClanNicknameError, DISPLAY_NAME_MAX_BYTES, DisplayNameError,
+    is_valid_clan_name, is_valid_menu_name, is_valid_name_content,
+    prepare_clan_nickname_for_update, prepare_display_name_for_update,
 };
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
@@ -239,13 +240,12 @@ pub use platform::{
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
     PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
-    download_url_with_dialog, open_media_url_external,
+    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
 };
 pub use presence::*;
 pub use quick_menu::{
     QUICK_MENU_ACTION_MSG_MAX_BYTES, QUICK_MENU_NAME_MAX_RUNES, QUICK_MENU_TYPE_FLASH,
-    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, is_valid_menu_name,
-    name_exists,
+    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, name_exists,
 };
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use realtime_server::RealtimeServer;
