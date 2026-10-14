@@ -197,6 +197,7 @@ pub use message_search::{
     enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
 };
 pub use messages::*;
+pub use mezon_client::meeting_room_id;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
     TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
@@ -222,7 +223,8 @@ pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, invite_id_from_url, is_clan_invite_url, trusted_invite_id,
+    internal_invite_id, internal_meeting_code, invite_id_from_url, is_clan_invite_url,
+    trusted_invite_id,
 };
 pub use onboarding::{
     ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
@@ -273,15 +275,15 @@ pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
-    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
-    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
-    VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
-    VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
-    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
-    validate_sound_file,
+    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, ExternalMeeting,
+    MAX_SOUND_BYTES, MeetingChatMessage, MeetingChatStatus, NetworkQuality, NoiseSuppressionStatus,
+    PickedScreen, RecordingState, RecordingToast, RemovalCause, SOUND_ALLOWED_EXTENSIONS,
+    ScreenShareKind, ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview,
+    SfuRole, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
+    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent,
+    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
+    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
