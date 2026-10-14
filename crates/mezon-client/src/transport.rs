@@ -8251,7 +8251,7 @@ impl MezonTransport {
             height,
             part_count: 0,
             channel_id,
-            transcode_hls: false,
+            transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
         }
         .encode_to_vec();
         let (code, response) = self

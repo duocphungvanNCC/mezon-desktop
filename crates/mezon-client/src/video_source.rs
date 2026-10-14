@@ -8,10 +8,23 @@ const TRANSCODING_ORIGINS: [&str; 4] = [
     "https://cdn.mezon.vn",
     "http://cdn.mezon.vn",
 ];
+const HLS_OUTPUT_PREFIX: &str = "hls/";
 const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
 const HLS_PLAYLIST_SUFFIX: &str = ".m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
 const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const HLS_TRANSCODE_MIN_SIZE: i32 = 10 * 1024 * 1024;
+const HLS_TRANSCODE_EXTENSIONS: [&str; 7] = ["mp4", "mov", "mkv", "avi", "flv", "m4v", "wmv"];
+
+pub fn wants_hls_transcode(filename: &str, size: i32) -> bool {
+    size >= HLS_TRANSCODE_MIN_SIZE
+        && filename.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && HLS_TRANSCODE_EXTENSIONS
+                    .iter()
+                    .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+}
 
 pub fn master_playlist_url(url: &str) -> Option<String> {
     hls_playlist_candidate(url, &TRANSCODING_ORIGINS)
@@ -37,22 +50,27 @@ async fn hls_playlist_on(url: &str, origins: &[&str], nonce: u64) -> Option<Stri
 }
 
 fn hls_playlist_candidate(url: &str, origins: &[&str]) -> Option<String> {
-    transcodable_file(url, origins).then(|| format!("{url}/{HLS_MASTER_PLAYLIST}"))
+    transcodable_path(url, origins)
+        .map(|(origin, path)| format!("{origin}/{HLS_OUTPUT_PREFIX}{path}/{HLS_MASTER_PLAYLIST}"))
 }
 
 fn transcodable_file(url: &str, origins: &[&str]) -> bool {
-    let Some(path) = origins
-        .iter()
-        .find_map(|origin| url.strip_prefix(origin)?.strip_prefix('/'))
-    else {
-        return false;
-    };
+    transcodable_path(url, origins).is_some()
+}
+
+fn transcodable_path<'a>(url: &'a str, origins: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    let (origin, path) = origins.iter().find_map(|origin| {
+        let path = url.strip_prefix(*origin)?.strip_prefix('/')?;
+        Some((*origin, path))
+    })?;
     let file = path.rsplit('/').next().unwrap_or_default();
-    !path.contains(['?', '#'])
+    let transcodable = !path.contains(['?', '#'])
+        && !path.starts_with(HLS_OUTPUT_PREFIX)
         && !file.is_empty()
         && !file
             .get(file.len().saturating_sub(HLS_PLAYLIST_SUFFIX.len())..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(HLS_PLAYLIST_SUFFIX))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(HLS_PLAYLIST_SUFFIX));
+    transcodable.then_some((origin, path))
 }
 
 fn probe_nonce() -> u64 {
@@ -69,8 +87,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        CDN_MEZON_MINIO, TRANSCODING_ORIGINS, hls_playlist_candidate, hls_playlist_on,
-        may_be_transcoded,
+        CDN_MEZON_MINIO, HLS_TRANSCODE_MIN_SIZE, TRANSCODING_ORIGINS, hls_playlist_candidate,
+        hls_playlist_on, may_be_transcoded, wants_hls_transcode,
     };
 
     const VIDEO: &str = "1cf93b197d401000/2080000000000000001_clip.mp4";
@@ -114,12 +132,40 @@ mod tests {
     }
 
     #[test]
+    fn only_large_videos_ask_for_hls() {
+        let large = HLS_TRANSCODE_MIN_SIZE;
+        for name in [
+            "clip.mp4",
+            "IMG_0001.MOV",
+            "movie.mkv",
+            "old.avi",
+            "a.flv",
+            "b.m4v",
+            "c.wmv",
+        ] {
+            assert!(wants_hls_transcode(name, large), "{name}");
+            assert!(!wants_hls_transcode(name, large - 1), "{name}");
+        }
+        for name in [
+            "clip.webm",
+            "photo.png",
+            "song.mp3",
+            "notes.pdf",
+            "mp4",
+            ".mp4",
+            "clip.mp4.zip",
+        ] {
+            assert!(!wants_hls_transcode(name, i32::MAX), "{name}");
+        }
+    }
+
+    #[test]
     fn a_video_on_the_transcoding_cdn_points_at_its_master_playlist() {
         for origin in TRANSCODING_ORIGINS {
             let url = format!("{origin}/{VIDEO}");
             assert_eq!(
                 hls_playlist_candidate(&url, &TRANSCODING_ORIGINS),
-                Some(format!("{url}/master.m3u8"))
+                Some(format!("{origin}/hls/{VIDEO}/master.m3u8"))
             );
             assert!(may_be_transcoded(&url));
         }
@@ -134,6 +180,8 @@ mod tests {
             format!("{CDN_MEZON_MINIO}/{VIDEO}#t=3"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}/master.m3u8"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}/INDEX.M3U8"),
+            format!("{CDN_MEZON_MINIO}/hls/{VIDEO}"),
+            format!("{CDN_MEZON_MINIO}/hls/{VIDEO}/stream_0/data000.ts"),
             format!("{CDN_MEZON_MINIO}/1cf93b197d401000/"),
             CDN_MEZON_MINIO.to_string(),
         ] {
@@ -148,25 +196,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_transcoded_video_plays_from_its_playlist() {
-        let (origin, _) = fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), MASTER)]).await;
+        let (origin, _) = fake_minio(vec![(format!("/hls/{VIDEO}/master.m3u8"), MASTER)]).await;
         let url = format!("{origin}/{VIDEO}");
         assert_eq!(
             hls_playlist_on(&url, &[origin.as_str()], 0xbeef).await,
-            Some(format!("{url}/master.m3u8"))
+            Some(format!("{origin}/hls/{VIDEO}/master.m3u8"))
         );
     }
 
     #[tokio::test]
     async fn the_probe_never_requests_the_url_the_player_will_open() {
-        let (origin, seen) = fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), MASTER)]).await;
+        let (origin, seen) = fake_minio(vec![(format!("/hls/{VIDEO}/master.m3u8"), MASTER)]).await;
         let url = format!("{origin}/{VIDEO}");
         hls_playlist_on(&url, &[origin.as_str()], 0xbeef).await;
         hls_playlist_on(&url, &[origin.as_str()], 0xcafe).await;
         assert_eq!(
             *seen.lock().unwrap(),
             vec![
-                format!("/{VIDEO}/master.m3u8?probe=beef"),
-                format!("/{VIDEO}/master.m3u8?probe=cafe"),
+                format!("/hls/{VIDEO}/master.m3u8?probe=beef"),
+                format!("/hls/{VIDEO}/master.m3u8?probe=cafe"),
             ]
         );
     }
@@ -182,8 +230,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_playlist_url_that_answers_something_else_is_ignored() {
-        let (origin, _) =
-            fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), "<html>ok</html>")]).await;
+        let (origin, _) = fake_minio(vec![(
+            format!("/hls/{VIDEO}/master.m3u8"),
+            "<html>ok</html>",
+        )])
+        .await;
         assert_eq!(
             hls_playlist_on(&format!("{origin}/{VIDEO}"), &[origin.as_str()], 1).await,
             None
