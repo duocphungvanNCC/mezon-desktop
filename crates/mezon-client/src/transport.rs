@@ -524,6 +524,25 @@ pub struct OutgoingMessageFlags {
     pub message_code: i32,
 }
 
+fn varint_encoded_len(mut value: u64) -> usize {
+    let mut n = 1usize;
+    while value > 0x7f {
+        n += 1;
+        value >>= 7;
+    }
+    n
+}
+
+pub fn encoded_envelope_cid_last_len(envelope: &realtime::Envelope) -> usize {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encoded_len();
+    }
+    let mut zero_cid = envelope.clone();
+    zero_cid.cid = 0;
+    zero_cid.encoded_len() + 1 + varint_encoded_len(cid as u64)
+}
+
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     let cid = envelope.cid;
     if cid <= 0 {
@@ -3058,11 +3077,10 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
 
 fn url_is_inline_data(url: &str) -> bool {
     let trimmed = url.trim();
-    trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("data:")
-}
-
-fn content_has_inline_data_uri(content_raw: &str) -> bool {
-    content_raw.contains("data:image") || content_raw.contains("data:application")
+    trimmed
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
 }
 
 fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
@@ -3078,40 +3096,78 @@ fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
     }
 }
 
-pub fn forward_realtime_envelope_bytes(
+#[allow(clippy::too_many_arguments)]
+pub fn build_forward_channel_message_send(
+    clan_id: i64,
+    channel_id: i64,
     content_raw: &str,
     text: &str,
+    is_public: bool,
+    mode: i32,
     attachments: &[ApiAttachment],
-) -> usize {
+    mentions: &[OutgoingMention],
+) -> realtime::ChannelMessageSend {
     let content_json = forward_content_json(content_raw, text);
-    let message = realtime::ChannelMessageSend {
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
         content: content_json,
+        mentions: proto_mentions,
         attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        mode,
+        is_public,
+        mention_everyone,
         ..Default::default()
+    }
+}
+
+pub fn channel_message_send_realtime_proto_len(
+    message: &realtime::ChannelMessageSend,
+    cid: i32,
+) -> usize {
+    let envelope = realtime::Envelope {
+        cid,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(
+            message.clone(),
+        )),
     };
-    encode_envelope_cid_last(realtime::Envelope {
-        cid: 1,
-        message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
-    })
-    .len()
+    encoded_envelope_cid_last_len(&envelope)
+}
+
+pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
+    if message
+        .attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    let proto_len = channel_message_send_realtime_proto_len(message, 1);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
 }
 
 pub fn forward_blocked_for_realtime(
     content_raw: &str,
     text: &str,
     attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
 ) -> bool {
-    if attachments
-        .iter()
-        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
-    {
-        return true;
-    }
-    if content_has_inline_data_uri(content_raw) {
-        return true;
-    }
-    forward_realtime_envelope_bytes(content_raw, text, attachments)
-        > crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD
+    let message = build_forward_channel_message_send(
+        1,
+        1,
+        content_raw,
+        text,
+        false,
+        2,
+        attachments,
+        mentions,
+    );
+    forward_blocked_for_realtime_message(&message)
 }
 
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
@@ -6764,58 +6820,29 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let content_json = forward_content_json(content_raw, text);
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
+        let api_attachments: Vec<ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+                size: a.size,
+            })
             .collect();
-        let attachment_url_bytes: usize = attachments.iter().map(|a| a.url.len()).sum();
-        let attachment_count = attachments.len();
-        let message = realtime::ChannelMessageSend {
+        let message = build_forward_channel_message_send(
             clan_id,
             channel_id,
-            content: content_json,
-            mentions: proto_mentions,
-            attachments,
-            mode,
+            content_raw,
+            text,
             is_public,
-            mention_everyone,
-            ..Default::default()
-        };
-        if tracing::enabled!(target: "mezon.forward", tracing::Level::INFO) {
-            let proto_bytes = message.encode_to_vec().len();
-            let envelope_bytes = encode_envelope_cid_last(realtime::Envelope {
-                cid: 1,
-                message: Some(realtime::envelope::Message::ChannelMessageSend(
-                    message.clone(),
-                )),
-            })
-            .len();
-            tracing::info!(
-                target: "mezon.forward",
-                clan_id,
-                channel_id,
-                content_json_bytes = message.content.len(),
-                content_raw_bytes = content_raw.len(),
-                attachment_count,
-                attachment_url_bytes,
-                channel_message_send_proto_bytes = proto_bytes,
-                envelope_bytes,
-                cap = crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD,
-                has_embed_json = content_raw.contains("\"embed\""),
-                has_data_image_uri = content_raw.contains("data:image"),
-                "forward_channel_message wire sizes"
-            );
-            if envelope_bytes > crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD {
-                tracing::warn!(
-                    target: "mezon.forward",
-                    envelope_bytes,
-                    cap = crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD,
-                    "forward payload likely exceeds realtime frame cap — expect socket disconnect on server push"
-                );
-            }
-        }
+            mode,
+            &api_attachments,
+            &mentions,
+        );
         let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
@@ -8589,8 +8616,7 @@ impl MezonTransport {
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
-        let has_fallback = self.http_fallback.read().is_some();
-        if has_fallback && !self.is_open().await {
+        if self.http_fallback.read().is_some() && !self.is_open().await {
             tracing::warn!(
                 target: "socket",
                 "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
@@ -11222,24 +11248,70 @@ mod tests {
             url: "data:image/png;base64,abcd".into(),
             ..Default::default()
         }];
-        assert!(forward_blocked_for_realtime(
+        let message = build_forward_channel_message_send(
+            1,
+            2,
             r#"{"t":"hi"}"#,
             "hi",
-            &attachments
-        ));
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
     }
 
     #[test]
-    fn forward_allowed_for_small_https_attachment() {
+    fn forward_realtime_ok_for_small_https_attachment() {
         let attachments = vec![ApiAttachment {
             url: "https://cdn.example/a.png".into(),
             ..Default::default()
         }];
-        assert!(!forward_blocked_for_realtime(
+        let message = build_forward_channel_message_send(
+            1,
+            2,
             r#"{"t":"hi"}"#,
             "hi",
-            &attachments
-        ));
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(!forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_blocked_when_wire_exceeds_proto_server_cap() {
+        let pad = "x".repeat(4200);
+        let attachments = vec![ApiAttachment {
+            url: format!("https://cdn.example/{pad}.png"),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn encoded_envelope_cid_last_len_matches_encode() {
+        let message =
+            build_forward_channel_message_send(1, 2, r#"{"t":"hi"}"#, "hi", false, 2, &[], &[]);
+        let envelope = realtime::Envelope {
+            cid: 9,
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        assert_eq!(
+            encoded_envelope_cid_last_len(&envelope),
+            encode_envelope_cid_last(envelope).len()
+        );
     }
 
     #[test]

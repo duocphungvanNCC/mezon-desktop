@@ -983,17 +983,6 @@ async fn send_forward(
     let same_channel = dest.channel_id == source_channel_id.get();
     let mut failures = 0usize;
     for source in sources {
-        tracing::info!(
-            target: "mezon.forward",
-            dest_channel_id = dest.channel_id,
-            dest_clan_id = dest.clan_id,
-            content_raw_bytes = source.content_raw.len(),
-            plain_text_chars = source.text.chars().count(),
-            attachment_count = source.attachments.len(),
-            has_embed_json = source.content_raw.contains("\"embed\""),
-            has_data_image_uri = source.content_raw.contains("data:image"),
-            "send_forward item"
-        );
         let mentions = if same_channel {
             source.mentions.clone()
         } else {
@@ -4470,15 +4459,15 @@ impl MessagesStore {
                 &source.content_raw,
                 &source.text,
                 &source.attachments,
+                &source.mentions,
             )
         }) {
             return ForwardStart::PayloadTooLarge;
         }
+        let api = self.api.clone();
         let note = note
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty() && n.chars().count() <= MAX_FORWARD_MESSAGE_LENGTH);
-
-        let api = self.api.clone();
         let total = targets.len();
         start_target_clan_joins(&targets, cx);
         self.forward_in_flight = true;
@@ -13062,22 +13051,59 @@ mod tests {
         assert_eq!(source.mentions[0].e, 8);
     }
 
+    #[gpui::test]
+    fn forward_returns_payload_too_large_for_inline_data_attachment(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.activate(ClanId(1), ChannelId(10), true, false, 1, 2, cx);
+                let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+                msg.raw_content = Some(r#"{"t":"report"}"#.into());
+                msg.attachments = vec![MessageAttachment {
+                    url: "data:image/png;base64,YWJj".into(),
+                    filename: "chart.png".into(),
+                    filetype: "image/png".into(),
+                    ..Default::default()
+                }];
+                store.set_channel(ChannelId(10), vec![msg]);
+                assert!(!store.is_forwarding());
+                let started = store.forward(
+                    vec![MessageRef {
+                        bucket: ChannelId(10),
+                        id: MessageId(1),
+                    }],
+                    vec![channel_target(ClanId(2))],
+                    None,
+                    cx,
+                );
+                assert_eq!(started, ForwardStart::PayloadTooLarge);
+                assert!(!store.is_forwarding());
+            });
+        });
+    }
+
     #[test]
-    fn forward_rejects_inline_data_attachment_before_send() {
+    fn forward_preflight_uses_shared_realtime_size_estimate() {
         let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
         msg.raw_content = Some(r#"{"t":"report"}"#.into());
         msg.attachments = vec![MessageAttachment {
-            url: "data:image/png;base64,YWJj".into(),
+            url: "đường.png".into(),
             filename: "chart.png".into(),
             filetype: "image/png".into(),
             ..Default::default()
         }];
         let source = forward_source(&msg);
-        assert!(mezon_client::transport::forward_blocked_for_realtime(
+        let message = mezon_client::transport::build_forward_channel_message_send(
+            1,
+            1,
             &source.content_raw,
             &source.text,
+            false,
+            2,
             &source.attachments,
-        ));
+            &source.mentions,
+        );
+        assert!(!mezon_client::transport::forward_blocked_for_realtime_message(&message));
     }
 
     #[test]
