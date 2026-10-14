@@ -8,6 +8,7 @@ const TRANSCODING_ORIGINS: [&str; 4] = [
     "https://cdn.mezon.vn",
     "http://cdn.mezon.vn",
 ];
+const HLS_OUTPUT_PREFIX: &str = "hls/";
 const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
 const HLS_PLAYLIST_SUFFIX: &str = ".m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
@@ -37,22 +38,27 @@ async fn hls_playlist_on(url: &str, origins: &[&str], nonce: u64) -> Option<Stri
 }
 
 fn hls_playlist_candidate(url: &str, origins: &[&str]) -> Option<String> {
-    transcodable_file(url, origins).then(|| format!("{url}/{HLS_MASTER_PLAYLIST}"))
+    transcodable_path(url, origins)
+        .map(|(origin, path)| format!("{origin}/{HLS_OUTPUT_PREFIX}{path}/{HLS_MASTER_PLAYLIST}"))
 }
 
 fn transcodable_file(url: &str, origins: &[&str]) -> bool {
-    let Some(path) = origins
-        .iter()
-        .find_map(|origin| url.strip_prefix(origin)?.strip_prefix('/'))
-    else {
-        return false;
-    };
+    transcodable_path(url, origins).is_some()
+}
+
+fn transcodable_path<'a>(url: &'a str, origins: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    let (origin, path) = origins.iter().find_map(|origin| {
+        let path = url.strip_prefix(*origin)?.strip_prefix('/')?;
+        Some((*origin, path))
+    })?;
     let file = path.rsplit('/').next().unwrap_or_default();
-    !path.contains(['?', '#'])
+    let transcodable = !path.contains(['?', '#'])
+        && !path.starts_with(HLS_OUTPUT_PREFIX)
         && !file.is_empty()
         && !file
             .get(file.len().saturating_sub(HLS_PLAYLIST_SUFFIX.len())..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(HLS_PLAYLIST_SUFFIX))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(HLS_PLAYLIST_SUFFIX));
+    transcodable.then_some((origin, path))
 }
 
 fn probe_nonce() -> u64 {
@@ -119,7 +125,7 @@ mod tests {
             let url = format!("{origin}/{VIDEO}");
             assert_eq!(
                 hls_playlist_candidate(&url, &TRANSCODING_ORIGINS),
-                Some(format!("{url}/master.m3u8"))
+                Some(format!("{origin}/hls/{VIDEO}/master.m3u8"))
             );
             assert!(may_be_transcoded(&url));
         }
@@ -134,6 +140,8 @@ mod tests {
             format!("{CDN_MEZON_MINIO}/{VIDEO}#t=3"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}/master.m3u8"),
             format!("{CDN_MEZON_MINIO}/{VIDEO}/INDEX.M3U8"),
+            format!("{CDN_MEZON_MINIO}/hls/{VIDEO}"),
+            format!("{CDN_MEZON_MINIO}/hls/{VIDEO}/stream_0/data000.ts"),
             format!("{CDN_MEZON_MINIO}/1cf93b197d401000/"),
             CDN_MEZON_MINIO.to_string(),
         ] {
@@ -148,25 +156,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_transcoded_video_plays_from_its_playlist() {
-        let (origin, _) = fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), MASTER)]).await;
+        let (origin, _) = fake_minio(vec![(format!("/hls/{VIDEO}/master.m3u8"), MASTER)]).await;
         let url = format!("{origin}/{VIDEO}");
         assert_eq!(
             hls_playlist_on(&url, &[origin.as_str()], 0xbeef).await,
-            Some(format!("{url}/master.m3u8"))
+            Some(format!("{origin}/hls/{VIDEO}/master.m3u8"))
         );
     }
 
     #[tokio::test]
     async fn the_probe_never_requests_the_url_the_player_will_open() {
-        let (origin, seen) = fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), MASTER)]).await;
+        let (origin, seen) = fake_minio(vec![(format!("/hls/{VIDEO}/master.m3u8"), MASTER)]).await;
         let url = format!("{origin}/{VIDEO}");
         hls_playlist_on(&url, &[origin.as_str()], 0xbeef).await;
         hls_playlist_on(&url, &[origin.as_str()], 0xcafe).await;
         assert_eq!(
             *seen.lock().unwrap(),
             vec![
-                format!("/{VIDEO}/master.m3u8?probe=beef"),
-                format!("/{VIDEO}/master.m3u8?probe=cafe"),
+                format!("/hls/{VIDEO}/master.m3u8?probe=beef"),
+                format!("/hls/{VIDEO}/master.m3u8?probe=cafe"),
             ]
         );
     }
@@ -182,8 +190,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_playlist_url_that_answers_something_else_is_ignored() {
-        let (origin, _) =
-            fake_minio(vec![(format!("/{VIDEO}/master.m3u8"), "<html>ok</html>")]).await;
+        let (origin, _) = fake_minio(vec![(
+            format!("/hls/{VIDEO}/master.m3u8"),
+            "<html>ok</html>",
+        )])
+        .await;
         assert_eq!(
             hls_playlist_on(&format!("{origin}/{VIDEO}"), &[origin.as_str()], 1).await,
             None
