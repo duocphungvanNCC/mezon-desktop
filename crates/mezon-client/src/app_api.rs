@@ -2075,7 +2075,7 @@ impl AppApi {
                     height,
                     part_count: ranges.len() as i32,
                     channel_id,
-                    transcode_hls: false,
+                    transcode_hls: crate::video_source::wants_hls_transcode(&upload_name, size),
                 })
                 .await?;
             if started.urls.len() != ranges.len() {

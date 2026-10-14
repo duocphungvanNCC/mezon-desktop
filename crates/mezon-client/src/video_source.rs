@@ -13,6 +13,18 @@ const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
 const HLS_PLAYLIST_SUFFIX: &str = ".m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
 const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const HLS_TRANSCODE_MIN_SIZE: i32 = 10 * 1024 * 1024;
+const HLS_TRANSCODE_EXTENSIONS: [&str; 7] = ["mp4", "mov", "mkv", "avi", "flv", "m4v", "wmv"];
+
+pub fn wants_hls_transcode(filename: &str, size: i32) -> bool {
+    size >= HLS_TRANSCODE_MIN_SIZE
+        && filename.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && HLS_TRANSCODE_EXTENSIONS
+                    .iter()
+                    .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+}
 
 pub fn master_playlist_url(url: &str) -> Option<String> {
     hls_playlist_candidate(url, &TRANSCODING_ORIGINS)
@@ -75,8 +87,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        CDN_MEZON_MINIO, TRANSCODING_ORIGINS, hls_playlist_candidate, hls_playlist_on,
-        may_be_transcoded,
+        CDN_MEZON_MINIO, HLS_TRANSCODE_MIN_SIZE, TRANSCODING_ORIGINS, hls_playlist_candidate,
+        hls_playlist_on, may_be_transcoded, wants_hls_transcode,
     };
 
     const VIDEO: &str = "1cf93b197d401000/2080000000000000001_clip.mp4";
@@ -117,6 +129,34 @@ mod tests {
             }
         });
         (origin, seen)
+    }
+
+    #[test]
+    fn only_large_videos_ask_for_hls() {
+        let large = HLS_TRANSCODE_MIN_SIZE;
+        for name in [
+            "clip.mp4",
+            "IMG_0001.MOV",
+            "movie.mkv",
+            "old.avi",
+            "a.flv",
+            "b.m4v",
+            "c.wmv",
+        ] {
+            assert!(wants_hls_transcode(name, large), "{name}");
+            assert!(!wants_hls_transcode(name, large - 1), "{name}");
+        }
+        for name in [
+            "clip.webm",
+            "photo.png",
+            "song.mp3",
+            "notes.pdf",
+            "mp4",
+            ".mp4",
+            "clip.mp4.zip",
+        ] {
+            assert!(!wants_hls_transcode(name, i32::MAX), "{name}");
+        }
     }
 
     #[test]
