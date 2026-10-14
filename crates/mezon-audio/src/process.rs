@@ -1,5 +1,12 @@
 use crate::{AudioError, DecodedPcm};
 
+pub const PROCESSED_SOUND_SAMPLE_RATE: u32 = 22_050;
+
+pub fn estimated_mono_wav_bytes(duration_secs: f64) -> Option<u64> {
+    let samples = (duration_secs.max(0.0) * f64::from(PROCESSED_SOUND_SAMPLE_RATE)).ceil() as u64;
+    samples.checked_mul(2)?.checked_add(44)
+}
+
 pub fn process_pcm_to_wav(
     pcm: &DecodedPcm,
     start_secs: f64,
@@ -7,6 +14,7 @@ pub fn process_pcm_to_wav(
     volume: f32,
 ) -> Result<Vec<u8>, AudioError> {
     let processed = process_pcm(pcm, start_secs, end_secs, volume)?;
+    let processed = downsample_mono(&processed, PROCESSED_SOUND_SAMPLE_RATE)?;
     encode_mono_wav(&processed)
 }
 
@@ -44,6 +52,39 @@ pub fn process_pcm(
         samples: samples.into(),
         channels: 1,
         sample_rate: pcm.sample_rate,
+    })
+}
+
+fn downsample_mono(pcm: &DecodedPcm, output_rate: u32) -> Result<DecodedPcm, AudioError> {
+    if pcm.channels != 1 || pcm.sample_rate == 0 || output_rate == 0 {
+        return Err(AudioError::Decode("invalid pcm data".into()));
+    }
+    if pcm.sample_rate <= output_rate {
+        return Ok(DecodedPcm {
+            samples: pcm.samples.clone(),
+            channels: 1,
+            sample_rate: pcm.sample_rate,
+        });
+    }
+
+    let ratio = f64::from(pcm.sample_rate) / f64::from(output_rate);
+    let output_len = (pcm.samples.len() as f64 / ratio).floor() as usize;
+    if output_len == 0 {
+        return Err(AudioError::Decode("empty audio selection".into()));
+    }
+    let mut samples = Vec::with_capacity(output_len);
+    for index in 0..output_len {
+        let start = (index as f64 * ratio).floor() as usize;
+        let end = (((index + 1) as f64 * ratio).floor() as usize)
+            .max(start + 1)
+            .min(pcm.samples.len());
+        let sum = pcm.samples[start..end].iter().copied().sum::<f32>();
+        samples.push(sum / (end - start) as f32);
+    }
+    Ok(DecodedPcm {
+        samples: samples.into(),
+        channels: 1,
+        sample_rate: output_rate,
     })
 }
 
@@ -106,5 +147,25 @@ mod tests {
             sample_rate: 2,
         };
         assert!(process_pcm_to_wav(&pcm, 0.5, 0.5, 1.0).is_err());
+    }
+
+    #[test]
+    fn processed_wav_size_is_bounded_for_ten_seconds() {
+        assert_eq!(estimated_mono_wav_bytes(10.0), Some(441_044));
+    }
+
+    #[test]
+    fn processed_wav_downsamples_to_target_rate() {
+        let pcm = DecodedPcm {
+            samples: vec![0.5; 44_100].into(),
+            channels: 1,
+            sample_rate: 44_100,
+        };
+        let wav = process_pcm_to_wav(&pcm, 0.0, 1.0, 1.0).expect("processed wav");
+        assert_eq!(
+            u32::from_le_bytes(wav[24..28].try_into().unwrap()),
+            PROCESSED_SOUND_SAMPLE_RATE
+        );
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 44_100);
     }
 }

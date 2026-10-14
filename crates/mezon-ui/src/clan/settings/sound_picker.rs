@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -6,7 +7,9 @@ use gpui::{
     FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
     SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
 };
-use mezon_audio::{AudioPlayer, DecodedPcm, process_pcm, process_pcm_to_wav};
+use mezon_audio::{
+    AudioPlayer, DecodedPcm, estimated_mono_wav_bytes, process_pcm, process_pcm_to_wav,
+};
 use mezon_store::{
     ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, Settings, StickerStore, VoiceStore,
     is_valid_emoticon_shortname, validate_sound_file,
@@ -14,7 +17,8 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Slider, SliderEvent,
+    SliderState, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -22,8 +26,10 @@ const FORM_CONTROL_H: f32 = 34.0;
 const PREVIEW_TICK: Duration = Duration::from_millis(250);
 const WAVEFORM_BARS: usize = 144;
 const MIN_TRIM_PERCENT: f32 = 1.0;
-const DEFAULT_VOLUME_PERCENT: f32 = 100.0;
+const DEFAULT_VOLUME_PERCENT: f32 = 80.0;
 const MAX_VOLUME_PERCENT: f32 = 100.0;
+const UNITY_VOLUME_PERCENT: f32 = 100.0;
+const MAX_TRIM_SECS: f64 = 10.0;
 
 #[derive(Clone)]
 struct TrimThumb((EntityId, bool));
@@ -125,7 +131,7 @@ impl WaveformTrimSlider {
             .w(px(4.0))
             .h_full()
             .rounded_sm()
-            .bg(Hsla::from(cx.theme().text_primary))
+            .bg(Hsla::from(cx.theme().tokens.text_theme_message))
             .when(!self.disabled, |this| {
                 this.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_drag(TrimThumb((entity_id, is_start)), |drag, _, _, cx| {
@@ -135,9 +141,9 @@ impl WaveformTrimSlider {
                     .on_drag_move(window.listener_for(
                         &self.state,
                         move |state, event: &DragMoveEvent<TrimThumb>, _, cx| {
-                            let TrimThumb((id, is_start)) = event.drag(cx);
-                            if *id == entity_id {
-                                state.update_from_position(event.event.position.x, *is_start, cx);
+                            let TrimThumb((id, dragged_start)) = event.drag(cx);
+                            if *id == entity_id && *dragged_start == is_start {
+                                state.update_from_position(event.event.position.x, is_start, cx);
                             }
                         },
                     ))
@@ -204,150 +210,6 @@ impl RenderOnce for WaveformTrimSlider {
     }
 }
 
-#[derive(Clone)]
-struct VolumeThumb(EntityId);
-
-impl Render for VolumeThumb {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
-enum SoundVolumeEvent {
-    Change(f32),
-}
-
-struct SoundVolumeState {
-    percentage: f32,
-    bounds: Bounds<Pixels>,
-}
-
-impl SoundVolumeState {
-    fn new() -> Self {
-        Self {
-            percentage: DEFAULT_VOLUME_PERCENT,
-            bounds: Bounds::default(),
-        }
-    }
-
-    fn value(&self) -> f32 {
-        self.percentage
-    }
-
-    fn reset(&mut self, cx: &mut Context<Self>) {
-        self.percentage = DEFAULT_VOLUME_PERCENT;
-        cx.emit(SoundVolumeEvent::Change(self.percentage));
-        cx.notify();
-    }
-
-    fn update_from_position(&mut self, position: Pixels, cx: &mut Context<Self>) {
-        let width = self.bounds.size.width;
-        if width <= px(0.0) {
-            return;
-        }
-        self.percentage = (((position - self.bounds.left()) / width).clamp(0.0, 1.0)
-            * MAX_VOLUME_PERCENT)
-            .round();
-        cx.emit(SoundVolumeEvent::Change(self.percentage));
-        cx.notify();
-    }
-}
-
-impl EventEmitter<SoundVolumeEvent> for SoundVolumeState {}
-
-impl Render for SoundVolumeState {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
-#[derive(IntoElement)]
-struct SoundVolumeSlider {
-    state: Entity<SoundVolumeState>,
-}
-
-impl SoundVolumeSlider {
-    fn new(state: &Entity<SoundVolumeState>) -> Self {
-        Self {
-            state: state.clone(),
-        }
-    }
-}
-
-impl RenderOnce for SoundVolumeSlider {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = self.state.read(cx);
-        let ratio = state.percentage / MAX_VOLUME_PERCENT;
-        let entity_id = self.state.entity_id();
-        let bar_color = Hsla::from(cx.theme().brand);
-        let thumb_color = cx.theme().text_primary;
-
-        div()
-            .id(("sound-volume-slider", entity_id))
-            .relative()
-            .w_full()
-            .h_6()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                window.listener_for(&self.state, |state, event: &MouseDownEvent, _, cx| {
-                    state.update_from_position(event.position.x, cx)
-                }),
-            )
-            .on_drag(VolumeThumb(entity_id), |drag, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| drag.clone())
-            })
-            .on_drag_move(window.listener_for(
-                &self.state,
-                move |state, event: &DragMoveEvent<VolumeThumb>, _, cx| {
-                    if event.drag(cx).0 == entity_id {
-                        state.update_from_position(event.event.position.x, cx);
-                    }
-                },
-            ))
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h_1p5()
-                    .rounded_full()
-                    .bg(bar_color.opacity(0.2))
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .bottom_0()
-                            .w(gpui::relative(ratio))
-                            .rounded_full()
-                            .bg(bar_color),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(-5.0))
-                            .left(gpui::relative(ratio))
-                            .ml(-px(8.0))
-                            .size_4()
-                            .rounded_full()
-                            .bg(thumb_color),
-                    )
-                    .child({
-                        let state = self.state.clone();
-                        canvas(
-                            move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full()
-                    }),
-            )
-    }
-}
-
 fn default_voice_shortname() -> String {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -359,6 +221,19 @@ fn default_voice_shortname() -> String {
 fn format_mmss(secs: f64) -> String {
     let total = secs.max(0.0).round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+fn audio_time_label(current: f64, duration: f64) -> SharedString {
+    if duration <= 0.0 {
+        return format_mmss(current).into();
+    }
+    format!("{} / {}", format_mmss(current), format_mmss(duration)).into()
+}
+
+fn audio_needs_processing(start_percent: f32, end_percent: f32, volume_percent: f32) -> bool {
+    start_percent > f32::EPSILON
+        || end_percent < 100.0 - f32::EPSILON
+        || volume_percent < UNITY_VOLUME_PERCENT
 }
 
 #[derive(Clone)]
@@ -383,14 +258,18 @@ pub struct SoundPicker {
     file_label: SharedString,
     preview_url: Option<SharedString>,
     local_pcm: Option<DecodedPcm>,
+    waveform_peaks: Vec<f32>,
+    decode_pending: bool,
+    decode_failed: bool,
     local_player: Option<AudioPlayer>,
     trim_slider: Entity<TrimRangeState>,
-    volume_slider: Entity<SoundVolumeState>,
+    volume_slider: Entity<SliderState>,
     submitting: bool,
     _name_sub: Subscription,
     _trim_sub: Subscription,
     _volume_sub: Subscription,
     _voice_observe: Subscription,
+    _pick_task: Option<Task<()>>,
     _submit_task: Option<Task<()>>,
     _decode_task: Option<Task<()>>,
     _preview_tick: Option<Task<()>>,
@@ -449,11 +328,17 @@ impl SoundPicker {
         let trim_sub = cx.subscribe(&trim_slider, |this, _, _: &TrimRangeEvent, cx| {
             this.stop_local_preview(cx);
         });
-        let volume_slider = cx.new(|_| SoundVolumeState::new());
-        let volume_sub = cx.subscribe(&volume_slider, |this, _, event, cx| {
-            let SoundVolumeEvent::Change(value) = event;
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(MAX_VOLUME_PERCENT)
+                .step(1.0)
+                .default_value(DEFAULT_VOLUME_PERCENT)
+        });
+        let volume_sub = cx.subscribe(&volume_slider, |this, _, event: &SliderEvent, cx| {
+            let SliderEvent::Change(value) = event;
             if let Some(player) = &this.local_player {
-                player.set_volume(*value / DEFAULT_VOLUME_PERCENT);
+                player.set_volume(value.end() / UNITY_VOLUME_PERCENT);
             }
             cx.notify();
         });
@@ -467,6 +352,9 @@ impl SoundPicker {
             file_label,
             preview_url,
             local_pcm: None,
+            waveform_peaks: Vec::new(),
+            decode_pending: false,
+            decode_failed: false,
             local_player: None,
             trim_slider,
             volume_slider,
@@ -475,6 +363,7 @@ impl SoundPicker {
             _trim_sub: trim_sub,
             _volume_sub: volume_sub,
             _voice_observe: voice_observe,
+            _pick_task: None,
             _submit_task: None,
             _decode_task: None,
             _preview_tick: None,
@@ -538,8 +427,18 @@ impl SoundPicker {
         )
     }
 
+    fn selected_duration(&self, cx: &App) -> f64 {
+        let (start, end) = self.trim_times(cx);
+        (end - start).max(0.0)
+    }
+
+    fn needs_processing(&self, cx: &App) -> bool {
+        let (start, end) = self.trim_slider.read(cx).value();
+        audio_needs_processing(start, end, self.volume_slider.read(cx).value().end())
+    }
+
     fn volume_gain(&self, cx: &App) -> f32 {
-        self.volume_slider.read(cx).value() / DEFAULT_VOLUME_PERCENT
+        self.volume_slider.read(cx).value().end() / UNITY_VOLUME_PERCENT
     }
 
     fn processed_pcm(&self, cx: &App) -> Option<DecodedPcm> {
@@ -624,7 +523,9 @@ impl SoundPicker {
             let decoded = cx
                 .background_spawn(async move {
                     let bytes = std::fs::read(&path).map_err(|_| "invalid_file".to_string())?;
-                    mezon_audio::decode_audio(bytes).map_err(|err| err.to_string())
+                    let pcm = mezon_audio::decode_audio(bytes).map_err(|err| err.to_string())?;
+                    let peaks = waveform_amplitudes(&pcm);
+                    Ok::<_, String>((pcm, peaks))
                 })
                 .await;
             let error_code = match &decoded {
@@ -637,14 +538,19 @@ impl SoundPicker {
                     return;
                 }
                 match decoded {
-                    Ok(pcm) => {
+                    Ok((pcm, peaks)) => {
                         this.local_pcm = Some(pcm);
+                        this.waveform_peaks = peaks;
+                        this.decode_failed = false;
                     }
                     Err(err) => {
                         tracing::warn!("sound picker decode failed: {err}");
                         this.local_pcm = None;
+                        this.waveform_peaks.clear();
+                        this.decode_failed = true;
                     }
                 }
+                this.decode_pending = false;
                 cx.notify();
             });
             if let Some(code) = error_code {
@@ -654,11 +560,7 @@ impl SoundPicker {
     }
 
     fn render_waveform(&self, theme: &Theme) -> impl IntoElement {
-        let amplitudes = self
-            .local_pcm
-            .as_ref()
-            .map(waveform_amplitudes)
-            .unwrap_or_else(|| vec![0.08; WAVEFORM_BARS]);
+        let amplitudes = self.waveform_peaks.clone();
         h_flex()
             .w_full()
             .h(px(52.0))
@@ -675,8 +577,62 @@ impl SoundPicker {
                             .min_w(px(0.25))
                             .h(px(3.0 + amplitude * 47.0))
                             .rounded_full()
-                            .bg(theme.text_primary)
+                            .bg(theme.tokens.text_theme_message)
                     }),
+            )
+    }
+
+    fn render_preview_playbar(
+        &self,
+        previewing: bool,
+        theme: &Theme,
+        cx: &App,
+    ) -> impl IntoElement {
+        let (position, duration) = self.preview_timeline(cx);
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let time_label = audio_time_label(if previewing { position } else { 0.0 }, duration);
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .h(px(36.0))
+            .px(px(10.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_tertiary)
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(4.0))
+                    .rounded_full()
+                    .bg(theme.border)
+                    .overflow_hidden()
+                    .when(progress > 0.0, |track| {
+                        track.child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(progress))
+                                .rounded_full()
+                                .bg(theme.brand),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .whitespace_nowrap()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(time_label),
             )
     }
 
@@ -691,8 +647,15 @@ impl SoundPicker {
         if let Some(editing) = &self.editing {
             return editing.shortname != name;
         }
-        let (start, end) = self.trim_slider.read(cx).value();
-        self.picked_path.is_some() && self.local_pcm.is_some() && end > start
+        if self.picked_path.is_none() || self.decode_pending {
+            return false;
+        }
+        if self.decode_failed {
+            return true;
+        }
+        self.local_pcm.is_some()
+            && self.selected_duration(cx) > 0.0
+            && self.selected_duration(cx) <= MAX_TRIM_SECS
     }
 
     fn pick_file(&mut self, cx: &mut Context<Self>) {
@@ -710,7 +673,7 @@ impl SoundPicker {
             multiple: false,
             prompt: Some(prompt),
         });
-        self._submit_task = Some(cx.spawn(async move |this, cx| {
+        self._pick_task = Some(cx.spawn(async move |this, cx| {
             let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
@@ -737,9 +700,14 @@ impl SoundPicker {
                 this.file_label = label.into();
                 this.preview_url = Some(preview.into());
                 this.local_pcm = None;
+                this.waveform_peaks.clear();
+                this.decode_pending = true;
+                this.decode_failed = false;
                 this.stop_local_preview(cx);
                 this.trim_slider.update(cx, |slider, cx| slider.reset(cx));
-                this.volume_slider.update(cx, |slider, cx| slider.reset(cx));
+                this.volume_slider.update(cx, |slider, cx| {
+                    slider.set_value(DEFAULT_VOLUME_PERCENT, window, cx);
+                });
                 if this.editing.is_none() {
                     this.name_input.update(cx, |state, cx| {
                         state.set_value(default_name, window, cx);
@@ -782,32 +750,52 @@ impl SoundPicker {
             return;
         }
 
+        let needs_processing = self.needs_processing(cx);
+        if needs_processing
+            && estimated_mono_wav_bytes(self.selected_duration(cx))
+                .is_none_or(|size| size > MAX_SOUND_BYTES)
+        {
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.error(sound_error_message(&locale, "size_limit"), cx)
+            });
+            return;
+        }
+
         self.submitting = true;
         cx.notify();
         let clan_id = self.clan_id;
         let editing = self.editing.clone();
         let picked_path = self.picked_path.clone();
-        let processed = self.local_pcm.as_ref().map(|pcm| {
+        let processing = self.local_pcm.as_ref().and_then(|pcm| {
+            if !needs_processing {
+                return None;
+            }
             let (start, end) = self.trim_times(cx);
-            process_pcm_to_wav(pcm, start, end, self.volume_gain(cx))
+            Some((
+                DecodedPcm {
+                    samples: Arc::clone(&pcm.samples),
+                    channels: pcm.channels,
+                    sample_rate: pcm.sample_rate,
+                },
+                start,
+                end,
+                self.volume_gain(cx),
+            ))
         });
 
         self._submit_task = Some(cx.spawn(async move |this, cx| {
-            let processed_path = match processed {
-                Some(Ok(bytes)) if bytes.len() as u64 <= MAX_SOUND_BYTES => {
-                    let path = processed_sound_path();
-                    match std::fs::write(&path, bytes) {
-                        Ok(()) => Some(ProcessedSoundFile(path)),
-                        Err(_) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.submitting = false;
-                                cx.notify();
-                            });
-                            show_error(cx, sound_error_message(&locale, "invalid_file"));
-                            return;
-                        }
-                    }
-                }
+            let processed = match processing {
+                Some((pcm, start, end, gain)) => Some(
+                    cx.background_spawn(async move {
+                        process_pcm_to_wav(&pcm, start, end, gain)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await,
+                ),
+                None => None,
+            };
+            let processed_bytes = match processed {
+                Some(Ok(bytes)) if bytes.len() as u64 <= MAX_SOUND_BYTES => Some(bytes),
                 Some(Ok(_)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
@@ -816,7 +804,8 @@ impl SoundPicker {
                     show_error(cx, sound_error_message(&locale, "size_limit"));
                     return;
                 }
-                Some(Err(_)) => {
+                Some(Err(error)) => {
+                    tracing::warn!("sound processing failed: {error}");
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();
@@ -826,17 +815,18 @@ impl SoundPicker {
                 }
                 None => None,
             };
-            let upload_path = processed_path
-                .as_ref()
-                .map(|file| &file.0)
-                .or(picked_path.as_ref());
-            let task = match (editing.as_ref(), upload_path) {
-                (Some(target), _) => cx.update(|cx| {
+            let task = match (editing.as_ref(), processed_bytes, picked_path.as_ref()) {
+                (Some(target), _, _) => cx.update(|cx| {
                     StickerStore::global(cx).update(cx, |store, cx| {
                         store.update_sound(&target.id, clan_id, &target.source, &name, cx)
                     })
                 }),
-                (None, Some(path)) => cx.update(|cx| {
+                (None, Some(bytes), _) => cx.update(|cx| {
+                    StickerStore::global(cx).update(cx, |store, cx| {
+                        store.create_sound_from_bytes(clan_id, bytes, "wav", &name, cx)
+                    })
+                }),
+                (None, None, Some(path)) => cx.update(|cx| {
                     StickerStore::global(cx)
                         .update(cx, |store, cx| store.create_sound(clan_id, path, &name, cx))
                 }),
@@ -883,23 +873,6 @@ impl SoundPicker {
     }
 }
 
-fn processed_sound_path() -> PathBuf {
-    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "mezon-sound-edit-{}-{nonce}.wav",
-        std::process::id()
-    ))
-}
-
-struct ProcessedSoundFile(PathBuf);
-
-impl Drop for ProcessedSoundFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
     let frames = pcm.frames();
     if frames == 0 {
@@ -917,9 +890,42 @@ fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
                     pcm.samples[offset..offset + pcm.channels].iter()
                 })
                 .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-            peak.max(0.08)
+            peak.clamp(0.08, 1.0)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_peaks_are_cached_at_a_bounded_height() {
+        let pcm = DecodedPcm {
+            samples: vec![2.0, -3.0, 0.0, 0.5].into(),
+            channels: 1,
+            sample_rate: 4,
+        };
+        let peaks = waveform_amplitudes(&pcm);
+        assert_eq!(peaks.len(), WAVEFORM_BARS);
+        assert!(peaks.iter().all(|peak| (0.08..=1.0).contains(peak)));
+        assert_eq!(peaks[0], 1.0);
+    }
+
+    #[test]
+    fn untouched_audio_bypasses_processing() {
+        assert!(!audio_needs_processing(0.0, 100.0, 100.0));
+        assert!(audio_needs_processing(1.0, 100.0, 100.0));
+        assert!(audio_needs_processing(0.0, 99.0, 100.0));
+        assert!(audio_needs_processing(0.0, 100.0, 80.0));
+    }
+
+    #[test]
+    fn volume_defaults_to_eighty_percent_of_unity_gain() {
+        assert_eq!(DEFAULT_VOLUME_PERCENT, 80.0);
+        assert_eq!(DEFAULT_VOLUME_PERCENT / UNITY_VOLUME_PERCENT, 0.8);
+        assert_eq!(MAX_VOLUME_PERCENT, 100.0);
+    }
 }
 
 fn sound_error_message(locale: &str, code: &str) -> String {
@@ -976,8 +982,9 @@ impl Render for SoundPicker {
         let name_len = self.name_input.read(cx).value().trim().chars().count();
         let previewing = self.is_previewing(cx);
         let (trim_start, trim_end) = self.trim_times(cx);
+        let trim_too_long = !is_edit && self.selected_duration(cx) > MAX_TRIM_SECS;
         let (preview_position, preview_duration) = self.preview_timeline(cx);
-        let volume_percent = self.volume_slider.read(cx).value().round() as u32;
+        let volume_percent = self.volume_slider.read(cx).value().end().round() as u32;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -1005,13 +1012,13 @@ impl Render for SoundPicker {
                                 div()
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_primary)
+                                    .text_color(theme.tokens.text_theme_message)
                                     .child(title),
                             )
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(theme.text_secondary)
+                                    .text_color(theme.tokens.text_theme_primary)
                                     .child(subtitle),
                             ),
                     )
@@ -1028,7 +1035,7 @@ impl Render for SoundPicker {
                             .child(
                                 Icon::new(IconName::Close)
                                     .size(px(16.))
-                                    .text_color(theme.text_secondary),
+                                    .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),
@@ -1041,7 +1048,7 @@ impl Render for SoundPicker {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.text_secondary)
+                            .text_color(theme.tokens.text_theme_message)
                             .child(preview_label.to_uppercase()),
                     )
                     .when(can_preview, |section| {
@@ -1082,52 +1089,61 @@ impl Render for SoundPicker {
                                             .text_color(gpui::white()),
                                         ),
                                 )
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .relative()
-                                                .w_full()
-                                                .h(px(64.0))
-                                                .flex()
-                                                .items_center()
-                                                .child(self.render_waveform(&theme))
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .top_0()
-                                                        .right_0()
-                                                        .bottom_0()
-                                                        .left_0()
-                                                        .child(
-                                                            WaveformTrimSlider::new(
-                                                                &self.trim_slider,
-                                                            )
-                                                            .disabled(!can_preview),
-                                                        ),
-                                                ),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .justify_between()
-                                                .text_xs()
-                                                .text_color(theme.text_muted)
-                                                .child(format_mmss(trim_start))
-                                                .child(if previewing {
-                                                    format!(
-                                                        "{} / {}",
-                                                        format_mmss(preview_position),
-                                                        format_mmss(preview_duration)
-                                                    )
-                                                } else {
-                                                    format_mmss(trim_end)
-                                                }),
-                                        ),
-                                ),
+                                .when(is_edit, |row| {
+                                    row.child(self.render_preview_playbar(previewing, &theme, cx))
+                                })
+                                .when(!is_edit, |row| {
+                                    row.child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .w_full()
+                                                    .h(px(64.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .child(self.render_waveform(&theme))
+                                                    .child(
+                                                        div()
+                                                            .absolute()
+                                                            .top_0()
+                                                            .right_0()
+                                                            .bottom_0()
+                                                            .left_0()
+                                                            .child(
+                                                                WaveformTrimSlider::new(
+                                                                    &self.trim_slider,
+                                                                )
+                                                                .disabled(!can_preview),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .w_full()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .text_color(if trim_too_long {
+                                                        theme.danger_text
+                                                    } else {
+                                                        theme.tokens.text_theme_primary
+                                                    })
+                                                    .child(format_mmss(trim_start))
+                                                    .child(if previewing {
+                                                        format!(
+                                                            "{} / {}",
+                                                            format_mmss(preview_position),
+                                                            format_mmss(preview_duration)
+                                                        )
+                                                    } else {
+                                                        format_mmss(trim_end)
+                                                    }),
+                                            ),
+                                    )
+                                }),
                         )
                     })
                     .when(!can_preview, |section| {
@@ -1145,12 +1161,12 @@ impl Render for SoundPicker {
                                 .child(
                                     Icon::new(IconName::UploadSoundIcon)
                                         .size(px(48.0))
-                                        .text_color(theme.text_muted),
+                                        .text_color(theme.tokens.text_theme_primary),
                                 ),
                         )
                     }),
             )
-            .when(can_preview, |root| {
+            .when(can_preview && !is_edit, |root| {
                 root.child(
                     v_flex()
                         .gap_1()
@@ -1162,17 +1178,17 @@ impl Render for SoundPicker {
                                     div()
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme.text_secondary)
+                                        .text_color(theme.tokens.text_theme_message)
                                         .child(volume_label.to_uppercase()),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(theme.text_muted)
+                                        .text_color(theme.tokens.text_theme_primary)
                                         .child(format!("{volume_percent}%")),
                                 ),
                         )
-                        .child(SoundVolumeSlider::new(&self.volume_slider)),
+                        .child(Slider::new(&self.volume_slider).percentage_positioning()),
                 )
             })
             .child(
@@ -1189,7 +1205,7 @@ impl Render for SoundPicker {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.text_secondary)
+                                    .text_color(theme.tokens.text_theme_message)
                                     .child(audio_label.to_uppercase()),
                             )
                             .child(
@@ -1214,7 +1230,7 @@ impl Render for SoundPicker {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .text_sm()
-                                                    .text_color(theme.text_primary)
+                                                    .text_color(theme.tokens.text_theme_message)
                                                     .overflow_hidden()
                                                     .text_ellipsis()
                                                     .whitespace_nowrap()
@@ -1224,7 +1240,7 @@ impl Render for SoundPicker {
                                     .child({
                                         let mut browse_btn =
                                             Button::new("sound-browse").label(browse);
-                                        if is_edit {
+                                        if is_edit || self.submitting {
                                             browse_btn = browse_btn.disabled(true);
                                         }
                                         browse_btn.on_click(
@@ -1245,7 +1261,7 @@ impl Render for SoundPicker {
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(theme.text_secondary)
+                                            .text_color(theme.tokens.text_theme_message)
                                             .child(name_label.to_uppercase()),
                                     )
                                     .child(
@@ -1254,7 +1270,7 @@ impl Render for SoundPicker {
                                             .text_color(if name_len > 40 {
                                                 theme.danger_text
                                             } else {
-                                                theme.text_muted
+                                                theme.tokens.text_theme_primary
                                             })
                                             .child(format!("{name_len}/{EMOTICON_SHORTNAME_MAX}")),
                                     ),
