@@ -4127,6 +4127,7 @@
   "setting.clanProfile.nicknameExists": "Smeknamnet finns redan",
   "setting.clanProfile.nicknamePlaceholder": "Klansmeknamn",
   "setting.clanProfile.saveFailed": "Det gick inte att spara klanprofilen:",
+  "setting.clanProfile.invalidNickname": "Klanens smeknamn får vara högst 64 tecken. Använd endast bokstäver, siffror, mellanslag och _ - . +. Får inte börja med _ eller -.",
   "setting.clanProfile.saved": "Klanprofil sparad",
   "setting.deviceSettings.current": "Nuvarande",
   "setting.deviceSettings.currentDevice": "Nuvarande enhet",

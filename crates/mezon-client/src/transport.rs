@@ -8006,14 +8006,14 @@ impl MezonTransport {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id,
-            nick_name: Some(nick_name.to_string()),
-            avatar: avatar_url.map(|s| s.to_string()),
+            nick_name: nick_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8026,10 +8026,9 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
             ));
         }
         Ok(())

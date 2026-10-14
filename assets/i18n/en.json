@@ -4125,6 +4125,7 @@
   "setting.clanProfile.nicknameExists": "Nickname already exists",
   "setting.clanProfile.nicknamePlaceholder": "Clan nickname",
   "setting.clanProfile.saveFailed": "Failed to save clan profile:",
+  "setting.clanProfile.invalidNickname": "Clan nickname must be at most 64 characters. Use only letters, numbers, spaces, and _ - . +. It cannot start with _ or -.",
   "setting.clanProfile.saved": "Clan profile saved",
   "setting.deviceSettings.current": "Current",
   "setting.deviceSettings.currentDevice": "Current Device",

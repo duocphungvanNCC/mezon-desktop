@@ -4127,6 +4127,7 @@
   "setting.clanProfile.nicknameExists": "이미 존재하는 닉네임입니다",
   "setting.clanProfile.nicknamePlaceholder": "클랜 닉네임",
   "setting.clanProfile.saveFailed": "클랜 프로필 저장에 실패했습니다:",
+  "setting.clanProfile.invalidNickname": "클랜 별명은 최대 64자까지 가능합니다. 문자, 숫자, 공백 및 _ - . +만 사용할 수 있으며 _ 또는 -로 시작할 수 없습니다.",
   "setting.clanProfile.saved": "클랜 프로필을 저장했습니다",
   "setting.deviceSettings.current": "현재",
   "setting.deviceSettings.currentDevice": "현재 장치",

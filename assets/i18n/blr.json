@@ -4126,6 +4126,7 @@
   "setting.clanProfile.nicknameExists": "Такі псеўданім ужо існуе",
   "setting.clanProfile.nicknamePlaceholder": "Мянушка клана",
   "setting.clanProfile.saveFailed": "Не ўдалося захаваць профіль клана:",
+  "setting.clanProfile.invalidNickname": "Мянушка клана павінна змяшчаць не больш за 64 сімвалы. Дазволены толькі літары, лічбы, прабелы і _ - . +. Не можа пачынацца з _ або -.",
   "setting.clanProfile.saved": "Профіль клана захаваны",
   "setting.deviceSettings.current": "Бягучы",
   "setting.deviceSettings.currentDevice": "Бягучая прылада",

@@ -2814,7 +2814,7 @@ impl AppApi {
     pub async fn update_user_clan_profile(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         self.transport

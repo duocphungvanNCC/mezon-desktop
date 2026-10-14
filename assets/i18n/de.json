@@ -4127,6 +4127,7 @@
   "setting.clanProfile.nicknameExists": "Spitzname existiert bereits",
   "setting.clanProfile.nicknamePlaceholder": "Clan-Spitzname",
   "setting.clanProfile.saveFailed": "Clan-Profil konnte nicht gespeichert werden:",
+  "setting.clanProfile.invalidNickname": "Clan-Spitzname darf höchstens 64 Zeichen lang sein. Nur Buchstaben, Zahlen, Leerzeichen und _ - . + sind erlaubt. Er darf nicht mit _ oder - beginnen.",
   "setting.clanProfile.saved": "Clan-Profil gespeichert",
   "setting.deviceSettings.current": "Aktuell",
   "setting.deviceSettings.currentDevice": "Aktuelles Gerät",

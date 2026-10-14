@@ -4126,6 +4126,7 @@
   "setting.clanProfile.nicknameExists": "Такий псевдонім уже існує",
   "setting.clanProfile.nicknamePlaceholder": "Прізвисько клану",
   "setting.clanProfile.saveFailed": "Не вдалося зберегти профіль клану:",
+  "setting.clanProfile.invalidNickname": "Прізвисько клану має містити не більше 64 символів. Дозволені лише літери, цифри, пробіли та _ - . +. Не може починатися з _ або -.",
   "setting.clanProfile.saved": "Профіль клану збережено",
   "setting.deviceSettings.current": "Поточний",
   "setting.deviceSettings.currentDevice": "Поточний пристрій",

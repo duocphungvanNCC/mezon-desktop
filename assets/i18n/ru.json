@@ -4369,6 +4369,7 @@
   "setting.clanProfile.nicknameExists": "Такой ник уже существует",
   "setting.clanProfile.nicknamePlaceholder": "Ник в клане",
   "setting.clanProfile.saveFailed": "Не удалось сохранить профиль клана:",
+  "setting.clanProfile.invalidNickname": "Псевдоним в клане должен содержать не более 64 символов. Допустимы только буквы, цифры, пробелы и _ - . +. Не может начинаться с _ или -.",
   "setting.clanProfile.saved": "Профиль клана сохранён",
   "setting.deviceSettings.current": "Текущий",
   "setting.deviceSettings.currentDevice": "Текущее устройство",

@@ -4126,6 +4126,7 @@
   "setting.clanProfile.nicknameExists": "Bijnaam bestaat al",
   "setting.clanProfile.nicknamePlaceholder": "Clan Bijnaam",
   "setting.clanProfile.saveFailed": "Clanprofiel kon niet worden opgeslagen:",
+  "setting.clanProfile.invalidNickname": "Clanbijnaam mag maximaal 64 tekens bevatten. Gebruik alleen letters, cijfers, spaties en _ - . +. Mag niet beginnen met _ of -.",
   "setting.clanProfile.saved": "Clanprofiel opgeslagen",
   "setting.deviceSettings.current": "Huidig",
   "setting.deviceSettings.currentDevice": "Huidig apparaat",
