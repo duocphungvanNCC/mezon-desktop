@@ -75,7 +75,6 @@ pub struct ChatLayout {
     voice_focus: FocusHandle,
     _voice_ptt_activation: Option<Subscription>,
     pending_channel_id: Option<ChannelId>,
-    prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
@@ -536,7 +535,6 @@ impl ChatLayout {
             voice_focus: cx.focus_handle(),
             _voice_ptt_activation: None,
             pending_channel_id: None,
-            prefetched_voice_channel: None,
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
@@ -1439,33 +1437,6 @@ impl ChatLayout {
         }
     }
 
-    fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
-        let active_voice_channel = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .filter(|ch| ch.channel_type == ChannelType::Voice)
-            .map(|ch| ch.id);
-
-        if active_voice_channel == self.prefetched_voice_channel {
-            return;
-        }
-        self.prefetched_voice_channel = active_voice_channel;
-
-        if let Some(channel_id) = active_voice_channel {
-            let clan_id = self
-                .channel_list
-                .read(cx)
-                .active_channel()
-                .map(|ch| ch.clan_id);
-            if let Some(clan_id) = clan_id {
-                self.voice_store.update(cx, |store, cx| {
-                    store.prefetch_meet_token(channel_id.to_string(), clan_id.to_string(), cx);
-                });
-            }
-        }
-    }
-
     fn threads_panel_state_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = ThreadsStore::global(cx);
         let store = store.read(cx);
@@ -1724,7 +1695,6 @@ impl Render for ChatLayout {
         }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
-        self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         if std::mem::take(&mut self.pending_open_threads_popover) {

@@ -74,9 +74,7 @@ pub enum NoiseSuppressionStatus {
     Error,
 }
 
-const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const NOISE_SUPPRESSION_DEFAULT_ENABLED: bool = true;
-// The web voice thunk normalizes an empty roomName to "0" before requesting the SFU token.
 const SFU_TOKEN_ROOM_NAME: &str = "0";
 const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
 const SFU_RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(30);
@@ -245,13 +243,6 @@ fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> Stri
         .find(|value| !value.is_empty())
         .unwrap_or_default();
     format!("{username};{avatar}")
-}
-
-struct CachedMeetToken {
-    channel_id: String,
-    metadata: String,
-    token: mezon_proto::api::GenerateMeetTokenResponse,
-    fetched_at: Instant,
 }
 
 #[derive(Clone)]
@@ -431,7 +422,6 @@ pub struct VoiceStore {
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_work: AtomicBool,
-    cached_meet_token: Option<CachedMeetToken>,
     role: SfuRole,
     ptt_active: bool,
     ptt_held: bool,
@@ -440,7 +430,6 @@ pub struct VoiceStore {
     network_warning_dismissed: bool,
     pending_join_role: SfuRole,
     join_role_menu_open: bool,
-    meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
     screen_share_mode: ScreenShareMode,
     link_copied: bool,
@@ -824,7 +813,6 @@ impl VoiceStore {
             pending_texture_drops: Mutex::new(Vec::new()),
             pending_texture_replaces: Mutex::new(Vec::new()),
             pending_texture_work: AtomicBool::new(false),
-            cached_meet_token: None,
             role: SfuRole::Speaker,
             ptt_active: false,
             ptt_held: false,
@@ -833,7 +821,6 @@ impl VoiceStore {
             network_warning_dismissed: false,
             pending_join_role: SfuRole::Speaker,
             join_role_menu_open: false,
-            meet_token_prefetching: None,
             last_screen_share: None,
             link_copied: false,
             recording: RecordingState::Idle,
@@ -902,57 +889,6 @@ impl VoiceStore {
                 me.and_then(|m| m.avatar_url.as_deref()).unwrap_or_default(),
             ],
         )
-    }
-
-    fn cached_token_for(
-        &self,
-        channel_id: &str,
-        metadata: &str,
-    ) -> Option<mezon_proto::api::GenerateMeetTokenResponse> {
-        let cached = self.cached_meet_token.as_ref()?;
-        if cached.channel_id == channel_id
-            && cached.metadata == metadata
-            && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL
-        {
-            return Some(cached.token.clone());
-        }
-        None
-    }
-
-    pub fn prefetch_meet_token(
-        &mut self,
-        channel_id: String,
-        clan_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        let metadata = Self::meet_token_metadata(&clan_id, cx);
-        if self.cached_token_for(&channel_id, &metadata).is_some() {
-            return;
-        }
-        if self.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
-            return;
-        }
-        self.meet_token_prefetching = Some(channel_id.clone());
-        let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
-            let token = api
-                .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
-                .await;
-            let _ = this.update(cx, |this, _| {
-                if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
-                    this.meet_token_prefetching = None;
-                }
-                if let Ok(token) = token {
-                    this.cached_meet_token = Some(CachedMeetToken {
-                        channel_id: channel_id.clone(),
-                        metadata: metadata.clone(),
-                        token,
-                        fetched_at: Instant::now(),
-                    });
-                }
-            });
-        })
-        .detach();
     }
 
     pub fn connection(&self) -> &VoiceConnection {
@@ -3008,32 +2944,12 @@ impl VoiceStore {
 
         let api = self.api.clone();
         let metadata = Self::meet_token_metadata(&clan_id, cx);
-        let cached_token = self.cached_token_for(&channel_id, &metadata);
-        if let Some(token) = cached_token {
-            self.start_session(
-                ws_url,
-                token,
-                channel_id,
-                false,
-                input_device_id,
-                output_device_id,
-                camera_device_id,
-                cx,
-            );
-            return;
-        }
         cx.spawn(async move |this, cx| {
             let token = api
                 .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                 .await;
             let _ = this.update(cx, |this, cx| match token {
                 Ok(token) => {
-                    this.cached_meet_token = Some(CachedMeetToken {
-                        channel_id: channel_id.clone(),
-                        metadata: metadata.clone(),
-                        token: token.clone(),
-                        fetched_at: Instant::now(),
-                    });
                     this.start_session(
                         ws_url,
                         token,
@@ -3363,12 +3279,6 @@ impl VoiceStore {
                             "voice reconnect watchdog rebuilding SFU session for channel {}",
                             snapshot.channel_id
                         );
-                        this.cached_meet_token = Some(CachedMeetToken {
-                            channel_id: snapshot.channel_id.clone(),
-                            metadata: snapshot.metadata.clone(),
-                            token: token.clone(),
-                            fetched_at: Instant::now(),
-                        });
                         this.restart_sfu_session(generation, snapshot, token, cx);
                     }
                     Err(e) => {
@@ -3511,9 +3421,6 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
             }
             VoiceEvent::Reconnecting => {
-                if self.connection.is_connecting() {
-                    self.cached_meet_token = None;
-                }
                 if self
                     .reconnect_healthy_since
                     .is_some_and(|since| since.elapsed() >= SFU_RECONNECT_HEALTHY_SESSION)
@@ -3674,9 +3581,6 @@ impl VoiceStore {
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
-                if reason.contains("invalid_token") || reason.contains("missing_token") {
-                    self.cached_meet_token = None;
-                }
                 let was_connected = matches!(&self.connection, VoiceConnection::Connected { .. });
                 let unjoined_channel = match &self.connection {
                     VoiceConnection::Connecting { channel_id, .. }
@@ -4749,7 +4653,6 @@ impl VoiceStore {
         self.last_flower_effect_at = None;
         self.shown_flowers.clear();
         self.flower_seq = 0;
-        self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;
         self.recording = RecordingState::Idle;
