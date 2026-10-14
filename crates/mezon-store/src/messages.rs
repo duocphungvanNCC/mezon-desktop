@@ -17066,7 +17066,7 @@ mod tests {
                 store.set_active_topic(Some(77), cx);
                 assert!(!store.topic_anonymous_mode());
 
-                store.toggle_anonymous_mode(cx);
+                store.toggle_anonymous_mode(true, cx);
                 assert!(store.topic_anonymous_mode());
 
                 store.set_active_topic(None, cx);
