@@ -740,6 +740,8 @@ const LINUX_DESKTOP_ENTRY: &str = "mezon";
 const GATE_WAITING: u8 = 0;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const GATE_CLOSE: u8 = 1;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const GATE_SUPERSEDED: u8 = 2;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct CloseGate {
@@ -759,6 +761,25 @@ impl CloseGate {
     fn request(&self, action: u8) {
         self.action
             .store(action, std::sync::atomic::Ordering::Release);
+        self.wake();
+    }
+
+    fn supersede(&self) {
+        if self
+            .action
+            .compare_exchange(
+                GATE_WAITING,
+                GATE_SUPERSEDED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.wake();
+        }
+    }
+
+    fn wake(&self) {
         if let Some(waker) = self
             .waker
             .lock()
@@ -788,7 +809,7 @@ impl std::future::Future for CloseWait {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<u8> {
         let action = self.gate.action();
-        if action == GATE_CLOSE {
+        if action != GATE_WAITING {
             return std::task::Poll::Ready(action);
         }
         *self
@@ -797,7 +818,7 @@ impl std::future::Future for CloseWait {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(cx.waker().clone());
         let action = self.gate.action();
-        if action == GATE_CLOSE {
+        if action != GATE_WAITING {
             std::task::Poll::Ready(action)
         } else {
             std::task::Poll::Pending
@@ -856,6 +877,87 @@ fn gate_channel_key(channel_id: &str) -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct ChannelToastSlot {
+    generation: u64,
+    id: u32,
+    gate: std::sync::Arc<CloseGate>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct ChannelToastBook {
+    slots: std::collections::HashMap<String, ChannelToastSlot>,
+    turns: std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>,
+    next_generation: u64,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl ChannelToastBook {
+    fn new() -> Self {
+        Self {
+            slots: std::collections::HashMap::new(),
+            turns: std::collections::HashMap::new(),
+            next_generation: 0,
+        }
+    }
+
+    fn replaces_id(&self, key: &str) -> u32 {
+        self.slots.get(key).map(|slot| slot.id).unwrap_or(0)
+    }
+
+    fn turn(&mut self, key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+        self.turns
+            .entry(key.to_owned())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn publish(&mut self, key: &str, id: u32, gate: std::sync::Arc<CloseGate>) -> u64 {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        if let Some(previous) = self.slots.insert(
+            key.to_owned(),
+            ChannelToastSlot {
+                generation,
+                id,
+                gate,
+            },
+        ) {
+            previous.gate.supersede();
+        }
+        generation
+    }
+
+    fn retire(&mut self, key: &str, generation: u64) {
+        if self
+            .slots
+            .get(key)
+            .is_some_and(|slot| slot.generation == generation)
+        {
+            self.slots.remove(key);
+        }
+    }
+
+    fn owns(&self, key: &str, generation: u64) -> bool {
+        self.slots
+            .get(key)
+            .is_some_and(|slot| slot.generation == generation)
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn toast_book() -> std::sync::MutexGuard<'static, ChannelToastBook> {
+    static BOOK: std::sync::OnceLock<std::sync::Mutex<ChannelToastBook>> =
+        std::sync::OnceLock::new();
+    BOOK.get_or_init(|| std::sync::Mutex::new(ChannelToastBook::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn session_connection() -> Option<&'static zbus::Connection> {
     static CONN: std::sync::OnceLock<Option<zbus::Connection>> = std::sync::OnceLock::new();
     CONN.get_or_init(|| {
@@ -885,6 +987,8 @@ async fn dbus_notify(
     body: &str,
     icon: &str,
     has_action: bool,
+    replaces_id: u32,
+    with_sound: bool,
 ) -> Result<u32, zbus::Error> {
     let actions: &[&str] = if has_action {
         &["default", "Open"]
@@ -893,16 +997,27 @@ async fn dbus_notify(
     };
     let mut hints = std::collections::HashMap::<&str, zbus::zvariant::Value<'_>>::new();
     hints.insert("desktop-entry", zbus::zvariant::Value::Str("mezon".into()));
-    hints.insert(
-        "sound-name",
-        zbus::zvariant::Value::Str("message-new-instant".into()),
-    );
+    if with_sound {
+        hints.insert(
+            "sound-name",
+            zbus::zvariant::Value::Str("message-new-instant".into()),
+        );
+    }
     conn.call_method(
         Some("org.freedesktop.Notifications"),
         "/org/freedesktop/Notifications",
         Some("org.freedesktop.Notifications"),
         "Notify",
-        &("Mezon", 0u32, icon, summary, body, actions, &hints, -1i32),
+        &(
+            "Mezon",
+            replaces_id,
+            icon,
+            summary,
+            body,
+            actions,
+            &hints,
+            -1i32,
+        ),
     )
     .await?
     .body()
@@ -963,7 +1078,12 @@ fn drive_shown(
     id: u32,
     gate: std::sync::Arc<CloseGate>,
     target: Option<NotificationTarget>,
+    channel_key: Option<String>,
+    generation: u64,
 ) {
+    if gate.action() == GATE_SUPERSEDED {
+        return;
+    }
     if gate.action() == GATE_CLOSE {
         pollster::block_on(dbus_close_id(conn, id));
         return;
@@ -971,7 +1091,11 @@ fn drive_shown(
     let action = pollster::block_on(async {
         let gate_ref = std::sync::Arc::clone(&gate);
         let mut wait = std::pin::pin!(wait_for_notification(conn, id, |action| {
-            if notification_clicked_action(action)
+            let current = channel_key
+                .as_deref()
+                .is_none_or(|key| toast_book().owns(key, generation));
+            if current
+                && notification_clicked_action(action)
                 && let Some(t) = target
             {
                 dispatch_click(t);
@@ -1032,30 +1156,63 @@ fn show_linux(n: &Notification) {
 
     std::thread::spawn(move || {
         let _guard = GateGuard {
-            key: channel_key,
+            key: channel_key.clone(),
             gate: std::sync::Arc::clone(&gate),
         };
-        if gate.action() == GATE_CLOSE {
-            return;
-        }
-        let id = match pollster::block_on(dbus_notify(
-            &conn,
-            &title,
-            &body,
-            &icon,
-            activation_target.is_some(),
-        )) {
-            Ok(id) if id > 0 => id,
-            Ok(_) => {
-                tracing::warn!("Linux notification: daemon returned id=0");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Linux notification failed: {e}");
-                return;
+        let shown = {
+            let turn = channel_key.as_deref().map(|key| toast_book().turn(key));
+            let _turn = turn
+                .as_ref()
+                .map(|turn| turn.lock().unwrap_or_else(|poison| poison.into_inner()));
+            if gate.action() == GATE_CLOSE {
+                None
+            } else {
+                let replaces_id = channel_key
+                    .as_deref()
+                    .map(|key| toast_book().replaces_id(key))
+                    .unwrap_or(0);
+                match pollster::block_on(dbus_notify(
+                    &conn,
+                    &title,
+                    &body,
+                    &icon,
+                    activation_target.is_some(),
+                    replaces_id,
+                    replaces_id == 0,
+                )) {
+                    Ok(id) if id > 0 => {
+                        let generation = channel_key
+                            .as_deref()
+                            .map(|key| toast_book().publish(key, id, std::sync::Arc::clone(&gate)));
+                        Some((id, generation.unwrap_or(0)))
+                    }
+                    Ok(_) => {
+                        tracing::warn!("Linux notification: daemon returned id=0");
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("Linux notification failed: {e}");
+                        None
+                    }
+                }
             }
         };
-        drive_shown(&conn, id, gate, activation_target);
+        let Some((id, generation)) = shown else {
+            return;
+        };
+        drive_shown(
+            &conn,
+            id,
+            std::sync::Arc::clone(&gate),
+            activation_target,
+            channel_key.clone(),
+            generation,
+        );
+        if let Some(key) = channel_key.as_deref() {
+            let turn = toast_book().turn(key);
+            let _turn = turn.lock().unwrap_or_else(|poison| poison.into_inner());
+            toast_book().retire(key, generation);
+        }
     });
 }
 
@@ -1091,6 +1248,7 @@ pub fn close_all() {
         for gate in all {
             gate.request(GATE_CLOSE);
         }
+        toast_book().clear();
     }
 }
 
@@ -1137,6 +1295,47 @@ mod tests {
         };
         drop(guard);
         assert!(lock_gates().get(key).is_none());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_channel_replaces_its_live_toast_until_that_toast_ends() {
+        let mut book = ChannelToastBook::new();
+        let first = std::sync::Arc::new(CloseGate::new());
+        let second = std::sync::Arc::new(CloseGate::new());
+        let other = std::sync::Arc::new(CloseGate::new());
+
+        assert_eq!(book.replaces_id("channel-a"), 0);
+        let first_generation = book.publish("channel-a", 41, std::sync::Arc::clone(&first));
+        assert_eq!(book.replaces_id("channel-a"), 41);
+
+        let second_generation = book.publish("channel-a", 41, std::sync::Arc::clone(&second));
+        assert_eq!(first.action(), GATE_SUPERSEDED);
+        assert_eq!(book.replaces_id("channel-a"), 41);
+        assert!(book.owns("channel-a", second_generation));
+        assert!(!book.owns("channel-a", first_generation));
+
+        book.retire("channel-a", first_generation);
+        assert_eq!(book.replaces_id("channel-a"), 41);
+
+        let other_generation = book.publish("channel-b", 77, other);
+        assert_eq!(second.action(), GATE_WAITING);
+        assert_eq!(book.replaces_id("channel-a"), 41);
+        assert_eq!(book.replaces_id("channel-b"), 77);
+
+        book.retire("channel-a", second_generation);
+        book.retire("channel-b", other_generation);
+        assert_eq!(book.replaces_id("channel-a"), 0);
+        assert_eq!(book.replaces_id("channel-b"), 0);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn supersede_leaves_a_toast_that_is_already_closing() {
+        let gate = std::sync::Arc::new(CloseGate::new());
+        gate.request(GATE_CLOSE);
+        gate.supersede();
+        assert_eq!(gate.action(), GATE_CLOSE);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
