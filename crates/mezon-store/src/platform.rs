@@ -271,6 +271,15 @@ fn note_channel_dismissed(channel_id: &str) {
         .insert(channel_id.to_owned(), seq);
 }
 
+pub fn reset_dismissed() {
+    channel_dismissed_at()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+}
+
+pub type CloseAllNotificationsFn = Arc<dyn Fn() + Send + Sync>;
+
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     open_url_app_window: Option<OpenUrlFn>,
@@ -278,6 +287,7 @@ pub struct PlatformStore {
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     dismiss_channel_notification: Option<DismissChannelNotificationFn>,
+    close_all_notifications: Option<CloseAllNotificationsFn>,
     cli_install: Option<CliInstallHooks>,
     mcp_server: Option<McpServerHooks>,
     notification_permit: Option<NotificationPermitFn>,
@@ -293,6 +303,7 @@ impl PlatformStore {
             save_attachment: None,
             notifier: None,
             dismiss_channel_notification: None,
+            close_all_notifications: None,
             cli_install: None,
             mcp_server: None,
             notification_permit: None,
@@ -406,6 +417,22 @@ impl PlatformStore {
         entity.update(cx, |store, _| {
             store.dismiss_channel_notification = Some(f);
         });
+    }
+
+    pub fn set_close_all_notifications(
+        entity: &Entity<Self>,
+        f: CloseAllNotificationsFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.close_all_notifications = Some(f);
+        });
+    }
+
+    pub fn close_all_notifications(&self) {
+        if let Some(f) = &self.close_all_notifications {
+            f();
+        }
     }
 
     pub fn arm_channel_show(channel_id: Option<&str>) -> u64 {

@@ -5707,6 +5707,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",
  "flume",
+ "futures-lite 1.13.0",
  "image",
  "ksni",
  "libc",

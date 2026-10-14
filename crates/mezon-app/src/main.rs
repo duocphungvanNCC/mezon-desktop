@@ -1067,6 +1067,13 @@ fn open_main_window(
         }),
         cx,
     );
+    mezon_store::PlatformStore::set_close_all_notifications(
+        &platform_store,
+        std::sync::Arc::new(|| {
+            mezon_native::notifications::close_all();
+        }),
+        cx,
+    );
     mezon_store::PlatformStore::set_notifier(
         &platform_store,
         std::sync::Arc::new(|n: mezon_store::DesktopNotification| {

@@ -728,7 +728,10 @@ fn escape_xml(s: &str) -> String {
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
 //
-// Uses the `notify-rust` crate which wraps D-Bus `org.freedesktop.Notifications`.
+// Uses a single persistent zbus session connection for all notifications so that
+// GNOME's FdoNotificationDaemonSource watches one stable D-Bus unique name that
+// lives for the whole process, eliminating the per-app-Source destruction that
+// occurred when individual per-toast connections were dropped.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const LINUX_DESKTOP_ENTRY: &str = "mezon";
@@ -853,95 +856,130 @@ fn gate_channel_key(channel_id: &str) -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn notification_clicked(response: &notify_rust::NotificationResponse) -> bool {
-    match response {
-        notify_rust::NotificationResponse::Default => true,
-        notify_rust::NotificationResponse::Action(action) => action == "default",
-        _ => false,
-    }
+fn session_connection() -> Option<&'static zbus::Connection> {
+    static CONN: std::sync::OnceLock<Option<zbus::Connection>> = std::sync::OnceLock::new();
+    CONN.get_or_init(|| {
+        pollster::block_on(async {
+            let conn = zbus::Connection::session().await.ok()?;
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await.ok()?;
+            for member in ["ActionInvoked", "NotificationClosed"] {
+                let rule = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.Notifications")
+                    .ok()?
+                    .member(member)
+                    .ok()?
+                    .build();
+                proxy.add_match_rule(rule).await.ok()?;
+            }
+            Some(conn)
+        })
+    })
+    .as_ref()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn close_shown(handle: &notify_rust::NotificationHandle) {
-    pollster::block_on(handle.close_async());
+async fn dbus_notify(
+    conn: &zbus::Connection,
+    summary: &str,
+    body: &str,
+    icon: &str,
+    has_action: bool,
+) -> Result<u32, zbus::Error> {
+    let actions: &[&str] = if has_action {
+        &["default", "Open"]
+    } else {
+        &[]
+    };
+    let mut hints = std::collections::HashMap::<&str, zbus::zvariant::Value<'_>>::new();
+    hints.insert("desktop-entry", zbus::zvariant::Value::Str("mezon".into()));
+    hints.insert(
+        "sound-name",
+        zbus::zvariant::Value::Str("message-new-instant".into()),
+    );
+    conn.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &("Mezon", 0u32, icon, summary, body, actions, &hints, -1i32),
+    )
+    .await?
+    .body()
+    .deserialize()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-struct ShownToasts<H> {
-    live: usize,
-    anchor_toast: Option<u64>,
-    anchor: Option<H>,
+async fn dbus_close_id(conn: &zbus::Connection, id: u32) {
+    let _ = conn
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "CloseNotification",
+            &(id,),
+        )
+        .await;
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl<H> ShownToasts<H> {
-    const fn new() -> Self {
-        Self {
-            live: 0,
-            anchor_toast: None,
-            anchor: None,
+async fn wait_for_notification(conn: &zbus::Connection, id: u32, on_action: impl FnOnce(&str)) {
+    use futures_lite::StreamExt as _;
+    let mut stream = zbus::MessageStream::from(conn);
+    while let Some(Ok(msg)) = stream.next().await {
+        let header = msg.header();
+        if !matches!(header.message_type(), zbus::message::Type::Signal) {
+            continue;
+        }
+        match header.member() {
+            Some(m) if m == "ActionInvoked" => {
+                if let Ok((nid, action)) = msg.body().deserialize::<(u32, String)>()
+                    && nid == id
+                {
+                    on_action(&action);
+                    return;
+                }
+            }
+            Some(m) if m == "NotificationClosed" => {
+                if let Ok((nid, _)) = msg.body().deserialize::<(u32, u32)>()
+                    && nid == id
+                {
+                    return;
+                }
+            }
+            _ => {}
         }
     }
-
-    fn register(&mut self, toast: u64) {
-        self.live += 1;
-        if self.anchor_toast.is_none() {
-            self.anchor_toast = Some(toast);
-        }
-    }
-
-    fn retire(&mut self, toast: u64, handle: H) -> Vec<H> {
-        self.live = self.live.saturating_sub(1);
-        if self.live == 0 {
-            self.anchor_toast = None;
-            let mut released: Vec<H> = self.anchor.take().into_iter().collect();
-            released.push(handle);
-            return released;
-        }
-        if self.anchor_toast == Some(toast) {
-            self.anchor = Some(handle);
-            return Vec::new();
-        }
-        vec![handle]
-    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn shown_toasts() -> std::sync::MutexGuard<'static, ShownToasts<notify_rust::NotificationHandle>> {
-    static SHOWN: std::sync::Mutex<ShownToasts<notify_rust::NotificationHandle>> =
-        std::sync::Mutex::new(ShownToasts::new());
-    SHOWN.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn next_toast_id() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+fn notification_clicked_action(action: &str) -> bool {
+    action.is_empty() || action == "default"
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn drive_shown(
-    handle: &notify_rust::NotificationHandle,
+    conn: &zbus::Connection,
+    id: u32,
     gate: std::sync::Arc<CloseGate>,
     target: Option<NotificationTarget>,
-) -> u8 {
-    let pending = gate.action();
-    if pending == GATE_CLOSE {
-        close_shown(handle);
-        return pending;
+) {
+    if gate.action() == GATE_CLOSE {
+        pollster::block_on(dbus_close_id(conn, id));
+        return;
     }
     let action = pollster::block_on(async {
-        let gate = std::sync::Arc::clone(&gate);
-        let mut wait = std::pin::pin!(handle.wait_for_action_async(move |response| {
-            if notification_clicked(response)
-                && let Some(target) = target
+        let gate_ref = std::sync::Arc::clone(&gate);
+        let mut wait = std::pin::pin!(wait_for_notification(conn, id, |action| {
+            if notification_clicked_action(action)
+                && let Some(t) = target
             {
-                dispatch_click(target);
+                dispatch_click(t);
             }
         }));
-        let mut close = std::pin::pin!(CloseWait { gate });
+        let mut close = std::pin::pin!(CloseWait { gate: gate_ref });
         std::future::poll_fn(|cx| match close.as_mut().poll(cx) {
-            std::task::Poll::Ready(action) => std::task::Poll::Ready(action),
+            std::task::Poll::Ready(v) => std::task::Poll::Ready(v),
             std::task::Poll::Pending => {
                 if wait.as_mut().poll(cx).is_ready() {
                     std::task::Poll::Ready(GATE_WAITING)
@@ -953,38 +991,31 @@ fn drive_shown(
         .await
     });
     if action == GATE_CLOSE {
-        close_shown(handle);
-    }
-    action
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn show_in_arrival_order(
-    notification: &notify_rust::Notification,
-) -> Option<(u64, notify_rust::NotificationHandle)> {
-    static ARRIVAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _arrival = ARRIVAL.lock().unwrap_or_else(|poison| poison.into_inner());
-    match notification.show() {
-        Ok(handle) => {
-            let toast = next_toast_id();
-            shown_toasts().register(toast);
-            Some((toast, handle))
-        }
-        Err(e) => {
-            tracing::warn!("Linux notification failed: {e}");
-            None
-        }
+        pollster::block_on(dbus_close_id(conn, id));
     }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn retire_shown(toast: u64, handle: notify_rust::NotificationHandle) {
-    let released = shown_toasts().retire(toast, handle);
-    drop(released);
+struct GateGuard {
+    key: Option<String>,
+    gate: std::sync::Arc<CloseGate>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.as_deref() {
+            release_gate(key, &self.gate);
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn show_linux(n: &Notification) {
+    let Some(conn) = session_connection() else {
+        tracing::warn!("Linux notification skipped: no D-Bus session connection");
+        return;
+    };
     let title = n.title.clone();
     let body = n.body.clone();
     let channel_key = n.channel_id.as_deref().and_then(gate_channel_key);
@@ -994,41 +1025,37 @@ fn show_linux(n: &Notification) {
         .clone()
         .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned());
     let gate = std::sync::Arc::new(CloseGate::new());
-    if let Some(channel_key) = channel_key.clone() {
-        push_gate(&channel_key, std::sync::Arc::clone(&gate));
+    if let Some(key) = channel_key.clone() {
+        push_gate(&key, std::sync::Arc::clone(&gate));
     }
+    let conn = conn.clone();
 
     std::thread::spawn(move || {
-        if gate.action() == GATE_CLOSE {
-            if let Some(channel_key) = channel_key.as_deref() {
-                release_gate(channel_key, &gate);
-            }
-            return;
-        }
-        let mut notification = notify_rust::Notification::new();
-        notification
-            .appname("Mezon")
-            .summary(&title)
-            .body(&body)
-            .icon(&icon)
-            .hint(notify_rust::Hint::DesktopEntry(
-                LINUX_DESKTOP_ENTRY.to_owned(),
-            ))
-            .sound_name("message-new-instant");
-        if activation_target.is_some() {
-            notification.action("default", "Open");
-        }
-        let Some((toast, handle)) = show_in_arrival_order(&notification) else {
-            if let Some(channel_key) = channel_key.as_deref() {
-                release_gate(channel_key, &gate);
-            }
-            return;
+        let _guard = GateGuard {
+            key: channel_key,
+            gate: std::sync::Arc::clone(&gate),
         };
-        drive_shown(&handle, std::sync::Arc::clone(&gate), activation_target);
-        retire_shown(toast, handle);
-        if let Some(channel_key) = channel_key.as_deref() {
-            release_gate(channel_key, &gate);
+        if gate.action() == GATE_CLOSE {
+            return;
         }
+        let id = match pollster::block_on(dbus_notify(
+            &conn,
+            &title,
+            &body,
+            &icon,
+            activation_target.is_some(),
+        )) {
+            Ok(id) if id > 0 => id,
+            Ok(_) => {
+                tracing::warn!("Linux notification: daemon returned id=0");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Linux notification failed: {e}");
+                return;
+            }
+        };
+        drive_shown(&conn, id, gate, activation_target);
     });
 }
 
@@ -1049,6 +1076,21 @@ fn close_linux_channel(clan_id: Option<&str>, channel_id: &str) {
     };
     for gate in take_gates(&key) {
         gate.request(GATE_CLOSE);
+    }
+}
+
+pub fn close_all() {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let all: Vec<std::sync::Arc<CloseGate>> = {
+            let mut gates = lock_gates();
+            let collected: Vec<_> = gates.values().flatten().cloned().collect();
+            gates.clear();
+            collected
+        };
+        for gate in all {
+            gate.request(GATE_CLOSE);
+        }
     }
 }
 
@@ -1084,22 +1126,33 @@ mod tests {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
-    fn the_connection_gnome_watches_outlives_the_other_toasts() {
-        let mut shown = ShownToasts::<&str>::new();
-        shown.register(1);
-        shown.register(2);
-        shown.register(3);
+    fn gate_guard_releases_gate_on_drop() {
+        let key = "test-gate-guard-releases";
+        let gate = std::sync::Arc::new(CloseGate::new());
+        push_gate(key, std::sync::Arc::clone(&gate));
+        assert!(!lock_gates().get(key).map(|v| v.is_empty()).unwrap_or(true));
+        let guard = GateGuard {
+            key: Some(key.to_owned()),
+            gate: std::sync::Arc::clone(&gate),
+        };
+        drop(guard);
+        assert!(lock_gates().get(key).is_none());
+    }
 
-        assert!(shown.retire(1, "first").is_empty());
-        assert_eq!(shown.retire(2, "second"), vec!["second"]);
-        shown.register(4);
-        assert_eq!(shown.retire(3, "third"), vec!["third"]);
-        assert_eq!(shown.retire(4, "fourth"), vec!["first", "fourth"]);
-
-        shown.register(5);
-        assert_eq!(shown.retire(5, "fifth"), vec!["fifth"]);
-        assert!(shown.anchor.is_none());
-        assert_eq!(shown.anchor_toast, None);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn close_all_clears_every_gate() {
+        let key_a = "test-close-all-a";
+        let key_b = "test-close-all-b";
+        let gate_a = std::sync::Arc::new(CloseGate::new());
+        let gate_b = std::sync::Arc::new(CloseGate::new());
+        push_gate(key_a, std::sync::Arc::clone(&gate_a));
+        push_gate(key_b, std::sync::Arc::clone(&gate_b));
+        close_all();
+        assert_eq!(gate_a.action(), GATE_CLOSE);
+        assert_eq!(gate_b.action(), GATE_CLOSE);
+        assert!(lock_gates().get(key_a).is_none());
+        assert!(lock_gates().get(key_b).is_none());
     }
 
     #[test]

@@ -3918,6 +3918,10 @@ impl ChannelList {
         let Some(tracked) = self.topic_parent_badges.remove(&topic_id) else {
             return;
         };
+        let parent_still_has_topics = self
+            .topic_parent_badges
+            .values()
+            .any(|t| t.parent_id == tracked.parent_id && t.clan_id == tracked.clan_id);
         let cleared = match self.cache.get_mut(&tracked.clan_id) {
             Some(categories) => {
                 subtract_channel_badge(categories, tracked.parent_id, tracked.count)
@@ -3929,16 +3933,13 @@ impl ChannelList {
             self.sync_clan_after_read(tracked.clan_id, cleared, cx);
             self.reseed_unknown_clan(tracked.clan_id, cx);
         }
-        crate::platform::PlatformStore::dismiss_channel_notification(
-            cx,
-            Some(tracked.clan_id.get()),
-            topic_id.get(),
-        );
-        crate::platform::PlatformStore::dismiss_channel_notification(
-            cx,
-            Some(tracked.clan_id.get()),
-            tracked.parent_id.get(),
-        );
+        if !parent_still_has_topics {
+            crate::platform::PlatformStore::dismiss_channel_notification(
+                cx,
+                Some(tracked.clan_id.get()),
+                tracked.parent_id.get(),
+            );
+        }
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
