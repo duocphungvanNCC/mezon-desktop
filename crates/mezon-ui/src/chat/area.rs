@@ -680,13 +680,7 @@ fn latest_activity_strip(
     let active_clan_id = clan_id.parse::<ClanId>().ok();
     let latest_pin = (pinned.clan_id() == active_clan_id
         && pinned.channel_id() == active_channel_id)
-        .then(|| {
-            pinned
-                .pinned()
-                .iter()
-                .max_by_key(|pin| pin.create_time)
-                .cloned()
-        })
+        .then(|| pinned.pinned().iter().max_by_key(|pin| pin.create_time))
         .flatten();
     let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
@@ -955,6 +949,19 @@ fn latest_activity_strip(
         .as_ref()
         .and_then(|pin| pin.message_id.parse::<MessageId>().ok());
     let pin_media = pin_attachment.as_ref().map(|attachment| {
+        if attachment.source_denied
+            || mezon_store::hides_media(&attachment.url, context.channel_id.get())
+        {
+            return div()
+                .flex_none()
+                .size(px(32.))
+                .rounded(px(7.))
+                .overflow_hidden()
+                .child(crate::chat::message::parts::render_private_media_tile(
+                    theme, 32., 32.,
+                ))
+                .into_any_element();
+        }
         if attachment.is_image() {
             let source = if !attachment.thumbnail_proxied.is_empty() {
                 attachment.thumbnail_proxied.clone()
@@ -1237,14 +1244,15 @@ impl LatestActivityStripView {
         let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
             this.refresh_snapshot(cx)
         });
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
-            if matches!(
-                event,
-                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
-            ) {
-                this.refresh_snapshot(cx);
-            }
-        });
+        let messages_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |this, _, event, cx| match event {
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. } => {
+                    this.refresh_snapshot(cx)
+                }
+                _ => {}
+            },
+        );
         let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
         let badge_sub = BadgeService::try_global(cx)
             .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
