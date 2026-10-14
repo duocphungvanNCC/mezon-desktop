@@ -438,6 +438,8 @@ pub struct ActivityStripDismissal {
     #[serde(default)]
     pub newest_topic_id: Option<i64>,
     #[serde(default)]
+    pub newest_topic_timestamp: u32,
+    #[serde(default)]
     pub pin_record_ids: Vec<i64>,
 }
 
@@ -819,6 +821,7 @@ mod settings_tests {
                 clan_id: 2,
                 channel_id: 3,
                 newest_topic_id: Some(4),
+                newest_topic_timestamp: 5,
                 pin_record_ids: vec![5, 6],
             }],
             ..Settings::default()
