@@ -520,7 +520,8 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
 }
 
 fn shows_anonymous_hat(msg: &Message, cx: &App) -> bool {
-    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) && !msg.is_sending()
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+        && (!msg.is_sending() || !msg.avatar_url.is_empty())
 }
 
 fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElement {
