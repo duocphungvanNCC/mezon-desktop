@@ -322,8 +322,8 @@ impl AddMemRoleModal {
             HashSet::new()
         };
         let excluded_users: HashSet<UserId> = self.excluded_user_ids.iter().copied().collect();
-        let mut member_ids: Vec<UserId> = ClanMembersStore::global(cx)
-            .read(cx)
+        let roster = ClanMembersStore::global(cx).read(cx);
+        let mut member_ids: Vec<UserId> = roster
             .members(self.clan_id)
             .into_iter()
             .filter(|member| {
@@ -350,6 +350,17 @@ impl AddMemRoleModal {
             })
             .collect();
         member_ids.extend(remote.iter().map(ClanMember::id));
+        {
+            let remote_by_id: HashMap<UserId, &ClanMember> =
+                remote.iter().map(|member| (member.id(), member)).collect();
+            remote_members::rank_by_match(&mut member_ids, &search.needle, |user_id| {
+                roster
+                    .member(self.clan_id, *user_id)
+                    .or_else(|| remote_by_id.get(user_id).copied())
+                    .map(remote_members::names)
+                    .unwrap_or_default()
+            });
+        }
         (member_ids, remote)
     }
 
