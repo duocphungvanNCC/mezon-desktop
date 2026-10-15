@@ -61,7 +61,7 @@ pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
 pub use sfu::sdp::stabilize_inactive_video_sections;
-pub use sfu::{RemovalCause, SfuRole};
+pub use sfu::{MediaLimit, RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -190,6 +190,7 @@ pub enum VoiceEvent {
         reason: String,
     },
     MutedByModerator,
+    MediaLimitReached(MediaLimit),
     RoomMessage(String),
     RoomMessageSent,
     RoomMessageFailed,
@@ -672,6 +673,9 @@ async fn session_main(
                         }
                         emit!();
                         let _ = evt_tx.send(VoiceEvent::MutedByModerator);
+                    }
+                    SfuEvent::MediaLimitReached(limit) => {
+                        let _ = evt_tx.send(VoiceEvent::MediaLimitReached(limit));
                     }
                     SfuEvent::RoomMessage(message) => {
                         let _ = evt_tx.send(VoiceEvent::RoomMessage(message));

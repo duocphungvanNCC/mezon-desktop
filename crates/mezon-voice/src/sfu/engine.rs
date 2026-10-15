@@ -216,6 +216,12 @@ pub enum RemovalCause {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaLimit {
+    Camera,
+    ScreenShare,
+}
+
 pub enum SfuEvent {
     Connected {
         room: String,
@@ -247,6 +253,7 @@ pub enum SfuEvent {
         reason: String,
     },
     MutedByModerator,
+    MediaLimitReached(MediaLimit),
     RoomMessage(String),
     RoomMessageSent,
     RoomMessageFailed,
@@ -1537,6 +1544,16 @@ async fn session_loop(
                             )
                         {
                             tracing::warn!(%message, "sfu rejected the participant action");
+                            continue;
+                        }
+                        let media_limit = match message.as_str() {
+                            "camera_capacity_full" => Some(MediaLimit::Camera),
+                            "screen_share_capacity_full" => Some(MediaLimit::ScreenShare),
+                            _ => None,
+                        };
+                        if let Some(limit) = media_limit {
+                            tracing::warn!(%message, "sfu refused the media, room limit reached");
+                            let _ = evt_tx.send(SfuEvent::MediaLimitReached(limit));
                             continue;
                         }
                         tracing::warn!(%message, joined, "sfu reported an error");

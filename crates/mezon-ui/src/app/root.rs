@@ -81,6 +81,22 @@ fn surface_voice_toast(
             });
             return;
         }
+        mezon_store::VoiceStoreEvent::MediaLimitReached(limit) => {
+            let key = match limit {
+                mezon_store::MediaLimit::Camera => "channelVoice.toast.cameraLimitReached",
+                mezon_store::MediaLimit::ScreenShare => {
+                    "channelVoice.toast.screenShareLimitReached"
+                }
+            };
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Error,
+                    mezon_i18n::t(&locale, key).to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(

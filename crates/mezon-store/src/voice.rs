@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
-    CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
+    CameraDeviceInfo, MediaLimit, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
     ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
     VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
     list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
@@ -659,6 +659,7 @@ pub enum VoiceStoreEvent {
     RecordingFinished(RecordingToast),
     RecordingVideoUnavailable,
     RemovedFromChannel(RemovalCause),
+    MediaLimitReached(MediaLimit),
 }
 
 impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
@@ -3824,6 +3825,13 @@ impl VoiceStore {
             VoiceEvent::MutedByModerator => {
                 self.mic_enabled = false;
                 self.muted_by_moderator = true;
+            }
+            VoiceEvent::MediaLimitReached(limit) => {
+                match limit {
+                    MediaLimit::Camera => self.set_camera_enabled(false, cx),
+                    MediaLimit::ScreenShare => self.stop_screen_share(cx),
+                }
+                cx.emit(VoiceStoreEvent::MediaLimitReached(limit));
             }
             VoiceEvent::RoomMessage(raw) => {
                 if self.external_meeting.is_none() {
