@@ -1,4 +1,7 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 
 use gpui::App;
 use mezon_store::{
@@ -89,6 +92,103 @@ fn known_row(roster: Option<&ClanMember>, remote: Option<&ClanMember>) -> Option
     roster.or(remote).map(member_row_from_clan_member)
 }
 
+pub(super) fn names(member: &ClanMember) -> [&str; 3] {
+    [
+        member.clan_nick.as_str(),
+        member.user.display_name.as_str(),
+        member.user.username.as_str(),
+    ]
+}
+
+pub(super) fn rank_by_match<'n, T>(
+    rows: &mut [T],
+    needle: &str,
+    names: impl Fn(&T) -> [&'n str; 3],
+) {
+    let folded = normalize_search_string(needle.trim());
+    if folded.is_empty() {
+        return;
+    }
+    rows.sort_by_cached_key(|row| {
+        let names = names(row);
+        let rank = match_rank(&names, &folded);
+        let shown = names
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or_default();
+        (rank, NameKey(normalize_search_string(shown)))
+    });
+}
+
+fn match_rank(names: &[&str; 3], folded: &str) -> u8 {
+    let mut rank = 3;
+    for name in names {
+        let name = normalize_search_string(name);
+        for (at, _) in name.match_indices(folded) {
+            if at == 0 {
+                return 0;
+            }
+            let word_start = name[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_alphanumeric());
+            rank = rank.min(if word_start { 1 } else { 2 });
+        }
+    }
+    rank
+}
+
+#[derive(PartialEq, Eq)]
+struct NameKey(String);
+
+impl Ord for NameKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        natural_cmp(&self.0, &other.0).then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+impl PartialOrd for NameKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut a = a.chars().peekable();
+    let mut b = b.chars().peekable();
+    loop {
+        match (a.peek(), b.peek()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let x = number(&mut a);
+                let y = number(&mut b);
+                let order = x.len().cmp(&y.len()).then_with(|| x.cmp(&y));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(x), Some(y)) => {
+                let order = x.cmp(y);
+                if order != Ordering::Equal {
+                    return order;
+                }
+                a.next();
+                b.next();
+            }
+        }
+    }
+}
+
+fn number(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut digits = String::new();
+    while let Some(ch) = chars.next_if(char::is_ascii_digit) {
+        digits.push(ch);
+    }
+    digits.trim_start_matches('0').to_string()
+}
+
 fn folded_match(member: &ClanMember, folded: &str) -> bool {
     [
         member.clan_nick.as_str(),
@@ -147,6 +247,83 @@ mod tests {
         let row = known_row(None, Some(&remembered)).expect("a row");
         assert_eq!(row.name.as_ref(), "Old Nick");
         assert!(known_row(None, None).is_none());
+    }
+
+    fn ranked(rows: &[[&'static str; 3]], needle: &str) -> Vec<&'static str> {
+        let mut rows = rows.to_vec();
+        rank_by_match(&mut rows, needle, |row| *row);
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .copied()
+                    .find(|name| !name.is_empty())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn names_starting_with_the_search_rank_above_words_then_contained_matches() {
+        let rows = [
+            ["", "Magic Mike", "mm"],
+            ["", "Zed", "zed"],
+            ["", "Tran Gi Anh", "tga"],
+            ["Someone", "", "giang.tran"],
+            ["", "Giàng A Páo", "gap"],
+        ];
+        assert_eq!(
+            ranked(&rows, " Gi "),
+            ["Giàng A Páo", "Someone", "Tran Gi Anh", "Magic Mike", "Zed"]
+        );
+    }
+
+    #[test]
+    fn equal_matches_follow_the_shown_name_with_numbers_by_value() {
+        let rows = [
+            ["", "Old Timer 099", ""],
+            ["Old Timer 098", "", ""],
+            ["", "Old Timer 090", "oldtimer_090"],
+            ["Old Timer 9", "", ""],
+            ["Old Timer 10", "", ""],
+        ];
+        assert_eq!(
+            ranked(&rows, "old timer"),
+            [
+                "Old Timer 9",
+                "Old Timer 10",
+                "Old Timer 090",
+                "Old Timer 098",
+                "Old Timer 099"
+            ]
+        );
+        assert_eq!(
+            ranked(&rows, "  "),
+            [
+                "Old Timer 099",
+                "Old Timer 098",
+                "Old Timer 090",
+                "Old Timer 9",
+                "Old Timer 10"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_username_match_ranks_by_its_separators_as_words() {
+        let rows = [
+            ["", "Member 0009", "member_0009"],
+            ["", "Member 0900", "member_0900"],
+        ];
+        assert_eq!(ranked(&rows, "09"), ["Member 0900", "Member 0009"]);
+        let rows = [
+            ["Ostrander", "", ""],
+            ["", "", "giang.tran"],
+            ["Matran Tran", "", ""],
+        ];
+        assert_eq!(
+            ranked(&rows, "tran"),
+            ["giang.tran", "Matran Tran", "Ostrander"]
+        );
     }
 
     #[test]

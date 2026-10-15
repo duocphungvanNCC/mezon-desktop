@@ -522,6 +522,14 @@ impl PermissionOverrides {
             add_members.push(user_id);
             Rc::make_mut(&mut self.remote_members).insert(user_id, member);
         }
+        let roster = members_store.read(cx);
+        remote_members::rank_by_match(&mut add_members, &needle, |user_id| {
+            roster
+                .member(self.clan_id, *user_id)
+                .or_else(|| self.remote_members.get(user_id))
+                .map(remote_members::names)
+                .unwrap_or_default()
+        });
         self.remote_seq = remote_members::answer_seq(self.clan_id, &needle, cx);
         self.add_members = Rc::new(add_members);
     }
