@@ -114,11 +114,23 @@ fn is_first_topic_message(msg: &Message, cx: &App) -> bool {
     };
     let topic_id = ChannelId(topic_id);
     let messages = MessagesStore::global(cx).read(cx);
-    is_first_topic_message_in(msg, topic_id, messages.messages_in_channel(topic_id))
+    is_first_topic_message_in(
+        msg,
+        topic_id,
+        messages.messages_in_channel(topic_id),
+        messages.topic_has_more_top(),
+    )
 }
 
-fn is_first_topic_message_in(msg: &Message, topic_id: ChannelId, messages: &[Message]) -> bool {
-    msg.channel_id == topic_id && messages.first().is_some_and(|first| first.id == msg.id)
+fn is_first_topic_message_in(
+    msg: &Message,
+    topic_id: ChannelId,
+    messages: &[Message],
+    has_more_top: bool,
+) -> bool {
+    !has_more_top
+        && msg.channel_id == topic_id
+        && messages.first().is_some_and(|first| first.id == msg.id)
 }
 
 fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
@@ -969,23 +981,27 @@ mod delete_permission_tests {
     }
 
     #[test]
-    fn only_the_message_that_created_the_topic_is_protected() {
+    fn only_the_first_reply_at_the_start_of_topic_history_is_protected() {
         let topic_id = ChannelId(20);
         let root = message(1, 10);
         let initial_topic_message = message(2, 20);
         let later_reply = message(3, 20);
         let messages = [initial_topic_message.clone(), later_reply.clone()];
 
-        assert!(!is_first_topic_message_in(&root, topic_id, &messages));
+        assert!(!is_first_topic_message_in(
+            &root, topic_id, &messages, false
+        ));
         assert!(is_first_topic_message_in(
             &initial_topic_message,
             topic_id,
-            &messages
+            &messages,
+            false
         ));
         assert!(!is_first_topic_message_in(
             &later_reply,
             topic_id,
-            &messages
+            &messages,
+            false
         ));
     }
 
@@ -994,7 +1010,41 @@ mod delete_permission_tests {
         assert!(!is_first_topic_message_in(
             &message(2, 20),
             ChannelId(20),
-            &[]
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn loading_older_history_does_not_protect_a_page_boundary_reply() {
+        let topic_id = ChannelId(20);
+        let first_reply = message(2, 20);
+        let page_boundary_reply = message(50, 20);
+        let latest_page = [page_boundary_reply.clone(), message(51, 20)];
+
+        assert!(!is_first_topic_message_in(
+            &page_boundary_reply,
+            topic_id,
+            &latest_page,
+            true
+        ));
+
+        let history = [
+            first_reply.clone(),
+            page_boundary_reply.clone(),
+            message(51, 20),
+        ];
+        assert!(!is_first_topic_message_in(
+            &page_boundary_reply,
+            topic_id,
+            &history,
+            false
+        ));
+        assert!(is_first_topic_message_in(
+            &first_reply,
+            topic_id,
+            &history,
+            false
         ));
     }
 
