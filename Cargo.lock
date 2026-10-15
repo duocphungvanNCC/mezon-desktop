@@ -5714,7 +5714,6 @@ dependencies = [
  "notify-rust",
  "objc",
  "open",
- "pollster 0.4.0",
  "serde",
  "serde_json",
  "tempfile",

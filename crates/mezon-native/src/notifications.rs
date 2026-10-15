@@ -958,26 +958,29 @@ fn toast_book() -> std::sync::MutexGuard<'static, ChannelToastBook> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn session_connection() -> Option<&'static zbus::Connection> {
-    static CONN: std::sync::OnceLock<Option<zbus::Connection>> = std::sync::OnceLock::new();
-    CONN.get_or_init(|| {
-        pollster::block_on(async {
-            let conn = zbus::Connection::session().await.ok()?;
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await.ok()?;
-            for member in ["ActionInvoked", "NotificationClosed"] {
-                let rule = zbus::MatchRule::builder()
-                    .msg_type(zbus::message::Type::Signal)
-                    .interface("org.freedesktop.Notifications")
-                    .ok()?
-                    .member(member)
-                    .ok()?
-                    .build();
-                proxy.add_match_rule(rule).await.ok()?;
-            }
-            Some(conn)
-        })
-    })
-    .as_ref()
+fn session_connection() -> Option<zbus::Connection> {
+    static CONN: std::sync::Mutex<Option<zbus::Connection>> = std::sync::Mutex::new(None);
+    let mut slot = CONN.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(conn) = slot.as_ref() {
+        return Some(conn.clone());
+    }
+    let conn = zbus::block_on(async {
+        let conn = zbus::Connection::session().await.ok()?;
+        let proxy = zbus::fdo::DBusProxy::new(&conn).await.ok()?;
+        for member in ["ActionInvoked", "NotificationClosed"] {
+            let rule = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .interface("org.freedesktop.Notifications")
+                .ok()?
+                .member(member)
+                .ok()?
+                .build();
+            proxy.add_match_rule(rule).await.ok()?;
+        }
+        Some(conn)
+    })?;
+    *slot = Some(conn.clone());
+    Some(conn)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1085,10 +1088,10 @@ fn drive_shown(
         return;
     }
     if gate.action() == GATE_CLOSE {
-        pollster::block_on(dbus_close_id(conn, id));
+        zbus::block_on(dbus_close_id(conn, id));
         return;
     }
-    let action = pollster::block_on(async {
+    let action = zbus::block_on(async {
         let gate_ref = std::sync::Arc::clone(&gate);
         let mut wait = std::pin::pin!(wait_for_notification(conn, id, |action| {
             let current = channel_key
@@ -1115,7 +1118,7 @@ fn drive_shown(
         .await
     });
     if action == GATE_CLOSE {
-        pollster::block_on(dbus_close_id(conn, id));
+        zbus::block_on(dbus_close_id(conn, id));
     }
 }
 
@@ -1136,10 +1139,6 @@ impl Drop for GateGuard {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn show_linux(n: &Notification) {
-    let Some(conn) = session_connection() else {
-        tracing::warn!("Linux notification skipped: no D-Bus session connection");
-        return;
-    };
     let title = n.title.clone();
     let body = n.body.clone();
     let channel_key = n.channel_id.as_deref().and_then(gate_channel_key);
@@ -1152,12 +1151,15 @@ fn show_linux(n: &Notification) {
     if let Some(key) = channel_key.clone() {
         push_gate(&key, std::sync::Arc::clone(&gate));
     }
-    let conn = conn.clone();
 
     std::thread::spawn(move || {
         let _guard = GateGuard {
             key: channel_key.clone(),
             gate: std::sync::Arc::clone(&gate),
+        };
+        let Some(conn) = session_connection() else {
+            tracing::warn!("Linux notification skipped: no D-Bus session connection");
+            return;
         };
         let shown = {
             let turn = channel_key.as_deref().map(|key| toast_book().turn(key));
@@ -1171,7 +1173,7 @@ fn show_linux(n: &Notification) {
                     .as_deref()
                     .map(|key| toast_book().replaces_id(key))
                     .unwrap_or(0);
-                match pollster::block_on(dbus_notify(
+                match zbus::block_on(dbus_notify(
                     &conn,
                     &title,
                     &body,

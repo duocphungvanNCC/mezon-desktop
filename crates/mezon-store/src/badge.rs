@@ -8,7 +8,7 @@ use mezon_client::{
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
-use crate::channel::{ChannelList, STREAM_MODE_THREAD};
+use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
@@ -543,7 +543,6 @@ impl BadgeService {
                         dm.note_read(channel_id, cx);
                     });
                 } else {
-                    let thread_last_seen = e.mode == STREAM_MODE_THREAD;
                     ChannelList::global(cx).update(cx, |cl, cx| {
                         cl.apply_last_seen(
                             clan_id,
@@ -553,20 +552,12 @@ impl BadgeService {
                             seen_message_id,
                             cx,
                         );
-                        if !thread_last_seen {
-                            cl.apply_topic_read(channel_id, cx);
-                        }
+                        cl.apply_topic_read(channel_id, cx);
                     });
                 }
                 if !seen_message_id.is_zero() {
                     MessagesStore::global(cx).update(cx, |store, _| {
-                        if e.mode == STREAM_MODE_THREAD {
-                            if let Some(topic_id) = store.active_topic_id() {
-                                store.set_last_read_message(topic_id, seen_message_id);
-                            }
-                        } else {
-                            store.set_last_read_message(channel_id, seen_message_id);
-                        }
+                        store.set_last_read_message(channel_id, seen_message_id);
                     });
                 }
             }
