@@ -23,6 +23,7 @@ use crate::upload_jobs::UploadJob;
 use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
+const INBOX_MESSAGE_DIRECTION_AROUND: i32 = 2;
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
@@ -172,6 +173,7 @@ impl TopicsData {
         if message.sender_id > 0 {
             topic.last_sender_id = message.sender_id.to_string();
         }
+        topic.last_message_id = message.message_id.to_string();
         let timestamp = message.create_time_seconds;
         if timestamp > topic.last_message_timestamp {
             topic.last_message_timestamp = timestamp;
@@ -201,6 +203,7 @@ impl TopicsData {
         if message.sender_id > 0 {
             topic.last_sender_id = message.sender_id.to_string();
         }
+        topic.last_message_id = message.message_id.to_string();
         let timestamp =
             normalize_unix_seconds(message.create_time).clamp(0, i64::from(u32::MAX)) as u32;
         if timestamp >= topic.last_message_timestamp {
@@ -230,6 +233,9 @@ impl TopicsData {
             }
             if !topic.last_sender_id.is_empty() && topic.last_sender_id != "0" {
                 existing.last_sender_id = topic.last_sender_id;
+            }
+            if !topic.last_message_id.is_empty() && topic.last_message_id != "0" {
+                existing.last_message_id = topic.last_message_id;
             }
             if !topic.message_id.is_empty() && topic.message_id != "0" {
                 existing.message_id = topic.message_id;
@@ -369,7 +375,17 @@ impl PendingInboxTopicJump {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InboxMessageAvatar {
+    Loading,
+    Ready(String, String),
+    Missing,
+    Failed,
+}
+
 pub struct TopicsStore {
+    inbox_message_avatars: std::collections::HashMap<(ChannelId, MessageId), InboxMessageAvatar>,
+    inbox_message_generation: u64,
     data: TopicsData,
     clan_id: Option<String>,
     loading: bool,
@@ -414,6 +430,8 @@ impl TopicsStore {
             })
         });
         Self {
+            inbox_message_avatars: Default::default(),
+            inbox_message_generation: 0,
             data: TopicsData::default(),
             clan_id: None,
             loading: false,
@@ -495,6 +513,8 @@ impl TopicsStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.inbox_message_avatars.clear();
+        self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
         self.data.clear();
         self.clan_id = None;
         self.loading = false;
@@ -768,15 +788,45 @@ impl TopicsStore {
         if !self.is_active_clan(message.clan_id, cx) {
             return;
         }
+        let previous_avatar_key = self
+            .data
+            .topic_by_id(&message.topic_id.to_string())
+            .and_then(inbox_message_key);
         if message.code == 2 && message.topic_id > 0 {
             self.hydrated_preview_topic_id = None;
             self.hydrate_latest_topic_preview(cx);
         } else if self.data.note_topic_message(message) {
+            let next_key = (ChannelId(message.topic_id), MessageId(message.message_id));
+            if let Some(key) = previous_avatar_key.filter(|key| *key != next_key) {
+                self.inbox_message_avatars.remove(&key);
+            }
+            if message.message_id > 0 {
+                if message.avatar.is_empty() {
+                    self.inbox_message_avatars
+                        .entry(next_key)
+                        .or_insert(InboxMessageAvatar::Missing);
+                } else {
+                    self.inbox_message_avatars.insert(
+                        next_key,
+                        InboxMessageAvatar::Ready(message.username.clone(), message.avatar.clone()),
+                    );
+                }
+            }
             self.schedule_updated_notify(cx);
         }
     }
 
     fn on_messages_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        if matches!(
+            event,
+            MessagesEvent::Updated { .. }
+                | MessagesEvent::Reset { .. }
+                | MessagesEvent::Resized { .. }
+                | MessagesEvent::Shifted { .. }
+                | MessagesEvent::TopicUpdated { .. }
+        ) {
+            self.refresh_inbox_message_avatars(cx);
+        }
         let MessagesEvent::JumpTo {
             message_id,
             request_id,
@@ -1819,6 +1869,8 @@ impl TopicsStore {
             return;
         }
         if self.clan_id.as_deref() != Some(clan_id) {
+            self.inbox_message_avatars.clear();
+            self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
             self.data.clear_topics();
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
@@ -1877,6 +1929,8 @@ impl TopicsStore {
                 if append {
                     self.data.upsert_topics(topics);
                 } else {
+                    self.inbox_message_avatars.clear();
+                    self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
                     self.data.set_topics(topics);
                 }
                 self.clan_id = Some(clan_id.to_string());
@@ -1897,6 +1951,137 @@ impl TopicsStore {
                 cx.notify();
             }
         }
+    }
+
+    pub fn inbox_message_avatar(&self, topic: &TopicDiscussion) -> Option<(&str, &str)> {
+        if self.clan_id.as_deref() != Some(topic.clan_id.as_str()) {
+            return None;
+        }
+        match self.inbox_message_avatars.get(&inbox_message_key(topic)?)? {
+            InboxMessageAvatar::Ready(name, avatar) => Some((name, avatar)),
+            _ => None,
+        }
+    }
+
+    fn apply_inbox_message_avatar(
+        &mut self,
+        generation: u64,
+        key: (ChannelId, MessageId),
+        state: InboxMessageAvatar,
+    ) -> bool {
+        if self.inbox_message_generation != generation
+            || self.inbox_message_avatars.get(&key) != Some(&InboxMessageAvatar::Loading)
+        {
+            return false;
+        }
+        self.inbox_message_avatars.insert(key, state);
+        true
+    }
+
+    fn refresh_inbox_message_avatars(&mut self, cx: &mut Context<Self>) {
+        let Some(messages) = MessagesStore::try_global(cx) else {
+            return;
+        };
+        let messages = messages.read(cx);
+        let mut changed = false;
+        for (key, state) in &mut self.inbox_message_avatars {
+            if let Some(message) = messages.message_in_channel(key.0, key.1) {
+                let next = if message.is_deleted_placeholder || message.avatar_url.is_empty() {
+                    InboxMessageAvatar::Missing
+                } else {
+                    InboxMessageAvatar::Ready(
+                        message.sender_name.to_string(),
+                        message.avatar_url.to_string(),
+                    )
+                };
+                if *state != next {
+                    *state = next;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.schedule_updated_notify(cx);
+        }
+    }
+
+    pub fn retry_inbox_message_avatars(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        if self.clan_id.as_deref() == Some(clan_id) {
+            self.inbox_message_avatars
+                .retain(|_, state| *state != InboxMessageAvatar::Failed);
+        }
+        self.load_inbox_message_avatars(clan_id, cx);
+    }
+
+    pub fn load_inbox_message_avatars(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        if self.clan_id.as_deref() != Some(clan_id) {
+            return;
+        }
+        let Ok(clan) = clan_id.parse::<ClanId>() else {
+            return;
+        };
+        if clan.get() <= 0 {
+            return;
+        }
+        let keys: Vec<_> = self
+            .data
+            .topics()
+            .iter()
+            .filter_map(|topic| {
+                Some((
+                    inbox_message_key(topic)?,
+                    topic.channel_id.parse::<ChannelId>().ok()?,
+                ))
+            })
+            .collect();
+        let mut missing = Vec::new();
+        let active_keys: std::collections::HashSet<_> = keys.iter().map(|(key, _)| *key).collect();
+        self.inbox_message_avatars
+            .retain(|key, _| active_keys.contains(key));
+        for (key, parent) in keys {
+            if self.inbox_message_avatars.contains_key(&key) {
+                continue;
+            }
+            self.inbox_message_avatars
+                .insert(key, InboxMessageAvatar::Loading);
+            missing.push((key, parent));
+        }
+        if missing.is_empty() {
+            return;
+        }
+        self.refresh_inbox_message_avatars(cx);
+        let generation = self.inbox_message_generation;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            for (key, parent) in missing {
+                let loading = this.read_with(cx, |store, _| {
+                    store.inbox_message_generation == generation
+                        && store.inbox_message_avatars.get(&key) == Some(&InboxMessageAvatar::Loading)
+                });
+                if !matches!(loading, Ok(true)) {
+                    continue;
+                }
+                let page = if key.0 == parent {
+                    api.list_channel_messages(clan.get(), parent.get(), key.1.get(),
+                        INBOX_MESSAGE_DIRECTION_AROUND, TOPICS_LIMIT as u32).await
+                } else {
+                    api.list_topic_messages(clan.get(), parent.get(), key.0.get(), key.1.get(),
+                        INBOX_MESSAGE_DIRECTION_AROUND, TOPICS_LIMIT as u32).await
+                };
+                let state = match page {
+                    Ok(page) => message_avatar_from_messages(key.1, &page.messages),
+                    Err(error) => {
+                        tracing::warn!(message_id = key.1.get(), %error, "failed to load inbox topic message avatar");
+                        InboxMessageAvatar::Failed
+                    }
+                };
+                let _ = this.update(cx, |store, cx| {
+                    if store.apply_inbox_message_avatar(generation, key, state) {
+                        store.schedule_updated_notify(cx);
+                    }
+                });
+            }
+        }).detach();
     }
 
     /// The topic listing is sufficient for ordering, but its `last_sent_message` is not
@@ -1971,6 +2156,44 @@ impl TopicsStore {
         })
         .detach();
     }
+}
+
+fn inbox_message_key(topic: &TopicDiscussion) -> Option<(ChannelId, MessageId)> {
+    let last = topic
+        .last_message_id
+        .parse::<MessageId>()
+        .ok()
+        .filter(|id| id.get() > 0);
+    let (channel, message) = if let Some(last) = last {
+        if topic.last_message_id == topic.message_id {
+            (topic.channel_id.parse::<ChannelId>().ok()?, last)
+        } else {
+            (topic.id.parse::<ChannelId>().ok()?, last)
+        }
+    } else {
+        (
+            topic.channel_id.parse::<ChannelId>().ok()?,
+            topic.message_id.parse::<MessageId>().ok()?,
+        )
+    };
+    (channel.get() > 0 && message.get() > 0).then_some((channel, message))
+}
+
+fn message_avatar_from_messages(
+    original_id: MessageId,
+    messages: &[mezon_client::transport::ApiMessage],
+) -> InboxMessageAvatar {
+    messages
+        .iter()
+        .find(|message| {
+            message.message_id == original_id.get()
+                && message.code != 2
+                && !message.avatar.is_empty()
+        })
+        .map(|message| {
+            InboxMessageAvatar::Ready(message.sender_name.clone(), message.avatar.clone())
+        })
+        .unwrap_or(InboxMessageAvatar::Missing)
 }
 
 fn sd_topic_event_last_sent_seconds(ev: &realtime::SdTopicEvent, now_seconds: i64) -> i64 {
@@ -2053,6 +2276,280 @@ mod tests {
     use super::*;
     use crate::message::MessageCode;
 
+    fn original_test_message(
+        id: i64,
+        sender: i64,
+        avatar: &str,
+        code: i32,
+    ) -> mezon_client::transport::ApiMessage {
+        mezon_client::MezonTransport::message_from_proto(&api::ChannelMessage {
+            message_id: id,
+            sender_id: sender,
+            username: format!("sender-{sender}"),
+            avatar: avatar.into(),
+            code,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn inbox_message_avatar_matches_message_not_creator_or_last_sender() {
+        let messages = vec![
+            original_test_message(40, 3, "creator.png", 0),
+            original_test_message(42, 8, "original.png", 0),
+            original_test_message(43, 9, "last.png", 0),
+        ];
+        assert_eq!(
+            message_avatar_from_messages(MessageId(42), &messages),
+            InboxMessageAvatar::Ready("sender-8".into(), "original.png".into())
+        );
+        assert_eq!(
+            message_avatar_from_messages(MessageId(41), &messages),
+            InboxMessageAvatar::Missing
+        );
+    }
+
+    #[test]
+    fn inbox_message_avatar_missing_deleted_and_empty_use_fallback() {
+        assert_eq!(
+            message_avatar_from_messages(MessageId(42), &[]),
+            InboxMessageAvatar::Missing
+        );
+        for message in [
+            original_test_message(42, 8, "", 0),
+            original_test_message(42, 8, "deleted.png", 2),
+        ] {
+            assert_eq!(
+                message_avatar_from_messages(MessageId(42), &[message]),
+                InboxMessageAvatar::Missing
+            );
+        }
+    }
+
+    #[test]
+    fn inbox_message_key_rejects_invalid_ids_and_uses_parent_channel() {
+        let original = topic(10, 42, "9", "body", 100);
+        assert_eq!(
+            inbox_message_key(&original),
+            Some((ChannelId(5), MessageId(42)))
+        );
+        for invalid in ["", "0", "-1", "invalid"] {
+            let mut value = original.clone();
+            value.message_id = invalid.into();
+            assert_eq!(inbox_message_key(&value), None);
+            value = original.clone();
+            value.channel_id = invalid.into();
+            assert_eq!(inbox_message_key(&value), None);
+        }
+    }
+
+    #[gpui::test]
+    fn inbox_message_avatar_store_preserves_topics_and_rejects_stale_results(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            let store = TopicsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.clan_id = Some("9".into());
+                let original = topic(10, 42, "9", "original body", 100);
+                store
+                    .data
+                    .set_topics(vec![original.clone(), topic(11, 43, "3", "other", 200)]);
+                let before = store.data.topics().to_vec();
+                let key = inbox_message_key(&original).unwrap();
+                let generation = store.inbox_message_generation;
+                store
+                    .inbox_message_avatars
+                    .insert(key, InboxMessageAvatar::Loading);
+                assert!(store.apply_inbox_message_avatar(
+                    generation,
+                    key,
+                    InboxMessageAvatar::Ready("original-author".into(), "original.png".into())
+                ));
+                assert_eq!(
+                    store.inbox_message_avatar(&original),
+                    Some(("original-author", "original.png"))
+                );
+                assert!(!store.apply_inbox_message_avatar(
+                    generation,
+                    key,
+                    InboxMessageAvatar::Missing
+                ));
+                for (clan, channel, message) in
+                    [("8", "5", "42"), ("9", "6", "42"), ("9", "5", "43")]
+                {
+                    let mut other = original.clone();
+                    other.clan_id = clan.into();
+                    other.channel_id = channel.into();
+                    other.message_id = message.into();
+                    assert_eq!(store.inbox_message_avatar(&other), None);
+                }
+                assert_eq!(store.data.topics(), before.as_slice());
+                store.reset(cx);
+                store
+                    .inbox_message_avatars
+                    .insert(key, InboxMessageAvatar::Loading);
+                assert!(!store.apply_inbox_message_avatar(
+                    generation,
+                    key,
+                    InboxMessageAvatar::Ready("stale".into(), "stale.png".into())
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn inbox_message_retry_preserves_other_clan_and_prunes_unused_entries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            let store = TopicsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.clan_id = Some("9".into());
+                for (id, state) in [
+                    (40, InboxMessageAvatar::Failed),
+                    (41, InboxMessageAvatar::Missing),
+                    (42, InboxMessageAvatar::Loading),
+                    (
+                        43,
+                        InboxMessageAvatar::Ready("name".into(), "avatar.png".into()),
+                    ),
+                ] {
+                    store
+                        .inbox_message_avatars
+                        .insert((ChannelId(5), MessageId(id)), state);
+                }
+                store.retry_inbox_message_avatars("8", cx);
+                assert_eq!(store.inbox_message_avatars.len(), 4);
+                store.retry_inbox_message_avatars("9", cx);
+                assert!(store.inbox_message_avatars.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn inbox_message_source_event_recovers_missing_avatar_without_topic_mutation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let topics = cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            crate::channel::ChannelList::init(api.clone(), cx);
+            crate::account::AccountStore::init(api.clone(), cx);
+            let messages = MessagesStore::init(api.clone(), cx);
+            let topics = TopicsStore::init(api, cx);
+            topics.update(cx, |store, _| {
+                store.clan_id = Some("9".into());
+                store.data.set_topics(vec![topic(10, 42, "9", "body", 100)]);
+                store
+                    .inbox_message_avatars
+                    .insert((ChannelId(5), MessageId(42)), InboxMessageAvatar::Missing);
+            });
+            messages.update(cx, |store, cx| {
+                store.append_topic_message(
+                    5,
+                    original_test_message(42, 8, "late-original.png", 0),
+                    false,
+                    vec![],
+                    false,
+                    cx,
+                );
+                cx.emit(MessagesEvent::Reset { count: 1 });
+            });
+            topics
+        });
+        cx.update(|cx| {
+            topics.update(cx, |store, _| {
+                assert_eq!(
+                    store.inbox_message_avatar(&topic(10, 42, "9", "body", 100)),
+                    Some(("sender-8", "late-original.png"))
+                );
+                assert_eq!(store.data.topics(), &[topic(10, 42, "9", "body", 100)]);
+                assert!(!store.apply_inbox_message_avatar(
+                    store.inbox_message_generation,
+                    (ChannelId(5), MessageId(42)),
+                    InboxMessageAvatar::Missing
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn inbox_message_avatar_switches_from_original_to_latest_reply(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            let store = TopicsStore::init(api, cx);
+            store.update(cx, |store, _| {
+                store.clan_id = Some("9".into());
+                store
+                    .data
+                    .set_topics(vec![topic(10, 42, "8", "original", 100)]);
+                store.inbox_message_avatars.insert(
+                    (ChannelId(5), MessageId(42)),
+                    InboxMessageAvatar::Ready("original".into(), "original.png".into()),
+                );
+                assert_eq!(
+                    store.inbox_message_avatar(&store.data.topics()[0]),
+                    Some(("original", "original.png"))
+                );
+                for (id, sender, avatar) in [(500, 9, "reply.png"), (501, 7, "")] {
+                    let message = api::ChannelMessage {
+                        message_id: id,
+                        topic_id: 10,
+                        sender_id: sender,
+                        content: "latest reply".into(),
+                        create_time_seconds: 200,
+                        avatar: avatar.into(),
+                        username: "replier".into(),
+                        ..Default::default()
+                    };
+                    assert!(store.data.note_topic_message(&message));
+                    let discussion = store.data.topics()[0].clone();
+                    let key = inbox_message_key(&discussion).unwrap();
+                    store
+                        .inbox_message_avatars
+                        .insert(key, InboxMessageAvatar::Loading);
+                    assert!(store.apply_inbox_message_avatar(
+                        store.inbox_message_generation,
+                        key,
+                        message_avatar_from_messages(
+                            MessageId(id),
+                            &[original_test_message(id, sender, avatar, 0)]
+                        )
+                    ));
+                    if avatar.is_empty() {
+                        assert_eq!(store.inbox_message_avatar(&discussion), None);
+                    } else {
+                        assert_eq!(
+                            store.inbox_message_avatar(&discussion),
+                            Some(("sender-9", "reply.png"))
+                        );
+                    }
+                    assert_eq!(discussion.last_message_content, "latest reply");
+                    assert_eq!(discussion.content, "original");
+                }
+            });
+        });
+    }
+
     #[gpui::test]
     fn anonymous_send_requires_an_existing_topic(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -2067,7 +2564,7 @@ mod tests {
             let messages = MessagesStore::init(api, cx);
             messages.update(cx, |store, cx| {
                 store.set_active_topic(Some(77), cx);
-                store.toggle_anonymous_mode(cx);
+                store.toggle_anonymous_mode(true, cx);
             });
 
             assert!(!topic_anonymous_send(None, 9, cx));
@@ -2160,6 +2657,7 @@ mod tests {
             channel_id: "5".to_string(),
             creator_id: "3".to_string(),
             last_sender_id: last_sender_id.to_string(),
+            last_message_id: String::new(),
             content: content.to_string(),
             last_message_content: String::new(),
             last_message_attachments: Vec::new(),
@@ -2417,6 +2915,7 @@ mod tests {
             topic(20, 2, "4", "newer", 200),
         ]);
         let message = api::ChannelMessage {
+            message_id: 500,
             topic_id: 10,
             sender_id: 99,
             content: "latest reply".into(),
@@ -2429,6 +2928,11 @@ mod tests {
         assert_eq!(data.topics()[0].content, "older");
         assert_eq!(data.topics()[0].last_message_content, "latest reply");
         assert_eq!(data.topics()[0].last_sender_id, "99");
+        assert_eq!(data.topics()[0].last_message_id, "500");
+        assert_eq!(
+            inbox_message_key(&data.topics()[0]),
+            Some((ChannelId(10), MessageId(500)))
+        );
         assert_eq!(data.topics()[0].last_message_timestamp, 300);
         assert_index_matches_topics(&data);
     }

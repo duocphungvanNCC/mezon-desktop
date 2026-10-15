@@ -122,6 +122,11 @@ impl InboxPopoverPanel {
         }
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
+                if this.tab == InboxTab::Topics {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.load_inbox_message_avatars(&this.clan_id, cx);
+                    });
+                }
                 this.sync_from_store(cx, false);
                 cx.notify();
             }
@@ -237,6 +242,7 @@ impl InboxPopoverPanel {
         if self.tab == InboxTab::Topics {
             TopicsStore::global(cx).update(cx, |store, cx| {
                 store.fetch_if_needed(&self.clan_id, cx);
+                store.retry_inbox_message_avatars(&self.clan_id, cx);
             });
         } else if let Some(category) = self.tab.category() {
             InboxStore::global(cx).update(cx, |store, cx| {
