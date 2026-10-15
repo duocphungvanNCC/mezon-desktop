@@ -13,7 +13,7 @@ const HLS_MASTER_PLAYLIST: &str = "master.m3u8";
 const HLS_PLAYLIST_SUFFIX: &str = ".m3u8";
 const HLS_PLAYLIST_TAG: &[u8] = b"#EXTM3U";
 const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const HLS_TRANSCODE_MIN_SIZE: i32 = 10 * 1024 * 1024;
+const HLS_TRANSCODE_MIN_SIZE: i32 = 50 * 1024 * 1024;
 const HLS_TRANSCODE_EXTENSIONS: [&str; 7] = ["mp4", "mov", "mkv", "avi", "flv", "m4v", "wmv"];
 
 pub fn wants_hls_transcode(filename: &str, size: i32) -> bool {
@@ -157,6 +157,16 @@ mod tests {
         ] {
             assert!(!wants_hls_transcode(name, i32::MAX), "{name}");
         }
+    }
+
+    #[test]
+    fn videos_under_fifty_mib_upload_without_hls() {
+        const MIB: i32 = 1024 * 1024;
+        assert!(!wants_hls_transcode("clip.mp4", 10 * MIB));
+        assert!(!wants_hls_transcode("clip.mp4", 20 * MIB));
+        assert!(!wants_hls_transcode("clip.mp4", 50 * MIB - 1));
+        assert!(wants_hls_transcode("clip.mp4", 50 * MIB));
+        assert!(wants_hls_transcode("IMG_0001.MOV", 200 * MIB));
     }
 
     #[test]
