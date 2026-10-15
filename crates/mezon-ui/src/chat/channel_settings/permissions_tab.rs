@@ -68,9 +68,9 @@ pub(super) struct MemberRow {
 pub(super) fn member_row_from_clan_member(member: &ClanMember) -> MemberRow {
     MemberRow {
         user_id: member.id(),
-        name: member.name().to_string().into(),
+        name: member.name().into(),
         username: member.user.username.clone().into(),
-        avatar: member.avatar().to_string().into(),
+        avatar: member.avatar().into(),
     }
 }
 
@@ -188,7 +188,7 @@ pub struct PermissionsTab {
     private_initial: bool,
     seeded: bool,
     selected_user_ids: Vec<UserId>,
-    staged_rows: HashMap<UserId, MemberRow>,
+    staged_members: HashMap<UserId, ClanMember>,
     selected_role_ids: Vec<RoleId>,
     role_rows: Rc<Vec<RoleRow>>,
     member_ids: Rc<Vec<UserId>>,
@@ -279,7 +279,7 @@ impl PermissionsTab {
             private_initial: false,
             seeded: false,
             selected_user_ids: Vec::new(),
-            staged_rows: HashMap::new(),
+            staged_members: HashMap::new(),
             selected_role_ids: Vec::new(),
             role_rows: Rc::new(Vec::new()),
             member_ids: Rc::new(Vec::new()),
@@ -412,16 +412,25 @@ impl PermissionsTab {
         if let Some(profile) = channel_users.profile(self.channel_id, user_id) {
             return member_matches("", &profile.display_name, &profile.username, needle);
         }
-        self.staged_rows
-            .get(&user_id)
-            .is_some_and(|row| member_matches("", &row.name, &row.username, needle))
+        self.staged_members.get(&user_id).is_some_and(|member| {
+            member_matches(
+                &member.clan_nick,
+                &member.user.display_name,
+                &member.user.username,
+                needle,
+            )
+        })
     }
 
     fn listed_member_row(&self, user_id: UserId, cx: &App) -> MemberRow {
-        self.staged_rows
-            .get(&user_id)
-            .cloned()
-            .unwrap_or_else(|| channel_member_row(self.clan_id, self.channel_id, user_id, cx))
+        let in_roster = ClanMembersStore::global(cx)
+            .read(cx)
+            .member(self.clan_id, user_id)
+            .is_some();
+        match self.staged_members.get(&user_id) {
+            Some(member) if !in_roster => member_row_from_clan_member(member),
+            _ => channel_member_row(self.clan_id, self.channel_id, user_id, cx),
+        }
     }
 
     fn ensure_member_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -555,7 +564,7 @@ impl PermissionsTab {
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.selected_role_ids.clear();
         self.selected_user_ids.clear();
-        self.staged_rows.clear();
+        self.staged_members.clear();
         self.private_enabled = self.private_initial;
         if let Some(overrides) = self.overrides.clone() {
             overrides.update(cx, |overrides, cx| overrides.reset(cx));
@@ -609,7 +618,7 @@ impl PermissionsTab {
             let _ = this.update(cx, |this, cx| {
                 this.private_initial = private_enabled;
                 this.selected_user_ids.clear();
-                this.staged_rows.clear();
+                this.staged_members.clear();
                 this.selected_role_ids.clear();
                 ChannelUsersStore::global(cx).update(cx, |store, cx| {
                     store.apply_privacy_change(channel_id, private_enabled, cx);
@@ -717,15 +726,15 @@ impl PermissionsTab {
                 let AddMemRoleEvent::Staged {
                     user_ids,
                     role_ids,
-                    remote_rows,
+                    remote_members,
                 } = event;
                 for user_id in user_ids {
                     if !this.selected_user_ids.contains(user_id) {
                         this.selected_user_ids.push(*user_id);
                     }
                 }
-                for row in remote_rows {
-                    this.staged_rows.insert(row.user_id, row.clone());
+                for member in remote_members {
+                    this.staged_members.insert(member.id(), member.clone());
                 }
                 for role_id in role_ids {
                     if !this.selected_role_ids.contains(role_id) {

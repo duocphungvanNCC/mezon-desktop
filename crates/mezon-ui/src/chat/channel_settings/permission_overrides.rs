@@ -10,15 +10,15 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelRolePermissionsEvent, ChannelRolePermissionsStore, ChannelUsersEvent,
-    ChannelUsersStore, ClanId, ClanMembersEvent, ClanMembersStore, MentionSearchEvent,
+    ChannelUsersStore, ClanId, ClanMember, ClanMembersEvent, ClanMembersStore, MentionSearchEvent,
     MentionSearchStore, OVERRIDE_TYPE_ALLOW, OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL,
     PermissionDefinition, PermissionEntity, PermissionStore, RoleId, RolesStore, Settings, UserId,
 };
 
 use super::channel_acl::{self, member_matches, parse_search, role_matches};
 use super::permissions_tab::{
-    MemberRow, RoleRow, channel_member_row, member_avatar, member_row, page_count, page_slice,
-    role_glyph, role_row_from,
+    MemberRow, RoleRow, channel_member_row, member_avatar, page_count, page_slice, role_glyph,
+    role_row_from,
 };
 use super::remote_members;
 use crate::app::shell::Shell;
@@ -164,7 +164,8 @@ pub struct PermissionOverrides {
     add_query: String,
     add_roles: Rc<Vec<AddRoleRow>>,
     add_members: Rc<Vec<UserId>>,
-    remote_rows: Rc<HashMap<UserId, MemberRow>>,
+    remote_members: Rc<HashMap<UserId, ClanMember>>,
+    remote_seq: Option<u64>,
     add_member_scroll: UniformListScrollHandle,
     add_input_sub: Option<Subscription>,
     add_search_debounce: Task<()>,
@@ -208,6 +209,9 @@ impl PermissionOverrides {
                 &ClanMembersStore::global(cx),
                 |this, _, event: &ClanMembersEvent, cx| {
                     if event.clan_id() == this.clan_id {
+                        if this.add_open && remote_members::searchable(&this.add_input_needle(cx)) {
+                            this.search_remote(cx);
+                        }
                         this.refresh(cx);
                     }
                 },
@@ -219,7 +223,9 @@ impl PermissionOverrides {
         if let Some(store) = MentionSearchStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, _: &MentionSearchEvent, cx| {
                 if this.add_open {
-                    this.rebuild_add_candidates(cx);
+                    if this.remote_seq != this.current_remote_seq(cx) {
+                        this.rebuild_add_candidates(cx);
+                    }
                     cx.notify();
                 }
             }));
@@ -276,7 +282,8 @@ impl PermissionOverrides {
             add_query: String::new(),
             add_roles: Rc::new(Vec::new()),
             add_members: Rc::new(Vec::new()),
-            remote_rows: Rc::new(HashMap::new()),
+            remote_members: Rc::new(HashMap::new()),
+            remote_seq: None,
             add_member_scroll: UniformListScrollHandle::new(),
             add_input_sub: None,
             add_search_debounce: Task::ready(()),
@@ -459,6 +466,8 @@ impl PermissionOverrides {
         if !self.add_open {
             self.add_roles = Rc::new(Vec::new());
             self.add_members = Rc::new(Vec::new());
+            self.remote_members = Rc::new(HashMap::new());
+            self.remote_seq = None;
             return;
         }
         let needle = self.add_query.trim().to_lowercase();
@@ -505,14 +514,20 @@ impl PermissionOverrides {
             .map(|member| member.id())
             .collect();
         let mut listed: std::collections::HashSet<UserId> = add_members.iter().copied().collect();
-        for row in remote_members::hits(self.clan_id, &needle, cx) {
-            if on_channel_members.contains(&row.user_id) || !listed.insert(row.user_id) {
+        for member in remote_members::hits(self.clan_id, &needle, cx) {
+            let user_id = member.id();
+            if on_channel_members.contains(&user_id) || !listed.insert(user_id) {
                 continue;
             }
-            add_members.push(row.user_id);
-            Rc::make_mut(&mut self.remote_rows).insert(row.user_id, row);
+            add_members.push(user_id);
+            Rc::make_mut(&mut self.remote_members).insert(user_id, member);
         }
+        self.remote_seq = remote_members::answer_seq(self.clan_id, &needle, cx);
         self.add_members = Rc::new(add_members);
+    }
+
+    fn current_remote_seq(&self, cx: &App) -> Option<u64> {
+        remote_members::answer_seq(self.clan_id, &self.add_query.trim().to_lowercase(), cx)
     }
 
     fn add_input_needle(&self, cx: &App) -> String {
@@ -734,13 +749,13 @@ impl PermissionOverrides {
     }
 
     fn add_member(&mut self, user_id: UserId, cx: &mut Context<Self>) {
+        let profiles = self
+            .remote_members
+            .get(&user_id)
+            .map(|member| vec![(user_id, remote_members::profile(member))])
+            .unwrap_or_default();
         self.close_add_popup(cx);
         let channel_id = self.channel_id;
-        let profiles = self
-            .remote_rows
-            .get(&user_id)
-            .map(|row| vec![(user_id, remote_members::profile(row))])
-            .unwrap_or_default();
         ChannelUsersStore::global(cx).update(cx, |store, cx| {
             store.add_users(channel_id, &[user_id], profiles, cx);
         });
@@ -863,7 +878,7 @@ impl PermissionOverrides {
     ) -> impl IntoElement {
         let roles = self.add_roles.clone();
         let members = self.add_members.clone();
-        let remote_rows = self.remote_rows.clone();
+        let known_members = self.remote_members.clone();
         let count = roles.len() + members.len();
         let searching = count == 0
             && remote_members::is_searching(
@@ -924,10 +939,12 @@ impl PermissionOverrides {
                                             .into_any_element()
                                     } else {
                                         let user_id = members[ix - roles.len()];
-                                        let member = match remote_rows.get(&user_id) {
-                                            Some(row) => row.clone(),
-                                            None => member_row(clan_id, user_id, cx),
-                                        };
+                                        let member = remote_members::picker_row(
+                                            clan_id,
+                                            user_id,
+                                            &known_members,
+                                            cx,
+                                        );
                                         render_add_member_row(&member, &theme, view.clone())
                                             .into_any_element()
                                     }

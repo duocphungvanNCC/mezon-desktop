@@ -7,7 +7,7 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ChannelUsersStore, ClanId, ClanMembersStore,
+    ChannelId, ChannelList, ChannelType, ChannelUsersStore, ClanId, ClanMember, ClanMembersStore,
     MentionSearchEvent, MentionSearchStore, RoleId, RolesStore, Settings, UserId,
 };
 
@@ -15,7 +15,7 @@ use super::channel_acl::{
     self, SearchMode, is_system_role, member_matches, parse_search, role_matches,
 };
 use super::permissions_tab::{
-    MEMBER_ROW_HEIGHT, MemberRow, ROLE_ROW_HEIGHT, RoleRow, member_avatar, member_row, role_glyph,
+    MEMBER_ROW_HEIGHT, MemberRow, ROLE_ROW_HEIGHT, RoleRow, member_avatar, role_glyph,
     role_row_from,
 };
 use super::remote_members;
@@ -51,11 +51,15 @@ fn candidate_rows(role_count: usize, member_count: usize) -> Vec<CandidateRow> {
     rows
 }
 
+fn appended_rows(old: &[CandidateRow], new: &[CandidateRow]) -> Option<usize> {
+    (new.len() > old.len() && new.starts_with(old)).then(|| new.len() - old.len())
+}
+
 pub(super) enum AddMemRoleEvent {
     Staged {
         user_ids: Vec<UserId>,
         role_ids: Vec<RoleId>,
-        remote_rows: Vec<MemberRow>,
+        remote_members: Vec<ClanMember>,
     },
 }
 
@@ -71,8 +75,10 @@ pub struct AddMemRoleModal {
     selected_role_ids: Vec<RoleId>,
     role_rows: Rc<Vec<RoleRow>>,
     member_ids: Rc<Vec<UserId>>,
-    remote_rows: Rc<HashMap<UserId, MemberRow>>,
+    remote_members: Rc<HashMap<UserId, ClanMember>>,
+    remote_seq: Option<u64>,
     rows: Rc<Vec<CandidateRow>>,
+    rows_query: String,
     list_state: ListState,
     focus_handle: FocusHandle,
     _debounce: Task<()>,
@@ -164,7 +170,9 @@ impl AddMemRoleModal {
                 this.refresh_candidates(cx);
             }),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-                this.search_remote(cx);
+                if remote_members::searchable(&this.typed_needle(cx)) {
+                    this.search_remote(cx);
+                }
                 this.refresh_candidates(cx);
             }),
             cx.observe(&ChannelUsersStore::global(cx), |this, _, cx| {
@@ -174,7 +182,9 @@ impl AddMemRoleModal {
         ];
         if let Some(store) = MentionSearchStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, _: &MentionSearchEvent, cx| {
-                this.refresh_candidates(cx);
+                if this.remote_seq != this.current_remote_seq(cx) {
+                    this.refresh_candidates(cx);
+                }
             }));
         }
 
@@ -196,8 +206,10 @@ impl AddMemRoleModal {
             selected_role_ids: Vec::new(),
             role_rows: Rc::new(Vec::new()),
             member_ids: Rc::new(Vec::new()),
-            remote_rows: Rc::new(HashMap::new()),
+            remote_members: Rc::new(HashMap::new()),
+            remote_seq: None,
             rows: Rc::new(Vec::new()),
+            rows_query: String::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW))
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
@@ -221,9 +233,17 @@ impl AddMemRoleModal {
         });
     }
 
+    fn typed_needle(&self, cx: &App) -> String {
+        parse_search(self.search_input.read(cx).value()).needle
+    }
+
     fn search_remote(&mut self, cx: &mut Context<Self>) {
-        let needle = parse_search(self.search_input.read(cx).value()).needle;
+        let needle = self.typed_needle(cx);
         remote_members::search(cx.entity_id().as_u64(), self.clan_id, &needle, cx);
+    }
+
+    fn current_remote_seq(&self, cx: &App) -> Option<u64> {
+        remote_members::answer_seq(self.clan_id, &parse_search(&self.query).needle, cx)
     }
 
     fn refresh_candidates(&mut self, cx: &mut Context<Self>) {
@@ -233,19 +253,26 @@ impl AddMemRoleModal {
 
     fn rebuild_candidates(&mut self, cx: &App) {
         self.role_rows = Rc::new(self.compute_role_candidates(cx));
-        let (member_ids, remote_rows) = self.compute_member_candidates(cx);
-        if !remote_rows.is_empty() {
-            let known = Rc::make_mut(&mut self.remote_rows);
-            for row in remote_rows {
-                known.insert(row.user_id, row);
+        let (member_ids, remote_members) = self.compute_member_candidates(cx);
+        if !remote_members.is_empty() {
+            let known = Rc::make_mut(&mut self.remote_members);
+            for member in remote_members {
+                known.insert(member.id(), member);
             }
         }
+        self.remote_seq = self.current_remote_seq(cx);
         self.member_ids = Rc::new(member_ids);
         let rows = candidate_rows(self.role_rows.len(), self.member_ids.len());
         if rows != *self.rows {
-            self.list_state.reset(rows.len());
+            match appended_rows(&self.rows, &rows).filter(|_| self.rows_query == self.query) {
+                Some(added) => self
+                    .list_state
+                    .splice(self.rows.len()..self.rows.len(), added),
+                None => self.list_state.reset(rows.len()),
+            }
             self.rows = Rc::new(rows);
         }
+        self.rows_query.clone_from(&self.query);
     }
 
     fn is_private(&self, cx: &App) -> bool {
@@ -282,7 +309,7 @@ impl AddMemRoleModal {
             .collect()
     }
 
-    fn compute_member_candidates(&self, cx: &App) -> (Vec<UserId>, Vec<MemberRow>) {
+    fn compute_member_candidates(&self, cx: &App) -> (Vec<UserId>, Vec<ClanMember>) {
         let search = parse_search(&self.query);
         let in_channel: HashSet<UserId> = if self.is_private(cx) {
             ChannelUsersStore::global(cx)
@@ -313,22 +340,23 @@ impl AddMemRoleModal {
             .map(|member| member.id())
             .collect();
         let mut listed: HashSet<UserId> = member_ids.iter().copied().collect();
-        let remote_rows: Vec<MemberRow> = remote_members::hits(self.clan_id, &search.needle, cx)
+        let remote: Vec<ClanMember> = remote_members::hits(self.clan_id, &search.needle, cx)
             .into_iter()
-            .filter(|row| {
-                !in_channel.contains(&row.user_id)
-                    && !excluded_users.contains(&row.user_id)
-                    && listed.insert(row.user_id)
+            .filter(|member| {
+                let user_id = member.id();
+                !in_channel.contains(&user_id)
+                    && !excluded_users.contains(&user_id)
+                    && listed.insert(user_id)
             })
             .collect();
-        member_ids.extend(remote_rows.iter().map(|row| row.user_id));
-        (member_ids, remote_rows)
+        member_ids.extend(remote.iter().map(ClanMember::id));
+        (member_ids, remote)
     }
 
-    fn picked_remote_rows(&self, user_ids: &[UserId]) -> Vec<MemberRow> {
+    fn picked_remote_members(&self, user_ids: &[UserId]) -> Vec<ClanMember> {
         user_ids
             .iter()
-            .filter_map(|user_id| self.remote_rows.get(user_id).cloned())
+            .filter_map(|user_id| self.remote_members.get(user_id).cloned())
             .collect()
     }
 
@@ -357,13 +385,13 @@ impl AddMemRoleModal {
     fn submit(&mut self, cx: &mut Context<Self>) {
         let user_ids = std::mem::take(&mut self.selected_user_ids);
         let role_ids = std::mem::take(&mut self.selected_role_ids);
-        let remote_rows = self.picked_remote_rows(&user_ids);
+        let picked = self.picked_remote_members(&user_ids);
         if !self.is_private(cx) {
             if !user_ids.is_empty() || !role_ids.is_empty() {
                 cx.emit(AddMemRoleEvent::Staged {
                     user_ids,
                     role_ids,
-                    remote_rows,
+                    remote_members: picked,
                 });
             }
             Self::close(cx);
@@ -376,9 +404,9 @@ impl AddMemRoleModal {
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         if !user_ids.is_empty() {
-            let profiles = remote_rows
+            let profiles = picked
                 .iter()
-                .map(|row| (row.user_id, remote_members::profile(row)))
+                .map(|member| (member.id(), remote_members::profile(member)))
                 .collect();
             ChannelUsersStore::global(cx).update(cx, |store, cx| {
                 store.add_users(channel_id, &user_ids, profiles, cx);
@@ -472,7 +500,7 @@ impl AddMemRoleModal {
         let rows = self.rows.clone();
         let role_rows = self.role_rows.clone();
         let member_ids = self.member_ids.clone();
-        let remote_rows = self.remote_rows.clone();
+        let known_members = self.remote_members.clone();
         let selected_roles = self.selected_role_ids.clone();
         let selected_members = self.selected_user_ids.clone();
         let roles_label: SharedString =
@@ -514,10 +542,12 @@ impl AddMemRoleModal {
                         },
                         Some(CandidateRow::Member(member_ix)) => match member_ids.get(*member_ix) {
                             Some(user_id) => {
-                                let row = match remote_rows.get(user_id) {
-                                    Some(row) => row.clone(),
-                                    None => member_row(clan_id, *user_id, cx),
-                                };
+                                let row = remote_members::picker_row(
+                                    clan_id,
+                                    *user_id,
+                                    &known_members,
+                                    cx,
+                                );
                                 render_member_candidate(
                                     &row,
                                     selected_members.contains(user_id),
@@ -730,7 +760,7 @@ impl Render for AddMemRoleModal {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateRow, candidate_rows};
+    use super::{CandidateRow, appended_rows, candidate_rows};
 
     #[test]
     fn both_sections_share_one_flat_row_model() {
@@ -763,6 +793,30 @@ mod tests {
             vec![CandidateRow::RoleHeader, CandidateRow::Role(0)]
         );
         assert!(candidate_rows(0, 0).is_empty());
+    }
+
+    #[test]
+    fn server_rows_arriving_for_the_same_list_are_appended() {
+        assert_eq!(
+            appended_rows(&candidate_rows(1, 2), &candidate_rows(1, 5)),
+            Some(3)
+        );
+        assert_eq!(
+            appended_rows(&candidate_rows(0, 0), &candidate_rows(0, 2)),
+            Some(3)
+        );
+        assert_eq!(
+            appended_rows(&candidate_rows(1, 2), &candidate_rows(2, 2)),
+            None
+        );
+        assert_eq!(
+            appended_rows(&candidate_rows(1, 5), &candidate_rows(1, 2)),
+            None
+        );
+        assert_eq!(
+            appended_rows(&candidate_rows(1, 2), &candidate_rows(1, 2)),
+            None
+        );
     }
 
     #[test]

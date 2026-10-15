@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use futures::future::LocalBoxFuture;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus, is_unknown_api_error, mention_search_text_accepted};
+use mezon_client::{
+    ApiStatusError, AppApi, ConnectionStatus, api_status_from_error, is_unknown_api_error,
+    mention_search_text_accepted,
+};
 use mezon_proto::api;
 use unicode_normalization::UnicodeNormalization;
 
@@ -80,6 +83,16 @@ struct InFlight {
     session_ended: bool,
 }
 
+struct PendingRetry {
+    key: MentionSearchKey,
+    owner: u64,
+    sent: bool,
+}
+
+fn is_transient(err: &anyhow::Error) -> bool {
+    api_status_from_error(err).is_none_or(|status| status.code == ApiStatusError::INTERNAL)
+}
+
 fn in_flight_answers(in_flight: Option<&InFlight>, key: &MentionSearchKey) -> bool {
     in_flight.is_some_and(|request| !request.session_ended && request.key == *key)
 }
@@ -100,7 +113,7 @@ pub struct MentionSearchStore {
     in_flight: Option<InFlight>,
     queued: Option<MentionSearchKey>,
     failed: Option<(u64, MentionSearchKey)>,
-    retried: Option<MentionSearchKey>,
+    retry: Option<PendingRetry>,
     results: KeyedCache<MentionSearchKey, SettledSearch>,
     latest: Option<MentionSearchKey>,
     unsupported: bool,
@@ -147,7 +160,7 @@ impl MentionSearchStore {
             in_flight: None,
             queued: None,
             failed: None,
-            retried: None,
+            retry: None,
             results: KeyedCache::new(Some(SESSION_RESULTS)),
             latest: None,
             unsupported: false,
@@ -189,11 +202,19 @@ impl MentionSearchStore {
 
     fn on_reconnected(&mut self, cx: &mut Context<Self>) {
         self.unsupported = false;
-        let Some((_, failed)) = self.failed.take() else {
+        let waiting = self
+            .retry
+            .as_ref()
+            .filter(|retry| !retry.sent)
+            .map(|retry| retry.key.clone());
+        let Some(key) = self.failed.take().map(|(_, key)| key).or(waiting) else {
             return;
         };
-        if self.in_flight.is_none() && self.wanted.as_ref() == Some(&failed) {
-            self.schedule(failed, cx);
+        if self.in_flight.is_none() && self.wanted.as_ref() == Some(&key) {
+            if let Some(retry) = self.retry.as_mut().filter(|retry| retry.key == key) {
+                retry.sent = true;
+            }
+            self.schedule(key, cx);
         }
     }
 
@@ -205,7 +226,7 @@ impl MentionSearchStore {
         self.unsupported = false;
         self.release_pipeline();
         self.failed = None;
-        self.retried = None;
+        self.retry = None;
         self._retry_task = Task::ready(());
         self.latest = None;
         if !self.results.is_empty() {
@@ -234,6 +255,14 @@ impl MentionSearchStore {
             .is_some_and(|(failed_owner, _)| *failed_owner == owner)
         {
             self.failed = None;
+        }
+        if self
+            .retry
+            .as_ref()
+            .is_some_and(|retry| retry.owner == owner)
+        {
+            self.retry = None;
+            self._retry_task = Task::ready(());
         }
         let owned: Vec<MentionSearchKey> = self
             .results
@@ -283,6 +312,12 @@ impl MentionSearchStore {
         self.queued = None;
     }
 
+    fn retry_waiting_on(&self, key: &MentionSearchKey) -> bool {
+        self.retry
+            .as_ref()
+            .is_some_and(|retry| !retry.sent && retry.key == *key)
+    }
+
     fn failed_on(&self, key: &MentionSearchKey) -> bool {
         self.failed
             .as_ref()
@@ -322,7 +357,10 @@ impl MentionSearchStore {
             && wanted.text == search_text(text)
             && !self.answered(wanted)
             && !self.failed_on(wanted)
-            && (self.debounce_pending || self.in_flight.is_some() || self.queued.is_some())
+            && (self.debounce_pending
+                || self.in_flight.is_some()
+                || self.queued.is_some()
+                || self.retry_waiting_on(wanted))
     }
 
     pub fn results(
@@ -417,6 +455,7 @@ impl MentionSearchStore {
         self.wanted = Some(key.clone());
         if self.answered(&key)
             || self.failed_on(&key)
+            || self.retry_waiting_on(&key)
             || in_flight_answers(self.in_flight.as_ref(), &key)
         {
             self.queued = None;
@@ -464,18 +503,28 @@ impl MentionSearchStore {
             cx.background_executor().timer(FAILED_RETRY_DELAY).await;
             let _ = this.update(cx, |this, cx| {
                 if this.reset_generation == reset_generation {
-                    this.retry_failed(key, cx);
+                    this.retry_due(key, cx);
                 }
             });
         });
     }
 
-    fn retry_failed(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
-        if !self.failed_on(&key) || self.wanted.as_ref() != Some(&key) || self.in_flight.is_some() {
+    fn retry_due(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
+        if !self.retry_waiting_on(&key) {
             return;
         }
-        self.failed = None;
-        self.send(key, cx);
+        if self.wanted.as_ref() != Some(&key) {
+            self.retry = None;
+            return;
+        }
+        if let Some(retry) = self.retry.as_mut() {
+            retry.sent = true;
+        }
+        if self.in_flight.is_some() {
+            self.queued = Some(key);
+        } else {
+            self.send(key, cx);
+        }
     }
 
     fn send(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
@@ -527,7 +576,9 @@ impl MentionSearchStore {
                     if self.failed_on(&key) {
                         self.failed = None;
                     }
-                    self.retried = None;
+                    if self.retry.as_ref().is_some_and(|retry| retry.key == key) {
+                        self.retry = None;
+                    }
                     self.latest = Some(key);
                 }
                 Err(err) if is_unknown_api_error(&err) => {
@@ -537,13 +588,26 @@ impl MentionSearchStore {
                     self.unsupported = true;
                     self.wanted = None;
                     self.queued = None;
+                    self.retry = None;
                 }
                 Err(err) => {
                     tracing::warn!("SearchMentionUsers failed: {err}");
-                    self.failed = Some((owner, key.clone()));
-                    if self.retried.as_ref() != Some(&key) {
-                        self.retried = Some(key.clone());
+                    let retried = self
+                        .retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.sent && retry.key == key);
+                    if !retried && is_transient(&err) {
+                        self.retry = Some(PendingRetry {
+                            key: key.clone(),
+                            owner,
+                            sent: false,
+                        });
                         self.schedule_retry(key, cx);
+                    } else {
+                        if retried {
+                            self.retry = None;
+                        }
+                        self.failed = Some((owner, key));
                     }
                 }
             }
@@ -551,6 +615,7 @@ impl MentionSearchStore {
         if let Some(next) = self.queued.take().or_else(|| self.wanted.clone())
             && !self.answered(&next)
             && !self.failed_on(&next)
+            && !self.retry_waiting_on(&next)
         {
             self.schedule(next, cx);
         }
@@ -958,6 +1023,7 @@ mod tests {
         advance(DEBOUNCE_MS, cx);
         fail_next(&server, "API error: code=13");
         cx.run_until_parked();
+        assert!(searching(&store, "ng", cx));
         advance(1000, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         fail_next(&server, "API error: code=13");
@@ -976,15 +1042,31 @@ mod tests {
         assert_eq!(sent(&server), vec!["ng", "ng", "ngu"]);
     }
 
+    fn searching(store: &Entity<MentionSearchStore>, text: &str, cx: &mut TestAppContext) -> bool {
+        store.read_with(cx, |store, _| {
+            store.is_searching(COMPOSER, ClanId(1), None, text)
+        })
+    }
+
+    fn reject_next(server: &Rc<RefCell<FakeServer>>, code: u32) {
+        let reply = server
+            .borrow_mut()
+            .replies
+            .pop_front()
+            .expect("a request is waiting");
+        let _ = reply.send(Err(ApiStatusError { code }.into()));
+    }
+
     #[gpui::test]
     fn a_query_that_failed_once_is_retried_and_its_answer_shows(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
         advance(DEBOUNCE_MS, cx);
-        fail_next(&server, "API error: code=13");
+        reject_next(&server, ApiStatusError::INTERNAL);
         cx.run_until_parked();
         advance(999, cx);
         assert_eq!(sent(&server), vec!["ng"]);
+        assert!(searching(&store, "ng", cx));
         advance(1, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         server.borrow_mut().answer(many(3));
@@ -1005,6 +1087,70 @@ mod tests {
         cx.run_until_parked();
         advance(1000, cx);
         assert_eq!(sent(&server), vec!["ng", "hoa"]);
+    }
+
+    #[gpui::test]
+    fn a_query_the_server_rejects_is_not_retried(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        reject_next(&server, ApiStatusError::INVALID_ARGUMENT);
+        cx.run_until_parked();
+        assert!(!searching(&store, "ng", cx));
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng"]);
+    }
+
+    #[gpui::test]
+    fn a_retry_due_while_another_query_is_out_goes_next(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        type_query(&store, "ngu", cx);
+        advance(DEBOUNCE_MS, cx);
+        assert_eq!(sent(&server), vec!["ng", "ngu"]);
+        type_query(&store, "ng", cx);
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ngu"]);
+        server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
+        cx.run_until_parked();
+        advance(DEBOUNCE_MS, cx);
+        assert_eq!(sent(&server), vec!["ng", "ngu", "ng"]);
+    }
+
+    #[gpui::test]
+    fn another_query_succeeding_does_not_grant_a_second_retry(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng"]);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        type_query(&store, "hoa", cx);
+        advance(DEBOUNCE_MS, cx);
+        server.borrow_mut().answer(many(2));
+        cx.run_until_parked();
+        type_query(&store, "ng", cx);
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng", "hoa"]);
+        assert!(!searching(&store, "ng", cx));
+    }
+
+    #[gpui::test]
+    fn ending_the_session_drops_a_waiting_retry(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.end_session(COMPOSER, cx));
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng"]);
     }
 
     #[gpui::test]
