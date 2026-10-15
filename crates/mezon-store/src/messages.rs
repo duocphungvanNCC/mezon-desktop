@@ -10931,7 +10931,7 @@ impl MessageAttachment {
         let height = a.height.max(0) as u32;
         let tenor_mp4 = crate::message::tenor_mp4_url(&a.url);
         let is_sticker = a.filetype == STICKER_FILETYPE && tenor_mp4.is_none();
-        let is_video = MessageAttachment::media_is_video(&a.filetype, &a.url);
+        let is_video = MessageAttachment::plays_as_video(&a.filetype, &a.filename, &a.url);
         let (proxied_src, display_width, display_height) = if is_sticker {
             cfg.map(|c| c.sticker_attachment_proxy(&a.url, width, height))
                 .unwrap_or_else(|| {
@@ -13322,6 +13322,40 @@ mod tests {
             (attachment.display_width, attachment.display_height),
             (140.0, 140.0)
         );
+    }
+
+    #[test]
+    fn a_container_the_transcoder_converts_gets_a_video_box_without_dimensions() {
+        let sent_from_desktop = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "b5_h264.mkv".into(),
+            filetype: "doc".into(),
+            width: 0,
+            height: 0,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 61_022_429,
+        };
+        let on_minio = MessageAttachment::from_api(
+            sent_from_desktop(
+                "https://cdn.mezon.ai/1c6eb6c3e6c01000/2110590466519994368_b5_h264.mkv",
+            ),
+            None,
+        );
+        assert!(on_minio.is_video());
+        assert_eq!(
+            (on_minio.display_width, on_minio.display_height),
+            crate::config::video_attachment_display_dimensions(0, 0)
+        );
+        assert!(on_minio.display_width > on_minio.display_height);
+
+        let on_r2 = MessageAttachment::from_api(
+            sent_from_desktop(
+                "https://cdn.komu.vn/1c6eb6c3e6c01000/2110590466519994368_b5_h264.mkv",
+            ),
+            None,
+        );
+        assert!(on_r2.is_unsupported_media());
     }
 
     #[test]
