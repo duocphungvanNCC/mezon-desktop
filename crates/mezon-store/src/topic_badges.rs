@@ -13,7 +13,7 @@ use crate::AuthState;
 use crate::channel::{ChannelList, ChannelType};
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -252,6 +252,7 @@ impl TopicBadgeStore {
         if is_already_seen(
             ClanId(m.clan_id),
             ChannelId(m.topic_id),
+            MessageId(m.message_id),
             m.create_time_seconds,
             cx,
         ) {
@@ -327,7 +328,13 @@ impl TopicBadgeStore {
             } else {
                 notification_message_time(n)
             };
-            if is_already_seen(ClanId(n.clan_id), ChannelId(topic_id_raw), msg_time, cx) {
+            if is_already_seen(
+                ClanId(n.clan_id),
+                ChannelId(topic_id_raw),
+                MessageId(message_id.parse().unwrap_or_default()),
+                msg_time,
+                cx,
+            ) {
                 continue;
             }
             let dedupe_key = format!("{parent_channel_id}_{message_id}");
@@ -438,22 +445,34 @@ fn is_viewing_channel(channel_id: &str, cx: &App) -> bool {
     let Ok(topic_id) = channel_id.parse::<i64>() else {
         return false;
     };
+    if cx.active_window().is_none() {
+        return false;
+    }
     let topics = TopicsStore::global(cx);
     let topics = topics.read(cx);
-    topics.is_panel_open() && topics.active_topic_id() == Some(topic_id)
+    topics.is_panel_open()
+        && topics.active_topic_id() == Some(topic_id)
+        && !MessagesStore::global(cx).read(cx).topic_has_more_bottom()
 }
 
-fn is_already_seen(clan_id: ClanId, channel_id: ChannelId, msg_time: u32, cx: &App) -> bool {
-    let channel_last = ChannelList::global(cx)
+fn is_already_seen(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    msg_time: u32,
+    cx: &App,
+) -> bool {
+    if MessagesStore::global(cx)
+        .read(cx)
+        .has_read_message(channel_id, message_id)
+    {
+        return true;
+    }
+    let last_seen = ChannelList::global(cx)
         .read(cx)
         .channel(clan_id, channel_id)
         .map(|ch| ch.last_seen_timestamp.max(0) as u32)
         .unwrap_or(0);
-    let read_second = MessagesStore::global(cx)
-        .read(cx)
-        .last_read_snowflake_second(channel_id)
-        .max(0) as u32;
-    let last_seen = channel_last.max(read_second);
     msg_time > 0 && last_seen > 0 && msg_time <= last_seen
 }
 

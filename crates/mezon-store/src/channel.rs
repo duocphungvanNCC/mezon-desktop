@@ -1420,7 +1420,10 @@ impl ChannelList {
             .map(|(id, s)| (*id, s.last_sent_message_id))
             .collect();
         let applied = match self.cache.get_mut(&clan_id) {
-            Some(categories) => apply_unread_seed_into(&seed, categories),
+            Some(categories) => {
+                let seeded = apply_unread_seed_into(&seed, categories);
+                restore_topic_badges(&self.topic_parent_badges, clan_id, categories) || seeded
+            }
             None => false,
         };
         if tracing::enabled!(target: "clan_load", tracing::Level::DEBUG) {
@@ -1820,6 +1823,7 @@ impl ChannelList {
         self.merge_pending_badges(&mut categories);
         let previous_badges = collect_channel_badges(&self.cache, clan_id);
         carry_live_channel_badges(&mut categories, &previous_badges);
+        restore_topic_badges(&self.topic_parent_badges, clan_id, &mut categories);
         tracing::debug!(
             target: "badge_flow",
             clan = clan_id.get(),
@@ -2464,6 +2468,24 @@ impl ChannelList {
             .unwrap_or(0)
     }
 
+    fn topic_badge_for_parent(&self, clan_id: ClanId, parent_id: ChannelId) -> u32 {
+        self.topic_parent_badges
+            .values()
+            .filter(|tracked| tracked.clan_id == clan_id && tracked.parent_id == parent_id)
+            .fold(0, |total, tracked| total.saturating_add(tracked.count))
+    }
+
+    pub fn own_unread(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<(u32, bool)> {
+        let channel = self.channel(clan_id, channel_id)?;
+        let own_badge = channel
+            .badge_count
+            .saturating_sub(self.topic_badge_for_parent(clan_id, channel_id));
+        Some((
+            own_badge,
+            own_badge > 0 || channel.last_seen_timestamp < channel.last_sent_timestamp,
+        ))
+    }
+
     pub fn is_clan_cache_loaded(&self, clan_id: ClanId) -> bool {
         self.cache.contains(&clan_id)
     }
@@ -3075,10 +3097,15 @@ impl ChannelList {
         &mut self,
         clan_id: ClanId,
         channel_id: ChannelId,
+        topic_id: ChannelId,
         message_ts: i64,
         cx: &mut Context<Self>,
     ) -> bool {
+        let topic_tracked = forget_topic_mention(&mut self.topic_parent_badges, topic_id);
         let decremented = match self.cache.get_mut(&clan_id) {
+            Some(categories) if topic_tracked => {
+                subtract_channel_badge(categories, channel_id, 1) > 0
+            }
             Some(categories) => {
                 decrement_channel_badge_on_delete(categories, channel_id, message_ts)
             }
@@ -3094,18 +3121,21 @@ impl ChannelList {
         let mut cleared_badge = 0;
         let mut should_notify = false;
         let mut found = false;
+        let topic_badge = self.topic_badge_for_parent(clan_id, channel_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for ch in categories
                 .iter_mut()
                 .flat_map(|c| c.channels.iter_mut())
                 .filter(|ch| ch.id == channel_id)
             {
+                let kept = ch.badge_count.min(topic_badge);
                 if !found {
                     found = true;
-                    cleared_badge = ch.badge_count;
-                    should_notify = ch.is_unread() || cleared_badge > 0;
+                    cleared_badge = ch.badge_count - kept;
+                    should_notify =
+                        cleared_badge > 0 || ch.last_seen_timestamp < ch.last_sent_timestamp;
                 }
-                ch.badge_count = 0;
+                ch.badge_count = kept;
                 ch.last_seen_timestamp = ch.last_sent_timestamp;
                 ch.last_seen_message_id = ch.last_sent_message_id;
             }
@@ -3123,9 +3153,8 @@ impl ChannelList {
             cleared_badge,
             "apply_read"
         );
-        clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
         if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
-            user_channel.badge_count = 0;
+            user_channel.badge_count = user_channel.badge_count.min(topic_badge);
             user_channel.last_seen_timestamp = user_channel.last_sent_timestamp;
             user_channel.last_seen_message_id = user_channel.last_sent_message_id;
             cx.notify();
@@ -3155,6 +3184,7 @@ impl ChannelList {
             }
         }
         self.drop_pending_badges_for_clan(clan_id);
+        clear_topic_badges_for_clan(&mut self.topic_parent_badges, clan_id);
         self.clear_topic_unreads(clan_id, None, cx);
         if changed {
             self.notify_channel_list(clan_id, cx);
@@ -3200,11 +3230,21 @@ impl ChannelList {
             .get(&clan_id)
             .map(|categories| thread_ids_of(categories, channel_id))
             .unwrap_or_default();
-        self.clear_topic_unreads(clan_id, Some(&[channel_id]), cx);
-        self.apply_read(clan_id, channel_id, cx);
+        self.apply_mark_as_read_channel(clan_id, channel_id, cx);
         for thread_id in thread_ids {
             self.apply_read(clan_id, thread_id, cx);
         }
+    }
+
+    pub(crate) fn apply_mark_as_read_channel(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
+        self.clear_topic_unreads(clan_id, Some(&[channel_id]), cx);
+        self.apply_read(clan_id, channel_id, cx);
     }
 
     pub fn mark_channel_as_read(
@@ -3989,6 +4029,7 @@ impl ChannelList {
         let mut visible_changed = false;
         let mut badge_delta = 0;
         let mut computed = false;
+        let topic_badge = self.topic_badge_for_parent(clan_id, channel_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for ch in categories
                 .iter_mut()
@@ -3997,7 +4038,7 @@ impl ChannelList {
             {
                 let was_unread = ch.is_unread();
                 let was_badge = ch.badge_count;
-                ch.badge_count = 0;
+                ch.badge_count = ch.badge_count.min(topic_badge);
                 if seen_ts > ch.last_seen_timestamp {
                     ch.last_seen_timestamp = seen_ts;
                 }
@@ -4012,11 +4053,10 @@ impl ChannelList {
                 if !computed {
                     computed = true;
                     visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
-                    badge_delta = was_badge;
+                    badge_delta = was_badge - ch.badge_count;
                 }
             }
         }
-        clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
         if let Some(live) = self.channel(clan_id, channel_id).cloned() {
             self.sync_user_channel_from(&live, cx);
         }
@@ -4047,10 +4087,9 @@ impl ChannelList {
                 false
             }
         };
+        record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
         if changed {
-            record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
             self.notify_channel_list(clan_id, cx);
-            self.sync_clan_after_read(clan_id, 0, cx);
         }
         if let Some(parent) = self.channel(clan_id, parent_id).cloned() {
             self.sync_user_channel_from(&parent, cx);
@@ -7185,6 +7224,42 @@ fn decrement_channel_badge_on_delete(
         }
     }
     changed
+}
+
+fn restore_topic_badges(
+    topic_badges: &HashMap<ChannelId, TopicParentBadge>,
+    clan_id: ClanId,
+    categories: &mut [Category],
+) -> bool {
+    let mut held: HashMap<ChannelId, u32> = HashMap::new();
+    for tracked in topic_badges.values().filter(|t| t.clan_id == clan_id) {
+        let count = held.entry(tracked.parent_id).or_default();
+        *count = count.saturating_add(tracked.count);
+    }
+    let mut changed = false;
+    for ch in categories.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+        if let Some(&count) = held.get(&ch.id)
+            && ch.badge_count < count
+        {
+            ch.badge_count = count;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn forget_topic_mention(
+    topic_badges: &mut HashMap<ChannelId, TopicParentBadge>,
+    topic_id: ChannelId,
+) -> bool {
+    let Some(tracked) = topic_badges.get_mut(&topic_id) else {
+        return false;
+    };
+    tracked.count = tracked.count.saturating_sub(1);
+    if tracked.count == 0 {
+        topic_badges.remove(&topic_id);
+    }
+    true
 }
 
 fn record_topic_parent_badge(
@@ -12911,6 +12986,7 @@ mod tests {
         crate::direct::DirectMessageStore::init(api.clone(), cx);
         crate::clan_members::ClanMembersStore::init(api.clone(), cx);
         crate::topics::TopicsStore::init(api.clone(), cx);
+        crate::inbox::InboxStore::init(api.clone(), cx);
         let channels = ChannelList::init(api.clone(), cx);
         MessagesStore::init(api.clone(), cx);
         let topic_badges = TopicBadgeStore::init(api.clone(), auth_state, cx);
@@ -13076,6 +13152,386 @@ mod tests {
         cx.run_until_parked();
         assert!(!parent_has_unread_topic(cx, &stores, clan_id, parent_id));
         assert!(!clan_has_unread(cx, clan_id));
+    }
+
+    fn topic_message(
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        topic_id: i64,
+        second: i64,
+        mentions_me: bool,
+    ) -> RealtimeEvent {
+        let content = if mentions_me {
+            format!(r#"{{"t":"@me","mentions":[{{"user_id":"{REMOVED_SELF}","s":0,"e":3}}]}}"#)
+        } else {
+            r#"{"t":"hi"}"#.to_string()
+        };
+        RealtimeEvent::ChannelMessage(mezon_proto::api::ChannelMessage {
+            clan_id: clan_id.get(),
+            channel_id: parent_id.get(),
+            topic_id,
+            sender_id: REMOVED_SELF + 1,
+            message_id: second << 22,
+            create_time_seconds: second as u32,
+            mode: 2,
+            content,
+            ..Default::default()
+        })
+    }
+
+    fn topic_unread_clan(
+        cx: &mut gpui::TestAppContext,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        loaded: bool,
+        seeded: bool,
+    ) -> TopicUnreadStores {
+        let stores = cx.update(|cx| {
+            let stores = init_topic_unread_stores(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![make_clan(clan_id.get())], cx);
+            });
+            if loaded {
+                stores.channels.update(cx, |channels, cx| {
+                    channels.apply_clan_structure(
+                        clan_id,
+                        one_channel_structure(parent_id.get(), 1),
+                        None,
+                        cx,
+                    );
+                    if seeded {
+                        channels.badge_seeds.insert(
+                            clan_id,
+                            BadgeSeed {
+                                current: true,
+                                complete: true,
+                            },
+                        );
+                    }
+                    set_channel_activity(channels, clan_id, parent_id, 0, 50, 50);
+                });
+            }
+            stores
+        });
+        cx.run_until_parked();
+        stores
+    }
+
+    fn parent_badge(
+        cx: &gpui::TestAppContext,
+        stores: &TopicUnreadStores,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+    ) -> u32 {
+        cx.read(|cx| {
+            stores
+                .channels
+                .read(cx)
+                .channel_badge_count(clan_id, parent_id)
+        })
+    }
+
+    #[gpui::test]
+    fn a_topic_mention_stays_on_the_parent_and_clan_until_the_topic_is_read(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(921);
+        let parent_id = ChannelId(9211);
+        let topic_id = 9219;
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, topic_id, 60, true));
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 1);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+        assert_eq!(
+            cx.read(|cx| stores.channels.read(cx).own_unread(clan_id, parent_id)),
+            Some((0, false))
+        );
+
+        cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                channels.apply_read(clan_id, parent_id, cx);
+            });
+        });
+        stores.api.publish_event(RealtimeEvent::LastSeenUpdated(
+            mezon_proto::realtime::LastSeenMessageEvent {
+                clan_id: clan_id.get(),
+                channel_id: parent_id.get(),
+                message_id: 50 << 22,
+                mode: 2,
+                timestamp_seconds: 50,
+                badge_count: 0,
+            },
+        ));
+        cx.run_until_parked();
+        assert_eq!(
+            parent_badge(cx, &stores, clan_id, parent_id),
+            1,
+            "reading the parent's own messages must not read the topic mention"
+        );
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+        assert!(clan_has_unread(cx, clan_id));
+
+        cx.update(|cx| {
+            stores.topic_badges.update(cx, |store, cx| {
+                store.clear_topic(&topic_id.to_string(), cx);
+            });
+            stores.channels.update(cx, |channels, cx| {
+                channels.apply_topic_read(ChannelId(topic_id), cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 0);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(0));
+        assert!(!clan_has_unread(cx, clan_id));
+    }
+
+    #[gpui::test]
+    fn viewing_the_parent_keeps_the_mention_its_topic_holds(cx: &mut gpui::TestAppContext) {
+        let clan_id = ClanId(928);
+        let parent_id = ChannelId(9281);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9289, 60, true));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.open_channel_in_clan(clan_id, parent_id, cx);
+                assert_eq!(store.active_channel_id(), Some(parent_id));
+                store.note_viewport_seen(MessageId(50 << 22), 50, true, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 1);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+        assert!(parent_has_unread_topic(cx, &stores, clan_id, parent_id));
+    }
+
+    #[gpui::test]
+    fn a_mention_after_the_channel_and_topic_were_read_still_counts(cx: &mut gpui::TestAppContext) {
+        let clan_id = ClanId(929);
+        let parent_id = ChannelId(9291);
+        let topic_id = 9299;
+        let read = 1_840_651_252_652_835_840;
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+        cx.update(|cx| {
+            MessagesStore::global(cx).update(cx, |store, _| {
+                store.set_last_read_message(parent_id, MessageId(read));
+                store.set_last_read_message(ChannelId(topic_id), MessageId(read));
+            });
+        });
+        let mention = |channel_topic: i64, message_id: i64| {
+            RealtimeEvent::ChannelMessage(mezon_proto::api::ChannelMessage {
+                clan_id: clan_id.get(),
+                channel_id: parent_id.get(),
+                topic_id: channel_topic,
+                sender_id: REMOVED_SELF + 1,
+                message_id,
+                create_time_seconds: 1_792_087_534,
+                mode: 2,
+                content: format!(
+                    r#"{{"t":"@me","mentions":[{{"user_id":"{REMOVED_SELF}","s":0,"e":3}}]}}"#
+                ),
+                ..Default::default()
+            })
+        };
+
+        stores.api.publish_event(mention(0, read + (1 << 22)));
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 1);
+        stores
+            .api
+            .publish_event(mention(topic_id, read + (2 << 22)));
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 2);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(2));
+
+        stores.api.publish_event(mention(0, read));
+        cx.run_until_parked();
+        assert_eq!(
+            parent_badge(cx, &stores, clan_id, parent_id),
+            2,
+            "a message the user already read is not counted again"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reseed_keeps_the_mention_an_unread_topic_holds_on_its_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(930);
+        let parent_id = ChannelId(9301);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, false, false);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9309, 60, true));
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+
+        cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                channels.pending_badge_seed.insert(
+                    clan_id,
+                    HashMap::from([(
+                        parent_id,
+                        ChannelUnreadSeed {
+                            badge_count: 1,
+                            last_seen_timestamp: 50,
+                            last_seen_message_id: MessageId(50),
+                            last_sent_timestamp: 50,
+                            last_sent_message_id: MessageId(50),
+                        },
+                    )]),
+                );
+                channels.apply_clan_structure(
+                    clan_id,
+                    one_channel_structure(parent_id.get(), 1),
+                    None,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            parent_badge(cx, &stores, clan_id, parent_id),
+            1,
+            "the server counts a topic mention on its parent without moving the parent's last sent"
+        );
+    }
+
+    #[gpui::test]
+    fn a_topic_mention_counts_on_a_clan_that_was_not_opened(cx: &mut gpui::TestAppContext) {
+        let clan_id = ClanId(922);
+        let parent_id = ChannelId(9221);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, false, false);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9229, 60, true));
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+        assert!(clan_has_unread(cx, clan_id));
+    }
+
+    #[gpui::test]
+    fn a_topic_mention_counts_on_the_clan_before_its_badges_are_seeded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(923);
+        let parent_id = ChannelId(9231);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, false);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9239, 60, true));
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 1);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(1));
+    }
+
+    #[gpui::test]
+    fn a_plain_topic_message_marks_the_parent_unread_without_a_badge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(924);
+        let parent_id = ChannelId(9241);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9249, 60, false));
+        cx.run_until_parked();
+        assert!(parent_has_unread_topic(cx, &stores, clan_id, parent_id));
+        assert!(clan_has_unread(cx, clan_id));
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 0);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(0));
+    }
+
+    #[gpui::test]
+    fn mark_as_read_from_another_session_clears_the_mentions_of_the_topics(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(925);
+        let parent_id = ChannelId(9251);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9259, 60, true));
+        cx.run_until_parked();
+        stores.api.publish_event(RealtimeEvent::MarkAsRead(
+            mezon_proto::realtime::MarkAsRead {
+                channel_id: parent_id.get(),
+                category_id: 1,
+                clan_id: clan_id.get(),
+            },
+        ));
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 0);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(0));
+        assert!(!parent_has_unread_topic(cx, &stores, clan_id, parent_id));
+        assert!(!clan_has_unread(cx, clan_id));
+    }
+
+    #[gpui::test]
+    fn marking_the_parent_read_clears_the_mentions_of_its_topics(cx: &mut gpui::TestAppContext) {
+        let clan_id = ClanId(926);
+        let parent_id = ChannelId(9261);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, 9269, 60, true));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                channels.apply_channel_read_with_threads(clan_id, parent_id, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 0);
+        assert_eq!(cx.read(|cx| clan_badge(cx, clan_id)), Some(0));
+    }
+
+    #[gpui::test]
+    fn deleting_a_topic_mention_after_the_parent_was_read_drops_it_from_the_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(927);
+        let parent_id = ChannelId(9271);
+        let topic_id = ChannelId(9279);
+        let stores = topic_unread_clan(cx, clan_id, parent_id, true, true);
+
+        stores
+            .api
+            .publish_event(topic_message(clan_id, parent_id, topic_id.get(), 60, true));
+        cx.run_until_parked();
+        let decremented = cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                set_channel_activity(channels, clan_id, parent_id, 2, 50, 70);
+                channels.apply_read(clan_id, parent_id, cx);
+                channels.decrement_channel_on_delete(clan_id, parent_id, topic_id, 60, cx)
+            })
+        });
+        assert!(decremented);
+        assert_eq!(parent_badge(cx, &stores, clan_id, parent_id), 0);
+        cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                set_channel_activity(channels, clan_id, parent_id, 1, 70, 80);
+                channels.apply_read(clan_id, parent_id, cx);
+            });
+        });
+        assert_eq!(
+            parent_badge(cx, &stores, clan_id, parent_id),
+            0,
+            "a deleted topic mention must not keep a later parent mention on the row"
+        );
     }
 
     #[gpui::test]

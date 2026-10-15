@@ -10534,16 +10534,48 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeControlError {
+    pub action: String,
+    pub code: i64,
+    pub message: Option<String>,
+}
+
+impl RealtimeControlError {
+    pub const FORBIDDEN: i64 = 403;
+
+    pub fn is_forbidden(&self) -> bool {
+        self.code == Self::FORBIDDEN
+    }
+}
+
+impl std::fmt::Display for RealtimeControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{} error: code={} {}", self.action, self.code, message),
+            None => write!(f, "{} error: code={}", self.action, self.code),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeControlError {}
+
 fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
     if let Some(error) = realtime_error_from_body(response) {
-        anyhow::bail!(
-            "{action} error: code={} {}",
-            error.code,
-            error.message.trim()
-        );
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(error.code),
+            message: Some(error.message.trim().to_owned()),
+        }
+        .into());
     }
     if code != 0 {
-        anyhow::bail!("{action} error: code={code}");
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(code),
+            message: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -13030,6 +13062,10 @@ mod tests {
         assert!(
             message.contains("join_clan_chat error: code=403 Not allowed"),
             "{message}"
+        );
+        assert!(
+            err.downcast_ref::<RealtimeControlError>()
+                .is_some_and(RealtimeControlError::is_forbidden)
         );
     }
 

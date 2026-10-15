@@ -1525,11 +1525,12 @@ impl MessagesStore {
         self.last_read_message_by_channel.remove(&channel_id);
     }
 
-    pub fn last_read_snowflake_second(&self, channel_id: ChannelId) -> i64 {
-        self.last_read_message_by_channel
-            .get(&channel_id)
-            .map(|id| snowflake_seq(*id))
-            .unwrap_or(0)
+    pub fn has_read_message(&self, channel_id: ChannelId, message_id: MessageId) -> bool {
+        !message_id.is_zero()
+            && self
+                .last_read_message_by_channel
+                .get(&channel_id)
+                .is_some_and(|read| message_id <= *read)
     }
 
     /// Schedule a last-seen write when the viewport tail is visible (cf. React
@@ -1583,7 +1584,7 @@ impl MessagesStore {
             mode: self.mode,
             badge_count,
         };
-        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
+        if self.channel_is_unread(channel_id, clan_id, cx) {
             self.apply_local_last_seen(&pending, cx);
         } else {
             self.set_last_read_message(channel_id, message_id);
@@ -1809,11 +1810,9 @@ impl MessagesStore {
                 })
             })
         } else {
-            ChannelList::try_global(cx).is_some_and(|cl| {
-                cl.read(cx)
-                    .channel(clan_id, channel_id)
-                    .is_some_and(|c| c.is_unread())
-            })
+            ChannelList::try_global(cx)
+                .and_then(|cl| cl.read(cx).own_unread(clan_id, channel_id))
+                .is_some_and(|(_, unread)| unread)
         }
     }
 
@@ -1938,6 +1937,11 @@ impl MessagesStore {
                     message_id,
                     "write_last_seen_message failed: {e}"
                 );
+                if e.downcast_ref::<mezon_client::RealtimeControlError>()
+                    .is_some_and(mezon_client::RealtimeControlError::is_forbidden)
+                {
+                    return;
+                }
                 this.update(cx, |this, _| {
                     if this.reset_generation != generation {
                         return;
