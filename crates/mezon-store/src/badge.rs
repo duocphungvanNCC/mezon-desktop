@@ -8,7 +8,7 @@ use mezon_client::{
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
-use crate::channel::ChannelList;
+use crate::channel::{ChannelList, STREAM_MODE_THREAD};
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
@@ -112,12 +112,16 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     let Some(active) = messages.active_channel_id() else {
         return false;
     };
+    if m.topic_id != 0 {
+        let topic_id = ChannelId(m.topic_id);
+        let parent_id = ChannelId(m.channel_id);
+        return messages.is_viewing_topic_live(topic_id, parent_id);
+    }
     let badge_id = badge_channel_id(m);
-    let parent_id = ChannelId(m.channel_id);
-    if active == badge_id && badge_id == parent_id {
+    if active == badge_id {
         return messages.is_reading_live_tail(active);
     }
-    active == badge_id || active == parent_id
+    false
 }
 
 fn mention_check_policy(
@@ -153,11 +157,15 @@ fn is_message_already_seen(
     if msg_time <= 0 {
         return false;
     }
-    let last_seen = ChannelList::global(cx)
+    let channel_last = ChannelList::global(cx)
         .read(cx)
         .channel(clan_id, channel_id)
         .map(|channel| channel.last_seen_timestamp)
         .unwrap_or(0);
+    let read_second = MessagesStore::global(cx)
+        .read(cx)
+        .last_read_snowflake_second(channel_id);
+    let last_seen = channel_last.max(read_second);
     last_seen > 0 && msg_time <= last_seen
 }
 
@@ -415,21 +423,30 @@ impl BadgeService {
                         skip = skip_unread_activity,
                         "socket ChannelMessage decision"
                     );
-                    if m.topic_id == 0 && !skip_unread_activity {
-                        ChannelList::global(cx).update(cx, |cl, cx| {
-                            cl.note_channel_message(
-                                clan_id,
-                                channel_id,
-                                badge_mention,
-                                seen,
-                                ts,
-                                message_id,
-                                cx,
-                            )
-                        });
-                        if seen {
-                            MessagesStore::global(cx).update(cx, |store, _| {
-                                store.set_last_read_message(channel_id, message_id);
+                    if !skip_unread_activity {
+                        if m.topic_id == 0 {
+                            ChannelList::global(cx).update(cx, |cl, cx| {
+                                cl.note_channel_message(
+                                    clan_id,
+                                    channel_id,
+                                    badge_mention,
+                                    seen,
+                                    ts,
+                                    message_id,
+                                    cx,
+                                )
+                            });
+                            if seen {
+                                MessagesStore::global(cx).update(cx, |store, _| {
+                                    store.set_last_read_message(channel_id, message_id);
+                                });
+                            }
+                        } else {
+                            let parent_id = ChannelId(m.channel_id);
+                            ChannelList::global(cx).update(cx, |cl, cx| {
+                                cl.note_channel_message(
+                                    clan_id, parent_id, false, seen, ts, message_id, cx,
+                                )
                             });
                         }
                     }
@@ -440,13 +457,14 @@ impl BadgeService {
                     }
                     if !from_me && is_new_message && !seen && badge_mention && !skip_unread_activity
                     {
-                        ClanList::global(cx).update(cx, |cls, cx| {
-                            cls.increment_clan_badge(clan_id, cx);
-                        });
                         if m.topic_id != 0 {
                             let parent_id = ChannelId(m.channel_id);
                             ChannelList::global(cx).update(cx, |cl, cx| {
                                 cl.increment_channel_for_topic(clan_id, parent_id, channel_id, cx);
+                            });
+                        } else {
+                            ClanList::global(cx).update(cx, |cls, cx| {
+                                cls.increment_clan_badge(clan_id, cx);
                             });
                         }
                     }
@@ -531,6 +549,7 @@ impl BadgeService {
                         dm.note_read(channel_id, cx);
                     });
                 } else {
+                    let thread_last_seen = e.mode == STREAM_MODE_THREAD;
                     ChannelList::global(cx).update(cx, |cl, cx| {
                         cl.apply_last_seen(
                             clan_id,
@@ -540,12 +559,20 @@ impl BadgeService {
                             seen_message_id,
                             cx,
                         );
-                        cl.apply_topic_read(channel_id, cx);
+                        if !thread_last_seen {
+                            cl.apply_topic_read(channel_id, cx);
+                        }
                     });
                 }
                 if !seen_message_id.is_zero() {
                     MessagesStore::global(cx).update(cx, |store, _| {
-                        store.set_last_read_message(channel_id, seen_message_id);
+                        if e.mode == STREAM_MODE_THREAD {
+                            if let Some(topic_id) = store.active_topic_id() {
+                                store.set_last_read_message(topic_id, seen_message_id);
+                            }
+                        } else {
+                            store.set_last_read_message(channel_id, seen_message_id);
+                        }
                     });
                 }
             }
@@ -661,23 +688,24 @@ impl BadgeService {
             message_id = message_id.get(),
             "badge: apply notification increment"
         );
-        ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.note_channel_message(
-                clan_id,
-                badge_channel,
-                true,
-                false,
-                msg_time,
-                message_id,
-                cx,
-            );
-        });
-        ClanList::global(cx).update(cx, |cls, cx| {
-            cls.increment_clan_badge(clan_id, cx);
-        });
         if badge_channel != channel_id {
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.increment_channel_for_topic(clan_id, channel_id, badge_channel, cx);
+            });
+        } else {
+            ChannelList::global(cx).update(cx, |cl, cx| {
+                cl.note_channel_message(
+                    clan_id,
+                    badge_channel,
+                    true,
+                    false,
+                    msg_time,
+                    message_id,
+                    cx,
+                );
+            });
+            ClanList::global(cx).update(cx, |cls, cx| {
+                cls.increment_clan_badge(clan_id, cx);
             });
         }
     }

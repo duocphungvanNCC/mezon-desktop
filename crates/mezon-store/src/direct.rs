@@ -2612,6 +2612,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn note_read_closes_the_dm_toast_before_the_channel_is_cached(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            let shown = crate::platform::PlatformStore::arm_channel_show(Some("9181"));
+            let other = crate::platform::PlatformStore::arm_channel_show(Some("9182"));
+            store.update(cx, |store, cx| {
+                assert!(!store.note_read(ChannelId(9181), cx));
+            });
+            assert!(crate::platform::PlatformStore::channel_show_cancelled(
+                Some("9181"),
+                shown
+            ));
+            assert!(!crate::platform::PlatformStore::channel_show_cancelled(
+                Some("9182"),
+                other
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn a_new_session_lists_before_asking_for_badges_again(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = dm_store(cx);

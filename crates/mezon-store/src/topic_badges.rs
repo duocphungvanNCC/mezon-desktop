@@ -14,6 +14,7 @@ use crate::channel::{ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId, UserId};
 use crate::inbox::{InboxStore, skip_inbox_mention_code};
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const USER_MENTIONED: i32 = -9;
@@ -111,6 +112,12 @@ impl TopicBadgeStore {
             .get(topic_id)
             .map(|entry| entry.count)
             .unwrap_or(0)
+    }
+
+    pub fn has_unread_for_parent(&self, parent_channel_id: &str) -> bool {
+        self.topic_parent_map
+            .values()
+            .any(|entry| entry._parent_channel_id == parent_channel_id && entry.count > 0)
     }
 
     pub fn badge_label_for_clan(&self, clan_id: &str) -> Option<String> {
@@ -341,20 +348,29 @@ fn format_topic_badge_label(total: u32) -> Option<String> {
 }
 
 fn is_viewing_channel(channel_id: &str, cx: &App) -> bool {
-    ChannelList::global(cx)
+    if cx.active_window().is_none() {
+        return false;
+    }
+    let Some(topic_raw) = channel_id.parse::<i64>().ok() else {
+        return false;
+    };
+    MessagesStore::global(cx)
         .read(cx)
-        .active_channel_id
-        .is_some_and(|id| id.to_string() == channel_id)
+        .active_topic_id()
+        .is_some_and(|id| id.get() == topic_raw)
 }
 
 fn is_already_seen(clan_id: ClanId, channel_id: ChannelId, msg_time: u32, cx: &App) -> bool {
-    let Some(ch) = ChannelList::global(cx)
+    let channel_last = ChannelList::global(cx)
         .read(cx)
         .channel(clan_id, channel_id)
-    else {
-        return false;
-    };
-    let last_seen = ch.last_seen_timestamp.max(0) as u32;
+        .map(|ch| ch.last_seen_timestamp.max(0) as u32)
+        .unwrap_or(0);
+    let read_second = MessagesStore::global(cx)
+        .read(cx)
+        .last_read_snowflake_second(channel_id)
+        .max(0) as u32;
+    let last_seen = channel_last.max(read_second);
     msg_time > 0 && last_seen > 0 && msg_time <= last_seen
 }
 

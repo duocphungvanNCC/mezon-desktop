@@ -1518,6 +1518,20 @@ impl MessagesStore {
         self.last_read_message_by_channel.remove(&channel_id);
     }
 
+    pub fn last_read_snowflake_second(&self, channel_id: ChannelId) -> i64 {
+        self.last_read_message_by_channel
+            .get(&channel_id)
+            .map(|id| snowflake_seq(*id))
+            .unwrap_or(0)
+    }
+
+    pub fn is_viewing_topic_live(&self, topic_id: ChannelId, parent_id: ChannelId) -> bool {
+        let parent = self.active_topic_parent.or(self.active_channel_id);
+        self.active_topic_id == Some(topic_id)
+            && parent == Some(parent_id)
+            && self.is_reading_live_tail(topic_id)
+    }
+
     /// Schedule a last-seen write when the viewport tail is visible (cf. React
     /// `useChannelSeen` + `updateLastSeenMessage`).
     pub fn note_viewport_seen(
@@ -1569,6 +1583,16 @@ impl MessagesStore {
             mode: self.mode,
             badge_count,
         };
+        if self.parent_mark_read_deferred(clan_id, channel_id, message_id, cx) {
+            tracing::debug!(
+                target: "badge_flow",
+                clan = clan_id.get(),
+                channel = channel_id.get(),
+                message = message_id.get(),
+                "viewport seen — deferred: topic activity newer than parent timeline"
+            );
+            return;
+        }
         if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
             self.apply_local_last_seen(&pending, cx);
         } else {
@@ -1589,6 +1613,9 @@ impl MessagesStore {
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent.or(self.active_channel_id) else {
             return;
         };
         if let Some(buzz) = BuzzStore::try_global(cx) {
@@ -1620,10 +1647,10 @@ impl MessagesStore {
             .unwrap_or(live_badge);
         let pending = PendingLastSeen {
             clan_id,
-            channel_id: topic_id,
+            channel_id: parent_channel_id,
             message_id,
             create_time,
-            mode: self.mode,
+            mode: STREAM_MODE_THREAD,
             badge_count,
         };
         self.set_last_read_message(topic_id, message_id);
@@ -1641,6 +1668,32 @@ impl MessagesStore {
                     .map(|ch| ch.last_seen_message_id)
             })
             .filter(|id| !id.is_zero())
+    }
+
+    fn parent_mark_read_deferred(
+        &self,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        viewport_message_id: MessageId,
+        cx: &App,
+    ) -> bool {
+        if self.is_dm || clan_id.is_zero() {
+            return false;
+        }
+        if self.active_topic_id.is_some() {
+            return false;
+        }
+        if TopicBadgeStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .has_unread_for_parent(&parent_id.get().to_string())
+        }) {
+            return true;
+        }
+        ChannelList::try_global(cx).is_some_and(|cl| {
+            cl.read(cx)
+                .should_defer_mark_parent_read(clan_id, parent_id, viewport_message_id)
+        })
     }
 
     fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
@@ -1694,8 +1747,10 @@ impl MessagesStore {
             badge_count = pending.badge_count,
             "empty channel opened — clearing its unread state"
         );
-        self.apply_local_last_seen(&pending, cx);
-        self.set_pending_last_seen(pending, cx);
+        if !self.parent_mark_read_deferred(clan_id, channel_id, tail_id, cx) {
+            self.apply_local_last_seen(&pending, cx);
+            self.set_pending_last_seen(pending, cx);
+        }
     }
 
     pub fn note_reopened_seen(&mut self, cx: &mut Context<Self>) {
@@ -1734,6 +1789,9 @@ impl MessagesStore {
             mode: self.mode,
             badge_count: live_badge,
         };
+        if self.parent_mark_read_deferred(clan_id, channel_id, message_id, cx) {
+            return;
+        }
         self.apply_local_last_seen(&pending, cx);
         self.set_pending_last_seen(pending, cx);
     }
@@ -1945,6 +2003,16 @@ impl MessagesStore {
     }
 
     fn apply_local_last_seen(&mut self, pending: &PendingLastSeen, cx: &mut Context<Self>) {
+        if !pending.clan_id.is_zero()
+            && self.parent_mark_read_deferred(
+                pending.clan_id,
+                pending.channel_id,
+                pending.message_id,
+                cx,
+            )
+        {
+            return;
+        }
         self.set_last_read_message(pending.channel_id, pending.message_id);
         let ts = pending.create_time.max(0);
         if self.is_dm {
@@ -3809,7 +3877,7 @@ impl MessagesStore {
         }
         self.topic_anonymous_mode = false;
         self.active_topic_id = next;
-        self.active_topic_parent = None;
+        self.active_topic_parent = next.and_then(|_| self.active_channel_id);
         self.pending_topic_jump = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
@@ -11488,6 +11556,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn topic_viewport_seen_arms_last_seen_for_parent_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            let seen = MessageId(100);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.note_topic_viewport_seen(topic, seen, 50, true, cx);
+            });
+
+            store.read_with(cx, |store, _| {
+                let pending = store.pending_last_seen.get(&parent).expect("pending");
+                assert_eq!(pending.channel_id, parent);
+                assert_eq!(pending.mode, STREAM_MODE_THREAD);
+                assert_eq!(pending.message_id, seen);
+                assert_eq!(store.last_read_message_by_channel.get(&topic), Some(&seen));
+            });
+        });
+    }
+
     fn init_forward_stores(cx: &mut App) -> (Entity<ChannelList>, Entity<MessagesStore>) {
         let store = test_store(cx);
         (ChannelList::global(cx), store)
@@ -16985,7 +17086,7 @@ mod tests {
                 store.set_active_topic(Some(77), cx);
                 assert!(!store.topic_anonymous_mode());
 
-                store.toggle_anonymous_mode(cx);
+                store.toggle_anonymous_mode(true, cx);
                 assert!(store.topic_anonymous_mode());
 
                 store.set_active_topic(None, cx);
