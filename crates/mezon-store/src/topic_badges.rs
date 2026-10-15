@@ -16,6 +16,7 @@ use crate::ids::{ChannelId, ClanId, UserId};
 use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topics::TopicsStore;
 
 const USER_MENTIONED: i32 = -9;
 const USER_REPLIED: i32 = -11;
@@ -32,6 +33,7 @@ pub enum TopicBadgeEvent {
 struct TopicParentEntry {
     clan_id: String,
     _parent_channel_id: String,
+    unread: bool,
     count: u32,
 }
 
@@ -120,6 +122,12 @@ impl TopicBadgeStore {
             .any(|entry| entry._parent_channel_id == parent_channel_id && entry.count > 0)
     }
 
+    pub fn topic_has_unread(&self, topic_id: &str) -> bool {
+        self.topic_parent_map
+            .get(topic_id)
+            .is_some_and(|entry| entry.unread)
+    }
+
     pub fn badge_label_for_clan(&self, clan_id: &str) -> Option<String> {
         format_topic_badge_label(self.all_topic_noti_clan(clan_id))
     }
@@ -172,6 +180,9 @@ impl TopicBadgeStore {
         let Some(user_id) = self.current_user_id(cx) else {
             return (Vec::new(), Vec::new());
         };
+        if m.sender_id == user_id.get() {
+            return (Vec::new(), Vec::new());
+        }
         let topic_id = m.topic_id.to_string();
         let parent_channel_id = m.channel_id.to_string();
         let clan_id = m.clan_id.to_string();
@@ -190,9 +201,7 @@ impl TopicBadgeStore {
             channel_id: m.topic_id,
             ..m.clone()
         };
-        if !is_message_mention_or_reply(&topic_message, user_id, cx) {
-            return (Vec::new(), Vec::new());
-        }
+        let badge_mention = is_message_mention_or_reply(&topic_message, user_id, cx);
         let message_id = m.message_id.to_string();
         let dedupe_key = format!("{parent_channel_id}_{message_id}");
         if self.increment_topic_for_message(
@@ -201,8 +210,10 @@ impl TopicBadgeStore {
             &topic_id,
             Some(&message_id),
             &dedupe_key,
+            badge_mention,
         ) {
-            let inbox = if skip_inbox_mention_code(m.code)
+            let inbox = if !badge_mention
+                || skip_inbox_mention_code(m.code)
                 || !is_message_inbox_mention_or_reply(&topic_message, user_id, cx)
             {
                 Vec::new()
@@ -266,6 +277,7 @@ impl TopicBadgeStore {
                 &topic_id,
                 Some(&message_id),
                 &dedupe_key,
+                true,
             ) && !changed_clans.contains(&clan_id)
             {
                 changed_clans.push(clan_id);
@@ -287,6 +299,7 @@ impl TopicBadgeStore {
         topic_id: &str,
         message_id: Option<&str>,
         dedupe_key: &str,
+        increment_badge: bool,
     ) -> bool {
         let dedupable = message_id.is_some_and(|id| !id.is_empty() && id != "0");
         if dedupable {
@@ -301,9 +314,13 @@ impl TopicBadgeStore {
             .or_insert_with(|| TopicParentEntry {
                 clan_id: clan_id.to_string(),
                 _parent_channel_id: parent_channel_id.to_string(),
+                unread: false,
                 count: 0,
             });
-        entry.count = entry.count.saturating_add(1);
+        entry.unread = true;
+        if increment_badge {
+            entry.count = entry.count.saturating_add(1);
+        }
         true
     }
 
@@ -348,16 +365,12 @@ fn format_topic_badge_label(total: u32) -> Option<String> {
 }
 
 fn is_viewing_channel(channel_id: &str, cx: &App) -> bool {
-    if cx.active_window().is_none() {
-        return false;
-    }
-    let Some(topic_raw) = channel_id.parse::<i64>().ok() else {
+    let Ok(topic_id) = channel_id.parse::<i64>() else {
         return false;
     };
-    MessagesStore::global(cx)
-        .read(cx)
-        .active_topic_id()
-        .is_some_and(|id| id.get() == topic_raw)
+    let topics = TopicsStore::global(cx);
+    let topics = topics.read(cx);
+    topics.is_panel_open() && topics.active_topic_id() == Some(topic_id)
 }
 
 fn is_already_seen(clan_id: ClanId, channel_id: ChannelId, msg_time: u32, cx: &App) -> bool {
@@ -443,11 +456,13 @@ mod tests {
             TopicParentEntry {
                 clan_id: "10".into(),
                 _parent_channel_id: "5".into(),
+                unread: true,
                 count: 2,
             },
             TopicParentEntry {
                 clan_id: "10".into(),
                 _parent_channel_id: "5".into(),
+                unread: true,
                 count: 3,
             },
         ];
@@ -475,6 +490,7 @@ mod tests {
                     TopicParentEntry {
                         clan_id: "10".into(),
                         _parent_channel_id: "5".into(),
+                        unread: true,
                         count: 2,
                     },
                 );

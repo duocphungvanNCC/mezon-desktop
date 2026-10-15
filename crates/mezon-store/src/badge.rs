@@ -17,6 +17,7 @@ use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topics::TopicsStore;
 
 const STREAM_MODE_GROUP: i32 = 3;
 const STREAM_MODE_DM: i32 = 4;
@@ -109,14 +110,16 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     if messages.is_dm() {
         return false;
     }
+    if m.topic_id != 0 {
+        let topics = TopicsStore::global(cx);
+        let topics = topics.read(cx);
+        return topics.is_panel_open()
+            && topics.active_topic_id() == Some(m.topic_id)
+            && !messages.topic_has_more_bottom();
+    }
     let Some(active) = messages.active_channel_id() else {
         return false;
     };
-    if m.topic_id != 0 {
-        let topic_id = ChannelId(m.topic_id);
-        let parent_id = ChannelId(m.channel_id);
-        return messages.is_viewing_topic_live(topic_id, parent_id);
-    }
     let badge_id = badge_channel_id(m);
     if active == badge_id {
         return messages.is_reading_live_tail(active);
@@ -424,29 +427,20 @@ impl BadgeService {
                         "socket ChannelMessage decision"
                     );
                     if !skip_unread_activity {
-                        if m.topic_id == 0 {
-                            ChannelList::global(cx).update(cx, |cl, cx| {
-                                cl.note_channel_message(
-                                    clan_id,
-                                    channel_id,
-                                    badge_mention,
-                                    seen,
-                                    ts,
-                                    message_id,
-                                    cx,
-                                )
-                            });
-                            if seen {
-                                MessagesStore::global(cx).update(cx, |store, _| {
-                                    store.set_last_read_message(channel_id, message_id);
-                                });
-                            }
-                        } else {
-                            let parent_id = ChannelId(m.channel_id);
-                            ChannelList::global(cx).update(cx, |cl, cx| {
-                                cl.note_channel_message(
-                                    clan_id, parent_id, false, seen, ts, message_id, cx,
-                                )
+                        ChannelList::global(cx).update(cx, |cl, cx| {
+                            cl.note_channel_message(
+                                clan_id,
+                                channel_id,
+                                badge_mention,
+                                seen,
+                                ts,
+                                message_id,
+                                cx,
+                            )
+                        });
+                        if seen {
+                            MessagesStore::global(cx).update(cx, |store, _| {
+                                store.set_last_read_message(channel_id, message_id);
                             });
                         }
                     }
