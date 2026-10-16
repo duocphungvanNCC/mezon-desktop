@@ -1030,8 +1030,14 @@ pub struct ApiChannelDesc {
     pub e2ee: i32,
     #[serde(default)]
     pub app_id: i64,
-    #[serde(default)]
-    pub is_topic: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTopicBadge {
+    pub topic_id: i64,
+    pub channel_id: i64,
+    pub badge: i32,
+    pub has_unread: bool,
 }
 
 fn default_channel_active() -> i32 {
@@ -4576,7 +4582,6 @@ impl MezonTransport {
             age_restricted: channel.age_restricted,
             e2ee: channel.e2ee,
             app_id: channel.app_id,
-            is_topic: channel.is_topic,
         }
     }
 
@@ -4949,6 +4954,7 @@ impl MezonTransport {
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
+            "ListTopicBadgeCount" => 215,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6123,6 +6129,29 @@ impl MezonTransport {
             .into_iter()
             .map(Self::channel_desc_from_proto)
             .collect())
+    }
+
+    pub async fn list_topic_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiTopicBadge>> {
+        let cid = self.generate_cid();
+        let body = api::ListTopicBadgeCountRequest { clan_id }.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "ListTopicBadgeCount", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(
+            api::ListTopicBadgeCountResponse::decode(response.as_slice())?
+                .topics
+                .into_iter()
+                .map(|topic| ApiTopicBadge {
+                    topic_id: topic.topic_id,
+                    channel_id: topic.channel_id,
+                    badge: topic.badge,
+                    has_unread: topic.has_unread,
+                })
+                .collect(),
+        )
     }
 
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {

@@ -11,8 +11,8 @@ use gpui::{
     App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, Global, Subscription, Task,
 };
 use mezon_client::transport::{
-    ApiCategoryDesc, ApiChannelDesc, CHANNEL_DESC_FETCH_LIMIT, api_status_from_error,
-    is_channel_limit_api_error,
+    ApiCategoryDesc, ApiChannelDesc, ApiTopicBadge, CHANNEL_DESC_FETCH_LIMIT,
+    api_status_from_error, is_channel_limit_api_error,
 };
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
@@ -1165,7 +1165,7 @@ impl ChannelList {
     fn apply_topic_seed(
         &mut self,
         clan_id: ClanId,
-        topics: &[ApiChannelDesc],
+        topics: &[ApiTopicBadge],
         cx: &mut Context<Self>,
     ) {
         if topics.is_empty() {
@@ -1173,13 +1173,12 @@ impl ChannelList {
         }
         let seeds: Vec<TopicSeed> = topics
             .iter()
-            .filter(|topic| topic.channel_id != 0 && topic.parent_id != 0)
+            .filter(|topic| topic.topic_id != 0 && topic.channel_id != 0)
             .map(|topic| TopicSeed {
-                topic_id: ChannelId(topic.channel_id),
-                parent_id: ChannelId(topic.parent_id),
-                count: topic.badge_count.max(0) as u32,
-                unread: topic.badge_count > 0
-                    || topic.last_sent_message_id > topic.last_seen_message_id,
+                topic_id: ChannelId(topic.topic_id),
+                parent_id: ChannelId(topic.channel_id),
+                count: topic.badge.max(0) as u32,
+                unread: topic.badge > 0 || topic.has_unread,
             })
             .collect();
         for seed in seeds.iter().filter(|seed| seed.count > 0) {
@@ -1394,27 +1393,38 @@ impl ChannelList {
             if !still_current {
                 return;
             }
-            let mut attempt = 0u32;
-            let descs = loop {
-                match api.list_channel_badge_counts(clan_id.get()).await {
-                    Ok(descs) => break Some(descs),
-                    Err(e) => {
-                        attempt += 1;
-                        if attempt >= BADGE_SEED_MAX_ATTEMPTS {
+            let channel_seed = async {
+                let mut attempt = 0u32;
+                loop {
+                    match api.list_channel_badge_counts(clan_id.get()).await {
+                        Ok(descs) => break Some(descs),
+                        Err(e) => {
+                            attempt += 1;
+                            if attempt >= BADGE_SEED_MAX_ATTEMPTS {
+                                tracing::warn!(
+                                    "list_channel_badge_counts failed for clan {clan_id} after {attempt} attempts: {e}"
+                                );
+                                break None;
+                            }
                             tracing::warn!(
-                                "list_channel_badge_counts failed for clan {clan_id} after {attempt} attempts: {e}"
+                                "list_channel_badge_counts failed for clan {clan_id} (attempt {attempt}): {e}, retrying"
                             );
-                            break None;
+                            cx.background_executor()
+                                .timer(BADGE_SEED_RETRY_BACKOFF * attempt)
+                                .await;
                         }
-                        tracing::warn!(
-                            "list_channel_badge_counts failed for clan {clan_id} (attempt {attempt}): {e}, retrying"
-                        );
-                        cx.background_executor()
-                            .timer(BADGE_SEED_RETRY_BACKOFF * attempt)
-                            .await;
                     }
                 }
             };
+            let (descs, topics) = futures::future::join(
+                channel_seed,
+                api.list_topic_badge_counts(clan_id.get()),
+            )
+            .await;
+            let topics = topics.unwrap_or_else(|e| {
+                tracing::debug!("list_topic_badge_counts failed for clan {clan_id}: {e}");
+                Vec::new()
+            });
             let _ = this.update(cx, |this, cx| {
                 if this.reset_generation != generation
                     || this.socket_generation != socket_generation
@@ -1425,7 +1435,7 @@ impl ChannelList {
                 let Some(descs) = descs else {
                     return;
                 };
-                this.apply_badge_seed(clan_id, descs, cx);
+                this.apply_badge_seed(clan_id, descs, &topics, cx);
             });
         })
     }
@@ -1434,14 +1444,13 @@ impl ChannelList {
         &mut self,
         clan_id: ClanId,
         descs: Vec<ApiChannelDesc>,
+        topics: &[ApiTopicBadge],
         cx: &mut Context<Self>,
     ) {
         if self.forgotten_clans.contains(&clan_id) {
             return;
         }
-        let (topics, descs): (Vec<ApiChannelDesc>, Vec<ApiChannelDesc>) =
-            descs.into_iter().partition(|desc| desc.is_topic);
-        self.apply_topic_seed(clan_id, &topics, cx);
+        self.apply_topic_seed(clan_id, topics, cx);
         if descs.is_empty() {
             return;
         }
@@ -7700,7 +7709,6 @@ mod tests {
 
     fn api_desc(id: i64, name: &str, parent_id: i64) -> ApiChannelDesc {
         ApiChannelDesc {
-            is_topic: false,
             channel_id: id,
             channel_label: name.into(),
             channel_type: 1,
@@ -8198,7 +8206,6 @@ mod tests {
     fn channel_detail_desc_inserts_thread_under_parent() {
         let mut cats = categories();
         let desc = ApiChannelDesc {
-            is_topic: false,
             channel_id: 500,
             channel_label: "my-thread".into(),
             channel_type: 7,
@@ -8764,7 +8771,6 @@ mod tests {
         use mezon_client::transport::ApiChannelDesc;
 
         let make_desc = |id: i64, label: &str, ch_type: u32, badge: i32| ApiChannelDesc {
-            is_topic: false,
             channel_id: id,
             channel_label: label.into(),
             channel_type: ch_type,
@@ -9221,7 +9227,6 @@ mod tests {
     #[test]
     fn channel_from_desc_leaves_voice_member_name_unresolved() {
         let desc = ApiChannelDesc {
-            is_topic: false,
             channel_id: 10,
             channel_label: "voice".into(),
             channel_type: 10,
@@ -11671,7 +11676,7 @@ mod tests {
             );
 
             channels.update(cx, |channels, cx| {
-                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 3)], cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 3)], &[], cx);
             });
             assert_eq!(
                 clan_rail(cx),
@@ -11692,7 +11697,7 @@ mod tests {
                     favor_ids(&[]),
                     cx,
                 );
-                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], &[], cx);
                 channels.resync(cx);
                 assert_eq!(
                     channels
@@ -11741,7 +11746,7 @@ mod tests {
                     favor_ids(&[]),
                     cx,
                 );
-                channels.apply_badge_seed(ClanId(1), Vec::new(), cx);
+                channels.apply_badge_seed(ClanId(1), Vec::new(), &[], cx);
                 assert!(
                     !channels.badge_seeds.contains_key(&ClanId(1)),
                     "ListChannelBadgeCount answers a cold listing cache with an empty success; \
@@ -11788,7 +11793,7 @@ mod tests {
             );
 
             channels.update(cx, |channels, cx| {
-                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], &[], cx);
             });
             assert_eq!(clan_rail(cx), (2, true));
 
@@ -11835,7 +11840,7 @@ mod tests {
                     "a clan whose seed never landed must ask again on a read, or its dot stays on \
                      for the session"
                 );
-                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 0)], cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 0)], &[], cx);
             });
             assert_eq!(clan_rail(cx), (0, false));
         });
@@ -11943,7 +11948,7 @@ mod tests {
             let channels = init_clan_with_rail_badge(cx, 0);
             channels.update(cx, |channels, cx| {
                 channels.forget_clan(ClanId(1), cx);
-                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], cx);
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2)], &[], cx);
                 assert!(
                     !channels.badge_seeds.contains_key(&ClanId(1))
                         && !channels.pending_badge_seed.contains_key(&ClanId(1)),
@@ -11970,7 +11975,7 @@ mod tests {
                     favor_ids(&[]),
                     cx,
                 );
-                channels.apply_badge_seed(ClanId(1), seed, cx);
+                channels.apply_badge_seed(ClanId(1), seed, &[], cx);
             });
             assert_eq!(clan_rail(cx), (5, true));
 
@@ -12000,7 +12005,7 @@ mod tests {
                     favor_ids(&[]),
                     cx,
                 );
-                channels.apply_badge_seed(ClanId(1), seed, cx);
+                channels.apply_badge_seed(ClanId(1), seed, &[], cx);
             });
             assert_eq!(
                 clan_rail(cx),
@@ -12023,7 +12028,6 @@ mod tests {
 
     fn badge_desc(channel_id: i64, badge_count: i32) -> ApiChannelDesc {
         ApiChannelDesc {
-            is_topic: false,
             badge_count,
             count_mess_unread: badge_count,
             last_sent_timestamp: 100,
@@ -12284,7 +12288,7 @@ mod tests {
         });
         channels.update(cx, |channels, cx| {
             channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
-            channels.apply_badge_seed(ClanId(1), vec![api_desc(2, "", 0)], cx);
+            channels.apply_badge_seed(ClanId(1), vec![api_desc(2, "", 0)], &[], cx);
             for (ts, id) in messages {
                 channels.note_channel_message(
                     ClanId(1),
@@ -13452,16 +13456,8 @@ mod tests {
         );
     }
 
-    fn seeded_row(
-        channel_id: i64,
-        parent_id: i64,
-        badge: i32,
-        seen: i64,
-        sent: i64,
-    ) -> ApiChannelDesc {
+    fn seeded_row(channel_id: i64, badge: i32, seen: i64, sent: i64) -> ApiChannelDesc {
         ApiChannelDesc {
-            is_topic: parent_id != 0,
-            parent_id,
             badge_count: badge,
             count_mess_unread: badge,
             last_seen_message_id: seen,
@@ -13469,6 +13465,15 @@ mod tests {
             last_sent_message_id: sent,
             last_sent_timestamp: sent,
             ..api_desc(channel_id, "", 0)
+        }
+    }
+
+    fn seeded_topic(topic_id: i64, channel_id: i64, badge: i32, has_unread: bool) -> ApiTopicBadge {
+        ApiTopicBadge {
+            topic_id,
+            channel_id,
+            badge,
+            has_unread,
         }
     }
 
@@ -13484,10 +13489,10 @@ mod tests {
             stores.channels.update(cx, |channels, cx| {
                 channels.apply_badge_seed(
                     clan_id,
-                    vec![
-                        seeded_row(parent_id.get(), 0, 1, 50, 50),
-                        seeded_row(mentioned, parent_id.get(), 1, 3, 9),
-                        seeded_row(unread, parent_id.get(), 0, 4, 6),
+                    vec![seeded_row(parent_id.get(), 1, 50, 50)],
+                    &[
+                        seeded_topic(mentioned, parent_id.get(), 1, true),
+                        seeded_topic(unread, parent_id.get(), 0, true),
                     ],
                     cx,
                 );
@@ -14022,7 +14027,6 @@ mod tests {
     #[test]
     fn unread_seed_from_descs_drops_app_and_voice_channels() {
         let desc = |id: i64, channel_type: u32| ApiChannelDesc {
-            is_topic: false,
             channel_id: id,
             channel_label: String::new(),
             channel_type,
@@ -14569,7 +14573,6 @@ mod tests {
     #[test]
     fn plain_channel_stays_visible_when_server_omits_active() {
         let desc = ApiChannelDesc {
-            is_topic: false,
             channel_id: 11,
             channel_label: "general".into(),
             channel_type: ChannelType::Text.as_raw(),
@@ -14603,7 +14606,6 @@ mod tests {
     #[test]
     fn channel_from_desc_preserves_active_state() {
         let desc = ApiChannelDesc {
-            is_topic: false,
             channel_id: 10,
             channel_label: "thread".into(),
             channel_type: ChannelType::Thread.as_raw(),
@@ -14889,7 +14891,6 @@ mod tests {
                 channels.apply_channel_detail(
                     ClanId(1),
                     ApiChannelDesc {
-                        is_topic: false,
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
                         channel_type: CHANNEL_TYPE_THREAD,
@@ -14977,7 +14978,6 @@ mod tests {
                 channels.apply_channel_detail(
                     ClanId(1),
                     ApiChannelDesc {
-                        is_topic: false,
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
                         channel_type: CHANNEL_TYPE_THREAD,
@@ -15455,7 +15455,6 @@ mod tests {
                 channels.apply_channel_detail(
                     ClanId(1),
                     ApiChannelDesc {
-                        is_topic: false,
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
                         channel_type: CHANNEL_TYPE_THREAD,
@@ -15501,7 +15500,6 @@ mod tests {
                 channels.apply_channel_detail(
                     ClanId(1),
                     ApiChannelDesc {
-                        is_topic: false,
                         channel_id: 9,
                         channel_label: "hidden thread".into(),
                         channel_type: CHANNEL_TYPE_THREAD,
@@ -16145,7 +16143,6 @@ mod tests {
         active: i32,
     ) -> mezon_client::transport::ApiChannelDesc {
         mezon_client::transport::ApiChannelDesc {
-            is_topic: false,
             channel_id,
             channel_label: "voice elsewhere".into(),
             channel_type: 10,
