@@ -85,7 +85,7 @@ pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CdnFileLink {
+pub(crate) struct CdnFileLink {
     pub src: String,
     pub dst: String,
     pub url: String,
@@ -107,7 +107,7 @@ fn is_channel_upload_name(file: &str) -> bool {
             .is_some_and(|(id, _)| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
-pub fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<CdnFileLink> {
+pub(crate) fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<CdnFileLink> {
     if channel_id == 0 {
         return None;
     }
@@ -3417,12 +3417,18 @@ impl AppApi {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use prost::Message as _;
+
     use super::{
-        CdnFileLink, MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan,
+        AppApi, CdnFileLink, MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan,
         attachment_cdn_url_for_upload, cdn_file_link_into_channel, cdn_read_base_url,
         emoticon_id_from_filename, multipart_part_ranges, sanitize_upload_filename,
         upload_attachment_type,
     };
+    use crate::TransportClient;
+    use crate::transport::{ApiAttachment, HttpFallbackSession};
 
     #[test]
     fn emoticon_id_is_the_server_snowflake_in_every_key_layout() {
@@ -3681,6 +3687,141 @@ mod tests {
                 0
             ),
             None
+        );
+    }
+
+    async fn fake_link_api() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, len);
+                        }
+                    };
+                    while buf.len() < head_end + body_len {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let dst = mezon_proto::api::LinkCdnFileRequest::decode(&buf[head_end..])
+                        .map(|request| request.dst)
+                        .unwrap_or_default();
+                    let status = if dst.ends_with("_linked.png") {
+                        "409 Conflict"
+                    } else if dst.ends_with("_broken.png") {
+                        "500 Internal Server Error"
+                    } else {
+                        "200 OK"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        base_url
+    }
+
+    fn forwarded(url: &str, thumbnail: &str) -> ApiAttachment {
+        ApiAttachment {
+            url: url.to_string(),
+            thumbnail: thumbnail.to_string(),
+            filename: "file".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn forwarded_attachments_move_to_the_destination_unless_the_link_fails() {
+        let transport = Arc::new(TransportClient::new(String::new()));
+        transport.set_http_fallback(Some(HttpFallbackSession {
+            base_url: fake_link_api().await,
+            token: "token".to_string(),
+            expires_at: 0,
+            refresh_token: String::new(),
+            is_remember: false,
+            server_key: String::new(),
+        }));
+        let api = AppApi::new(transport, String::new());
+
+        let linked = api
+            .link_attachments_into_channel(
+                vec![
+                    forwarded(
+                        "https://cdn.mezon.ai/1cf93b197d401000/2090000000000000001_fresh.png",
+                        "https://cdn.mezon.ai/1cf93b197d401000/2090000000000000002_poster.png",
+                    ),
+                    forwarded(
+                        "https://cdn.mezon.ai/1cf93b197d401000/2090000000000000003_linked.png",
+                        "",
+                    ),
+                    forwarded(
+                        "https://cdn.mezon.ai/1cf93b197d401000/2090000000000000004_broken.png",
+                        "",
+                    ),
+                    forwarded(
+                        "https://cdn.komu.vn/1cf93b197d401000/2090000000000000005_old.png",
+                        "",
+                    ),
+                ],
+                FORWARD_DESTINATION,
+            )
+            .await;
+
+        let urls: Vec<(&str, &str)> = linked
+            .iter()
+            .map(|attachment| (attachment.url.as_str(), attachment.thumbnail.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                (
+                    "https://cdn.mezon.ai/1d0000000000abcd/2090000000000000001_fresh.png",
+                    "https://cdn.mezon.ai/1d0000000000abcd/2090000000000000002_poster.png",
+                ),
+                (
+                    "https://cdn.mezon.ai/1d0000000000abcd/2090000000000000003_linked.png",
+                    "",
+                ),
+                (
+                    "https://cdn.mezon.ai/1cf93b197d401000/2090000000000000004_broken.png",
+                    "",
+                ),
+                (
+                    "https://cdn.komu.vn/1cf93b197d401000/2090000000000000005_old.png",
+                    "",
+                ),
+            ]
+        );
+        assert!(
+            linked
+                .iter()
+                .all(|attachment| attachment.filename == "file")
         );
     }
 }
