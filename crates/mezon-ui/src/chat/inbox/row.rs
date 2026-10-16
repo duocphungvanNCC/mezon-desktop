@@ -526,7 +526,7 @@ pub(crate) fn build_notification_row_view(
 pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
     let (avatar_name, avatar_url) = TopicsStore::global(cx)
         .read(cx)
-        .inbox_message_avatar(topic)
+        .inbox_avatar(topic, cx)
         .map(|(name, avatar)| {
             let avatar = AppConfig::try_global(cx)
                 .map(|cfg| cfg.avatar_proxy(avatar))

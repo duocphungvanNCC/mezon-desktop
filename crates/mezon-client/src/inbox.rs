@@ -123,6 +123,7 @@ pub struct TopicDiscussion {
     pub channel_id: String,
     pub creator_id: String,
     pub last_sender_id: String,
+    pub last_sender_is_authoritative: bool,
     pub last_message_id: String,
     pub content: String,
     pub last_message_content: String,
@@ -1091,6 +1092,10 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
         channel_id: id_str(t.channel_id),
         creator_id: id_str(t.creator_id),
         last_sender_id: id_str(last_sender_id),
+        last_sender_is_authoritative: t
+            .last_sent_message
+            .as_ref()
+            .is_some_and(|message| message.sender_id > 0),
         last_message_id: t
             .last_sent_message
             .as_ref()
@@ -1677,6 +1682,7 @@ mod tests {
         );
         assert!(!topic.reply_is_attachment());
         assert!(topic.last_message_id.is_empty());
+        assert!(!topic.last_sender_is_authoritative);
         let latest = topic_discussion_from_api(api::SdTopic {
             last_sent_message: Some(api::ChannelMessageHeader {
                 id: 30,
@@ -1687,6 +1693,17 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(latest.last_message_id, "30");
+        assert!(latest.last_sender_is_authoritative);
+        let sparse = topic_discussion_from_api(api::SdTopic {
+            creator_id: 3,
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 30,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sparse.last_sender_id, "3");
+        assert!(!sparse.last_sender_is_authoritative);
         assert_eq!(latest.last_sender_id, "8");
         assert_eq!(
             latest.reply_preview(),

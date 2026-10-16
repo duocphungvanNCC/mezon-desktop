@@ -133,6 +133,12 @@ impl InboxPopoverPanel {
         });
         let _members_sub = cx.subscribe(&members_store, |this, _, event, cx| {
             if this.clan_id == event.clan_id().to_string() {
+                if this.tab == InboxTab::Topics {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.load_inbox_message_avatars(&this.clan_id, cx);
+                    });
+                    this.sync_from_store(cx, false);
+                }
                 cx.notify();
             }
         });
