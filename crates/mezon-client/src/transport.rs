@@ -1030,6 +1030,8 @@ pub struct ApiChannelDesc {
     pub e2ee: i32,
     #[serde(default)]
     pub app_id: i64,
+    #[serde(default)]
+    pub is_topic: bool,
 }
 
 fn default_channel_active() -> i32 {
@@ -4574,6 +4576,7 @@ impl MezonTransport {
             age_restricted: channel.age_restricted,
             e2ee: channel.e2ee,
             app_id: channel.app_id,
+            is_topic: channel.is_topic,
         }
     }
 

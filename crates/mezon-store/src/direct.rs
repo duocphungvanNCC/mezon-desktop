@@ -2048,6 +2048,7 @@ mod tests {
         creator_id: i64,
     ) -> ApiChannelDesc {
         ApiChannelDesc {
+            is_topic: false,
             channel_id: id,
             channel_label: label.into(),
             channel_type: ty,

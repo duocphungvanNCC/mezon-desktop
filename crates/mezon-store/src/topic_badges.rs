@@ -30,6 +30,14 @@ pub enum TopicBadgeEvent {
     Updated { clan_id: Option<String> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicSeed {
+    pub topic_id: ChannelId,
+    pub parent_id: ChannelId,
+    pub count: u32,
+    pub unread: bool,
+}
+
 #[derive(Debug, Clone)]
 struct TopicParentEntry {
     clan_id: String,
@@ -114,6 +122,9 @@ impl TopicBadgeStore {
             dispatch.on(RealtimeKind::MarkAsRead, &entity, |this, event, cx| {
                 this.handle_event(event, cx);
             });
+            dispatch.on(RealtimeKind::LastSeenUpdated, &entity, |this, event, cx| {
+                this.handle_event(event, cx);
+            });
             dispatch.on_lagged(&entity, |this, cx| this.reset(cx));
         });
     }
@@ -182,6 +193,35 @@ impl TopicBadgeStore {
         }
     }
 
+    pub fn seed(&mut self, clan_id: ClanId, seeds: Vec<TopicSeed>, cx: &mut Context<Self>) {
+        let clan_key = clan_id.to_string();
+        let mut changed = false;
+        for seed in seeds.into_iter().filter(|seed| seed.unread) {
+            let topic_key = seed.topic_id.to_string();
+            if is_viewing_channel(&topic_key, cx) {
+                continue;
+            }
+            let entry =
+                self.topic_parent_map
+                    .entry(topic_key)
+                    .or_insert_with(|| TopicParentEntry {
+                        clan_id: clan_key.clone(),
+                        parent_channel_id: seed.parent_id.to_string(),
+                        unread: false,
+                        count: 0,
+                    });
+            changed |= !entry.unread || entry.count < seed.count;
+            entry.unread = true;
+            entry.count = entry.count.max(seed.count);
+        }
+        if changed {
+            cx.emit(TopicBadgeEvent::Updated {
+                clan_id: Some(clan_key),
+            });
+            cx.notify();
+        }
+    }
+
     pub fn topic_has_unread(&self, topic_id: &str) -> bool {
         self.topic_parent_map
             .get(topic_id)
@@ -209,6 +249,12 @@ impl TopicBadgeStore {
             RealtimeEvent::MarkAsRead(e) => {
                 (self.handle_mark_as_read(e.channel_id, cx), Vec::new())
             }
+            RealtimeEvent::LastSeenUpdated(e) => (
+                self.reset_topic(&e.channel_id.to_string())
+                    .into_iter()
+                    .collect(),
+                Vec::new(),
+            ),
             _ => (Vec::new(), Vec::new()),
         };
         for notification in inbox_mentions {
