@@ -81,11 +81,17 @@ fn surface_voice_toast(
             });
             return;
         }
-        mezon_store::VoiceStoreEvent::MediaLimitReached(limit) => {
-            let key = match limit {
-                mezon_store::MediaLimit::Camera => "channelVoice.toast.cameraLimitReached",
-                mezon_store::MediaLimit::ScreenShare => {
+        mezon_store::VoiceStoreEvent::MediaRefused(refusal) => {
+            let key = match refusal {
+                mezon_store::MediaRefusal::CameraLimit => "channelVoice.toast.cameraLimitReached",
+                mezon_store::MediaRefusal::ScreenShareLimit => {
                     "channelVoice.toast.screenShareLimitReached"
+                }
+                mezon_store::MediaRefusal::CameraUpdateFailed => {
+                    "channelVoice.toast.cameraUpdateFailed"
+                }
+                mezon_store::MediaRefusal::ScreenShareUpdateFailed => {
+                    "channelVoice.toast.screenShareUpdateFailed"
                 }
             };
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
