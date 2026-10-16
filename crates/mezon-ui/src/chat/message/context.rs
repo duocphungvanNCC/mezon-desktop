@@ -62,6 +62,7 @@ pub struct RowCtx<'a> {
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
     pub is_topic_box: bool,
+    pub context_menu_enabled: bool,
     pub scroll_active: bool,
     /// Message whose hover toolbar should show, after the React-style hover-intent
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.

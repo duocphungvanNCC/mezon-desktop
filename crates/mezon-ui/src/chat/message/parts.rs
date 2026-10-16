@@ -2117,7 +2117,8 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 }
 
 fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
-    let visible = !ctx.suppress_hover
+    let visible = ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(message_id)
         && ctx.hovered_row == Some(message_id);
     let bg = ctx.theme.bg_tertiary;
@@ -2290,7 +2291,8 @@ fn reaction_pill(reaction: &Reaction, target: MessageRef, ctx: &RowCtx) -> AnyEl
 }
 
 pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
-    !ctx.suppress_hover
+    ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(msg.id)
         && ctx.hovered_row == Some(msg.id)
 }
@@ -2489,14 +2491,16 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 ),
             )
         })
-        .child(
-            action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
-                let position = window.mouse_position();
-                let _ = option_host.update(cx, |this, cx| {
-                    this.open_context_menu(msg_id, position, cx);
-                });
-            }),
-        )
+        .when(ctx.context_menu_enabled, |row| {
+            row.child(
+                action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                    let position = window.mouse_position();
+                    let _ = option_host.update(cx, |this, cx| {
+                        this.open_context_menu(msg_id, position, cx);
+                    });
+                }),
+            )
+        })
         .into_any_element()
 }
 
