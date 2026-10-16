@@ -276,14 +276,15 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, ExternalMeeting,
-    MAX_SOUND_BYTES, MeetingChatMessage, MeetingChatStatus, NetworkQuality, NoiseSuppressionStatus,
-    PickedScreen, RecordingState, RecordingToast, RemovalCause, SOUND_ALLOWED_EXTENSIONS,
-    ScreenShareKind, ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview,
-    SfuRole, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
-    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent,
-    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
-    screen_tile_id, system_screen_share_pick, upload_sound_bytes, upload_sound_file,
+    MAX_SOUND_BYTES, MediaRefusal, MeetingChatMessage, MeetingChatStatus, NetworkQuality,
+    NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast, RemovalCause,
+    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
+    VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
+    VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_bytes,
+    upload_sound_file,
     validate_sound_file,
 };
 pub use wallet::{
