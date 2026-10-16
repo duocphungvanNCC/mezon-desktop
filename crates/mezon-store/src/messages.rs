@@ -990,6 +990,9 @@ async fn send_forward(
         } else {
             Vec::new()
         };
+        let attachments = api
+            .link_attachments_into_channel(source.attachments.clone(), dest.channel_id)
+            .await;
         if let Err(e) = api
             .forward_channel_message(
                 dest.clan_id,
@@ -998,7 +1001,7 @@ async fn send_forward(
                 &source.text,
                 dest.is_public,
                 dest.mode,
-                source.attachments.clone(),
+                attachments,
                 mentions,
             )
             .await
