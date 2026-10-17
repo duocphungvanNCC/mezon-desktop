@@ -50,6 +50,11 @@ fn has_transcoded_container_extension(url: &str) -> bool {
     })
 }
 
+fn is_transcoded_container(filename: &str, url: &str) -> bool {
+    (has_transcoded_container_extension(filename) || has_transcoded_container_extension(url))
+        && crate::platform::may_be_transcoded(url)
+}
+
 pub fn url_extension(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next()?;
     let name = path.rsplit('/').next()?;
@@ -108,18 +113,16 @@ impl MessageAttachment {
             || (filetype.starts_with("video") && !filetype.ends_with("vnd.dlna.mpeg-tts"))
     }
 
-    pub fn is_video(&self) -> bool {
-        Self::media_is_video(&self.filetype, &self.url) || self.is_transcoded_container()
+    pub fn plays_as_video(filetype: &str, filename: &str, url: &str) -> bool {
+        Self::media_is_video(filetype, url) || is_transcoded_container(filename, url)
     }
 
-    fn is_transcoded_container(&self) -> bool {
-        (has_transcoded_container_extension(&self.filename)
-            || has_transcoded_container_extension(&self.url))
-            && crate::platform::may_be_transcoded(&self.url)
+    pub fn is_video(&self) -> bool {
+        Self::plays_as_video(&self.filetype, &self.filename, &self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
-        if self.is_transcoded_container() {
+        if is_transcoded_container(&self.filename, &self.url) {
             return false;
         }
         if matches!(

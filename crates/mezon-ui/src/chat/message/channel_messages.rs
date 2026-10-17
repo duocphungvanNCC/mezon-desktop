@@ -4979,14 +4979,15 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
-                    let (probe_urls, linked_channels) = {
+                    let (probe_urls, linked_channels, context_menu_enabled) = {
                         let topic = entity.read(cx);
                         match topic.topic_messages.get(row_ix) {
                             Some(message) => (
                                 super::audio_meta::urls_needing_probe(&message.attachments, cx),
                                 super::content::channel_links_needing_detail(&message.spans, cx),
+                                topic_context_menu_enabled(message, active_topic_bucket(cx)),
                             ),
-                            None => (Vec::new(), Vec::new()),
+                            None => (Vec::new(), Vec::new(), false),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
@@ -5001,6 +5002,7 @@ impl ChannelMessages {
                         onboarding: None,
                         suppress_hover,
                         is_topic_box: true,
+                        context_menu_enabled,
                         scroll_active,
                         hovered_row,
                         context_menu_message,
@@ -5403,6 +5405,7 @@ impl Render for ChannelMessages {
                         onboarding: onboarding.clone(),
                         suppress_hover,
                         is_topic_box: false,
+                        context_menu_enabled: true,
                         scroll_active,
                         hovered_row,
                         context_menu_message,
@@ -5973,6 +5976,10 @@ fn active_topic_bucket(cx: &App) -> Option<ChannelId> {
         .map(ChannelId)
 }
 
+fn topic_context_menu_enabled(message: &Message, topic: Option<ChannelId>) -> bool {
+    topic.is_some_and(|topic_id| message.channel_id == topic_id)
+}
+
 /// Which row an id-keyed row action in the topic panel refers to.
 ///
 /// The panel is one list over two buckets (see `merge_topic_rows`) and a message
@@ -6005,11 +6012,26 @@ fn merge_topic_rows(origin: Option<Message>, replies: &[Message]) -> Vec<Message
 
 #[cfg(test)]
 mod topic_row_tests {
-    use super::{merge_topic_rows, topic_row_index};
+    use super::{merge_topic_rows, topic_context_menu_enabled, topic_row_index};
     use mezon_store::{ChannelId, Message, MessageId};
 
     fn reply(id: i64, text: &str) -> Message {
         Message::new(MessageId(id), text, "1", "u", 0)
+    }
+
+    #[test]
+    fn the_topic_root_has_no_context_menu() {
+        let mut root = reply(100, "root");
+        root.channel_id = ChannelId(10);
+        let mut first_reply = reply(101, "first reply");
+        first_reply.channel_id = ChannelId(555);
+
+        assert!(!topic_context_menu_enabled(&root, Some(ChannelId(555))));
+        assert!(topic_context_menu_enabled(
+            &first_reply,
+            Some(ChannelId(555))
+        ));
+        assert!(!topic_context_menu_enabled(&first_reply, None));
     }
 
     #[test]

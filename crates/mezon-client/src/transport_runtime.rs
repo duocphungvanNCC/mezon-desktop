@@ -1823,6 +1823,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let src = src.to_string();
+        let dst = dst.to_string();
+
+        runtime()
+            .spawn(async move { transport.link_cdn_file(&src, &dst).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
