@@ -1055,7 +1055,7 @@ pub struct ApiTopicBadge {
     pub topic_id: i64,
     pub channel_id: i64,
     pub badge: i32,
-    pub has_unread: bool,
+    pub channel_badge: i32,
 }
 
 fn default_channel_active() -> i32 {
@@ -6155,7 +6155,11 @@ impl MezonTransport {
 
     pub async fn list_topic_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiTopicBadge>> {
         let cid = self.generate_cid();
-        let body = api::ListTopicBadgeCountRequest { clan_id }.encode_to_vec();
+        let body = api::ListTopicBadgeCountRequest {
+            clan_id,
+            channel_id: 0,
+        }
+        .encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "ListTopicBadgeCount", body)
             .await?;
@@ -6170,7 +6174,7 @@ impl MezonTransport {
                     topic_id: topic.topic_id,
                     channel_id: topic.channel_id,
                     badge: topic.badge,
-                    has_unread: topic.has_unread,
+                    channel_badge: topic.channel_badge,
                 })
                 .collect(),
         )
