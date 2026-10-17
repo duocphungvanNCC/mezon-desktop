@@ -505,6 +505,7 @@ impl BadgeService {
                                 clan_id,
                                 deleted_channel,
                                 ChannelId(m.topic_id),
+                                MessageId(m.message_id),
                                 message_ts,
                                 cx,
                             )

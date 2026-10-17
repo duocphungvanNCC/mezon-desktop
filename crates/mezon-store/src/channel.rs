@@ -3149,6 +3149,7 @@ impl ChannelList {
         clan_id: ClanId,
         channel_id: ChannelId,
         topic_id: ChannelId,
+        message_id: MessageId,
         message_ts: i64,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3158,7 +3159,7 @@ impl ChannelList {
                 subtract_channel_badge(categories, channel_id, 1) > 0
             }
             Some(categories) => {
-                decrement_channel_badge_on_delete(categories, channel_id, message_ts)
+                decrement_channel_badge_on_delete(categories, channel_id, message_id, message_ts)
             }
             None => false,
         };
@@ -7260,6 +7261,7 @@ fn subtract_channel_badge(categories: &mut [Category], channel_id: ChannelId, am
 fn decrement_channel_badge_on_delete(
     categories: &mut [Category],
     channel_id: ChannelId,
+    message_id: MessageId,
     message_ts: i64,
 ) -> bool {
     let mut changed = false;
@@ -7268,13 +7270,24 @@ fn decrement_channel_badge_on_delete(
         .flat_map(|category| category.channels.iter_mut())
         .filter(|ch| ch.id == channel_id)
     {
-        let last_seen = ch.last_seen_timestamp;
-        if last_seen > 0 && message_ts > last_seen && ch.badge_count > 0 {
+        let unread = if comparable_message_ids(message_id, ch.last_seen_message_id) {
+            message_id > ch.last_seen_message_id
+        } else {
+            ch.last_seen_timestamp > 0 && message_ts > ch.last_seen_timestamp
+        };
+        if unread && ch.badge_count > 0 {
             ch.badge_count = ch.badge_count.saturating_sub(1);
             changed = true;
         }
     }
     changed
+}
+
+fn comparable_message_ids(message_id: MessageId, last_seen: MessageId) -> bool {
+    !message_id.is_zero()
+        && !last_seen.is_zero()
+        && !message_id.is_optimistic()
+        && !last_seen.is_optimistic()
 }
 
 fn restore_topic_badges(
@@ -13651,7 +13664,14 @@ mod tests {
             stores.channels.update(cx, |channels, cx| {
                 set_channel_activity(channels, clan_id, parent_id, 2, 50, 70);
                 channels.apply_read(clan_id, parent_id, cx);
-                channels.decrement_channel_on_delete(clan_id, parent_id, topic_id, 60, cx)
+                channels.decrement_channel_on_delete(
+                    clan_id,
+                    parent_id,
+                    topic_id,
+                    MessageId(9279),
+                    60,
+                    cx,
+                )
             })
         });
         assert!(decremented);
@@ -13667,6 +13687,50 @@ mod tests {
             0,
             "a deleted topic mention must not keep a later parent mention on the row"
         );
+    }
+
+    #[gpui::test]
+    fn deleting_the_latest_unread_mention_drops_its_badge(cx: &mut gpui::TestAppContext) {
+        let clan_id = ClanId(928);
+        let channel_id = ChannelId(9281);
+        let stores = topic_unread_clan(cx, clan_id, channel_id, true, true);
+
+        let decrement = |cx: &mut gpui::TestAppContext, message_id: i64| {
+            cx.update(|cx| {
+                stores.channels.update(cx, |channels, cx| {
+                    set_channel_activity(channels, clan_id, channel_id, 1, 50, 70);
+                    let channel = channels
+                        .cache
+                        .get_mut(&clan_id)
+                        .unwrap()
+                        .iter_mut()
+                        .flat_map(|category| category.channels.iter_mut())
+                        .find(|channel| channel.id == channel_id)
+                        .unwrap();
+                    channel.last_seen_message_id = MessageId(10);
+                    channel.last_sent_message_id = MessageId(11);
+                    channels.decrement_channel_on_delete(
+                        clan_id,
+                        channel_id,
+                        ChannelId(0),
+                        MessageId(message_id),
+                        50,
+                        cx,
+                    )
+                })
+            })
+        };
+
+        assert!(
+            decrement(cx, 11),
+            "the delete event carries the timestamp of the message now latest, so the id decides"
+        );
+        assert_eq!(parent_badge(cx, &stores, clan_id, channel_id), 0);
+        assert!(
+            !decrement(cx, 9),
+            "a mention the user already read keeps the badge"
+        );
+        assert_eq!(parent_badge(cx, &stores, clan_id, channel_id), 1);
     }
 
     #[gpui::test]
@@ -14126,6 +14190,7 @@ mod tests {
         assert!(decrement_channel_badge_on_delete(
             &mut categories,
             PARENT_CHANNEL,
+            MessageId(0),
             150
         ));
         assert_eq!(categories[0].channels[0].badge_count, 1);
@@ -14139,6 +14204,7 @@ mod tests {
         assert!(!decrement_channel_badge_on_delete(
             &mut categories,
             PARENT_CHANNEL,
+            MessageId(0),
             150
         ));
     }
@@ -14151,6 +14217,7 @@ mod tests {
         assert!(!decrement_channel_badge_on_delete(
             &mut categories,
             PARENT_CHANNEL,
+            MessageId(0),
             150
         ));
         assert_eq!(categories[0].channels[0].badge_count, 2);
@@ -14164,9 +14231,40 @@ mod tests {
         assert!(!decrement_channel_badge_on_delete(
             &mut categories,
             PARENT_CHANNEL,
+            MessageId(0),
             150
         ));
         assert_eq!(categories[0].channels[0].badge_count, 2);
+    }
+
+    #[test]
+    fn delete_decides_by_message_id_when_both_ids_are_known() {
+        let mut categories = categories();
+        categories[0].channels[0].badge_count = 1;
+        categories[0].channels[0].last_seen_timestamp = 150;
+        categories[0].channels[0].last_seen_message_id = MessageId(10);
+        assert!(decrement_channel_badge_on_delete(
+            &mut categories,
+            PARENT_CHANNEL,
+            MessageId(11),
+            150
+        ));
+        assert_eq!(categories[0].channels[0].badge_count, 0);
+    }
+
+    #[test]
+    fn delete_keeps_the_badge_for_a_message_id_already_read() {
+        let mut categories = categories();
+        categories[0].channels[0].badge_count = 1;
+        categories[0].channels[0].last_seen_timestamp = 100;
+        categories[0].channels[0].last_seen_message_id = MessageId(10);
+        assert!(!decrement_channel_badge_on_delete(
+            &mut categories,
+            PARENT_CHANNEL,
+            MessageId(9),
+            150
+        ));
+        assert_eq!(categories[0].channels[0].badge_count, 1);
     }
 
     #[test]
@@ -14175,6 +14273,7 @@ mod tests {
         assert!(!decrement_channel_badge_on_delete(
             &mut categories,
             ChannelId(999),
+            MessageId(0),
             150
         ));
     }
