@@ -134,7 +134,7 @@ impl ChannelAttachment {
     }
 
     pub fn is_media(&self) -> bool {
-        self.is_image || self.is_video
+        (self.is_image || self.is_video) && self.filetype != crate::message::STICKER_FILETYPE
     }
 
     pub fn seed_from_message(
@@ -298,6 +298,17 @@ pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
 
 pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> bool {
     initial_page_has_more(raw_count, limit) && new_items > 0
+}
+
+pub fn older_page_has_more(
+    raw_count: usize,
+    limit: i32,
+    previous_oldest: Option<u32>,
+    page_oldest: Option<u32>,
+) -> bool {
+    initial_page_has_more(raw_count, limit)
+        && page_oldest
+            .is_some_and(|oldest| previous_oldest.is_none_or(|previous| oldest < previous))
 }
 
 /// Resolved uploader display info.
@@ -506,6 +517,7 @@ struct GalleryChannel {
     is_loading: bool,
     fetched_at: Option<Instant>,
     date_range: Option<(u32, u32)>,
+    oldest_fetched: Option<u32>,
 }
 
 impl GalleryChannel {
@@ -676,6 +688,7 @@ impl GalleryStore {
             channel.attachments.clear();
             channel.ids.clear();
             channel.date_range = None;
+            channel.oldest_fetched = None;
             channel.fetched_at = None;
             channel.is_loading = false;
             channel.has_more_before = true;
@@ -719,8 +732,8 @@ impl GalleryStore {
             let channel = self.by_channel.get(&channel_id);
             match direction {
                 LoadDirection::Before => {
-                    if let Some(oldest) = channel.and_then(|c| c.attachments.last()) {
-                        before = oldest.create_time_seconds;
+                    if let Some(oldest) = channel.and_then(|c| c.oldest_fetched) {
+                        before = oldest;
                     }
                 }
                 LoadDirection::After => {
@@ -756,6 +769,7 @@ impl GalleryStore {
             let mapped_result = match result {
                 Ok(list) => {
                     let raw_count = list.len();
+                    let page_oldest = list.iter().map(|a| a.create_time_seconds).min();
                     let cfg = mapping_cfg.clone();
                     let mapped = cx
                         .background_executor()
@@ -773,7 +787,7 @@ impl GalleryStore {
                         })
                         .await;
                     let mapped = drop_denied_foreign_media(channel_id, mapped).await;
-                    Ok((mapped, raw_count))
+                    Ok((mapped, raw_count, page_oldest))
                 }
                 Err(e) => Err(e),
             };
@@ -781,7 +795,14 @@ impl GalleryStore {
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
                 match mapped_result {
-                    Ok((mapped, raw_count)) => {
+                    Ok((mapped, raw_count, page_oldest)) => {
+                        let previous_oldest = if reset { None } else { entry.oldest_fetched };
+                        if reset || direction == LoadDirection::Before {
+                            entry.oldest_fetched = match (previous_oldest, page_oldest) {
+                                (Some(previous), Some(page)) => Some(previous.min(page)),
+                                (previous, page) => page.or(previous),
+                            };
+                        }
                         let added = merge_attachments(
                             &mut entry.attachments,
                             &mut entry.ids,
@@ -794,13 +815,18 @@ impl GalleryStore {
                                 initial_page_has_more(raw_count, GALLERY_PAGE_SIZE);
                             entry.has_more_after = false;
                         } else {
-                            let has_more = next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                             match direction {
                                 LoadDirection::Before => {
-                                    entry.has_more_before = has_more;
+                                    entry.has_more_before = older_page_has_more(
+                                        raw_count,
+                                        GALLERY_PAGE_SIZE,
+                                        previous_oldest,
+                                        page_oldest,
+                                    );
                                 }
                                 LoadDirection::After => {
-                                    entry.has_more_after = has_more;
+                                    entry.has_more_after =
+                                        next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                                 }
                             }
                         }
@@ -923,6 +949,43 @@ mod tests {
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
         }
+    }
+
+    #[test]
+    fn stickers_and_panel_gifs_are_left_out_of_the_gallery() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let from = |url: &str, filetype: &str| {
+            ChannelAttachment::from_api(
+                ApiChannelAttachment {
+                    url: url.into(),
+                    filetype: filetype.into(),
+                    ..ApiChannelAttachment::default()
+                },
+                ChannelId(1),
+                ClanId(1),
+                &cfg,
+            )
+        };
+        let sticker = from("https://cdn.mezon.ai/stickers/7.webp", "sticker");
+        let panel_gif = from("https://static.klipy.com/ii/abc/0b/d4/cat.gif", "sticker");
+        let uploaded_gif = from("https://cdn.mezon.ai/1/2/cat.gif", "image/gif");
+        let photo = from("https://cdn.mezon.ai/1/2/photo.png", "image/png");
+
+        assert!(!sticker.is_media());
+        assert!(!panel_gif.is_media());
+        assert!(uploaded_gif.is_media());
+        assert!(photo.is_media());
+    }
+
+    #[test]
+    fn a_page_of_only_stickers_still_lets_older_media_load() {
+        assert!(older_page_has_more(50, 50, Some(2_000), Some(1_500)));
+        assert!(older_page_has_more(50, 50, None, Some(1_500)));
+        assert!(!older_page_has_more(50, 50, Some(1_500), Some(1_500)));
+        assert!(!older_page_has_more(12, 50, Some(2_000), Some(1_500)));
+        assert!(!older_page_has_more(50, 50, Some(2_000), None));
     }
 
     #[test]
