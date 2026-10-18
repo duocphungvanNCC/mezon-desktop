@@ -66,7 +66,7 @@ pub fn sniff_sound_mime(bytes: &[u8]) -> Option<&'static str> {
         return Some("audio/wav");
     }
     let audio = skip_id3(bytes);
-    if is_mpeg_audio(audio) || first_mpeg_frame_offset(audio).is_some() {
+    if is_mpeg_audio(audio) || has_mp3_stream(audio) {
         return Some("audio/mpeg");
     }
     None
@@ -101,7 +101,11 @@ fn skip_id3(bytes: &[u8]) -> &[u8] {
 pub fn id3_tag_len(bytes: &[u8]) -> usize {
     id3_payload_len(bytes)
         .map(|size| {
-            let footer = if bytes[5] & 0x10 != 0 { 10 } else { 0 };
+            let footer = if bytes[3] == 4 && bytes[5] & 0x10 != 0 {
+                10
+            } else {
+                0
+            };
             10usize.saturating_add(size).saturating_add(footer)
         })
         .unwrap_or(0)
@@ -113,28 +117,35 @@ fn is_mpeg_audio(bytes: &[u8]) -> bool {
 
 const MPEG_SYNC_SEARCH_LIMIT: usize = 64 * 1024;
 
-fn first_mpeg_frame_offset(audio: &[u8]) -> Option<usize> {
+fn has_mp3_stream(audio: &[u8]) -> bool {
     let end = audio.len().min(MPEG_SYNC_SEARCH_LIMIT);
-    (0..end).find(|&offset| {
-        mpeg_frame_len(&audio[offset..]).is_some_and(|len| {
-            audio
-                .get(offset.saturating_add(len)..)
-                .is_some_and(|next| mpeg_frame_len(next).is_some())
+    (0..end).any(|offset| {
+        let header = &audio[offset..];
+        mp3_frame_len(header).is_some_and(|len| match audio.get(offset.saturating_add(len)..) {
+            Some([]) => true,
+            Some(next) => same_mpeg_stream(header, next) && mp3_frame_len(next).is_some(),
+            None => false,
         })
     })
 }
 
-fn mpeg_frame_len(header: &[u8]) -> Option<usize> {
+fn same_mpeg_stream(header: &[u8], next: &[u8]) -> bool {
+    next.len() >= 4
+        && header[1] & 0xFE == next[1] & 0xFE
+        && header[2] & 0x0C == next[2] & 0x0C
+        && (header[3] >> 6 == 0b11) == (next[3] >> 6 == 0b11)
+}
+
+fn mp3_frame_len(header: &[u8]) -> Option<usize> {
     let frame = first_mp3_frame(header)?;
+    if (header[1] >> 1) & 0x03 != 0b01 {
+        return None;
+    }
     let padding = usize::from((header[2] >> 1) & 0x01);
-    let bitrate = frame.bitrate as usize;
-    let sample_rate = frame.sample_rate as usize;
-    let len = if frame.samples_per_frame == 384 {
-        (12 * bitrate / sample_rate + padding) * 4
-    } else {
-        frame.samples_per_frame as usize / 8 * bitrate / sample_rate + padding
-    };
-    Some(len)
+    Some(
+        frame.samples_per_frame as usize / 8 * frame.bitrate as usize / frame.sample_rate as usize
+            + padding,
+    )
 }
 
 const FULL_DECODE_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -613,6 +624,9 @@ mod tests {
 
         let leading_junk = [vec![0u8; 417], mp3_frames(3)].concat();
         assert_eq!(sniff_sound_mime(&leading_junk), Some("audio/mpeg"));
+
+        let last_frame_only = [id3_tag(0, 20), vec![0u8; 600], mp3_frames(1)].concat();
+        assert_eq!(sniff_sound_mime(&last_frame_only), Some("audio/mpeg"));
     }
 
     #[test]
@@ -624,6 +638,11 @@ mod tests {
         assert_eq!(id3_tag_len(&footer), footer.len());
         let with_footer = [footer, mp3_frames(1)].concat();
         assert_eq!(sniff_sound_mime(&with_footer), Some("audio/mpeg"));
+
+        let mut v23_flag = id3_tag(0, 20);
+        v23_flag[3] = 3;
+        v23_flag[5] = 0x10;
+        assert_eq!(id3_tag_len(&v23_flag), v23_flag.len());
     }
 
     #[test]
@@ -635,6 +654,22 @@ mod tests {
         let mut jpeg = vec![0u8; 2_000];
         jpeg[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
         assert_eq!(sniff_sound_mime(&jpeg), None);
+
+        let mut mixed = [vec![0u8; 300], mp3_frames(2), vec![0u8; 100]].concat();
+        mixed[300 + 417..300 + 421].copy_from_slice(&[0xFF, 0xFB, 0x94, 0x00]);
+        assert_eq!(sniff_sound_mime(&mixed), None);
+
+        let mut channels = [vec![0u8; 300], mp3_frames(2), vec![0u8; 100]].concat();
+        channels[300 + 417 + 3] = 0xC0;
+        assert_eq!(sniff_sound_mime(&channels), None);
+    }
+
+    #[test]
+    fn sniff_sound_mime_does_not_resync_on_layer_two_frames() {
+        let mut frame = vec![0u8; 417];
+        frame[..4].copy_from_slice(&[0xFF, 0xFD, 0x90, 0x00]);
+        let layer_two = [vec![0u8; 100], frame.repeat(3)].concat();
+        assert_eq!(sniff_sound_mime(&layer_two), None);
     }
 
     #[test]

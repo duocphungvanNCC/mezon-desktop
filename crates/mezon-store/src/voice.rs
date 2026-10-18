@@ -5735,7 +5735,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let mp3_path = dir.join("padded.mp3");
         let mut bytes = vec![0u8; 30];
-        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[0..4].copy_from_slice(b"ID3\x03");
         bytes[9] = 20;
         bytes.extend_from_slice(&[0u8; 600]);
         for _ in 0..3 {
