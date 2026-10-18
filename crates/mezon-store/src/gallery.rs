@@ -19,6 +19,7 @@ use crate::user_profile::{ProfileContext, resolve_user_profile};
 pub const GALLERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default page size (React gallery slice `limit = 50`).
 pub const GALLERY_PAGE_SIZE: i32 = 50;
+const GALLERY_EMPTY_PAGE_CHAIN: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
@@ -300,6 +301,10 @@ pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> boo
     initial_page_has_more(raw_count, limit) && new_items > 0
 }
 
+fn keeps_paging_past_empty_page(added: usize, has_more_before: bool, empty_pages: u8) -> bool {
+    added == 0 && has_more_before && empty_pages < GALLERY_EMPTY_PAGE_CHAIN
+}
+
 pub fn older_page_cursor(oldest: u32) -> u32 {
     oldest.saturating_add(1)
 }
@@ -522,6 +527,7 @@ struct GalleryChannel {
     fetched_at: Option<Instant>,
     date_range: Option<(u32, u32)>,
     oldest_fetched: Option<u32>,
+    empty_older_pages: u8,
 }
 
 impl GalleryChannel {
@@ -693,6 +699,7 @@ impl GalleryStore {
             channel.ids.clear();
             channel.date_range = None;
             channel.oldest_fetched = None;
+            channel.empty_older_pages = 0;
             channel.fetched_at = None;
             channel.is_loading = false;
             channel.has_more_before = true;
@@ -798,6 +805,7 @@ impl GalleryStore {
             let _ = this.update(cx, |this, cx| {
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
+                let mut page_past_empty = false;
                 match mapped_result {
                     Ok((mapped, raw_count, page_oldest)) => {
                         let previous_oldest = if reset { None } else { entry.oldest_fetched };
@@ -834,6 +842,18 @@ impl GalleryStore {
                                 }
                             }
                         }
+                        if reset || direction == LoadDirection::Before {
+                            entry.empty_older_pages = match (added, reset) {
+                                (0, true) => 1,
+                                (0, false) => entry.empty_older_pages.saturating_add(1),
+                                _ => 0,
+                            };
+                            page_past_empty = keeps_paging_past_empty_page(
+                                added,
+                                entry.has_more_before,
+                                entry.empty_older_pages,
+                            );
+                        }
                         entry.fetched_at = Some(Instant::now());
                     }
                     Err(e) => {
@@ -842,6 +862,10 @@ impl GalleryStore {
                 }
                 cx.emit(GalleryEvent::Changed(channel_id));
                 cx.notify();
+                if page_past_empty {
+                    let range = this.by_channel.get(&channel_id).and_then(|c| c.date_range);
+                    this.fetch(clan_id, channel_id, range, LoadDirection::Before, false, cx);
+                }
             });
         })
         .detach();
@@ -1032,6 +1056,23 @@ mod tests {
         let kept_ids: Vec<i64> = kept.iter().map(|a| a.id).collect();
         assert_eq!(kept_ids, vec![10, 5, 4]);
         assert!(pages < 10);
+    }
+
+    #[test]
+    fn a_first_page_of_only_stickers_fetches_on_by_itself() {
+        assert!(keeps_paging_past_empty_page(0, true, 1));
+        assert!(keeps_paging_past_empty_page(
+            0,
+            true,
+            GALLERY_EMPTY_PAGE_CHAIN - 1
+        ));
+        assert!(!keeps_paging_past_empty_page(
+            0,
+            true,
+            GALLERY_EMPTY_PAGE_CHAIN
+        ));
+        assert!(!keeps_paging_past_empty_page(1, true, 1));
+        assert!(!keeps_paging_past_empty_page(0, false, 1));
     }
 
     #[test]
