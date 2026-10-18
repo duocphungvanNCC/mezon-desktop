@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
@@ -127,6 +127,40 @@ pub struct Emoji {
     pub is_for_sale: bool,
 }
 
+static EMOJI_SOURCES: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(Default::default);
+
+pub fn emoji_source(emoji_id: &str) -> Option<String> {
+    EMOJI_SOURCES.read().ok()?.get(emoji_id).cloned()
+}
+
+pub(crate) fn publish_emoji_sources(by_id: &HashMap<String, Emoji>) -> HashSet<String> {
+    let next: HashMap<String, String> = by_id
+        .values()
+        .filter(|emoji| !emoji.src.is_empty())
+        .map(|emoji| (emoji.id.clone(), emoji.src.clone()))
+        .collect();
+    let Ok(mut current) = EMOJI_SOURCES.write() else {
+        return HashSet::new();
+    };
+    let changed = changed_emoji_sources(&current, &next);
+    if !changed.is_empty() {
+        *current = next;
+    }
+    changed
+}
+
+fn changed_emoji_sources(
+    current: &HashMap<String, String>,
+    next: &HashMap<String, String>,
+) -> HashSet<String> {
+    let removed = current.keys().filter(|id| !next.contains_key(*id));
+    let added_or_moved = next
+        .iter()
+        .filter(|(id, src)| current.get(*id) != Some(*src))
+        .map(|(id, _)| id);
+    removed.chain(added_or_moved).cloned().collect()
+}
+
 #[derive(Debug, Clone)]
 pub enum EmojiEvent {
     Changed,
@@ -176,7 +210,20 @@ impl EmojiStore {
         self.loading = false;
         self.loading_recent = false;
         self.reset_generation = self.reset_generation.wrapping_add(1);
+        publish_emoji_sources(&self.by_id);
         cx.notify();
+    }
+
+    fn sync_emoji_sources(&self, cx: &mut Context<Self>) {
+        let changed = publish_emoji_sources(&self.by_id);
+        if changed.is_empty() {
+            return;
+        }
+        if let Some(messages) = crate::MessagesStore::try_global(cx) {
+            messages.update(cx, |messages, cx| {
+                messages.refresh_emoji_sources(&changed, cx)
+            });
+        }
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -306,6 +353,7 @@ impl EmojiStore {
         self.by_id = by_id;
         self.order = order;
         tracing::info!("EmojiStore: fetched {} emojis", self.order.len());
+        self.sync_emoji_sources(cx);
         cx.emit(EmojiEvent::Changed);
         cx.notify();
     }
@@ -578,6 +626,7 @@ impl EmojiStore {
             _ => false,
         };
         if changed {
+            self.sync_emoji_sources(cx);
             cx.emit(EmojiEvent::Changed);
             cx.notify();
         }
@@ -1002,6 +1051,46 @@ pub async fn upload_emoticon_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_emoji_sources_lists_added_moved_and_removed_ids() {
+        let current: HashMap<String, String> = [
+            (
+                "1".to_string(),
+                "https://cdn.komu.vn/emojis/1.webp".to_string(),
+            ),
+            (
+                "2".to_string(),
+                "https://cdn.komu.vn/emojis/2.webp".to_string(),
+            ),
+            (
+                "3".to_string(),
+                "https://cdn.komu.vn/emojis/3.webp".to_string(),
+            ),
+        ]
+        .into();
+        let next: HashMap<String, String> = [
+            (
+                "1".to_string(),
+                "https://cdn.komu.vn/emojis/1.webp".to_string(),
+            ),
+            (
+                "2".to_string(),
+                "https://cdn.mezon.ai/emojis/2.webp".to_string(),
+            ),
+            (
+                "4".to_string(),
+                "https://cdn.mezon.ai/emojis/4.webp".to_string(),
+            ),
+        ]
+        .into();
+
+        let changed = changed_emoji_sources(&current, &next);
+
+        let expected: HashSet<String> = ["2", "3", "4"].iter().map(|id| id.to_string()).collect();
+        assert_eq!(changed, expected);
+        assert!(changed_emoji_sources(&next, &next).is_empty());
+    }
 
     fn init_emoji_store(cx: &mut gpui::TestAppContext) -> (Arc<AppApi>, Entity<EmojiStore>) {
         cx.update(|cx| {

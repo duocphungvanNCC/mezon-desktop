@@ -515,7 +515,10 @@ impl AppConfig {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
-        let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
+        let source = match crate::emoji::emoji_source(emoji_id) {
+            Some(src) => self.read_media_url(&src).into_owned(),
+            None => format!("{}/emojis/{}.webp", self.base_img_url, emoji_id),
+        };
         self.imgproxy_url(&source, size, size, "fit")
     }
 

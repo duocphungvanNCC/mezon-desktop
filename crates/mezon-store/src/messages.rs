@@ -4582,6 +4582,31 @@ impl MessagesStore {
         }
     }
 
+    pub(crate) fn refresh_emoji_sources(
+        &mut self,
+        emoji_ids: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let config = AppConfig::try_global(cx).cloned();
+        let mut touched = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                if refill_emoji_sources(message, emoji_ids, config.as_ref()) {
+                    touched.push(message.id);
+                }
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
+    }
+
     fn refresh_private_source_media(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
         let mut touched = Vec::new();
@@ -10894,6 +10919,25 @@ fn settle_private_source_media(messages: &mut [Message], cx: &App) {
     }
 }
 
+fn refill_emoji_sources(
+    message: &mut Message,
+    emoji_ids: &HashSet<String>,
+    cfg: Option<&AppConfig>,
+) -> bool {
+    let mut changed = false;
+    if crate::message::spans_use_any_emoji(&message.spans, emoji_ids) {
+        crate::message::fill_emoji_sources(&mut message.spans, cfg);
+        changed = true;
+    }
+    for reference in message.references.iter_mut() {
+        if crate::message::spans_use_any_emoji(&reference.preview_spans, emoji_ids) {
+            crate::message::fill_reply_emoji_sources(&mut reference.preview_spans, cfg);
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn remark_private_source_media(message: &mut Message, cfg: Option<&AppConfig>) -> bool {
     if !message.is_forwarded || !mark_private_source_media(&mut message.attachments) {
         return false;
@@ -14377,6 +14421,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn an_emoji_stored_on_a_new_cdn_renders_from_its_source_once_the_catalog_arrives() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.komu.vn".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let source = "https://cdn.mezon.ai/emojis/990011.webp";
+        let mut message = Message::new(MessageId(1), ":new:", "u1", "U1", 1_700_000_000);
+        message.spans = vec![MessageSpan::Emoji {
+            name: ":new:".into(),
+            emoji_id: "990011".into(),
+            src: SharedString::default(),
+        }];
+        crate::message::fill_emoji_sources(&mut message.spans, Some(&cfg));
+        let before = match &message.spans[0] {
+            MessageSpan::Emoji { src, .. } => src.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            before.as_ref(),
+            cfg.imgproxy_url("https://cdn.komu.vn/emojis/990011.webp", 96, 96, "fit")
+        );
+
+        let catalog: HashMap<String, crate::emoji::Emoji> = [(
+            "990011".to_string(),
+            crate::emoji::Emoji {
+                id: "990011".into(),
+                shortname: "new".into(),
+                src: source.into(),
+                category: "Custom".into(),
+                clan_id: "1".into(),
+                clan_logo: String::new(),
+                creator_id: "2".into(),
+                is_for_sale: false,
+            },
+        )]
+        .into();
+        let changed = crate::emoji::publish_emoji_sources(&catalog);
+        assert!(changed.contains("990011"));
+        assert_eq!(
+            cfg.emoji_src("990011"),
+            cfg.imgproxy_url(source, 100, 100, "fit")
+        );
+
+        assert!(refill_emoji_sources(&mut message, &changed, Some(&cfg)));
+        assert!(matches!(
+            &message.spans[0],
+            MessageSpan::Emoji { src, .. } if src.as_ref() == cfg.imgproxy_url(source, 96, 96, "fit")
+        ));
+        assert!(!refill_emoji_sources(
+            &mut message,
+            &HashSet::new(),
+            Some(&cfg)
+        ));
     }
 
     #[test]
