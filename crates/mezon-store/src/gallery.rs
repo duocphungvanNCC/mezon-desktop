@@ -300,6 +300,10 @@ pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> boo
     initial_page_has_more(raw_count, limit) && new_items > 0
 }
 
+pub fn older_page_cursor(oldest: u32) -> u32 {
+    oldest.saturating_add(1)
+}
+
 pub fn older_page_has_more(
     raw_count: usize,
     limit: i32,
@@ -733,7 +737,7 @@ impl GalleryStore {
             match direction {
                 LoadDirection::Before => {
                     if let Some(oldest) = channel.and_then(|c| c.oldest_fetched) {
-                        before = oldest;
+                        before = older_page_cursor(oldest);
                     }
                 }
                 LoadDirection::After => {
@@ -977,6 +981,57 @@ mod tests {
         assert!(!panel_gif.is_media());
         assert!(uploaded_gif.is_media());
         assert!(photo.is_media());
+    }
+
+    #[test]
+    fn paging_keeps_photos_behind_a_sticker_page_and_a_split_message() {
+        let sticker = |id: i64, ts: u32| ChannelAttachment {
+            is_image: true,
+            ..att(id, ts, "sticker")
+        };
+        let rows = [
+            att(10, 100, "image/png"),
+            sticker(9, 90),
+            sticker(8, 89),
+            sticker(7, 88),
+            sticker(12, 87),
+            att(6, 80, "application/pdf"),
+            att(5, 80, "image/png"),
+            att(4, 70, "image/png"),
+        ];
+        let server_page = |before: u32| -> Vec<ChannelAttachment> {
+            rows.iter()
+                .filter(|a| before == 0 || a.create_time_seconds < before)
+                .take(3)
+                .cloned()
+                .collect()
+        };
+        let mut kept = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut oldest: Option<u32> = None;
+        let mut has_more = true;
+        let mut pages = 0;
+        while has_more && pages < 10 {
+            let page = server_page(oldest.map_or(0, older_page_cursor));
+            let page_oldest = page.iter().map(|a| a.create_time_seconds).min();
+            has_more = older_page_has_more(page.len(), 3, oldest, page_oldest);
+            oldest = page_oldest.or(oldest);
+            let media = page
+                .into_iter()
+                .filter(ChannelAttachment::is_media)
+                .collect();
+            merge_attachments(
+                &mut kept,
+                &mut ids,
+                media,
+                pages == 0,
+                LoadDirection::Before,
+            );
+            pages += 1;
+        }
+        let kept_ids: Vec<i64> = kept.iter().map(|a| a.id).collect();
+        assert_eq!(kept_ids, vec![10, 5, 4]);
+        assert!(pages < 10);
     }
 
     #[test]

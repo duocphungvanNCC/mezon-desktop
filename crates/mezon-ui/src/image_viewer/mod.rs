@@ -13,8 +13,8 @@ use gpui::{
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
     Settings, UploaderInfo, copy_media_url_to_clipboard, fetch_channel_attachments,
-    initial_page_has_more, next_page_has_more, older_page_has_more, open_media_url_external,
-    resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    open_media_url_external, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -737,12 +737,13 @@ impl ImageViewer {
         if self.loading || !self.has_more_before {
             return;
         }
-        let Some(before) = self
+        let Some(oldest) = self
             .oldest_fetched
             .or_else(|| self.attachments.last().map(|a| a.create_time_seconds))
         else {
             return;
         };
+        let before = older_page_cursor(oldest);
         let (Some(gallery), Some(cfg)) = (GalleryStore::try_global(cx), AppConfig::global_arc(cx))
         else {
             return;
@@ -775,7 +776,7 @@ impl ImageViewer {
                         this.has_more_before = older_page_has_more(
                             page.raw_count,
                             VIEWER_FETCH_LIMIT,
-                            Some(before),
+                            Some(oldest),
                             page.oldest_create_time,
                         );
                         if let Some(oldest) = page.oldest_create_time {
