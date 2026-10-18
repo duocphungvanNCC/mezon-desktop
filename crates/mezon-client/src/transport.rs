@@ -4180,6 +4180,7 @@ impl MezonTransport {
                     api_index: api_index as i32,
                     api_name: api_name.to_string(),
                     body,
+                    region: 0,
                 },
             )),
         };
@@ -10917,6 +10918,7 @@ mod tests {
                     api_index: 1,
                     api_name: "X".to_string(),
                     body: vec![0x08, 0x00],
+                    region: 0,
                 },
             )),
         };
