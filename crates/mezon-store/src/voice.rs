@@ -5729,6 +5729,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn validate_sound_file_accepts_mp3_with_padding_after_the_id3_tag() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-pad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mp3_path = dir.join("padded.mp3");
+        let mut bytes = vec![0u8; 30];
+        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[9] = 20;
+        bytes.extend_from_slice(&[0u8; 600]);
+        for _ in 0..3 {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+            bytes.extend_from_slice(&frame);
+        }
+        std::fs::write(&mp3_path, bytes).unwrap();
+        assert!(validate_sound_file(&mp3_path, MAX_SOUND_BYTES).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::{
         ScreenAutoFocus, camera_tile_id, default_focus_tile_for, screen_auto_focus_transition,
         screen_tile_id,

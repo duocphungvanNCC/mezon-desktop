@@ -65,7 +65,8 @@ pub fn sniff_sound_mime(bytes: &[u8]) -> Option<&'static str> {
     if is_wav(bytes) {
         return Some("audio/wav");
     }
-    if is_mpeg_audio(skip_id3(bytes)) {
+    let audio = skip_id3(bytes);
+    if is_mpeg_audio(audio) || first_mpeg_frame_offset(audio).is_some() {
         return Some("audio/mpeg");
     }
     None
@@ -87,20 +88,53 @@ fn id3_payload_len(bytes: &[u8]) -> Option<usize> {
 }
 
 fn skip_id3(bytes: &[u8]) -> &[u8] {
-    match id3_payload_len(bytes) {
-        Some(size) => bytes.get(10usize.saturating_add(size)..).unwrap_or(&[]),
-        None => bytes,
+    let mut rest = bytes;
+    loop {
+        let tag = id3_tag_len(rest);
+        if tag == 0 {
+            return rest;
+        }
+        rest = rest.get(tag..).unwrap_or(&[]);
     }
 }
 
 pub fn id3_tag_len(bytes: &[u8]) -> usize {
     id3_payload_len(bytes)
-        .map(|size| 10usize.saturating_add(size))
+        .map(|size| {
+            let footer = if bytes[5] & 0x10 != 0 { 10 } else { 0 };
+            10usize.saturating_add(size).saturating_add(footer)
+        })
         .unwrap_or(0)
 }
 
 fn is_mpeg_audio(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0
+}
+
+const MPEG_SYNC_SEARCH_LIMIT: usize = 64 * 1024;
+
+fn first_mpeg_frame_offset(audio: &[u8]) -> Option<usize> {
+    let end = audio.len().min(MPEG_SYNC_SEARCH_LIMIT);
+    (0..end).find(|&offset| {
+        mpeg_frame_len(&audio[offset..]).is_some_and(|len| {
+            audio
+                .get(offset.saturating_add(len)..)
+                .is_some_and(|next| mpeg_frame_len(next).is_some())
+        })
+    })
+}
+
+fn mpeg_frame_len(header: &[u8]) -> Option<usize> {
+    let frame = first_mp3_frame(header)?;
+    let padding = usize::from((header[2] >> 1) & 0x01);
+    let bitrate = frame.bitrate as usize;
+    let sample_rate = frame.sample_rate as usize;
+    let len = if frame.samples_per_frame == 384 {
+        (12 * bitrate / sample_rate + padding) * 4
+    } else {
+        frame.samples_per_frame as usize / 8 * bitrate / sample_rate + padding
+    };
+    Some(len)
 }
 
 const FULL_DECODE_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -554,6 +588,53 @@ mod tests {
     fn sniff_sound_mime_rejects_non_audio() {
         assert_eq!(sniff_sound_mime(b"GIF89a"), None);
         assert_eq!(sniff_sound_mime(b"PNG\r\n\x1a\n"), None);
+    }
+
+    fn mp3_frames(count: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; 417];
+        frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        frame.repeat(count)
+    }
+
+    fn id3_tag(flags: u8, payload: usize) -> Vec<u8> {
+        let mut tag = vec![0u8; 10 + payload];
+        tag[..6].copy_from_slice(&[b'I', b'D', b'3', 4, 0, flags]);
+        tag[9] = payload as u8;
+        if flags & 0x10 != 0 {
+            tag.extend_from_slice(&[b'3', b'D', b'I', 4, 0, flags, 0, 0, 0, payload as u8]);
+        }
+        tag
+    }
+
+    #[test]
+    fn sniff_sound_mime_finds_mp3_frames_after_padding_or_junk() {
+        let padded = [id3_tag(0, 20), vec![0u8; 600], mp3_frames(3)].concat();
+        assert_eq!(sniff_sound_mime(&padded), Some("audio/mpeg"));
+
+        let leading_junk = [vec![0u8; 417], mp3_frames(3)].concat();
+        assert_eq!(sniff_sound_mime(&leading_junk), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn sniff_sound_mime_skips_every_id3_tag_and_its_footer() {
+        let two_tags = [id3_tag(0, 20), id3_tag(0, 20), mp3_frames(1)].concat();
+        assert_eq!(sniff_sound_mime(&two_tags), Some("audio/mpeg"));
+
+        let footer = id3_tag(0x10, 20);
+        assert_eq!(id3_tag_len(&footer), footer.len());
+        let with_footer = [footer, mp3_frames(1)].concat();
+        assert_eq!(sniff_sound_mime(&with_footer), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn sniff_sound_mime_needs_two_frames_in_a_row_past_the_start() {
+        let mut lone_header = vec![0u8; 2_000];
+        lone_header[300..304].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        assert_eq!(sniff_sound_mime(&lone_header), None);
+
+        let mut jpeg = vec![0u8; 2_000];
+        jpeg[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        assert_eq!(sniff_sound_mime(&jpeg), None);
     }
 
     #[test]
