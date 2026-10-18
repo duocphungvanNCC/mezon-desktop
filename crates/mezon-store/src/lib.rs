@@ -165,7 +165,8 @@ pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     AttachmentSeedInput, ChannelAttachment, FetchedChannelAttachments, GalleryEvent, GalleryStore,
     LoadDirection, MediaFilter, UploaderInfo, enrich_uploader, fetch_channel_attachments,
-    initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
