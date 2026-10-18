@@ -1928,10 +1928,24 @@ pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
     }
 }
 
-pub(crate) fn spans_use_any_emoji(spans: &[MessageSpan], emoji_ids: &HashSet<String>) -> bool {
-    spans.iter().any(
-        |span| matches!(span, MessageSpan::Emoji { emoji_id, .. } if emoji_ids.contains(emoji_id)),
-    )
+pub(crate) fn spans_use_any_emoji(
+    spans: &[MessageSpan],
+    emoji_ids: Option<&HashSet<String>>,
+) -> bool {
+    spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Emoji { emoji_id, .. }
+                if !emoji_id.is_empty() && emoji_ids.is_none_or(|ids| ids.contains(emoji_id))
+        )
+    })
+}
+
+pub(crate) fn emoji_span_sources(spans: &[MessageSpan]) -> impl Iterator<Item = &SharedString> {
+    spans.iter().filter_map(|span| match span {
+        MessageSpan::Emoji { src, .. } => Some(src),
+        _ => None,
+    })
 }
 
 pub(crate) fn fill_reply_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {

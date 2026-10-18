@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -127,38 +127,47 @@ pub struct Emoji {
     pub is_for_sale: bool,
 }
 
-static EMOJI_SOURCES: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(Default::default);
+static EMOJI_SOURCES: LazyLock<RwLock<HashMap<String, Arc<str>>>> = LazyLock::new(Default::default);
+static EMOJI_SOURCES_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-pub fn emoji_source(emoji_id: &str) -> Option<String> {
+pub fn emoji_source(emoji_id: &str) -> Option<Arc<str>> {
     EMOJI_SOURCES.read().ok()?.get(emoji_id).cloned()
 }
 
-pub(crate) fn publish_emoji_sources(by_id: &HashMap<String, Emoji>) -> HashSet<String> {
-    let next: HashMap<String, String> = by_id
-        .values()
-        .filter(|emoji| !emoji.src.is_empty())
-        .map(|emoji| (emoji.id.clone(), emoji.src.clone()))
-        .collect();
-    let Ok(mut current) = EMOJI_SOURCES.write() else {
+pub fn emoji_sources_generation() -> u64 {
+    EMOJI_SOURCES_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn publish_emoji_sources<'a>(
+    emojis: impl IntoIterator<Item = &'a Emoji>,
+) -> HashSet<String> {
+    let Ok(mut known) = EMOJI_SOURCES.write() else {
         return HashSet::new();
     };
-    let changed = changed_emoji_sources(&current, &next);
+    let changed = merge_emoji_sources(&mut known, emojis);
     if !changed.is_empty() {
-        *current = next;
+        EMOJI_SOURCES_GENERATION.fetch_add(1, Ordering::AcqRel);
     }
     changed
 }
 
-fn changed_emoji_sources(
-    current: &HashMap<String, String>,
-    next: &HashMap<String, String>,
+fn merge_emoji_sources<'a>(
+    known: &mut HashMap<String, Arc<str>>,
+    emojis: impl IntoIterator<Item = &'a Emoji>,
 ) -> HashSet<String> {
-    let removed = current.keys().filter(|id| !next.contains_key(*id));
-    let added_or_moved = next
-        .iter()
-        .filter(|(id, src)| current.get(*id) != Some(*src))
-        .map(|(id, _)| id);
-    removed.chain(added_or_moved).cloned().collect()
+    let mut changed = HashSet::new();
+    for emoji in emojis {
+        if emoji.src.is_empty()
+            || known
+                .get(&emoji.id)
+                .is_some_and(|src| src.as_ref() == emoji.src)
+        {
+            continue;
+        }
+        known.insert(emoji.id.clone(), emoji.src.as_str().into());
+        changed.insert(emoji.id.clone());
+    }
+    changed
 }
 
 #[derive(Debug, Clone)]
@@ -210,12 +219,11 @@ impl EmojiStore {
         self.loading = false;
         self.loading_recent = false;
         self.reset_generation = self.reset_generation.wrapping_add(1);
-        publish_emoji_sources(&self.by_id);
         cx.notify();
     }
 
     fn sync_emoji_sources(&self, cx: &mut Context<Self>) {
-        let changed = publish_emoji_sources(&self.by_id);
+        let changed = publish_emoji_sources(self.by_id.values());
         if changed.is_empty() {
             return;
         }
@@ -1052,44 +1060,44 @@ pub async fn upload_emoticon_file(
 mod tests {
     use super::*;
 
+    fn emoji_with_src(id: &str, src: &str) -> Emoji {
+        Emoji {
+            src: src.into(),
+            ..emoji(id, id, "Custom", "1")
+        }
+    }
+
     #[test]
-    fn changed_emoji_sources_lists_added_moved_and_removed_ids() {
-        let current: HashMap<String, String> = [
-            (
-                "1".to_string(),
-                "https://cdn.komu.vn/emojis/1.webp".to_string(),
-            ),
-            (
-                "2".to_string(),
-                "https://cdn.komu.vn/emojis/2.webp".to_string(),
-            ),
-            (
-                "3".to_string(),
-                "https://cdn.komu.vn/emojis/3.webp".to_string(),
-            ),
-        ]
-        .into();
-        let next: HashMap<String, String> = [
-            (
-                "1".to_string(),
-                "https://cdn.komu.vn/emojis/1.webp".to_string(),
-            ),
-            (
-                "2".to_string(),
-                "https://cdn.mezon.ai/emojis/2.webp".to_string(),
-            ),
-            (
-                "4".to_string(),
-                "https://cdn.mezon.ai/emojis/4.webp".to_string(),
-            ),
-        ]
-        .into();
-
-        let changed = changed_emoji_sources(&current, &next);
-
-        let expected: HashSet<String> = ["2", "3", "4"].iter().map(|id| id.to_string()).collect();
+    fn merge_emoji_sources_reports_new_and_moved_sources_and_keeps_known_ones() {
+        let mut known: HashMap<String, Arc<str>> = HashMap::new();
+        let first = [
+            emoji_with_src("1", "https://cdn.komu.vn/emojis/1.webp"),
+            emoji_with_src("2", "https://cdn.komu.vn/emojis/2.webp"),
+            emoji_with_src("3", ""),
+        ];
+        let changed = merge_emoji_sources(&mut known, &first);
+        let expected: HashSet<String> = ["1", "2"].iter().map(|id| id.to_string()).collect();
         assert_eq!(changed, expected);
-        assert!(changed_emoji_sources(&next, &next).is_empty());
+
+        let second = [
+            emoji_with_src("1", "https://cdn.komu.vn/emojis/1.webp"),
+            emoji_with_src("2", "https://cdn.mezon.ai/emojis/2.webp"),
+            emoji_with_src("4", "https://cdn.mezon.ai/emojis/4.webp"),
+        ];
+        let changed = merge_emoji_sources(&mut known, &second);
+        let expected: HashSet<String> = ["2", "4"].iter().map(|id| id.to_string()).collect();
+        assert_eq!(changed, expected);
+
+        assert!(merge_emoji_sources(&mut known, &[emoji_with_src("2", "")]).is_empty());
+        assert!(merge_emoji_sources(&mut known, &second).is_empty());
+        assert_eq!(
+            known.get("2").map(|src| src.as_ref()),
+            Some("https://cdn.mezon.ai/emojis/2.webp")
+        );
+        assert_eq!(
+            known.get("1").map(|src| src.as_ref()),
+            Some("https://cdn.komu.vn/emojis/1.webp")
+        );
     }
 
     fn init_emoji_store(cx: &mut gpui::TestAppContext) -> (Arc<AppApi>, Entity<EmojiStore>) {
