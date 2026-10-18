@@ -204,10 +204,11 @@ pub use mezon_client::{
     message_content_is_attachment,
 };
 pub use mezon_client::{
-    SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
-    finalize_incomplete_filter_token, has_filter_options, insert_filter_markup,
-    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
-    search_page_count, search_page_numbers, should_show_search_dropdown,
+    PickedSearchUser, SearchDropdownMode, SearchPageToken, autocomplete_needle,
+    expand_user_name_tokens, finalize_incomplete_filter_token, has_filter_options,
+    insert_filter_markup, retain_picked_search_users, search_content_highlight_terms,
+    search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
+    should_show_search_dropdown,
 };
 pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
 pub use mmn_client::{
