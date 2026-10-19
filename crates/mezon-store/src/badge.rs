@@ -73,6 +73,16 @@ fn is_content_mutation(m: &ChannelMessage) -> bool {
     )
 }
 
+fn is_own_group_update(m: &ChannelMessage, user_id: Option<i64>) -> bool {
+    MessageCode::from_raw(m.code) == MessageCode::AuditLog
+        && m.sender_id == 0
+        && user_id.is_some_and(|uid| {
+            mezon_client::transport::parse_message_mentions(&m.mentions)
+                .first()
+                .is_some_and(|actor| actor.s == 0 && actor.user_id == uid)
+        })
+}
+
 fn is_chat_remove(m: &ChannelMessage) -> bool {
     matches!(MessageCode::from_raw(m.code), MessageCode::ChatRemove)
 }
@@ -329,6 +339,7 @@ impl BadgeService {
 
                 if is_dm_message(m) {
                     if !is_content_mutation(m) {
+                        let own_action = from_me || is_own_group_update(m, user_id);
                         self.dm_push_channels.insert(channel_id);
                         let gotify_counted = self
                             .dm_gotify_counted
@@ -342,9 +353,9 @@ impl BadgeService {
                             );
                         let increment_unread = fresh
                             && !gotify_counted
-                            && should_increment_dm_unread(cx, channel_id, from_me);
+                            && should_increment_dm_unread(cx, channel_id, own_action);
                         DirectMessageStore::global(cx).update(cx, |dm, cx| {
-                            if !dm.note_message(channel_id, ts, from_me, increment_unread, cx) {
+                            if !dm.note_message(channel_id, ts, own_action, increment_unread, cx) {
                                 let inserted = dm.insert_from_message(m, from_me, increment_unread, cx);
                                 tracing::info!(
                                     "dm message for unknown channel {}: synthesized entry inserted={inserted}",
@@ -356,7 +367,7 @@ impl BadgeService {
                             cl.note_user_channel_dm_message(
                                 channel_id,
                                 ts,
-                                from_me,
+                                own_action,
                                 increment_unread,
                                 message_id,
                                 cx,
@@ -759,5 +770,35 @@ mod tests {
 
         assert!(!needs_badge_check);
         assert!(needs_inbox_check);
+    }
+
+    fn audit_log_push(sender_id: i64, actor: i64, s: i32) -> ChannelMessage {
+        use prost::Message as _;
+        let mentions = mezon_proto::api::MessageMentionList {
+            mentions: vec![mezon_proto::api::MessageMention {
+                user_id: actor,
+                s,
+                e: s + 5,
+                ..Default::default()
+            }],
+        };
+        ChannelMessage {
+            code: 10,
+            sender_id,
+            mentions: mentions.encode_to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn own_group_update_is_recognised_from_the_leading_mention() {
+        assert!(is_own_group_update(&audit_log_push(0, 42, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 7, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 42, 3), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(9, 42, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 42, 0), None));
+        let mut chat = audit_log_push(0, 42, 0);
+        chat.code = 0;
+        assert!(!is_own_group_update(&chat, Some(42)));
     }
 }
