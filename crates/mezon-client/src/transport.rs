@@ -4969,7 +4969,6 @@ impl MezonTransport {
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
             "LinkCDNFile" => 214,
-            "ListTopicUnread" => 215,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6144,26 +6143,6 @@ impl MezonTransport {
             .into_iter()
             .map(Self::channel_desc_from_proto)
             .collect())
-    }
-
-    pub async fn list_topic_unread(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        topic_ids: Vec<i64>,
-    ) -> Result<Vec<i64>> {
-        let cid = self.generate_cid();
-        let body = api::ListTopicUnreadRequest {
-            clan_id,
-            channel_id,
-            topic_ids,
-        }
-        .encode_to_vec();
-        let (code, response) = self.send_api_request(cid, "ListTopicUnread", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(api::ListTopicUnreadResponse::decode(response.as_slice())?.topic_ids)
     }
 
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {

@@ -3212,17 +3212,6 @@ impl AppApi {
         self.transport.list_channel_badge_counts(clan_id).await
     }
 
-    pub async fn list_topic_unread(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        topic_ids: Vec<i64>,
-    ) -> Result<Vec<i64>> {
-        self.transport
-            .list_topic_unread(clan_id, channel_id, topic_ids)
-            .await
-    }
-
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {
         self.transport.list_voice_channel_users(clan_id).await
     }

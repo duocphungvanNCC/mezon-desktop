@@ -295,6 +295,7 @@ fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
                             })
                             .unwrap_or_default(),
                         last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX)) as u32,
+                        unread_count: 0,
                     }
                 })
         })
@@ -522,21 +523,6 @@ fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
         clan_id,
         channel_id,
     })
-}
-
-fn check_channel_topics(context: ActivityStripContext, cx: &mut App) {
-    let clan_key = context.clan_id.to_string();
-    let channel_key = context.channel_id.to_string();
-    let topic_ids: Vec<i64> = TopicsStore::global(cx)
-        .read(cx)
-        .topics_for(&clan_key)
-        .iter()
-        .filter(|topic| topic.channel_id == channel_key)
-        .filter_map(|topic| topic.id.parse().ok())
-        .collect();
-    TopicBadgeStore::global(cx).update(cx, |store, cx| {
-        store.check_channel_topics(context.clan_id, context.channel_id, topic_ids, cx);
-    });
 }
 
 fn activity_strip_generation(
@@ -1352,7 +1338,6 @@ impl LatestActivityStripView {
             }
             return;
         };
-        check_channel_topics(context, cx);
         let topic_unread = TopicBadgeStore::global(cx)
             .read(cx)
             .channel_has_unread_topic(context.clan_id, context.channel_id);

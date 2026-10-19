@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
 use mezon_client::{
-    AppApi, InboxNotification, RealtimeEvent, inbox_notification_from_channel_mention,
-    notification_ids_from_content,
+    AppApi, InboxNotification, RealtimeEvent, TopicDiscussion,
+    inbox_notification_from_channel_mention, notification_ids_from_content,
 };
 use mezon_proto::api;
 use prost::Message;
@@ -24,7 +24,6 @@ const USER_REPLIED: i32 = -11;
 const CHAT_UPDATE: i32 = 1;
 const CHAT_REMOVE: i32 = 2;
 const MAX_PROCESSED_KEYS: usize = 500;
-const MAX_CHECKED_TOPICS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub enum TopicBadgeEvent {
@@ -39,6 +38,12 @@ struct TopicParentEntry {
     count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopicListing {
+    reset_generation: u64,
+    clear_generation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckedTopic {
     clan_id: String,
@@ -48,7 +53,6 @@ struct CheckedTopic {
 pub struct TopicBadgeStore {
     topic_parent_map: HashMap<String, TopicParentEntry>,
     checked_unread: HashMap<String, CheckedTopic>,
-    checked_requests: HashMap<String, Vec<i64>>,
     pending_checks: usize,
     clear_generation: u64,
     cleared_during_checks: HashMap<String, u64>,
@@ -56,7 +60,7 @@ pub struct TopicBadgeStore {
     processed_keys: HashSet<String>,
     processed_order: VecDeque<String>,
     auth_state: Entity<AuthState>,
-    api: Arc<AppApi>,
+    _api: Arc<AppApi>,
 }
 
 struct GlobalTopicBadgeStore(Entity<TopicBadgeStore>);
@@ -99,7 +103,6 @@ impl TopicBadgeStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.topic_parent_map.clear();
         self.checked_unread.clear();
-        self.checked_requests.clear();
         self.pending_checks = 0;
         self.cleared_during_checks.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -114,7 +117,6 @@ impl TopicBadgeStore {
         Self {
             topic_parent_map: HashMap::new(),
             checked_unread: HashMap::new(),
-            checked_requests: HashMap::new(),
             pending_checks: 0,
             clear_generation: 0,
             cleared_during_checks: HashMap::new(),
@@ -122,7 +124,7 @@ impl TopicBadgeStore {
             processed_keys: HashSet::new(),
             processed_order: VecDeque::new(),
             auth_state,
-            api,
+            _api: api,
         }
     }
 
@@ -234,101 +236,61 @@ impl TopicBadgeStore {
             })
     }
 
-    pub fn check_channel_topics(
-        &mut self,
-        clan_id: ClanId,
-        channel_id: ChannelId,
-        topic_ids: impl IntoIterator<Item = i64>,
-        cx: &mut Context<Self>,
-    ) {
-        let mut seen = HashSet::new();
-        let mut topic_ids: Vec<i64> = topic_ids
-            .into_iter()
-            .filter(|id| *id > 0 && seen.insert(*id))
-            .take(MAX_CHECKED_TOPICS)
-            .collect();
-        topic_ids.sort_unstable();
-        if topic_ids.is_empty() || clan_id.is_zero() || channel_id.is_zero() {
-            return;
-        }
-        let channel_key = channel_id.to_string();
-        if self.checked_requests.get(&channel_key) == Some(&topic_ids) {
-            return;
-        }
-        self.checked_requests
-            .insert(channel_key.clone(), topic_ids.clone());
+    pub fn begin_topic_listing(&mut self) -> TopicListing {
         self.pending_checks += 1;
-        let api = self.api.clone();
-        let reset_generation = self.reset_generation;
-        let clear_generation = self.clear_generation;
-        cx.spawn(async move |this, cx| {
-            let result = api
-                .list_topic_unread(clan_id.get(), channel_id.get(), topic_ids)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.reset_generation != reset_generation {
-                    return;
-                }
-                this.pending_checks = this.pending_checks.saturating_sub(1);
-                match result {
-                    Ok(unread) => this.apply_checked_topics(
-                        clan_id,
-                        &channel_key,
-                        unread,
-                        clear_generation,
-                        cx,
-                    ),
-                    Err(e) => {
-                        tracing::debug!("list_topic_unread failed for channel {channel_id}: {e}");
-                    }
-                }
-                if this.pending_checks == 0 {
-                    this.cleared_during_checks.clear();
-                }
-            });
-        })
-        .detach();
+        TopicListing {
+            reset_generation: self.reset_generation,
+            clear_generation: self.clear_generation,
+        }
     }
 
-    fn apply_checked_topics(
+    pub fn end_topic_listing(
         &mut self,
         clan_id: ClanId,
-        channel_key: &str,
-        unread: Vec<i64>,
+        listed: &[TopicDiscussion],
+        listing: TopicListing,
+        cx: &mut Context<Self>,
+    ) {
+        if listing.reset_generation != self.reset_generation {
+            return;
+        }
+        self.pending_checks = self.pending_checks.saturating_sub(1);
+        self.apply_listed_topics(clan_id, listed, listing.clear_generation, cx);
+        if self.pending_checks == 0 {
+            self.cleared_during_checks.clear();
+        }
+    }
+
+    fn apply_listed_topics(
+        &mut self,
+        clan_id: ClanId,
+        listed: &[TopicDiscussion],
         clear_generation: u64,
         cx: &mut Context<Self>,
     ) {
         let clan_key = clan_id.to_string();
-        let checked: HashMap<String, CheckedTopic> = unread
-            .into_iter()
-            .map(|id| id.to_string())
-            .filter(|topic_id| {
-                self.cleared_during_checks
-                    .get(topic_id)
+        let mut changed = false;
+        for topic in listed {
+            let unread = topic.unread_count > 0
+                && self
+                    .cleared_during_checks
+                    .get(&topic.id)
                     .is_none_or(|cleared| *cleared <= clear_generation)
-                    && !is_viewing_channel(topic_id, cx)
-            })
-            .map(|topic_id| {
-                (
-                    topic_id,
-                    CheckedTopic {
-                        clan_id: clan_key.clone(),
-                        parent_channel_id: channel_key.to_string(),
-                    },
-                )
-            })
-            .collect();
-        let previous: HashSet<String> = self
-            .checked_unread
-            .iter()
-            .filter(|(_, topic)| topic.parent_channel_id == channel_key)
-            .map(|(topic_id, _)| topic_id.clone())
-            .collect();
-        let current: HashSet<String> = checked.keys().cloned().collect();
-        self.checked_unread
-            .retain(|_, topic| topic.parent_channel_id != channel_key);
-        self.checked_unread.extend(checked);
-        if previous != current {
+                && !is_viewing_channel(&topic.id, cx);
+            if unread {
+                let checked = CheckedTopic {
+                    clan_id: clan_key.clone(),
+                    parent_channel_id: topic.channel_id.clone(),
+                };
+                changed |= self
+                    .checked_unread
+                    .insert(topic.id.clone(), checked.clone())
+                    != Some(checked);
+            } else {
+                changed |= self.checked_unread.remove(&topic.id).is_some();
+            }
+        }
+        if changed {
             cx.emit(TopicBadgeEvent::Updated {
                 clan_id: Some(clan_key),
             });
@@ -824,22 +786,51 @@ mod tests {
         });
     }
 
+    fn listed(id: &str, channel_id: &str, unread_count: u32) -> TopicDiscussion {
+        TopicDiscussion {
+            id: id.into(),
+            message_id: String::new(),
+            clan_id: String::new(),
+            channel_id: channel_id.into(),
+            creator_id: String::new(),
+            last_sender_id: String::new(),
+            content: String::new(),
+            last_message_content: String::new(),
+            last_message_attachments: Vec::new(),
+            last_message_timestamp: 0,
+            unread_count,
+        }
+    }
+
     #[gpui::test]
-    fn checked_topics_dot_their_channel_but_never_its_label(cx: &mut gpui::TestAppContext) {
+    fn listed_topics_dot_their_channel_but_never_its_label(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = init_store(cx);
             store.update(cx, |store, cx| {
-                store.apply_checked_topics(ClanId(10), "5", vec![91, 92], 0, cx);
+                let listing = store.begin_topic_listing();
+                store.end_topic_listing(
+                    ClanId(10),
+                    &[
+                        listed("91", "5", 2),
+                        listed("92", "5", 1),
+                        listed("93", "6", 0),
+                    ],
+                    listing,
+                    cx,
+                );
                 assert!(store.topic_has_unread("91"));
                 assert!(store.topic_has_unread("92"));
+                assert!(!store.topic_has_unread("93"));
                 assert!(store.channel_has_unread_topic(ClanId(10), ChannelId(5)));
                 assert!(!store.channel_has_unread_topic(ClanId(10), ChannelId(6)));
                 assert!(!store.channel_has_unread_topic(ClanId(11), ChannelId(5)));
                 assert!(store.any_topic_unread(ClanId(10)));
                 assert!(store.unread_parent_ids(ClanId(10)).is_empty());
                 assert!(!store.clan_has_unread_topic(ClanId(10)));
+                assert_eq!(store.pending_checks, 0);
 
-                store.apply_checked_topics(ClanId(10), "5", vec![92], 0, cx);
+                let listing = store.begin_topic_listing();
+                store.end_topic_listing(ClanId(10), &[listed("91", "5", 0)], listing, cx);
                 assert!(!store.topic_has_unread("91"));
                 assert!(store.topic_has_unread("92"));
 
@@ -851,28 +842,53 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_topic_read_while_its_check_runs_stays_read(cx: &mut gpui::TestAppContext) {
+    fn a_topic_read_while_the_list_loads_stays_read(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = init_store(cx);
             store.update(cx, |store, cx| {
-                store.pending_checks = 1;
-                let started_at = store.clear_generation;
+                let listing = store.begin_topic_listing();
                 store.clear_topic("91", cx);
-                store.apply_checked_topics(ClanId(10), "5", vec![91, 92], started_at, cx);
+                store.end_topic_listing(
+                    ClanId(10),
+                    &[listed("91", "5", 1), listed("92", "5", 1)],
+                    listing,
+                    cx,
+                );
                 assert!(!store.topic_has_unread("91"));
                 assert!(store.topic_has_unread("92"));
+                assert!(store.cleared_during_checks.is_empty());
             });
         });
     }
 
     #[gpui::test]
-    fn marking_read_clears_checked_topics(cx: &mut gpui::TestAppContext) {
+    fn a_listing_from_before_a_reset_is_dropped(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = init_store(cx);
             store.update(cx, |store, cx| {
-                store.apply_checked_topics(ClanId(10), "5", vec![91], 0, cx);
-                store.apply_checked_topics(ClanId(10), "6", vec![93], 0, cx);
-                store.apply_checked_topics(ClanId(11), "7", vec![94], 0, cx);
+                let listing = store.begin_topic_listing();
+                store.reset(cx);
+                store.end_topic_listing(ClanId(10), &[listed("91", "5", 1)], listing, cx);
+                assert!(!store.topic_has_unread("91"));
+                assert_eq!(store.pending_checks, 0);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn marking_read_clears_listed_topics(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                let listing = store.begin_topic_listing();
+                store.end_topic_listing(
+                    ClanId(10),
+                    &[listed("91", "5", 1), listed("93", "6", 1)],
+                    listing,
+                    cx,
+                );
+                let listing = store.begin_topic_listing();
+                store.end_topic_listing(ClanId(11), &[listed("94", "7", 1)], listing, cx);
 
                 assert_eq!(store.handle_mark_as_read(5, cx), vec!["10".to_string()]);
                 assert!(!store.topic_has_unread("91"));
@@ -884,26 +900,6 @@ mod tests {
 
                 store.clear_clan(ClanId(11), cx);
                 assert!(!store.any_topic_unread(ClanId(11)));
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn a_channel_is_checked_again_only_when_its_topics_change(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let store = init_store(cx);
-            store.update(cx, |store, cx| {
-                store.check_channel_topics(ClanId(10), ChannelId(5), [92, 91], cx);
-                store.check_channel_topics(ClanId(10), ChannelId(5), [91, 92, 91], cx);
-                assert_eq!(store.pending_checks, 1);
-                assert_eq!(store.checked_requests.get("5"), Some(&vec![91, 92]));
-
-                store.check_channel_topics(ClanId(10), ChannelId(5), [91, 92, 93], cx);
-                assert_eq!(store.pending_checks, 2);
-
-                store.check_channel_topics(ClanId(10), ChannelId(5), Vec::new(), cx);
-                store.check_channel_topics(ClanId(0), ChannelId(6), [94], cx);
-                assert_eq!(store.pending_checks, 2);
             });
         });
     }
