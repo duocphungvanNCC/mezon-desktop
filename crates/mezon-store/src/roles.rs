@@ -20,6 +20,8 @@ const FAILED_FETCH_BACKOFF: Duration = Duration::from_secs(30);
 pub const DEFAULT_ROLE_COLOR: &str = "#99aab5";
 pub const MAX_ROLE_ICON_BYTES: u64 = 256 * 1024;
 
+const DEFAULT_ROLE_PERMISSION_SLUGS: &[&str] = &[crate::PERMISSION_SEND_MESSAGE, "view-channel"];
+
 const ROLE_EVENT_CREATED: i32 = 1;
 const ROLE_EVENT_UPDATED: i32 = 2;
 const ROLE_EVENT_DELETED: i32 = 3;
@@ -814,20 +816,61 @@ impl RolesStore {
         if !self.saving.insert(clan_id) {
             return;
         }
+        let default_permission_ids = default_role_permission_ids(
+            PermissionStore::global(cx)
+                .read(cx)
+                .permission_definitions()
+                .iter()
+                .map(|permission| (permission.slug.as_str(), permission.id)),
+        );
+        let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let request = api::CreateRoleRequest {
-                title: draft.title,
-                color: draft.color,
-                role_icon: draft.icon,
-                clan_id: clan_id.get(),
-                max_permission_id,
-                active_permission_ids: draft.add_permission_ids,
-                add_user_ids: draft.add_user_ids,
-                ..Default::default()
+            let default_permission_ids = if let Some(ids) = default_permission_ids {
+                Some(ids)
+            } else {
+                match api.get_list_permission().await {
+                    Ok(list) => default_role_permission_ids(
+                        list.permissions
+                            .iter()
+                            .map(|permission| (permission.slug.as_str(), permission.id)),
+                    ),
+                    Err(err) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.reset_generation != generation {
+                                return;
+                            }
+                            this.saving.remove(&clan_id);
+                            tracing::error!("load default role permissions failed: {err}");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
             };
+            if !this
+                .update(cx, |this, _| this.reset_generation == generation)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let Some(default_permission_ids) = default_permission_ids else {
+                let _ = this.update(cx, |this, cx| {
+                    this.saving.remove(&clan_id);
+                    tracing::error!(
+                        "default role permissions are missing or invalid for {clan_id}"
+                    );
+                    cx.notify();
+                });
+                return;
+            };
+            let request =
+                create_role_request(clan_id, draft, max_permission_id, default_permission_ids);
             let result = api.create_role(request).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.saving.remove(&clan_id);
                 match result {
                     Ok(role_proto) => {
@@ -1134,6 +1177,40 @@ pub fn everyone_slug(clan_id: ClanId) -> String {
     format!("everyone-{}", clan_id.get())
 }
 
+fn default_role_permission_ids<'a>(
+    permissions: impl IntoIterator<Item = (&'a str, i64)>,
+) -> Option<Vec<i64>> {
+    let permissions: HashMap<&str, i64> = permissions.into_iter().collect();
+    DEFAULT_ROLE_PERMISSION_SLUGS
+        .iter()
+        .map(|slug| permissions.get(slug).copied().filter(|id| *id > 0))
+        .collect()
+}
+
+fn create_role_request(
+    clan_id: ClanId,
+    draft: RoleDraft,
+    max_permission_id: i64,
+    default_permission_ids: Vec<i64>,
+) -> api::CreateRoleRequest {
+    let mut active_permission_ids = draft.add_permission_ids;
+    for permission_id in default_permission_ids {
+        if !active_permission_ids.contains(&permission_id) {
+            active_permission_ids.push(permission_id);
+        }
+    }
+    api::CreateRoleRequest {
+        title: draft.title,
+        color: draft.color,
+        role_icon: draft.icon,
+        clan_id: clan_id.get(),
+        max_permission_id,
+        active_permission_ids,
+        add_user_ids: draft.add_user_ids,
+        ..Default::default()
+    }
+}
+
 fn role_user_from_proto(user: api::role_user_list::RoleUser) -> RoleUser {
     RoleUser {
         id: UserId(user.id),
@@ -1340,6 +1417,62 @@ mod tests {
     const TEST_CLAN: ClanId = ClanId(1);
     const TEST_SELF: i64 = 42;
     const TEST_ACTOR: i64 = 77;
+
+    #[test]
+    fn create_role_request_grants_defaults_and_preserves_explicit_fields() {
+        let defaults = default_role_permission_ids([
+            ("send-message", 41),
+            ("view-channel", 92),
+            ("administrator", 7),
+        ])
+        .unwrap();
+        for permissions in [vec![], vec![7, 41]] {
+            let request = create_role_request(
+                ClanId(123),
+                RoleDraft {
+                    title: "New role".into(),
+                    color: DEFAULT_ROLE_COLOR.into(),
+                    icon: "icon.png".into(),
+                    add_permission_ids: permissions.clone(),
+                    remove_permission_ids: vec![],
+                    add_user_ids: vec![55],
+                    remove_user_ids: vec![],
+                },
+                7,
+                defaults.clone(),
+            );
+            let mut expected = permissions;
+            for id in [41, 92] {
+                if !expected.contains(&id) {
+                    expected.push(id);
+                }
+            }
+            assert_eq!(request.active_permission_ids, expected);
+            assert_eq!(request.clan_id, 123);
+            assert_eq!(request.max_permission_id, 7);
+            assert_eq!(request.title, "New role");
+            assert_eq!(request.color, DEFAULT_ROLE_COLOR);
+            assert_eq!(request.role_icon, "icon.png");
+            assert_eq!(request.add_user_ids, vec![55]);
+        }
+    }
+
+    #[test]
+    fn default_role_permissions_require_a_complete_valid_catalog() {
+        for catalog in [
+            vec![],
+            vec![("administrator", 7)],
+            vec![("send-message", 41)],
+            vec![("send-message", 0), ("view-channel", 92)],
+            vec![("send-message", 41), ("view-channel", -1)],
+        ] {
+            assert_eq!(default_role_permission_ids(catalog), None);
+        }
+        assert_eq!(
+            default_role_permission_ids([("view-channel", 200), ("send-message", 100)]),
+            Some(vec![100, 200])
+        );
+    }
 
     fn test_api() -> Arc<AppApi> {
         Arc::new(AppApi::new(
