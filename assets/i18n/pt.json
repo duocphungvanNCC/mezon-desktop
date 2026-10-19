@@ -3465,6 +3465,8 @@
   "message.systemMessages.aMessage": "uma mensagem",
   "message.systemMessages.allPinned": "todas as mensagens",
   "message.systemMessages.allThreads": "todos os tópicos",
+  "message.systemMessages.changedGroupAvatar": "alterou a foto do grupo.",
+  "message.systemMessages.changedGroupName": "alterou o nome do grupo para {{name}}.",
   "message.systemMessages.deletedAThread": "eliminou um tópico:",
   "message.systemMessages.messages": "fixadas.",
   "message.systemMessages.pinned": "fixou",

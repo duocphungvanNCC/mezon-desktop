@@ -3466,6 +3466,8 @@
   "message.systemMessages.aMessage": "メッセージ",
   "message.systemMessages.allPinned": "すべてのメッセージ",
   "message.systemMessages.allThreads": "すべてのスレッド",
+  "message.systemMessages.changedGroupAvatar": "がグループの画像を変更しました。",
+  "message.systemMessages.changedGroupName": "がグループ名を{{name}}に変更しました。",
   "message.systemMessages.deletedAThread": "スレッドを削除",
   "message.systemMessages.messages": "ピン留め。",
   "message.systemMessages.pinned": "ピン留め",

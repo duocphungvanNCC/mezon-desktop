@@ -3498,6 +3498,8 @@
   "message.systemMessages.aMessage": "un mensaje",
   "message.systemMessages.allPinned": "todos los fijados",
   "message.systemMessages.allThreads": "todos los hilos",
+  "message.systemMessages.changedGroupAvatar": "cambió la foto del grupo.",
+  "message.systemMessages.changedGroupName": "cambió el nombre del grupo a {{name}}.",
   "message.systemMessages.deletedAThread": "eliminó un hilo:",
   "message.systemMessages.messages": "mensajes.",
   "message.systemMessages.pinned": "fijado",

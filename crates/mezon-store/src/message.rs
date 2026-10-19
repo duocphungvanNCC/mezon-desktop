@@ -252,6 +252,22 @@ impl MessageCode {
     }
 }
 
+const GROUP_NAME_CHANGED: &str = " changed the group name to ";
+const GROUP_AVATAR_CHANGED: &str = " changed the group avatar.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupChange<'a> {
+    Name(&'a str),
+    Avatar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupUpdate<'a> {
+    pub actor: &'a str,
+    pub actor_id: Option<&'a str>,
+    pub change: GroupChange<'a>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MessageReference {
     pub message_ref_id: MessageId,
@@ -2073,6 +2089,29 @@ impl Message {
         (tx.title, tx.detail)
     }
 
+    pub fn group_update(&self) -> Option<GroupUpdate<'_>> {
+        if self.code != MessageCode::AuditLog {
+            return None;
+        }
+        let Some(MessageSpan::Mention {
+            display, user_id, ..
+        }) = self.spans.first()
+        else {
+            return None;
+        };
+        let action = self.content.strip_prefix(display.as_ref())?;
+        let change = if action == GROUP_AVATAR_CHANGED {
+            GroupChange::Avatar
+        } else {
+            GroupChange::Name(action.strip_prefix(GROUP_NAME_CHANGED)?.strip_suffix('.')?)
+        };
+        Some(GroupUpdate {
+            actor: display,
+            actor_id: user_id.as_deref(),
+            change,
+        })
+    }
+
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -3121,6 +3160,59 @@ mod tests {
         let mut sys = Message::new(MessageId(2), "joined", "u1", "U1", 110);
         sys.code = MessageCode::Welcome;
         assert!(!message_combined_with_prev(Some(&prev), &sys));
+    }
+
+    fn audit_log_message(text: &str, actor: &str) -> Message {
+        let content = ApiMessageContent {
+            t: text.into(),
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("huy".into()),
+                ..token(0, actor.encode_utf16().count() as i64)
+            }],
+            ..Default::default()
+        };
+        let mut msg = Message::new(MessageId(1), text, "0", "System", 100);
+        msg.code = MessageCode::AuditLog;
+        msg.spans = parse_spans(&content);
+        msg
+    }
+
+    #[test]
+    fn group_update_reads_a_group_name_change() {
+        let msg = audit_log_message("@Huy Lê changed the group name to Team v2.", "@Huy Lê");
+        assert_eq!(
+            msg.group_update(),
+            Some(GroupUpdate {
+                actor: "@Huy Lê",
+                actor_id: Some("42"),
+                change: GroupChange::Name("Team v2"),
+            })
+        );
+    }
+
+    #[test]
+    fn group_update_reads_a_group_avatar_change() {
+        let msg = audit_log_message("@Huy 🙂 changed the group avatar.", "@Huy 🙂");
+        assert_eq!(
+            msg.group_update()
+                .map(|update| (update.actor, update.change)),
+            Some(("@Huy 🙂", GroupChange::Avatar))
+        );
+    }
+
+    #[test]
+    fn group_update_ignores_clan_audit_logs_and_other_codes() {
+        let audit = audit_log_message("@huy update channel: general", "@huy");
+        assert_eq!(audit.group_update(), None);
+
+        let mut welcome = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        welcome.code = MessageCode::Welcome;
+        assert_eq!(welcome.group_update(), None);
+
+        let mut no_mention = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        no_mention.spans = vec![MessageSpan::Text(no_mention.content.as_str().into())];
+        assert_eq!(no_mention.group_update(), None);
     }
 
     #[test]
