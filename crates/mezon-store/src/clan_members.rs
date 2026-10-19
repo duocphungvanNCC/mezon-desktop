@@ -158,6 +158,7 @@ impl ClanMembersStore {
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
                 RealtimeKind::ClanProfileUpdated,
+                RealtimeKind::UserProfileUpdated,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -408,6 +409,34 @@ impl ClanMembersStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::UserProfileUpdated(e) = event {
+            let mut changed = false;
+            for (clan_id, bucket) in self.cache.iter_mut() {
+                let Some(member) = bucket.by_id.get_mut(&UserId(e.user_id)) else {
+                    continue;
+                };
+                let user = &mut member.user;
+                if (e.display_name.is_empty() || user.display_name == e.display_name)
+                    && (e.avatar.is_empty() || user.avatar_url == e.avatar)
+                    && user.about_me == e.about_me
+                {
+                    continue;
+                }
+                if !e.display_name.is_empty() {
+                    user.display_name.clone_from(&e.display_name);
+                }
+                if !e.avatar.is_empty() {
+                    user.avatar_url.clone_from(&e.avatar);
+                }
+                user.about_me.clone_from(&e.about_me);
+                cx.emit(ClanMembersEvent::ProfileUpdated { clan_id: *clan_id });
+                changed = true;
+            }
+            if changed {
+                cx.notify();
+            }
+            return;
+        }
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
             let clan_id = ClanId(e.clan_id);
             if apply_profile_update(
@@ -663,6 +692,79 @@ pub fn split_members_by_status(
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn profile_realtime_updates_members_without_a_clan_view(cx: &mut gpui::TestAppContext) {
+        let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (api, store, _sub) = cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = ClanMembersStore::init(api.clone(), cx);
+            store.update(cx, |store, _| {
+                for id in [1, 2] {
+                    let mut bucket = ClanBucket::default();
+                    let nick = if id == 1 { "" } else { "Nick" };
+                    let mut member =
+                        clan_member_from_proto(proto_clan_user(7, "user", "Old", nick)).unwrap();
+                    member.user.avatar_url = "old.png".into();
+                    bucket.upsert(member);
+                    store.cache.insert(ClanId(id), bucket, None);
+                }
+            });
+            let sink = updates.clone();
+            let sub = cx.subscribe(&store, move |_, event, _| {
+                if let ClanMembersEvent::ProfileUpdated { clan_id } = event {
+                    sink.lock().unwrap().push(*clan_id);
+                }
+            });
+            (api, store, sub)
+        });
+        cx.run_until_parked();
+        let profile = realtime::UserProfileUpdatedEvent {
+            user_id: 7,
+            display_name: "New".into(),
+            avatar: "new.png".into(),
+            about_me: "Bio".into(),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            api.publish_event(RealtimeEvent::UserProfileUpdated(profile.clone()));
+            cx.run_until_parked();
+        }
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(store.member(ClanId(1), UserId(7)).unwrap().name(), "New");
+            assert_eq!(store.member(ClanId(2), UserId(7)).unwrap().name(), "Nick");
+            assert_eq!(
+                store.member(ClanId(1), UserId(7)).unwrap().user.avatar_url,
+                "new.png"
+            );
+        });
+        assert_eq!(updates.lock().unwrap().len(), 2);
+        for user_id in [0, 999, 7] {
+            api.publish_event(RealtimeEvent::UserProfileUpdated(
+                realtime::UserProfileUpdatedEvent {
+                    user_id,
+                    ..Default::default()
+                },
+            ));
+        }
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let member = store.read(cx).member(ClanId(1), UserId(7)).unwrap();
+            assert_eq!(member.name(), "New");
+            assert_eq!(member.user.avatar_url, "new.png");
+            assert!(member.user.about_me.is_empty());
+            assert_eq!(member.user.username, "user");
+        });
+        assert_eq!(updates.lock().unwrap().len(), 4);
+        cx.update(|cx| store.update(cx, |store, cx| store.reset(cx)));
+        api.publish_event(RealtimeEvent::UserProfileUpdated(profile));
+        cx.run_until_parked();
+        assert_eq!(updates.lock().unwrap().len(), 4);
+    }
     use super::*;
 
     fn proto_clan_user(
