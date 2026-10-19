@@ -2148,11 +2148,10 @@ impl ChannelMessages {
                 meta.rpl.hash(&mut hasher);
                 meta.lsnt.hash(&mut hasher);
             }
-            let badge = badges
+            let unread = badges
                 .as_ref()
-                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
-                .unwrap_or(0);
-            badge.hash(&mut hasher);
+                .is_some_and(|store| store.read(cx).topic_has_unread(&topic_id.to_string()));
+            unread.hash(&mut hasher);
         }
         if !any_topic {
             return;

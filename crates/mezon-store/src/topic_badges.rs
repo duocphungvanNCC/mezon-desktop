@@ -24,18 +24,11 @@ const USER_REPLIED: i32 = -11;
 const CHAT_UPDATE: i32 = 1;
 const CHAT_REMOVE: i32 = 2;
 const MAX_PROCESSED_KEYS: usize = 500;
+const MAX_CHECKED_TOPICS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub enum TopicBadgeEvent {
     Updated { clan_id: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopicSeed {
-    pub topic_id: ChannelId,
-    pub parent_id: ChannelId,
-    pub count: u32,
-    pub unread: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,12 +39,24 @@ struct TopicParentEntry {
     count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckedTopic {
+    clan_id: String,
+    parent_channel_id: String,
+}
+
 pub struct TopicBadgeStore {
     topic_parent_map: HashMap<String, TopicParentEntry>,
+    checked_unread: HashMap<String, CheckedTopic>,
+    checked_requests: HashMap<String, Vec<i64>>,
+    pending_checks: usize,
+    clear_generation: u64,
+    cleared_during_checks: HashMap<String, u64>,
+    reset_generation: u64,
     processed_keys: HashSet<String>,
     processed_order: VecDeque<String>,
     auth_state: Entity<AuthState>,
-    _api: Arc<AppApi>,
+    api: Arc<AppApi>,
 }
 
 struct GlobalTopicBadgeStore(Entity<TopicBadgeStore>);
@@ -93,6 +98,11 @@ impl TopicBadgeStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.topic_parent_map.clear();
+        self.checked_unread.clear();
+        self.checked_requests.clear();
+        self.pending_checks = 0;
+        self.cleared_during_checks.clear();
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.processed_keys.clear();
         self.processed_order.clear();
         cx.emit(TopicBadgeEvent::Updated { clan_id: None });
@@ -103,10 +113,16 @@ impl TopicBadgeStore {
         Self::register_realtime(cx);
         Self {
             topic_parent_map: HashMap::new(),
+            checked_unread: HashMap::new(),
+            checked_requests: HashMap::new(),
+            pending_checks: 0,
+            clear_generation: 0,
+            cleared_during_checks: HashMap::new(),
+            reset_generation: 0,
             processed_keys: HashSet::new(),
             processed_order: VecDeque::new(),
             auth_state,
-            _api: api,
+            api,
         }
     }
 
@@ -129,14 +145,6 @@ impl TopicBadgeStore {
         });
     }
 
-    pub fn all_topic_noti_clan(&self, clan_id: &str) -> u32 {
-        self.topic_parent_map
-            .values()
-            .filter(|entry| entry.clan_id == clan_id)
-            .map(|entry| entry.count)
-            .sum()
-    }
-
     pub fn topic_badge_count(&self, topic_id: &str) -> u32 {
         self.topic_parent_map
             .get(topic_id)
@@ -151,6 +159,15 @@ impl TopicBadgeStore {
             .filter(|entry| entry.unread && entry.clan_id == clan_key)
             .filter_map(|entry| entry.parent_channel_id.parse().ok())
             .collect()
+    }
+
+    pub fn any_topic_unread(&self, clan_id: ClanId) -> bool {
+        let clan_key = clan_id.to_string();
+        self.clan_has_unread_topic(clan_id)
+            || self
+                .checked_unread
+                .values()
+                .any(|topic| topic.clan_id == clan_key)
     }
 
     pub fn clan_has_unread_topic(&self, clan_id: ClanId) -> bool {
@@ -168,11 +185,14 @@ impl TopicBadgeStore {
     ) {
         let clan_key = clan_id.to_string();
         let parents: HashSet<String> = parent_ids.iter().map(ChannelId::to_string).collect();
-        let before = self.topic_parent_map.len();
+        let before = self.topic_parent_map.len() + self.checked_unread.len();
         self.topic_parent_map.retain(|_, entry| {
             entry.clan_id != clan_key || !parents.contains(&entry.parent_channel_id)
         });
-        if self.topic_parent_map.len() != before {
+        self.checked_unread.retain(|_, topic| {
+            topic.clan_id != clan_key || !parents.contains(&topic.parent_channel_id)
+        });
+        if self.topic_parent_map.len() + self.checked_unread.len() != before {
             cx.emit(TopicBadgeEvent::Updated {
                 clan_id: Some(clan_key),
             });
@@ -182,39 +202,12 @@ impl TopicBadgeStore {
 
     pub fn clear_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let clan_key = clan_id.to_string();
-        let before = self.topic_parent_map.len();
+        let before = self.topic_parent_map.len() + self.checked_unread.len();
         self.topic_parent_map
             .retain(|_, entry| entry.clan_id != clan_key);
-        if self.topic_parent_map.len() != before {
-            cx.emit(TopicBadgeEvent::Updated {
-                clan_id: Some(clan_key),
-            });
-            cx.notify();
-        }
-    }
-
-    pub fn seed(&mut self, clan_id: ClanId, seeds: Vec<TopicSeed>, cx: &mut Context<Self>) {
-        let clan_key = clan_id.to_string();
-        let mut changed = false;
-        for seed in seeds.into_iter().filter(|seed| seed.unread) {
-            let topic_key = seed.topic_id.to_string();
-            if is_viewing_channel(&topic_key, cx) {
-                continue;
-            }
-            let entry =
-                self.topic_parent_map
-                    .entry(topic_key)
-                    .or_insert_with(|| TopicParentEntry {
-                        clan_id: clan_key.clone(),
-                        parent_channel_id: seed.parent_id.to_string(),
-                        unread: false,
-                        count: 0,
-                    });
-            changed |= !entry.unread || entry.count < seed.count;
-            entry.unread = true;
-            entry.count = entry.count.max(seed.count);
-        }
-        if changed {
+        self.checked_unread
+            .retain(|_, topic| topic.clan_id != clan_key);
+        if self.topic_parent_map.len() + self.checked_unread.len() != before {
             cx.emit(TopicBadgeEvent::Updated {
                 clan_id: Some(clan_key),
             });
@@ -223,13 +216,124 @@ impl TopicBadgeStore {
     }
 
     pub fn topic_has_unread(&self, topic_id: &str) -> bool {
-        self.topic_parent_map
-            .get(topic_id)
-            .is_some_and(|entry| entry.unread)
+        self.checked_unread.contains_key(topic_id)
+            || self
+                .topic_parent_map
+                .get(topic_id)
+                .is_some_and(|entry| entry.unread)
     }
 
-    pub fn badge_label_for_clan(&self, clan_id: &str) -> Option<String> {
-        format_topic_badge_label(self.all_topic_noti_clan(clan_id))
+    pub fn channel_has_unread_topic(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        self.checked_unread
+            .values()
+            .any(|topic| topic.clan_id == clan_key && topic.parent_channel_id == channel_key)
+            || self.topic_parent_map.values().any(|entry| {
+                entry.unread && entry.clan_id == clan_key && entry.parent_channel_id == channel_key
+            })
+    }
+
+    pub fn check_channel_topics(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic_ids: impl IntoIterator<Item = i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut seen = HashSet::new();
+        let mut topic_ids: Vec<i64> = topic_ids
+            .into_iter()
+            .filter(|id| *id > 0 && seen.insert(*id))
+            .take(MAX_CHECKED_TOPICS)
+            .collect();
+        topic_ids.sort_unstable();
+        if topic_ids.is_empty() || clan_id.is_zero() || channel_id.is_zero() {
+            return;
+        }
+        let channel_key = channel_id.to_string();
+        if self.checked_requests.get(&channel_key) == Some(&topic_ids) {
+            return;
+        }
+        self.checked_requests
+            .insert(channel_key.clone(), topic_ids.clone());
+        self.pending_checks += 1;
+        let api = self.api.clone();
+        let reset_generation = self.reset_generation;
+        let clear_generation = self.clear_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_unread(clan_id.get(), channel_id.get(), topic_ids)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
+                this.pending_checks = this.pending_checks.saturating_sub(1);
+                match result {
+                    Ok(unread) => this.apply_checked_topics(
+                        clan_id,
+                        &channel_key,
+                        unread,
+                        clear_generation,
+                        cx,
+                    ),
+                    Err(e) => {
+                        tracing::debug!("list_topic_unread failed for channel {channel_id}: {e}");
+                    }
+                }
+                if this.pending_checks == 0 {
+                    this.cleared_during_checks.clear();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_checked_topics(
+        &mut self,
+        clan_id: ClanId,
+        channel_key: &str,
+        unread: Vec<i64>,
+        clear_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_key = clan_id.to_string();
+        let checked: HashMap<String, CheckedTopic> = unread
+            .into_iter()
+            .map(|id| id.to_string())
+            .filter(|topic_id| {
+                self.cleared_during_checks
+                    .get(topic_id)
+                    .is_none_or(|cleared| *cleared <= clear_generation)
+                    && !is_viewing_channel(topic_id, cx)
+            })
+            .map(|topic_id| {
+                (
+                    topic_id,
+                    CheckedTopic {
+                        clan_id: clan_key.clone(),
+                        parent_channel_id: channel_key.to_string(),
+                    },
+                )
+            })
+            .collect();
+        let previous: HashSet<String> = self
+            .checked_unread
+            .iter()
+            .filter(|(_, topic)| topic.parent_channel_id == channel_key)
+            .map(|(topic_id, _)| topic_id.clone())
+            .collect();
+        let current: HashSet<String> = checked.keys().cloned().collect();
+        self.checked_unread
+            .retain(|_, topic| topic.parent_channel_id != channel_key);
+        self.checked_unread.extend(checked);
+        if previous != current {
+            cx.emit(TopicBadgeEvent::Updated {
+                clan_id: Some(clan_key),
+            });
+            cx.notify();
+        }
     }
 
     pub fn clear_topic(&mut self, topic_id: &str, cx: &mut Context<Self>) {
@@ -404,11 +508,19 @@ impl TopicBadgeStore {
             return Vec::new();
         }
         let channel_key = channel_id.to_string();
+        self.note_cleared(&channel_key);
         let mut cleared: Vec<String> = Vec::new();
         self.topic_parent_map.retain(|topic_id, entry| {
             let read = *topic_id == channel_key || entry.parent_channel_id == channel_key;
             if read && !cleared.contains(&entry.clan_id) {
                 cleared.push(entry.clan_id.clone());
+            }
+            !read
+        });
+        self.checked_unread.retain(|topic_id, topic| {
+            let read = *topic_id == channel_key || topic.parent_channel_id == channel_key;
+            if read && !cleared.contains(&topic.clan_id) {
+                cleared.push(topic.clan_id.clone());
             }
             !read
         });
@@ -448,9 +560,24 @@ impl TopicBadgeStore {
     }
 
     fn reset_topic(&mut self, topic_id: &str) -> Option<String> {
+        self.note_cleared(topic_id);
+        let checked = self
+            .checked_unread
+            .remove(topic_id)
+            .map(|topic| topic.clan_id);
         self.topic_parent_map
             .remove(topic_id)
             .map(|entry| entry.clan_id)
+            .or(checked)
+    }
+
+    fn note_cleared(&mut self, topic_id: &str) {
+        if self.pending_checks == 0 {
+            return;
+        }
+        self.clear_generation = self.clear_generation.wrapping_add(1);
+        self.cleared_during_checks
+            .insert(topic_id.to_string(), self.clear_generation);
     }
 
     fn track_processed(&mut self, key: String) {
@@ -474,16 +601,6 @@ impl TopicBadgeStore {
             }
             _ => None,
         }
-    }
-}
-
-fn format_topic_badge_label(total: u32) -> Option<String> {
-    if total == 0 {
-        None
-    } else if total > 9 {
-        Some("9+".into())
-    } else {
-        Some(total.to_string())
     }
 }
 
@@ -577,37 +694,6 @@ fn is_message_mention_or_reply(msg: &api::ChannelMessage, user_id: UserId, cx: &
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_topic_badge_label_values() {
-        assert_eq!(format_topic_badge_label(0), None);
-        assert_eq!(format_topic_badge_label(4), Some("4".into()));
-        assert_eq!(format_topic_badge_label(12), Some("9+".into()));
-    }
-
-    #[test]
-    fn all_topic_noti_clan_sums_entries() {
-        let entries = [
-            TopicParentEntry {
-                clan_id: "10".into(),
-                parent_channel_id: "5".into(),
-                unread: true,
-                count: 2,
-            },
-            TopicParentEntry {
-                clan_id: "10".into(),
-                parent_channel_id: "5".into(),
-                unread: true,
-                count: 3,
-            },
-        ];
-        let total: u32 = entries
-            .iter()
-            .filter(|entry| entry.clan_id == "10")
-            .map(|entry| entry.count)
-            .sum();
-        assert_eq!(total, 5);
-    }
 
     #[gpui::test]
     fn clear_topic_removes_entry(cx: &mut gpui::TestAppContext) {
@@ -734,6 +820,90 @@ mod tests {
 
                 store.clear_clan(ClanId(11), cx);
                 assert!(store.topic_parent_map.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn checked_topics_dot_their_channel_but_never_its_label(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.apply_checked_topics(ClanId(10), "5", vec![91, 92], 0, cx);
+                assert!(store.topic_has_unread("91"));
+                assert!(store.topic_has_unread("92"));
+                assert!(store.channel_has_unread_topic(ClanId(10), ChannelId(5)));
+                assert!(!store.channel_has_unread_topic(ClanId(10), ChannelId(6)));
+                assert!(!store.channel_has_unread_topic(ClanId(11), ChannelId(5)));
+                assert!(store.any_topic_unread(ClanId(10)));
+                assert!(store.unread_parent_ids(ClanId(10)).is_empty());
+                assert!(!store.clan_has_unread_topic(ClanId(10)));
+
+                store.apply_checked_topics(ClanId(10), "5", vec![92], 0, cx);
+                assert!(!store.topic_has_unread("91"));
+                assert!(store.topic_has_unread("92"));
+
+                store.clear_topic("92", cx);
+                assert!(!store.channel_has_unread_topic(ClanId(10), ChannelId(5)));
+                assert!(!store.any_topic_unread(ClanId(10)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_topic_read_while_its_check_runs_stays_read(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.pending_checks = 1;
+                let started_at = store.clear_generation;
+                store.clear_topic("91", cx);
+                store.apply_checked_topics(ClanId(10), "5", vec![91, 92], started_at, cx);
+                assert!(!store.topic_has_unread("91"));
+                assert!(store.topic_has_unread("92"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn marking_read_clears_checked_topics(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.apply_checked_topics(ClanId(10), "5", vec![91], 0, cx);
+                store.apply_checked_topics(ClanId(10), "6", vec![93], 0, cx);
+                store.apply_checked_topics(ClanId(11), "7", vec![94], 0, cx);
+
+                assert_eq!(store.handle_mark_as_read(5, cx), vec!["10".to_string()]);
+                assert!(!store.topic_has_unread("91"));
+                assert!(store.topic_has_unread("93"));
+
+                store.clear_parents(ClanId(10), &[ChannelId(6)], cx);
+                assert!(!store.topic_has_unread("93"));
+                assert!(store.topic_has_unread("94"));
+
+                store.clear_clan(ClanId(11), cx);
+                assert!(!store.any_topic_unread(ClanId(11)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_channel_is_checked_again_only_when_its_topics_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.check_channel_topics(ClanId(10), ChannelId(5), [92, 91], cx);
+                store.check_channel_topics(ClanId(10), ChannelId(5), [91, 92, 91], cx);
+                assert_eq!(store.pending_checks, 1);
+                assert_eq!(store.checked_requests.get("5"), Some(&vec![91, 92]));
+
+                store.check_channel_topics(ClanId(10), ChannelId(5), [91, 92, 93], cx);
+                assert_eq!(store.pending_checks, 2);
+
+                store.check_channel_topics(ClanId(10), ChannelId(5), Vec::new(), cx);
+                store.check_channel_topics(ClanId(0), ChannelId(6), [94], cx);
+                assert_eq!(store.pending_checks, 2);
             });
         });
     }

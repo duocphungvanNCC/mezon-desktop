@@ -12,7 +12,7 @@ use mezon_store::{
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::primitives::{h_flex, v_flex};
+use crate::components::primitives::{h_flex, unread_dot, v_flex};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
@@ -378,10 +378,10 @@ impl Render for InboxPopoverPanel {
         let locale = self.locale.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_tab = self.tab;
-        let topic_badge = self.clan_id.parse::<ClanId>().ok().and_then(|_| {
+        let topic_unread = self.clan_id.parse::<ClanId>().is_ok_and(|clan_id| {
             TopicBadgeStore::global(cx)
                 .read(cx)
-                .badge_label_for_clan(&self.clan_id)
+                .any_topic_unread(clan_id)
         });
         let is_loading = if active_tab == InboxTab::Topics {
             TopicsStore::global(cx).read(cx).is_loading()
@@ -468,7 +468,7 @@ impl Render for InboxPopoverPanel {
                         theme_ref,
                         &locale,
                         active_tab,
-                        topic_badge,
+                        topic_unread,
                         this.clone(),
                     )),
             )
@@ -505,7 +505,7 @@ fn render_tabs(
     theme: &Theme,
     locale: &SharedString,
     active: InboxTab,
-    topic_badge: Option<String>,
+    topic_unread: bool,
     this: gpui::WeakEntity<InboxPopoverPanel>,
 ) -> impl IntoElement {
     h_flex()
@@ -537,24 +537,8 @@ fn render_tabs(
                     theme.text_muted
                 })
                 .child(label)
-                .when(tab == InboxTab::Topics && topic_badge.is_some(), |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-4.))
-                            .right(px(-4.))
-                            .px_1()
-                            .min_w(px(16.))
-                            .h(px(16.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(theme.mention_badge)
-                            .text_xs()
-                            .text_color(theme.bg_primary)
-                            .child(topic_badge.clone().unwrap_or_default()),
-                    )
+                .when(tab == InboxTab::Topics && topic_unread, |d| {
+                    d.child(unread_dot().absolute().top(px(-2.)).right(px(-2.)))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     this.update(cx, |panel, cx| panel.select_tab(tab, cx)).ok();
@@ -1070,6 +1054,9 @@ fn render_topic_item(
     let jump_topic = topic.clone();
     let inbox_handle_jump = inbox_handle.clone();
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
+    let unread = TopicBadgeStore::global(cx)
+        .read(cx)
+        .topic_has_unread(&topic.id);
 
     div()
         .flex()
@@ -1112,7 +1099,10 @@ fn render_topic_item(
                                 );
                             },
                         )),
-                ),
+                )
+                .when(unread, |d| {
+                    d.child(unread_dot().absolute().top(px(10.)).right(px(10.)))
+                }),
         )
         .into_any_element()
 }

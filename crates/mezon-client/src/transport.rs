@@ -1050,14 +1050,6 @@ pub struct ApiChannelDesc {
     pub app_id: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiTopicBadge {
-    pub topic_id: i64,
-    pub channel_id: i64,
-    pub badge: i32,
-    pub channel_badge: i32,
-}
-
 fn default_channel_active() -> i32 {
     1
 }
@@ -4977,7 +4969,7 @@ impl MezonTransport {
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
             "LinkCDNFile" => 214,
-            "ListTopicBadgeCount" => 215,
+            "ListTopicUnread" => 215,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6154,31 +6146,24 @@ impl MezonTransport {
             .collect())
     }
 
-    pub async fn list_topic_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiTopicBadge>> {
+    pub async fn list_topic_unread(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_ids: Vec<i64>,
+    ) -> Result<Vec<i64>> {
         let cid = self.generate_cid();
-        let body = api::ListTopicBadgeCountRequest {
+        let body = api::ListTopicUnreadRequest {
             clan_id,
-            channel_id: 0,
+            channel_id,
+            topic_ids,
         }
         .encode_to_vec();
-        let (code, response) = self
-            .send_api_request(cid, "ListTopicBadgeCount", body)
-            .await?;
+        let (code, response) = self.send_api_request(cid, "ListTopicUnread", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(
-            api::ListTopicBadgeCountResponse::decode(response.as_slice())?
-                .topics
-                .into_iter()
-                .map(|topic| ApiTopicBadge {
-                    topic_id: topic.topic_id,
-                    channel_id: topic.channel_id,
-                    badge: topic.badge,
-                    channel_badge: topic.channel_badge,
-                })
-                .collect(),
-        )
+        Ok(api::ListTopicUnreadResponse::decode(response.as_slice())?.topic_ids)
     }
 
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {

@@ -33,8 +33,8 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex,
-    mention_count_badge, v_flex,
+    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex, unread_dot,
+    v_flex,
 };
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
@@ -314,23 +314,6 @@ struct ActivityStripGeneration {
     pin_record_ids: Vec<i64>,
 }
 
-fn topic_strip_badge_state(
-    latest_sender_id: Option<UserId>,
-    current_user_id: UserId,
-    server_unread: bool,
-    server_badge_count: u32,
-    realtime_unread: bool,
-    realtime_badge_count: u32,
-) -> (bool, u32) {
-    if latest_sender_id == Some(current_user_id) {
-        return (false, 0);
-    }
-    (
-        server_unread || realtime_unread,
-        server_badge_count.max(realtime_badge_count),
-    )
-}
-
 impl ActivityStripGeneration {
     fn has_new_activity_since(&self, previous: &Self) -> bool {
         self.newest_topic_id > previous.newest_topic_id
@@ -524,24 +507,6 @@ mod activity_strip_generation_tests {
             None
         );
     }
-
-    #[test]
-    fn own_latest_topic_message_never_shows_unread_or_badge() {
-        let current_user = UserId::new(7);
-        assert_eq!(
-            topic_strip_badge_state(Some(current_user), current_user, true, 3, true, 2),
-            (false, 0)
-        );
-    }
-
-    #[test]
-    fn topic_badge_state_combines_server_and_realtime_sources() {
-        let current_user = UserId::new(7);
-        assert_eq!(
-            topic_strip_badge_state(Some(UserId::new(8)), current_user, false, 1, true, 2,),
-            (true, 2)
-        );
-    }
 }
 
 fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
@@ -557,6 +522,21 @@ fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
         clan_id,
         channel_id,
     })
+}
+
+fn check_channel_topics(context: ActivityStripContext, cx: &mut App) {
+    let clan_key = context.clan_id.to_string();
+    let channel_key = context.channel_id.to_string();
+    let topic_ids: Vec<i64> = TopicsStore::global(cx)
+        .read(cx)
+        .topics_for(&clan_key)
+        .iter()
+        .filter(|topic| topic.channel_id == channel_key)
+        .filter_map(|topic| topic.id.parse().ok())
+        .collect();
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.check_channel_topics(context.clan_id, context.channel_id, topic_ids, cx);
+    });
 }
 
 fn activity_strip_generation(
@@ -608,8 +588,7 @@ fn latest_activity_strip(
     latest_topic: Option<TopicDiscussion>,
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
-    topic_has_persisted_unread: bool,
-    topic_badge_count: u32,
+    topic_unread: bool,
     strip: WeakEntity<LatestActivityStripView>,
     cx: &mut App,
 ) -> gpui::AnyElement {
@@ -887,28 +866,9 @@ fn latest_activity_strip(
                         .size(px(22.))
                         .text_color(theme.interactive_active),
                 )
-                .when(topic_badge_count > 0, |icon| {
-                    icon.child(
-                        mention_count_badge(topic_badge_count)
-                            .absolute()
-                            .top(px(-4.))
-                            .right(px(-4.)),
-                    )
-                })
-                .when(
-                    topic_badge_count == 0 && topic_has_persisted_unread,
-                    |icon| {
-                        icon.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .right_0()
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(theme.mention_badge),
-                        )
-                    },
-                ),
+                .when(topic_unread, |icon| {
+                    icon.child(unread_dot().absolute().top_0().right_0())
+                }),
         )
         .child(
             div()
@@ -1293,8 +1253,7 @@ struct ActivityStripSnapshot {
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
     latest_topic: Option<TopicDiscussion>,
-    topic_has_persisted_unread: bool,
-    topic_badge_count: u32,
+    topic_unread: bool,
     visible: bool,
 }
 
@@ -1393,32 +1352,10 @@ impl LatestActivityStripView {
             }
             return;
         };
-        let (topic_has_persisted_unread, topic_badge_count) = latest_topic
-            .as_ref()
-            .map(|topic| {
-                let server_state = topic
-                    .id
-                    .parse::<ChannelId>()
-                    .ok()
-                    .and_then(|topic_id| {
-                        ChannelList::global(cx)
-                            .read(cx)
-                            .channel(context.clan_id, topic_id)
-                            .map(|channel| (channel.is_unread(), channel.badge_count))
-                    })
-                    .unwrap_or_default();
-                let realtime = TopicBadgeStore::global(cx);
-                let realtime = realtime.read(cx);
-                topic_strip_badge_state(
-                    topic.last_sender_id.parse::<UserId>().ok(),
-                    context.user_id,
-                    server_state.0,
-                    server_state.1,
-                    realtime.topic_has_unread(&topic.id),
-                    realtime.topic_badge_count(&topic.id),
-                )
-            })
-            .unwrap_or_default();
+        check_channel_topics(context, cx);
+        let topic_unread = TopicBadgeStore::global(cx)
+            .read(cx)
+            .channel_has_unread_topic(context.clan_id, context.channel_id);
         let persisted = persisted_activity_strip_generation(self.settings.read(cx), context);
         let visible = match persisted {
             Some(previous) if generation.has_new_activity_since(&previous) => {
@@ -1432,8 +1369,7 @@ impl LatestActivityStripView {
             context,
             generation,
             latest_topic,
-            topic_has_persisted_unread,
-            topic_badge_count,
+            topic_unread,
             visible,
         });
         if self.snapshot != next {
@@ -1502,8 +1438,7 @@ impl Render for LatestActivityStripView {
             snapshot.latest_topic,
             snapshot.context,
             snapshot.generation,
-            snapshot.topic_has_persisted_unread,
-            snapshot.topic_badge_count,
+            snapshot.topic_unread,
             cx.weak_entity(),
             cx,
         )
