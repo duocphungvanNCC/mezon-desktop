@@ -86,7 +86,9 @@ impl MezonGrammarClient {
             };
         }
 
-        for &(wrong, right) in CONFUSABLE_PHRASES.iter() {
+        let mut phrases: Vec<(&str, &str)> = CONFUSABLE_PHRASES.iter().copied().collect();
+        phrases.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.chars().count()));
+        for (wrong, right) in phrases {
             let pattern = format!(r"(?i)\b{}\b", regex::escape(wrong));
             if let Ok(re) = Regex::new(&pattern) {
                 if re.is_match(&current) {

@@ -187,14 +187,20 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
 }
 
 fn apply_confusable_prepass(text: &str) -> String {
+    let mut phrases: Vec<(&str, &str)> = CONFUSABLE_PHRASES
+        .iter()
+        .copied()
+        .filter(|(wrong, _)| wrong.contains(' '))
+        .collect();
+    phrases.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.chars().count()));
     let mut current = text.to_string();
-    for (wrong, right) in CONFUSABLE_PHRASES.iter() {
-        if !wrong.contains(' ') || !current.to_lowercase().contains(&wrong.to_lowercase()) {
-            continue;
-        }
-        let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(wrong))) else {
+    for (wrong, right) in phrases {
+        let Ok(re) = Regex::new(&format!(r"(?i)(?<!\w){}(?!\w)", regex::escape(wrong))) else {
             continue;
         };
+        if !re.is_match(&current) {
+            continue;
+        }
         current = re
             .replace_all(&current, |caps: &regex::Captures| {
                 title_if_needed(&caps[0], right)
@@ -263,10 +269,15 @@ fn protect_substring(lower: &str, needle: &str, protected: &mut HashSet<usize>) 
     let mut start = 0usize;
     while start + needle.len() <= hay.len() {
         if hay[start..start + needle.len()] == needle[..] {
-            for idx in start..start + needle.len() {
-                protected.insert(idx);
+            let end = start + needle.len();
+            let before_ok = start == 0 || !hay[start - 1].is_alphanumeric();
+            let after_ok = end == hay.len() || !hay[end].is_alphanumeric();
+            if before_ok && after_ok {
+                for idx in start..end {
+                    protected.insert(idx);
+                }
             }
-            start += needle.len();
+            start = end;
         } else {
             start += 1;
         }
@@ -610,23 +621,7 @@ fn rescore_with_collocations(text: &str, original: &str) -> String {
             }
         }
     }
-    let mut result = tokens.concat();
-    let mut lower = result.to_lowercase();
-    for (wrong, right) in CONFUSABLE_PHRASES.iter() {
-        if !wrong.contains(' ') || !lower.contains(&wrong.to_lowercase()) {
-            continue;
-        }
-        let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(wrong))) else {
-            continue;
-        };
-        result = re
-            .replace_all(&result, |caps: &regex::Captures| {
-                title_if_needed(&caps[0], right)
-            })
-            .to_string();
-        lower = result.to_lowercase();
-    }
-    result
+    apply_confusable_prepass(&tokens.concat())
 }
 
 fn tokenize(text: &str) -> Vec<String> {
