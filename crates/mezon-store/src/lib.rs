@@ -513,6 +513,14 @@ pub struct Settings {
     pub realtime_server: RealtimeServer,
     #[serde(default)]
     pub agent_hint_dismissed: bool,
+    #[serde(default = "default_true")]
+    pub quick_replies_enabled: bool,
+    #[serde(default = "default_true")]
+    pub grammar_correction_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -547,6 +555,8 @@ impl Default for Settings {
             activity_strip_dismissals: Vec::new(),
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
+            quick_replies_enabled: true,
+            grammar_correction_enabled: true,
         }
     }
 }
@@ -860,5 +870,16 @@ mod settings_tests {
     fn clearing_an_untouched_tour_state_reports_no_change() {
         let mut settings = Settings::default();
         assert!(!settings.clear_tour_progress());
+    }
+
+    #[test]
+    fn grammar_chat_toggles_default_on_and_legacy_settings_parse() {
+        let defaults = Settings::default();
+        assert!(defaults.quick_replies_enabled);
+        assert!(defaults.grammar_correction_enabled);
+        let legacy = r#"{"language":"en"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert!(settings.quick_replies_enabled);
+        assert!(settings.grammar_correction_enabled);
     }
 }

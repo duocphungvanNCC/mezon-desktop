@@ -475,6 +475,7 @@ impl RootView {
             Route::SettingsDevices => crate::settings::SettingsPage::Device,
             Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
             Route::SettingsActivity => crate::settings::SettingsPage::Activity,
+            Route::SettingsChat => crate::settings::SettingsPage::Chat,
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
@@ -606,6 +607,7 @@ impl Render for RootView {
                     | Route::SettingsDevices
                     | Route::SettingsAppearance
                     | Route::SettingsActivity
+                    | Route::SettingsChat
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
