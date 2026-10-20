@@ -360,6 +360,17 @@ pub static TEENCODE_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
 /// Confusable compound phrases, spelling fixes, and multi-word collocations.
 pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
     let mut list = vec![
+        ("ok ánh", "ok anh"),
+        ("ok anh", "ok anh"),
+        ("ok em", "ok em"),
+        ("ok chi", "ok chị"),
+        ("ok sep", "ok sếp"),
+        ("ok sếp", "ok sếp"),
+        ("ok ban", "ok bạn"),
+        ("ok bạn", "ok bạn"),
+        ("ok bac", "ok bác"),
+        ("ok chu", "ok chú"),
+        ("ok thay", "ok thầy"),
         ("ko can dung unikey nua", "không cần dùng unikey nữa"),
         ("khong can dung unikey nua", "không cần dùng unikey nữa"),
         ("can dung unikey nua", "cần dùng unikey nữa"),
@@ -1247,6 +1258,15 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("hay", "dung"), ("hay", "dùng")),
         (("de", "anh"), ("để", "anh")),
         (("mong", "cai"), ("mong", "cái")),
+        (("ok", "anh"), ("ok", "anh")),
+        (("ok", "em"), ("ok", "em")),
+        (("ok", "chi"), ("ok", "chị")),
+        (("ok", "sep"), ("ok", "sếp")),
+        (("ok", "ban"), ("ok", "bạn")),
+        (("ok", "bac"), ("ok", "bác")),
+        (("ok", "chu"), ("ok", "chú")),
+        (("ok", "thay"), ("ok", "thầy")),
+        (("ok", "nhe"), ("ok", "nhé")),
     ];
     for (k, v) in pairs {
         m.insert(k, v);

@@ -67,6 +67,16 @@ fn neural_accent_keeps_desktop_and_tech_terms() {
 }
 
 #[test]
+fn neural_accent_keeps_ok_pronoun() {
+    let client = MezonGrammarClient::new();
+    assert_eq!(client.correct("ok anh").corrected, "Ok anh");
+    assert_eq!(client.correct("ok ánh").corrected, "Ok anh");
+    assert_eq!(client.correct("ok sep").corrected, "Ok sếp");
+    assert_eq!(client.correct("ok nhe").corrected, "Ok nhé");
+    assert!(!apply_neural_accent_onnx("ok anh").contains("ánh"));
+}
+
+#[test]
 fn neural_accent_restores_minh_sua_roi_nhe() {
     for input in ["minh sua roi nhé", "minh sua roi nhe"] {
         let out = apply_neural_accent_onnx(input);
