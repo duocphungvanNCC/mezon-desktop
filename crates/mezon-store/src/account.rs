@@ -6,10 +6,13 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
 use mezon_client::transport::LinkPhoneError;
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError};
+use mezon_client::{
+    AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError, api_status_from_error,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
+use crate::name_validation::prepare_display_name_for_update;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
@@ -26,6 +29,8 @@ pub struct UserAccount {
     pub status: String,
     pub user_status: String,
     pub dob_seconds: u32,
+    /// Epoch seconds the account was created. Zero when the server did not send one.
+    pub create_time_seconds: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +73,7 @@ pub enum AccountEvent {
     ClanProfileLoaded,
     ClanProfileLoadFailed(String),
     ClanProfileSaved,
-    ClanProfileSaveFailed(String),
+    ClanProfileSaveFailed(ClanProfileSaveError),
     NicknameDuplicateChecked(bool),
     StatusUpdated,
     AccountDeleted,
@@ -83,6 +88,13 @@ pub enum AccountEvent {
 pub enum PhoneLinkError {
     AlreadyLinkedToAnother,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClanProfileSaveError {
+    DuplicateNickname,
+    Api(u32),
+    Other(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,17 +383,27 @@ impl AccountStore {
 
     pub fn save_account(
         &mut self,
-        display_name: String,
+        display_name: Option<String>,
         avatar_url: Option<String>,
         about_me: String,
         logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let display_name_update = match display_name {
+            None => None,
+            Some(raw) => match prepare_display_name_for_update(&raw) {
+                Ok(update) => update,
+                Err(error) => {
+                    tracing::warn!("unexpected display name validation failure: {error:?}");
+                    return;
+                }
+            },
+        };
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_account(
-                    Some(&display_name),
+                    display_name_update.as_deref(),
                     Some(avatar_url.as_deref().unwrap_or_default()),
                     Some(&about_me),
                     logo_url.as_deref(),
@@ -392,7 +414,9 @@ impl AccountStore {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(account) = &mut this.account {
-                            account.display_name = display_name;
+                            if let Some(display_name) = display_name_update {
+                                account.display_name = display_name;
+                            }
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
                             account.logo = logo_url.filter(|url| !url.is_empty());
@@ -878,34 +902,48 @@ impl AccountStore {
     pub fn save_clan_profile(
         &mut self,
         clan_id: ClanId,
-        nick_name: String,
+        nick_name: Option<String>,
         avatar_url: Option<String>,
+        nick_changed: bool,
+        avatar_changed: bool,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
+        let nick_for_store = nick_name.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_user_clan_profile(
                     clan_id.get(),
-                    &nick_name,
-                    Some(avatar_url.as_deref().unwrap_or_default()),
+                    nick_name.as_deref(),
+                    avatar_url.as_deref(),
                 )
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.clan_profile = Some(UserClanProfile {
-                            clan_id,
-                            nick_name: nick_name.clone(),
-                            avatar_url: avatar_url.clone(),
-                        });
+                        if this.clan_profile.as_ref().map(|p| p.clan_id) == Some(clan_id) {
+                            let mut profile = this.clan_profile.take().unwrap_or(UserClanProfile {
+                                clan_id,
+                                nick_name: String::new(),
+                                avatar_url: None,
+                            });
+                            if let Some(nick) = nick_for_store {
+                                profile.nick_name = nick;
+                            }
+                            if avatar_changed {
+                                profile.avatar_url = avatar_url.clone();
+                            }
+                            this.clan_profile = Some(profile);
+                        }
                         cx.emit(AccountEvent::ClanProfileSaved);
                         cx.notify();
                     });
                 }
                 Err(e) => {
+                    tracing::error!("save clan profile failed: {e:#}");
+                    let mapped = map_clan_profile_save_error(e, nick_changed, avatar_changed);
                     let _ = this.update(cx, |_, cx| {
-                        cx.emit(AccountEvent::ClanProfileSaveFailed(e.to_string()));
+                        cx.emit(AccountEvent::ClanProfileSaveFailed(mapped));
                         cx.notify();
                     });
                 }
@@ -937,6 +975,20 @@ impl AccountStore {
     }
 }
 
+fn map_clan_profile_save_error(
+    err: anyhow::Error,
+    nick_changed: bool,
+    avatar_changed: bool,
+) -> ClanProfileSaveError {
+    if let Some(status) = api_status_from_error(&err) {
+        if status.is_invalid_argument() && nick_changed && !avatar_changed {
+            return ClanProfileSaveError::DuplicateNickname;
+        }
+        return ClanProfileSaveError::Api(status.code);
+    }
+    ClanProfileSaveError::Other(err.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedAccount {
     #[serde(default)]
@@ -953,6 +1005,8 @@ struct PersistedAccount {
     user_status: String,
     #[serde(default)]
     dob_seconds: u32,
+    #[serde(default)]
+    create_time_seconds: u32,
 }
 
 impl PersistedAccount {
@@ -966,6 +1020,7 @@ impl PersistedAccount {
             status: account.status.clone(),
             user_status: account.user_status.clone(),
             dob_seconds: account.dob_seconds,
+            create_time_seconds: account.create_time_seconds,
         }
     }
 
@@ -983,6 +1038,7 @@ impl PersistedAccount {
             status: self.status,
             user_status: self.user_status,
             dob_seconds: self.dob_seconds,
+            create_time_seconds: self.create_time_seconds,
         }
     }
 }
@@ -1045,6 +1101,7 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         status: acct.status,
         user_status: acct.user_status,
         dob_seconds: acct.dob_seconds,
+        create_time_seconds: acct.create_time_seconds,
     }
 }
 
@@ -1173,6 +1230,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
+            create_time_seconds: 0,
         };
         let json = serde_json::to_string(&PersistedAccount::from_account(&account)).unwrap();
         let restored = serde_json::from_str::<PersistedAccount>(&json)
@@ -1246,6 +1304,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 946_684_800,
+            create_time_seconds: 0,
         });
         assert_eq!(acct.dob_seconds, 946_684_800);
         let restored = PersistedAccount::from_account(&acct).into_account();
@@ -1267,8 +1326,36 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
+            create_time_seconds: 0,
         });
         assert_eq!(acct.user_id, 1);
         assert_eq!(acct.display_name, "alice");
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_invalid_argument_with_nick_only_change_to_duplicate() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, true, false),
+            ClanProfileSaveError::DuplicateNickname
+        );
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_invalid_argument_with_avatar_change_to_api_code() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, false, true),
+            ClanProfileSaveError::Api(3)
+        );
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_internal_to_api_code() {
+        let err = mezon_client::ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, true, false),
+            ClanProfileSaveError::Api(13)
+        );
     }
 }

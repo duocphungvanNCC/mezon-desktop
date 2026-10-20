@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use livekit::webrtc::native::apm::AudioProcessingModule;
+use libwebrtc::native::apm::AudioProcessingModule;
 use parking_lot::Mutex;
 
 struct CaptureChunk {
@@ -15,6 +15,7 @@ struct CaptureChunk {
     delay_ms: i32,
 }
 
+#[derive(Clone)]
 struct ReverseChunk {
     data: Vec<i16>,
     rate: i32,
@@ -243,81 +244,68 @@ fn flush_reverse(
     }
 }
 
-fn mix_noise_suppression(dry: &mut [i16], wet: &[i16], level: u32) {
-    for (d, w) in dry.iter_mut().zip(wet) {
-        let dry_val = *d as i32;
-        *d = (dry_val + ((*w as i32 - dry_val) * level as i32) / 100) as i16;
-    }
-}
-
 fn process_reverse(apm: &mut AudioProcessingModule, mut chunk: ReverseChunk) {
     let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
 }
 
-fn drain_reverse(apm: &mut AudioProcessingModule, reverse_rx: &flume::Receiver<ReverseChunk>) {
+#[allow(clippy::too_many_arguments)]
+fn process_capture_dual(
+    apm: &mut AudioProcessingModule,
+    apm_for_mezon_ns: &mut AudioProcessingModule,
+    reverse_rx: &flume::Receiver<ReverseChunk>,
+    mic_tx: &flume::Sender<Vec<i16>>,
+    mut chunk: CaptureChunk,
+    mezon_ns_requested: &AtomicBool,
+    mezon_ns_ready: &AtomicBool,
+) {
     for _ in 0..MAX_REVERSE_DRAIN_PER_CAPTURE {
         let Ok(render) = reverse_rx.try_recv() else {
             break;
         };
-        process_reverse(apm, render);
+        process_reverse(apm, render.clone());
+        process_reverse(apm_for_mezon_ns, render);
     }
-}
-
-fn process_capture(
-    apm: &mut AudioProcessingModule,
-    ns: &mut AudioProcessingModule,
-    wet: &mut Vec<i16>,
-    reverse_rx: &flume::Receiver<ReverseChunk>,
-    mic_tx: &flume::Sender<Vec<i16>>,
-    ns_enabled: &AtomicBool,
-    ns_level: &AtomicU32,
-    mut chunk: CaptureChunk,
-) {
-    drain_reverse(apm, reverse_rx);
     let _ = apm.set_stream_delay_ms(chunk.delay_ms);
+    let _ = apm_for_mezon_ns.set_stream_delay_ms(chunk.delay_ms);
+    let mut mezon_input = chunk.data.clone();
     let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
-    let level = ns_level.load(Ordering::Relaxed).min(100);
-    if ns_enabled.load(Ordering::Relaxed) && level > 0 {
-        wet.clear();
-        wet.extend_from_slice(&chunk.data);
-        if ns.process_stream(wet, chunk.rate, chunk.channels).is_ok() {
-            if level >= 100 {
-                chunk.data.copy_from_slice(wet);
-            } else {
-                mix_noise_suppression(&mut chunk.data, wet, level);
-            }
-        }
-    }
-    let _ = mic_tx.try_send(chunk.data);
+    let _ = apm_for_mezon_ns.process_stream(&mut mezon_input, chunk.rate, chunk.channels);
+    let chosen =
+        if mezon_ns_requested.load(Ordering::Acquire) && mezon_ns_ready.load(Ordering::Acquire) {
+            mezon_input
+        } else {
+            chunk.data
+        };
+    let _ = mic_tx.try_send(chosen);
 }
 
 fn run_apm(
     capture_rx: flume::Receiver<CaptureChunk>,
     reverse_rx: flume::Receiver<ReverseChunk>,
     mic_tx: flume::Sender<Vec<i16>>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
+    mezon_ns_requested: Arc<AtomicBool>,
+    mezon_ns_ready: Arc<AtomicBool>,
 ) {
     enum Event {
         Capture(CaptureChunk),
         Reverse(ReverseChunk),
         Stop,
     }
-    let mut apm = AudioProcessingModule::new(true, true, true, false);
-    let mut ns = AudioProcessingModule::new(false, false, false, true);
-    let mut wet: Vec<i16> = Vec::new();
+    let mut apm = AudioProcessingModule::new(true, true, true, true);
+    // Retain microphone gain before denoising, so enabling NS does not remove
+    // the level boost used by normal audio. Post-filter gain remains fixed.
+    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, true, true, false);
     loop {
         match capture_rx.try_recv() {
             Ok(chunk) => {
-                process_capture(
+                process_capture_dual(
                     &mut apm,
-                    &mut ns,
-                    &mut wet,
+                    &mut apm_for_mezon_ns,
                     &reverse_rx,
                     &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
                     chunk,
+                    &mezon_ns_requested,
+                    &mezon_ns_ready,
                 );
                 continue;
             }
@@ -334,18 +322,18 @@ fn run_apm(
             .wait();
         match event {
             Event::Reverse(chunk) => {
-                process_reverse(&mut apm, chunk);
+                process_reverse(&mut apm, chunk.clone());
+                process_reverse(&mut apm_for_mezon_ns, chunk);
             }
             Event::Capture(chunk) => {
-                process_capture(
+                process_capture_dual(
                     &mut apm,
-                    &mut ns,
-                    &mut wet,
+                    &mut apm_for_mezon_ns,
                     &reverse_rx,
                     &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
                     chunk,
+                    &mezon_ns_requested,
+                    &mezon_ns_ready,
                 );
             }
             Event::Stop => break,
@@ -353,7 +341,7 @@ fn run_apm(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioFormat {
     pub sample_rate: u32,
     pub channels: u32,
@@ -437,10 +425,15 @@ enum AudioCmd {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum DeviceResetKind {
     Input,
     Output,
+    InputChangeFailed {
+        requested: Option<String>,
+        retained: Option<String>,
+        error: String,
+    },
 }
 
 pub struct AudioIo {
@@ -453,8 +446,6 @@ pub struct AudioIo {
     pub output_format_rx: flume::Receiver<AudioFormat>,
     pub device_reset_rx: flume::Receiver<DeviceResetKind>,
     pub mixer: Arc<PlaybackMixer>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
 }
 
 impl AudioIo {
@@ -470,16 +461,26 @@ impl AudioIo {
         let _ = self.ctrl_tx.send(AudioCmd::SetOutputDevice(device_id));
     }
 
-    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
-        self.ns_enabled.store(enabled, Ordering::Relaxed);
-        self.ns_level
-            .store(level.min(100) as u32, Ordering::Relaxed);
-    }
-
     pub fn start(
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         record_taps: crate::record::RecordTaps,
+    ) -> Result<Self> {
+        Self::start_with_noise(
+            input_device_id,
+            output_device_id,
+            record_taps,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub(crate) fn start_with_noise(
+        input_device_id: Option<String>,
+        output_device_id: Option<String>,
+        record_taps: crate::record::RecordTaps,
+        mezon_ns_requested: Arc<AtomicBool>,
+        mezon_ns_ready: Arc<AtomicBool>,
     ) -> Result<Self> {
         let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
@@ -492,16 +493,18 @@ impl AudioIo {
         let (device_reset_tx, device_reset_rx) = flume::unbounded::<DeviceResetKind>();
         let (audio_stopped_tx, audio_stopped_rx) = flume::bounded::<()>(1);
         let (apm_stopped_tx, apm_stopped_rx) = flume::bounded::<()>(1);
-        let ns_enabled = Arc::new(AtomicBool::new(false));
-        let ns_level = Arc::new(AtomicU32::new(20));
 
-        let ns_enabled_apm = ns_enabled.clone();
-        let ns_level_apm = ns_level.clone();
         std::thread::Builder::new()
             .name("mezon-voice-apm".into())
             .spawn(move || {
                 let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx, ns_enabled_apm, ns_level_apm);
+                run_apm(
+                    capture_rx,
+                    reverse_rx,
+                    mic_tx,
+                    mezon_ns_requested,
+                    mezon_ns_ready,
+                );
             })?;
 
         let mixer_for_thread = mixer.clone();
@@ -549,6 +552,9 @@ impl AudioIo {
                 let mut in_stream: Option<cpal::Stream> = None;
                 let mut capture_started = false;
                 let mut input_active = false;
+                let mut input_bluetooth = false;
+                let mut input_running = false;
+                let mut bluetooth_release_at: Option<Instant> = None;
                 let mut output_healthy = true;
                 let mut input_healthy = true;
                 let mut last_rebuild: Option<Instant> = None;
@@ -556,6 +562,7 @@ impl AudioIo {
                 let mut output_absent_streak: u32 = 0;
                 let mut input_absent_streak: u32 = 0;
                 let mut current_in_fmt: Option<AudioFormat> = None;
+                let mut in_stream_device_id: Option<String> = None;
                 let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
                 let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
                 let mut active_default_output_id = if current_output_id.is_none() {
@@ -564,9 +571,28 @@ impl AudioIo {
                     None
                 };
                 loop {
-                    let cmd = match ctrl_rx.recv_timeout(AUDIO_HEALTH_CHECK_INTERVAL) {
+                    let wait = bluetooth_release_at
+                        .filter(|_| !input_active)
+                        .map(|release_at| release_at.saturating_duration_since(Instant::now()))
+                        .map_or(AUDIO_HEALTH_CHECK_INTERVAL, |remaining| {
+                            remaining.min(AUDIO_HEALTH_CHECK_INTERVAL)
+                        });
+                    let cmd = match ctrl_rx.recv_timeout(wait) {
                         Ok(cmd) => cmd,
                         Err(flume::RecvTimeoutError::Timeout) => {
+                            if !input_active
+                                && let Some(release_at) = bluetooth_release_at
+                                && Instant::now() >= release_at
+                            {
+                                bluetooth_release_at = None;
+                                if let Some(stream) = &in_stream
+                                    && let Err(e) = stream.pause()
+                                {
+                                    tracing::warn!("voice mic stream pause failed: {e}");
+                                }
+                                input_running = false;
+                                tracing::info!("bluetooth mic released after the mute grace period");
+                            }
                             match output_stall_recovery.poll(&output_heartbeat) {
                                 Some(StallAction::Recover(attempt)) => {
                                     tracing::warn!(
@@ -583,7 +609,7 @@ impl AudioIo {
                                 ),
                                 None => {}
                             }
-                            if input_active {
+                            if capture_started && (input_active || input_running) {
                                 match input_stall_recovery.poll(&input_heartbeat) {
                                     Some(StallAction::Recover(attempt)) => {
                                         tracing::warn!(
@@ -629,17 +655,31 @@ impl AudioIo {
                     match cmd {
                         AudioCmd::SetInputActive(active) => {
                             input_active = active;
-                            in_alive.store(active, Ordering::Relaxed);
                             input_stall_recovery.reset(&input_heartbeat);
                             if !active {
+                                if input_bluetooth && in_stream.is_some() {
+                                    bluetooth_release_at =
+                                        Some(Instant::now() + BLUETOOTH_MIC_RELEASE_GRACE);
+                                    continue;
+                                }
                                 if let Some(stream) = &in_stream
                                     && let Err(e) = stream.pause()
                                 {
                                     tracing::warn!("voice mic stream pause failed: {e}");
                                 }
+                                input_running = false;
                                 continue;
                             }
+                            bluetooth_release_at = None;
                             capture_started = true;
+                            if in_stream.is_some()
+                                && input_stream_orphaned(&host, in_stream_device_id.as_deref())
+                            {
+                                in_alive.store(false, Ordering::Relaxed);
+                                if let Some(old) = in_stream.take() {
+                                    drop_stream_detached(old);
+                                }
+                            }
                             if in_stream.is_none() {
                                 request_macos_microphone_permission();
                                 let new_alive = Arc::new(AtomicBool::new(true));
@@ -655,9 +695,14 @@ impl AudioIo {
                                         stream_alive: new_alive.clone(),
                                     },
                                 ) {
-                                    Ok((stream, in_fmt)) => {
+                                    Ok((stream, in_fmt, bluetooth)) => {
                                         in_alive.store(false, Ordering::Relaxed);
                                         in_alive = new_alive;
+                                        input_bluetooth = bluetooth;
+                                        in_stream_device_id = input_stream_device_id(
+                                            &host,
+                                            current_input_id.as_deref(),
+                                        );
                                         input_healthy = true;
                                         in_rebuild_pending.store(false, Ordering::Relaxed);
                                         if input_format_changed(current_in_fmt, in_fmt) {
@@ -680,6 +725,7 @@ impl AudioIo {
                             {
                                 tracing::warn!("voice mic stream play failed: {e}");
                             }
+                            input_running = in_stream.is_some();
                         }
                         AudioCmd::SetInputDevice(device_id) => {
                             if input_healthy
@@ -688,37 +734,62 @@ impl AudioIo {
                             {
                                 continue;
                             }
-                            current_input_id = device_id;
                             input_absent_streak = 0;
                             input_stall_recovery.reset(&input_heartbeat);
                             if !capture_started {
+                                current_input_id = device_id;
                                 continue;
                             }
                             request_macos_microphone_permission();
-                            let new_alive = Arc::new(AtomicBool::new(input_active));
-                            match build_input(
-                                &host,
-                                current_input_id.as_deref(),
-                                capture_tx.clone(),
-                                out_latency_ms.clone(),
-                                input_heartbeat.clone(),
-                                InputErrorHook {
-                                    ctrl_tx: rebuild_tx.clone(),
-                                    rebuild_pending: in_rebuild_pending.clone(),
-                                    stream_alive: new_alive.clone(),
+                            let running = input_active || bluetooth_release_at.is_some();
+                            let open = |id: Option<&str>, alive: Arc<AtomicBool>| {
+                                let opened = build_input(
+                                    &host,
+                                    id,
+                                    capture_tx.clone(),
+                                    out_latency_ms.clone(),
+                                    input_heartbeat.clone(),
+                                    InputErrorHook {
+                                        ctrl_tx: rebuild_tx.clone(),
+                                        rebuild_pending: in_rebuild_pending.clone(),
+                                        stream_alive: alive,
+                                    },
+                                )?;
+                                if running {
+                                    opened.0.play()?;
+                                }
+                                Ok::<_, anyhow::Error>(opened)
+                            };
+                            let new_alive = Arc::new(AtomicBool::new(true));
+                            let replacement = crate::input_switch::open_replacement(
+                                &mut in_stream,
+                                || open(device_id.as_deref(), new_alive.clone()),
+                                |old| {
+                                    in_alive.store(false, Ordering::Relaxed);
+                                    drop(old);
                                 },
-                            ) {
-                                Ok((stream, in_fmt)) => {
+                                |e| cfg!(target_os = "linux") && (
+                                    matches!(e.downcast_ref::<cpal::BuildStreamError>(),
+                                        Some(cpal::BuildStreamError::DeviceNotAvailable))
+                                    || matches!(e.downcast_ref::<cpal::DefaultStreamConfigError>(),
+                                        Some(cpal::DefaultStreamConfigError::DeviceNotAvailable))
+                                ),
+                            );
+                            if in_stream.is_none() {
+                                input_running = false;
+                            }
+                            match replacement {
+                                Ok((stream, in_fmt, bluetooth)) => {
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
+                                    current_input_id = device_id;
+                                    input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
-                                    if input_active
-                                        && let Err(e) = stream.play()
-                                    {
-                                        tracing::warn!("voice mic stream play failed: {e}");
-                                    }
+                                    input_running = running;
                                     in_stream = Some(stream);
                                     input_healthy = true;
                                     in_rebuild_pending.store(false, Ordering::Relaxed);
@@ -728,8 +799,39 @@ impl AudioIo {
                                     current_in_fmt = Some(in_fmt);
                                 }
                                 Err(e) => {
-                                    input_healthy = false;
-                                    tracing::warn!("voice mic stream rebuild failed: {e}")
+                                    new_alive.store(false, Ordering::Relaxed);
+                                    if in_stream.is_none() {
+                                        let restored_alive = Arc::new(AtomicBool::new(true));
+                                        match open(current_input_id.as_deref(), restored_alive.clone()) {
+                                            Ok((stream, fmt, bluetooth)) => {
+                                                in_alive = restored_alive;
+                                                in_stream = Some(stream);
+                                                input_bluetooth = bluetooth;
+                                                in_stream_device_id = input_stream_device_id(
+                                                    &host,
+                                                    current_input_id.as_deref(),
+                                                );
+                                                input_running = running;
+                                                input_healthy = true;
+                                                if input_format_changed(current_in_fmt, fmt) {
+                                                    let _ = in_fmt_tx.send(fmt);
+                                                }
+                                                current_in_fmt = Some(fmt);
+                                            }
+                                            Err(restore_error) => {
+                                                restored_alive.store(false, Ordering::Relaxed);
+                                                input_healthy = false;
+                                                tracing::warn!("voice previous mic restore failed: {restore_error}");
+                                            }
+                                        }
+                                    }
+                                    tracing::warn!(requested = ?device_id, retained = ?current_input_id,
+                                        "voice mic change rejected: {e}");
+                                    let _ = device_reset_tx.send(DeviceResetKind::InputChangeFailed {
+                                        requested: device_id,
+                                        retained: current_input_id.clone(),
+                                        error: e.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -787,7 +889,7 @@ impl AudioIo {
                             if !in_rebuild_pending.load(Ordering::Relaxed) {
                                 continue;
                             }
-                            if !capture_started || !input_active {
+                            if !capture_started {
                                 in_rebuild_pending.store(false, Ordering::Relaxed);
                                 continue;
                             }
@@ -799,6 +901,13 @@ impl AudioIo {
                             }
                             last_in_rebuild = Some(Instant::now());
                             request_macos_microphone_permission();
+                            #[cfg(target_os = "linux")]
+                            {
+                                in_alive.store(false, Ordering::Relaxed);
+                                drop(in_stream.take());
+                                input_running = false;
+                                input_healthy = false;
+                            }
                             let new_alive = Arc::new(AtomicBool::new(true));
                             let rebuild = rebuild_input_stream(
                                 &host,
@@ -818,6 +927,7 @@ impl AudioIo {
                                 InputRebuild::Installed {
                                     stream,
                                     fmt,
+                                    bluetooth,
                                     active_id,
                                 } => {
                                     if current_input_id.is_some() && active_id.is_none() {
@@ -827,10 +937,14 @@ impl AudioIo {
                                     current_input_id = active_id;
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
+                                    input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
-                                    if let Err(e) = stream.play() {
+                                    input_running = input_active || bluetooth_release_at.is_some();
+                                    if input_running && let Err(e) = stream.play() {
                                         tracing::warn!("voice mic stream play failed: {e}");
                                     }
                                     in_stream = Some(stream);
@@ -966,25 +1080,17 @@ impl AudioIo {
             output_format_rx: out_change_rx,
             device_reset_rx,
             mixer,
-            ns_enabled,
-            ns_level,
         })
     }
 }
 
 impl Drop for AudioIo {
     fn drop(&mut self) {
-        let started = Instant::now();
-        let deadline = started + AUDIO_SHUTDOWN_TIMEOUT;
+        let deadline = Instant::now() + AUDIO_SHUTDOWN_TIMEOUT;
         let _ = self.ctrl_tx.send(AudioCmd::Shutdown);
         let audio_stopped = wait_for_worker(&self.audio_stopped_rx, deadline);
         let apm_stopped = wait_for_worker(&self.apm_stopped_rx, deadline);
-        if audio_stopped && apm_stopped {
-            tracing::debug!(
-                elapsed_ms = started.elapsed().as_millis(),
-                "voice audio workers stopped"
-            );
-        } else {
+        if !audio_stopped || !apm_stopped {
             tracing::warn!(
                 audio_stopped,
                 apm_stopped,
@@ -1031,6 +1137,7 @@ fn input_err_fn(hook: InputErrorHook) -> impl FnMut(cpal::StreamError) + Send + 
 }
 
 const STREAM_REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const BLUETOOTH_MIC_RELEASE_GRACE: Duration = Duration::from_secs(3);
 const STREAM_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const AUDIO_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const AUDIO_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1083,57 +1190,11 @@ fn drop_stream_detached(stream: cpal::Stream) {
 }
 
 #[cfg(target_os = "macos")]
-fn mic_authorization_status() -> i64 {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    unsafe {
-        let Some(cls) = Class::get("AVCaptureDevice") else {
-            return 3;
-        };
-        let media_type: id = NSString::alloc(nil).init_str("soun");
-        msg_send![cls, authorizationStatusForMediaType: media_type]
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn microphone_denied() -> bool {
-    matches!(mic_authorization_status(), 1 | 2)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn microphone_denied() -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
 fn request_macos_microphone_permission() {
-    use std::time::Duration;
-
-    use block::ConcreteBlock;
-    use cocoa::base::{BOOL, NO, id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    if mic_authorization_status() != 0 {
-        return;
-    }
-    let Some(cls) = Class::get("AVCaptureDevice") else {
-        return;
-    };
-    let media_type: id = unsafe { NSString::alloc(nil).init_str("soun") };
-    let (tx, rx) = flume::bounded::<bool>(1);
-    let handler = ConcreteBlock::new(move |granted: BOOL| {
-        let _ = tx.send(granted != NO);
-    });
-    let handler = handler.copy();
-    let _: () = unsafe {
-        msg_send![cls, requestAccessForMediaType: media_type completionHandler: &*handler]
-    };
-    let _ = rx.recv_timeout(Duration::from_secs(15));
+    crate::permission::request_media_permission_blocking(
+        crate::MediaDevice::Microphone,
+        Duration::from_secs(15),
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1223,7 +1284,7 @@ enum OutputRebuild {
     },
 }
 
-fn output_device_absent(id: &str) -> bool {
+pub(crate) fn output_device_absent(id: &str) -> bool {
     let host = cpal::default_host();
     match host.output_devices() {
         Ok(mut devices) => {
@@ -1355,7 +1416,7 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
-fn default_output_id(host: &cpal::Host) -> Option<String> {
+pub(crate) fn default_output_id(host: &cpal::Host) -> Option<String> {
     host.default_output_device()
         .and_then(|device| device.id().ok())
         .map(|id| id.to_string())
@@ -1404,7 +1465,7 @@ fn build_input(
     out_latency_ms: Arc<AtomicU32>,
     heartbeat: CallbackHeartbeat,
     err_hook: InputErrorHook,
-) -> Result<(cpal::Stream, AudioFormat)> {
+) -> Result<(cpal::Stream, AudioFormat, bool)> {
     let device = select_input(host, id)?;
     open_input(&device, capture_tx, out_latency_ms, heartbeat, err_hook)
 }
@@ -1413,6 +1474,7 @@ enum InputRebuild {
     Installed {
         stream: cpal::Stream,
         fmt: AudioFormat,
+        bluetooth: bool,
         active_id: Option<String>,
     },
     KeepRetrying {
@@ -1427,6 +1489,28 @@ fn input_device_absent(host: &cpal::Host, id: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn default_input_id(host: &cpal::Host) -> Option<String> {
+    host.default_input_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
+fn input_stream_device_id(host: &cpal::Host, requested: Option<&str>) -> Option<String> {
+    requested.map(str::to_string).or_else(|| default_input_id(host))
+}
+
+fn input_stream_orphaned(host: &cpal::Host, device_id: Option<&str>) -> bool {
+    cfg!(target_os = "macos")
+        && device_id.is_some_and(|id| {
+            default_input_id(host).as_deref() != Some(id)
+                && host.devices().is_ok_and(|mut devices| {
+                    !devices.any(|device| {
+                        matches!(device.id(), Ok(found) if found.to_string() == id)
+                    })
+                })
+        })
 }
 
 fn rebuild_input_stream(
@@ -1446,10 +1530,11 @@ fn rebuild_input_stream(
         heartbeat.clone(),
         err_hook.clone(),
     ) {
-        Ok((stream, fmt)) => {
+        Ok((stream, fmt, bluetooth)) => {
             return InputRebuild::Installed {
                 stream,
                 fmt,
+                bluetooth,
                 active_id: desired_id.map(str::to_string),
             };
         }
@@ -1473,11 +1558,12 @@ fn rebuild_input_stream(
         heartbeat.clone(),
         err_hook.clone(),
     ) {
-        Ok((stream, fmt)) => {
+        Ok((stream, fmt, bluetooth)) => {
             tracing::warn!("preferred voice mic device disconnected; switched to system default");
             InputRebuild::Installed {
                 stream,
                 fmt,
+                bluetooth,
                 active_id: None,
             }
         }
@@ -1507,9 +1593,13 @@ where
     let mut converter = CaptureConverter::new(device_fmt);
     let mut scratch: Vec<i16> = Vec::new();
     let mut acc: Vec<i16> = Vec::new();
+    let alive = err_hook.stream_alive.clone();
     device.build_input_stream(
         config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
+            if !alive.load(Ordering::Relaxed) {
+                return;
+            }
             heartbeat.mark();
             let delay = capture_delay_ms(info, &out_latency_ms);
             scratch.clear();
@@ -1522,13 +1612,85 @@ where
     )
 }
 
+#[cfg(target_os = "macos")]
+fn input_is_bluetooth(device: &cpal::Device) -> bool {
+    use objc2_core_audio::{
+        kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
+    };
+
+    transport_type(device).is_some_and(|transport| {
+        transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn transport_type(device: &cpal::Device) -> Option<u32> {
+    use std::ffi::c_void;
+    use std::ptr::{NonNull, null};
+
+    use objc2_core_audio::{
+        AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+        kAudioDevicePropertyTransportType, kAudioHardwarePropertyTranslateUIDToDevice,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    };
+    use objc2_core_foundation::CFString;
+
+    let id = device.id().ok()?;
+    let uid = CFString::from_str(&id.1);
+    let uid_ref: *const CFString = &*uid;
+    let mut address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut device_id: AudioObjectID = 0;
+    let mut size = size_of::<AudioObjectID>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            NonNull::from(&mut address),
+            size_of::<*const CFString>() as u32,
+            (&uid_ref as *const *const CFString).cast::<c_void>(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut device_id).cast::<c_void>(),
+        )
+    };
+    if status != 0 || device_id == 0 {
+        return None;
+    }
+    let mut address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut transport: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&mut address),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut transport).cast::<c_void>(),
+        )
+    };
+    (status == 0).then_some(transport)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn input_is_bluetooth(_device: &cpal::Device) -> bool {
+    false
+}
+
 fn open_input(
     device: &cpal::Device,
     capture_tx: flume::Sender<CaptureChunk>,
     out_latency_ms: Arc<AtomicU32>,
     heartbeat: CallbackHeartbeat,
     err_hook: InputErrorHook,
-) -> Result<(cpal::Stream, AudioFormat)> {
+) -> Result<(cpal::Stream, AudioFormat, bool)> {
     let supported = device.default_input_config()?;
     let device_id = device
         .id()
@@ -1581,9 +1743,11 @@ fn open_input(
         )?,
         other => bail!("unsupported input sample format: {other:?}"),
     };
+    let bluetooth = input_is_bluetooth(device);
     tracing::info!(
         device_id,
         device_name,
+        bluetooth,
         device_sample_rate = device_fmt.sample_rate,
         device_channels = device_fmt.channels,
         sample_format = ?supported.sample_format(),
@@ -1591,7 +1755,7 @@ fn open_input(
         channels = capture_fmt.channels,
         "voice mic stream opened",
     );
-    Ok((stream, capture_fmt))
+    Ok((stream, capture_fmt, bluetooth))
 }
 
 fn build_output(
@@ -1673,4 +1837,275 @@ fn build_output(
         other => bail!("unsupported output sample format: {other:?}"),
     };
     Ok(stream)
+}
+
+pub struct MicResampler {
+    out_rate: u32,
+    in_rate: u32,
+    step: f64,
+    out_pos: f64,
+    consumed: u64,
+    prev: f32,
+    have_prev: bool,
+    started: bool,
+}
+
+impl MicResampler {
+    pub fn new(out_rate: u32) -> Self {
+        Self {
+            out_rate: out_rate.max(1),
+            in_rate: 0,
+            step: 1.0,
+            out_pos: 0.0,
+            consumed: 0,
+            prev: 0.0,
+            have_prev: false,
+            started: false,
+        }
+    }
+
+    fn reset(&mut self, in_rate: u32) {
+        self.in_rate = in_rate;
+        self.step = in_rate as f64 / self.out_rate as f64;
+        self.out_pos = 0.0;
+        self.consumed = 0;
+        self.prev = 0.0;
+        self.have_prev = false;
+        self.started = false;
+    }
+
+    pub fn process(&mut self, samples: &[i16], in_rate: u32, in_channels: u32, out: &mut Vec<i16>) {
+        if in_rate != self.in_rate {
+            self.reset(in_rate);
+        }
+        let channels = in_channels.max(1) as usize;
+        let mono: Vec<f32> = if channels == 1 {
+            samples.iter().map(|&s| s as f32).collect()
+        } else {
+            samples
+                .chunks_exact(channels)
+                .map(|c| c.iter().map(|&s| s as f32).sum::<f32>() / channels as f32)
+                .collect()
+        };
+        let Some(&last) = mono.last() else {
+            return;
+        };
+        if (self.step - 1.0).abs() < f64::EPSILON {
+            out.extend(mono.iter().map(|&v| clamp_i16(v)));
+            self.prev = last;
+            self.have_prev = true;
+            self.consumed += mono.len() as u64;
+            return;
+        }
+        if !self.started {
+            self.out_pos = self.consumed as f64;
+            self.started = true;
+        }
+        let base = self.consumed;
+        let n = mono.len() as u64;
+        let last_abs = (base + n - 1) as f64;
+        while self.out_pos < last_abs {
+            let left = self.out_pos.floor();
+            let frac = (self.out_pos - left) as f32;
+            let li = left as i64;
+            let sl = self.sample_at(li, base, &mono);
+            let sr = self.sample_at(li + 1, base, &mono);
+            out.push(clamp_i16(sl + (sr - sl) * frac));
+            self.out_pos += self.step;
+        }
+        self.prev = last;
+        self.have_prev = true;
+        self.consumed += n;
+    }
+
+    fn sample_at(&self, abs: i64, base: u64, mono: &[f32]) -> f32 {
+        if abs < base as i64 {
+            if self.have_prev { self.prev } else { mono[0] }
+        } else {
+            let idx = (abs - base as i64) as usize;
+            mono.get(idx).copied().unwrap_or(self.prev)
+        }
+    }
+}
+
+pub fn clamp_i16(v: f32) -> i16 {
+    v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[cfg(test)]
+mod resampler_tests {
+    use super::MicResampler;
+
+    #[test]
+    fn a_matching_rate_passes_mono_samples_straight_through() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[1, 2, 3, 4], 48_000, 1, &mut out);
+        assert_eq!(out, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn stereo_input_is_averaged_down_to_mono() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[100, 200, 300, 500], 48_000, 2, &mut out);
+        assert_eq!(out, [150, 400]);
+    }
+
+    #[test]
+    fn halving_the_rate_produces_about_half_the_samples() {
+        let mut resampler = MicResampler::new(24_000);
+        let mut out = Vec::new();
+        let input: Vec<i16> = (0..480).map(|i| i as i16).collect();
+        resampler.process(&input, 48_000, 1, &mut out);
+        assert!(
+            (out.len() as i64 - 240).abs() <= 1,
+            "expected ~240 samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn doubling_the_rate_produces_about_twice_the_samples() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        let input: Vec<i16> = (0..240).map(|i| i as i16).collect();
+        resampler.process(&input, 24_000, 1, &mut out);
+        assert!(
+            (out.len() as i64 - 480).abs() <= 2,
+            "expected ~480 samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn the_read_position_carries_across_buffers_without_drifting() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut total = 0usize;
+        for _ in 0..10 {
+            let mut out = Vec::new();
+            resampler.process(&[0i16; 441], 44_100, 1, &mut out);
+            total += out.len();
+        }
+        let expected = 4410.0 * 48_000.0 / 44_100.0;
+        assert!(
+            (total as f64 - expected).abs() < 12.0,
+            "expected ~{expected}, got {total}"
+        );
+    }
+
+    #[test]
+    fn an_empty_buffer_is_a_no_op() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[], 44_100, 1, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn changing_the_input_rate_restarts_cleanly() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[0i16; 441], 44_100, 1, &mut out);
+        out.clear();
+        resampler.process(&[7i16; 480], 48_000, 1, &mut out);
+        assert_eq!(out.len(), 480);
+        assert!(out.iter().all(|&s| s == 7));
+    }
+
+    #[test]
+    fn clamping_saturates_rather_than_wrapping() {
+        assert_eq!(super::clamp_i16(40_000.0), i16::MAX);
+        assert_eq!(super::clamp_i16(-40_000.0), i16::MIN);
+        assert_eq!(super::clamp_i16(1.4), 1);
+    }
+}
+
+pub struct SpeakingLevels {
+    loud_since: parking_lot::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+}
+
+const SPEAKING_RMS_THRESHOLD: f32 = 800.0;
+const SPEAKING_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+
+impl Default for SpeakingLevels {
+    fn default() -> Self {
+        Self {
+            loud_since: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl SpeakingLevels {
+    pub fn observe(&self, key: u64, samples: &[i16]) {
+        if rms(samples) < SPEAKING_RMS_THRESHOLD {
+            return;
+        }
+        self.loud_since
+            .lock()
+            .insert(key, std::time::Instant::now());
+    }
+
+    pub fn is_speaking(&self, key: u64) -> bool {
+        self.loud_since
+            .lock()
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < SPEAKING_HOLD)
+    }
+
+    pub fn forget(&self, key: u64) {
+        self.loud_since.lock().remove(&key);
+    }
+}
+
+fn rms(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    (sum / samples.len() as f64).sqrt() as f32
+}
+
+#[cfg(test)]
+mod speaking_tests {
+    use super::{SPEAKING_RMS_THRESHOLD, SpeakingLevels, rms};
+
+    #[test]
+    fn silence_measures_zero() {
+        assert_eq!(rms(&[0i16; 480]), 0.0);
+        assert_eq!(rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn a_loud_frame_measures_its_amplitude() {
+        assert!((rms(&[10_000i16; 480]) - 10_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn room_tone_stays_under_the_threshold() {
+        assert!(rms(&[200i16; 480]) < SPEAKING_RMS_THRESHOLD);
+    }
+
+    #[test]
+    fn a_quiet_stream_never_counts_as_speaking() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[100i16; 480]);
+        assert!(!levels.is_speaking(7));
+    }
+
+    #[test]
+    fn a_loud_stream_counts_as_speaking_and_only_for_itself() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[9_000i16; 480]);
+        assert!(levels.is_speaking(7));
+        assert!(!levels.is_speaking(8));
+    }
+
+    #[test]
+    fn forgetting_a_stream_clears_it() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[9_000i16; 480]);
+        levels.forget(7);
+        assert!(!levels.is_speaking(7));
+    }
 }

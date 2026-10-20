@@ -29,13 +29,15 @@ use crate::components::primitives::text_actions::{
 };
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    HistoryEntry, SelectGranularity, extend_range_for_granularity, granularity_for_click,
+    home_target, ime_replace_range, line_end, line_start, marked_caret_range,
+    marked_range_after_delete, next_word_boundary, previous_word_boundary, push_undo_entry,
+    range_for_granularity, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
+const MEASURE_CACHE_ENTRIES: usize = 4;
 const MAX_VISIBLE_LINES: usize = 10;
 
 struct DocLine {
@@ -71,6 +73,27 @@ fn locate_span(spans: &[(usize, usize)], off: usize) -> (usize, usize) {
         Some(&(start, _)) => (spans.len() - 1, off.saturating_sub(start)),
         None => (0, 0),
     }
+}
+
+fn copied_paths(item: &ClipboardItem) -> Vec<PathBuf> {
+    item.entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn copied_images(item: &ClipboardItem) -> Vec<Image> {
+    item.entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn normalize_pasted(text: &str) -> String {
@@ -175,7 +198,7 @@ pub(crate) enum MentionFieldEvent {
     NavDown,
     Paste(String),
     PasteImages(Vec<Image>),
-    PastePaths(Vec<PathBuf>),
+    PastePaths(Vec<PathBuf>, ClipboardItem),
 }
 
 pub(crate) struct MentionInputState {
@@ -192,6 +215,7 @@ pub(crate) struct MentionInputState {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
+    measure_cache: Vec<(SharedString, Pixels, usize)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -199,13 +223,19 @@ pub(crate) struct MentionInputState {
     select_anchor: Range<usize>,
     masked: bool,
     compact: bool,
+    accepts_files: bool,
     mention_spans: Vec<MentionSpan>,
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    last_edit_kind: Option<EditKind>,
     history_payload: Option<Rc<dyn Any>>,
     _window_activation_sub: Subscription,
+}
+
+impl MentionInputState {
+    pub(crate) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
 }
 
 impl EventEmitter<MentionFieldEvent> for MentionInputState {}
@@ -234,6 +264,7 @@ impl MentionInputState {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
+            measure_cache: Vec::new(),
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -241,11 +272,11 @@ impl MentionInputState {
             select_anchor: 0..0,
             masked: false,
             compact: false,
+            accepts_files: true,
             mention_spans: Vec::new(),
             caret_blink: CaretBlink::new(window.is_window_active()),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_edit_kind: None,
             history_payload: None,
             _window_activation_sub: window_activation_sub,
         };
@@ -285,6 +316,10 @@ impl MentionInputState {
         self
     }
 
+    pub(crate) fn set_accepts_files(&mut self, accepts_files: bool) {
+        self.accepts_files = accepts_files;
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
     }
@@ -313,12 +348,13 @@ impl MentionInputState {
     ) {
         let start = range.start.min(self.content.len());
         let end = range.end.min(self.content.len()).max(start);
-        self.record_history(EditKind::Other);
+        let before = self.history_snapshot();
         let mut next = String::with_capacity(self.content.len() - (end - start) + text.len());
         next.push_str(&self.content[..start]);
         next.push_str(text);
         next.push_str(&self.content[end..]);
         self.set_content(next);
+        self.record_history(before);
         let caret = start + text.len();
         self.selected_range = caret..caret;
         self.selection_reversed = false;
@@ -332,6 +368,21 @@ impl MentionInputState {
         if let Some(marked) = self.marked_range.take() {
             self.discard_ime_commit = self.content.get(marked).map(str::to_string);
         }
+    }
+
+    pub(crate) fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
+            return;
+        };
+        self.discard_ime_commit = Some(discarded);
+        self.set_content(next);
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        cx.notify();
+        cx.emit(MentionFieldEvent::Change);
     }
 
     pub(crate) fn pending_send_ime_token(&self) -> Option<String> {
@@ -581,17 +632,12 @@ impl MentionInputState {
         self.history_payload.clone()
     }
 
-    fn record_history(&mut self, kind: EditKind) {
-        let coalesce = should_coalesce(self.last_edit_kind, kind);
-        self.redo_stack.clear();
-        if !coalesce {
-            self.undo_stack.push(self.history_snapshot());
-            if self.undo_stack.len() > MAX_UNDO_HISTORY {
-                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
-                self.undo_stack.drain(..overflow);
-            }
+    fn record_history(&mut self, before: HistoryEntry) {
+        if before.content == self.content {
+            return;
         }
-        self.last_edit_kind = Some(kind);
+        self.redo_stack.clear();
+        push_undo_entry(&mut self.undo_stack, before);
     }
 
     fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
@@ -600,7 +646,6 @@ impl MentionInputState {
         self.selected_range = entry.selected_range;
         self.selection_reversed = entry.selection_reversed;
         self.marked_range = None;
-        self.last_edit_kind = None;
         self.history_payload = entry.payload;
         self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
@@ -611,7 +656,6 @@ impl MentionInputState {
     fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -725,7 +769,6 @@ impl MentionInputState {
         self.select_anchor = range.clone();
         self.selection_reversed = false;
         self.selected_range = range;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -756,7 +799,6 @@ impl MentionInputState {
         }
         self.selected_range = range;
         self.selection_reversed = reversed;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -771,36 +813,40 @@ impl MentionInputState {
         window.show_character_palette();
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        let paths = if self.accepts_files {
+            copied_paths(&item)
+        } else {
+            Vec::new()
         };
-        let images: Vec<Image> = item
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::Image(image) => Some(image.clone()),
-                _ => None,
-            })
-            .collect();
+        if paths.is_empty() {
+            self.paste_images_or_text(item, cx);
+        } else {
+            cx.emit(MentionFieldEvent::PastePaths(paths, item));
+        }
+    }
+
+    pub(crate) fn paste_images_or_text(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        let images = if self.accepts_files {
+            copied_images(&item)
+        } else {
+            Vec::new()
+        };
         if !images.is_empty() {
             cx.emit(MentionFieldEvent::PasteImages(images));
             return;
         }
-        let paths: Vec<PathBuf> = item
+        let has_text = item
             .entries()
             .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        if !paths.is_empty() {
-            cx.emit(MentionFieldEvent::PastePaths(paths));
-            return;
-        }
-        if let Some(text) = item.text() {
+            .any(|entry| matches!(entry, ClipboardEntry::String(_)));
+        if has_text && let Some(text) = item.text() {
             cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
         }
     }
@@ -809,7 +855,10 @@ impl MentionInputState {
         self.replace_text_in_range(None, text, window, cx);
     }
 
-    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+            return;
+        }
         self.discard_ime_commit = None;
     }
 
@@ -834,7 +883,6 @@ impl MentionInputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
@@ -967,7 +1015,6 @@ impl MentionInputState {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.last_edit_kind = None;
         self.extend_selection(offset, cx);
     }
 
@@ -1097,17 +1144,11 @@ impl EntityInputHandler for MentionInputState {
         let range = self.clamp_range(range);
         let prior_marked = self.marked_range.clone();
 
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
-            EditKind::Insert
-        } else {
-            EditKind::Other
-        };
-        self.record_history(kind);
+        let before = self.history_snapshot();
 
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         if new_text.is_empty() {
             self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
@@ -1145,12 +1186,11 @@ impl EntityInputHandler for MentionInputState {
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
 
-        if self.marked_range.is_none() {
-            self.record_history(EditKind::Insert);
-        }
+        let before = self.history_snapshot();
 
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -1406,6 +1446,78 @@ impl IntoElement for MentionTextElement {
     }
 }
 
+impl MentionTextElement {
+    fn measured_rows(
+        state: &Entity<MentionInputState>,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> usize {
+        let input = state.read(cx);
+        if input.is_masked() || input.content.is_empty() {
+            return 1;
+        }
+        if width <= Pixels::ZERO {
+            return input.visible_line_count();
+        }
+        let display_text = input.display_text();
+        if let Some((_, _, rows)) = input
+            .measure_cache
+            .iter()
+            .find(|(text, cached_width, _)| *cached_width == width && *text == display_text)
+        {
+            return (*rows).max(input.line_count);
+        }
+        let hard_lines = input.line_count;
+        let marked_range = input.marked_range.clone();
+        let brand_color: Hsla = cx.theme().brand.into();
+        let emoji_color: Hsla = rgb(EMOJI_SPAN_COLOR).into();
+        let resolved_spans: Vec<ResolvedSpan> = input
+            .mention_spans
+            .iter()
+            .map(|span| {
+                let (color, bold) = match span.kind {
+                    MentionSpanKind::Mention | MentionSpanKind::Hashtag => (brand_color, false),
+                    MentionSpanKind::Emoji => (emoji_color, true),
+                };
+                ResolvedSpan {
+                    range: span.range.clone(),
+                    color,
+                    bold,
+                }
+            })
+            .collect();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let base = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = build_text_runs(display_text.len(), &base, marked_range, &resolved_spans);
+        let wrapped = window
+            .text_system()
+            .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
+            .unwrap_or_default();
+        let total_h = wrapped
+            .iter()
+            .fold(Pixels::ZERO, |acc, line| {
+                acc + wrapped_line_height(line, line_height)
+            })
+            .max(line_height);
+        let rows = (total_h / line_height).round().max(1.) as usize;
+        state.update(cx, |input, _| {
+            input.measure_cache.insert(0, (display_text, width, rows));
+            input.measure_cache.truncate(MEASURE_CACHE_ENTRIES);
+        });
+        rows.max(hard_lines)
+    }
+}
+
 impl Element for MentionTextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1423,14 +1535,30 @@ impl Element for MentionTextElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.input.read(cx).visible_line_count();
-        let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
-        style.size.height = (window.line_height() * visible as f32).into();
-        (window.request_layout(style, [], cx), ())
+        let state = self.input.clone();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                let width = known_dimensions.width.or(match available_space.width {
+                    gpui::AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                });
+                let line_count = match width {
+                    Some(width) => Self::measured_rows(&state, width, window, cx),
+                    None => state.read(cx).visible_line_count(),
+                };
+                let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
+                let height = known_dimensions
+                    .height
+                    .unwrap_or(window.line_height() * visible as f32);
+                gpui::size(width.unwrap_or(Pixels::ZERO), height)
+            },
+        );
+        (layout_id, ())
     }
 
     fn prepaint(
@@ -1867,5 +1995,171 @@ mod tests {
         let spans = line_spans("a\n\nb");
         assert_eq!(spans, vec![(0, 1), (2, 0), (3, 1)]);
         assert_eq!(locate_span(&spans, 2), (1, 0));
+    }
+
+    fn field_events(
+        cx: &mut gpui::TestAppContext,
+        accepts_files: bool,
+        act: impl FnOnce(&mut MentionInputState, &mut Window, &mut Context<MentionInputState>),
+    ) -> Vec<MentionFieldEvent> {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut field = MentionInputState::new(window, cx);
+                field.set_accepts_files(accepts_files);
+                field
+            })
+        });
+        let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&field, move |_, event: &MentionFieldEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        field.update_in(cx, act);
+        cx.run_until_parked();
+        events.take()
+    }
+
+    fn paste_events(
+        cx: &mut gpui::TestAppContext,
+        accepts_files: bool,
+        item: ClipboardItem,
+    ) -> Vec<MentionFieldEvent> {
+        cx.update(|cx| cx.write_to_clipboard(item));
+        field_events(cx, accepts_files, |field, window, cx| {
+            field.paste(&Paste, window, cx)
+        })
+    }
+
+    fn bitmap() -> Image {
+        Image::from_bytes(gpui::ImageFormat::Png, vec![1, 2, 3])
+    }
+
+    fn clipboard(entries: Vec<ClipboardEntry>) -> ClipboardItem {
+        ClipboardItem { entries }
+    }
+
+    fn files(paths: &[&str]) -> ClipboardEntry {
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths.into()))
+    }
+
+    fn text(text: &str) -> ClipboardEntry {
+        ClipboardEntry::String(gpui::ClipboardString::new(text.into()))
+    }
+
+    #[gpui::test]
+    fn paste_sends_every_copied_file_ahead_of_its_bitmap(cx: &mut gpui::TestAppContext) {
+        let item = clipboard(vec![
+            files(&["/tmp/Báo cáo.pdf", "/tmp/a.zip"]),
+            ClipboardEntry::Image(bitmap()),
+            text("Báo cáo.pdf"),
+        ]);
+        let paths = vec![
+            PathBuf::from("/tmp/Báo cáo.pdf"),
+            PathBuf::from("/tmp/a.zip"),
+        ];
+        assert!(
+            paste_events(cx, true, item.clone())
+                == vec![MentionFieldEvent::PastePaths(paths, item)]
+        );
+    }
+
+    #[gpui::test]
+    fn paste_without_files_still_sends_the_bitmap(cx: &mut gpui::TestAppContext) {
+        let item = ClipboardItem::new_image(&bitmap());
+        assert!(
+            paste_events(cx, true, item) == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+        );
+    }
+
+    #[gpui::test]
+    fn unusable_files_fall_back_to_the_bitmap_or_the_text(cx: &mut gpui::TestAppContext) {
+        let with_bitmap = clipboard(vec![
+            files(&["/tmp/folder"]),
+            ClipboardEntry::Image(bitmap()),
+            text("folder"),
+        ]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(with_bitmap, cx))
+                == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+        );
+        let with_text = clipboard(vec![files(&["/tmp/folder"]), text("/tmp/folder")]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(with_text, cx))
+                == vec![MentionFieldEvent::Paste("/tmp/folder".into())]
+        );
+        let files_only = clipboard(vec![files(&["/tmp/folder"])]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(files_only, cx))
+            .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn a_field_without_attachments_pastes_only_real_text(cx: &mut gpui::TestAppContext) {
+        let finder = clipboard(vec![files(&["/tmp/a.pdf"]), text("a.pdf")]);
+        assert!(paste_events(cx, false, finder) == vec![MentionFieldEvent::Paste("a.pdf".into())]);
+        let explorer = clipboard(vec![files(&["/tmp/a.pdf"])]);
+        assert!(paste_events(cx, false, explorer).is_empty());
+        assert!(paste_events(cx, false, ClipboardItem::new_image(&bitmap())).is_empty());
+    }
+
+    #[gpui::test]
+    fn every_composer_edit_is_its_own_undo_step(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+        let (undone, redone) = field.update_in(cx, |field, window, cx| {
+            for ch in ["h", "i", " ", "y", "o"] {
+                field.replace_text_in_range(None, ch, window, cx);
+            }
+            field.replace_range(3..5, "@bob ", window, cx);
+            let mut undone = Vec::new();
+            for _ in 0..7 {
+                field.undo(&Undo, window, cx);
+                undone.push(field.value().to_string());
+            }
+            let mut redone = Vec::new();
+            for _ in 0..2 {
+                field.redo(&Redo, window, cx);
+                redone.push(field.value().to_string());
+            }
+            (undone, redone)
+        });
+        assert_eq!(undone, ["hi yo", "hi y", "hi ", "hi", "h", "", ""]);
+        assert_eq!(redone, ["h", "hi"]);
+    }
+
+    #[gpui::test]
+    fn a_composition_committed_by_a_click_leaves_the_next_word_at_the_new_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+        let (value, caret, composing) = field.update_in(cx, |field, window, cx| {
+            field.set_value("dùn bấm -> dùng", window, cx);
+            field.move_to("dùn bấm -> ".len(), cx);
+            for preedit in ["n", "ng", "ngu", "ngươ", "người "] {
+                field.replace_and_mark_text_in_range(None, preedit, None, window, cx);
+            }
+            field.replace_text_in_range(None, "người ", window, cx);
+            field.move_to("dùn".len(), cx);
+            field.replace_and_mark_text_in_range(None, "g", None, window, cx);
+            field.replace_text_in_range(None, "g", window, cx);
+            (
+                field.value().to_string(),
+                field.selected_range.clone(),
+                field.is_composing(),
+            )
+        });
+        assert_eq!(value, "dùng bấm -> người dùng");
+        assert_eq!(caret, "dùng".len().."dùng".len());
+        assert!(!composing);
     }
 }

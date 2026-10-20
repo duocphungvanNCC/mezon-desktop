@@ -6,24 +6,30 @@ pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
 pub mod quick_actions_tab;
+mod remote_members;
+pub mod stream_thumbnail_tab;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
     Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, can_delete_channel,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PermissionStore, Settings,
+    can_delete_channel, can_manage_channel,
 };
 
 use crate::app::shell::Shell;
+use crate::components::compositions::channel_row::{
+    ChannelIcon, channel_icon, render_channel_icon,
+};
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
 use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
-use permissions_tab::PermissionsTab;
+use permissions_tab::{PermissionsTab, render_channel_permissions_save_bar};
 use quick_actions_tab::QuickActionsTab;
+use stream_thumbnail_tab::StreamThumbnailTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
@@ -49,6 +55,8 @@ pub struct ChannelTabContext {
     pub is_thread: bool,
     pub is_welcome_channel: bool,
     pub has_manage_channel: bool,
+    pub age_restricted: i32,
+    pub private: bool,
 }
 
 impl ChannelTabContext {
@@ -58,6 +66,8 @@ impl ChannelTabContext {
             is_thread: false,
             is_welcome_channel: false,
             has_manage_channel: false,
+            age_restricted: 0,
+            private: false,
         }
     }
 }
@@ -116,9 +126,11 @@ impl ChannelSettingsTab {
         match self {
             Self::Overview => true,
             Self::Category => !ctx.is_thread,
+            // Voice gets the tab too: a private voice room is gated by the same
+            // member/role lists as a private text channel (the server hands a
+            // meet token to `chlu:` members only). Stream and app stay public.
             Self::Permissions => {
                 !ctx.is_thread
-                    && !is_voice
                     && !is_stream
                     && !is_app
                     && !ctx.is_welcome_channel
@@ -158,6 +170,7 @@ pub struct ChannelSettingScreen {
     integrations_sub: Option<Subscription>,
     quick_actions_tab: Option<Entity<QuickActionsTab>>,
     quick_actions_sub: Option<Subscription>,
+    stream_thumbnail_tab: Option<Entity<StreamThumbnailTab>>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -189,6 +202,7 @@ impl ChannelSettingScreen {
             integrations_sub: None,
             quick_actions_tab: None,
             quick_actions_sub: None,
+            stream_thumbnail_tab: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -197,6 +211,7 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
+        self.stream_thumbnail_tab = None;
         let had_permissions_tab = self.permissions_tab.take().is_some();
         let had_overview_tab = self.overview_tab.take().is_some();
         let had_category_tab = self.category_tab.take().is_some();
@@ -263,6 +278,7 @@ impl ChannelSettingScreen {
             return;
         }
         if target_changed {
+            self.stream_thumbnail_tab = None;
             self.permissions_tab = None;
             self.permissions_sub = None;
             self.overview_tab = None;
@@ -318,17 +334,14 @@ impl ChannelSettingScreen {
         let welcome_channel_id = ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(self.clan_id);
-        let has_manage_channel = {
-            let store = PermissionStore::global(cx);
-            let store = store.read(cx);
-            store.check(self.clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-                || store.check(self.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
-        };
+        let has_manage_channel = can_manage_channel(self.clan_id, self.channel_id, cx);
         ChannelTabContext {
             channel_type,
             is_thread: channel.is_thread(),
             is_welcome_channel: welcome_channel_id == Some(self.channel_id),
             has_manage_channel,
+            age_restricted: channel.age_restricted,
+            private: channel.private,
         }
     }
 
@@ -377,6 +390,13 @@ impl ChannelSettingScreen {
                 let tab = cx.new(|cx| QuickActionsTab::new(clan_id, channel_id, settings, cx));
                 self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.quick_actions_tab = Some(tab);
+            }
+            ChannelSettingsTab::StreamThumbnail if self.stream_thumbnail_tab.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                self.stream_thumbnail_tab =
+                    Some(cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)));
             }
             _ => {}
         }
@@ -428,12 +448,12 @@ impl ChannelSettingScreen {
                 .max_w(px(SIDEBAR_ITEM_WIDTH))
                 .items_start()
                 .gap_1()
-                .child(
-                    Icon::new(channel_tab_icon(ctx))
-                        .size(px(20.0))
-                        .flex_shrink_0()
-                        .text_color(theme.tokens.bg_icon_theme),
-                )
+                .child(div().flex_shrink_0().child(render_channel_icon(
+                    channel_tab_icon(ctx),
+                    px(20.0),
+                    theme.tokens.bg_icon_theme.into(),
+                    theme.tokens.bg_icon_theme_active.into(),
+                )))
                 .child(
                     div()
                         .min_w_0()
@@ -594,14 +614,20 @@ impl ChannelSettingScreen {
     }
 }
 
-fn channel_tab_icon(ctx: ChannelTabContext) -> IconName {
+/// The sidebar row's glyph, padlock included, so a private channel reads the
+/// same in both places. Other types keep the plain hashtag.
+fn channel_tab_icon(ctx: ChannelTabContext) -> ChannelIcon {
     if ctx.is_thread {
-        return IconName::ThreadIcon;
+        return channel_icon(ChannelType::Thread, ctx.private, 0);
     }
     match ctx.channel_type {
-        ChannelType::Voice => IconName::Speaker,
-        ChannelType::Stream => IconName::Stream,
-        _ => IconName::Hashtag,
+        ChannelType::Text | ChannelType::Voice | ChannelType::Stream => {
+            channel_icon(ctx.channel_type, ctx.private, ctx.age_restricted)
+        }
+        _ => ChannelIcon {
+            base: IconName::Hashtag,
+            lock: None,
+        },
     }
 }
 
@@ -639,6 +665,15 @@ impl Render for ChannelSettingScreen {
             .integrations_tab
             .clone()
             .filter(|_| show_integrations_save);
+        let show_permissions_save = self.current_tab == ChannelSettingsTab::Permissions
+            && self
+                .permissions_tab
+                .as_ref()
+                .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
+        let permissions_save_bar = self
+            .permissions_tab
+            .clone()
+            .filter(|_| show_permissions_save);
 
         let body = match self.current_tab {
             ChannelSettingsTab::Permissions => self
@@ -659,6 +694,10 @@ impl Render for ChannelSettingScreen {
                 .map(|tab| tab.clone().into_any_element()),
             ChannelSettingsTab::QuickMenu => self
                 .quick_actions_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::StreamThumbnail => self
+                .stream_thumbnail_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
             _ => None,
@@ -703,6 +742,10 @@ impl Render for ChannelSettingScreen {
                                     .size_full()
                                     .overflow_y_scroll()
                                     .track_scroll(&self.content_scroll)
+                                    .when(
+                                        self.current_tab == ChannelSettingsTab::Permissions,
+                                        |el| el.suppress_hover_while_scrolling(),
+                                    )
                                     .child(
                                         h_flex()
                                             .w_full()
@@ -714,7 +757,15 @@ impl Render for ChannelSettingScreen {
                                                     .pl(px(40.0))
                                                     .pr(px(10.0))
                                                     .pt(px(94.0))
-                                                    .pb(px(28.0))
+                                                    .pb(px(
+                                                        if self.current_tab
+                                                            == ChannelSettingsTab::Permissions
+                                                        {
+                                                            108.0
+                                                        } else {
+                                                            28.0
+                                                        },
+                                                    ))
                                                     .child(
                                                         div()
                                                             .w_full()
@@ -745,6 +796,11 @@ impl Render for ChannelSettingScreen {
                         panel.child(deferred(render_channel_integrations_save_bar(
                             tab, &locale, &theme, cx,
                         )))
+                    })
+                    .when_some(permissions_save_bar, |panel, tab| {
+                        panel.child(deferred(render_channel_permissions_save_bar(
+                            tab, &locale, &theme, cx,
+                        )))
                     }),
             )
     }
@@ -754,6 +810,86 @@ impl Render for ChannelSettingScreen {
 mod tests {
     use super::*;
     use mezon_store::Channel;
+
+    #[gpui::test]
+    fn permissions_scroll_blocks_hover_during_gesture_and_restores_after_idle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui::{HitboxBehavior, MouseMoveEvent, ScrollDelta, ScrollWheelEvent, canvas, size};
+
+        struct ScrollTestView {
+            scroll: ScrollHandle,
+            hitbox: Rc<Cell<Option<gpui::HitboxId>>>,
+        }
+
+        impl Render for ScrollTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hitbox = self.hitbox.clone();
+                div()
+                    .id("permissions-scroll-hover-test")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .suppress_hover_while_scrolling()
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                hitbox.set(Some(
+                                    window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                                ));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .h(px(800.))
+                        .w_full(),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let scroll = ScrollHandle::new();
+        let hitbox = Rc::new(Cell::new(None));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+                cx.new(|_| ScrollTestView {
+                    scroll: scroll.clone(),
+                    hitbox: hitbox.clone(),
+                })
+                .into_any_element()
+            });
+        };
+        draw(cx);
+        let pointer = point(px(50.), px(100.));
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.simulate_event(ScrollWheelEvent {
+            position: pointer,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-48.))),
+            ..Default::default()
+        });
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(scroll.offset().y < px(0.));
+        assert!(!cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+    }
 
     fn ctx(
         channel_type: ChannelType,
@@ -766,7 +902,69 @@ mod tests {
             is_thread,
             is_welcome_channel: welcome,
             has_manage_channel: manage,
+            age_restricted: 0,
+            private: false,
         }
+    }
+
+    #[test]
+    fn settings_sidebar_icon_keeps_the_old_glyphs() {
+        let restricted = ChannelTabContext {
+            channel_type: ChannelType::Text,
+            is_thread: false,
+            is_welcome_channel: false,
+            has_manage_channel: true,
+            age_restricted: 1,
+            private: false,
+        };
+        assert_eq!(
+            channel_tab_icon(restricted).base.path(),
+            IconName::HashtagWarning.path()
+        );
+        let voice = ChannelTabContext {
+            channel_type: ChannelType::Voice,
+            ..restricted
+        };
+        assert_eq!(
+            channel_tab_icon(voice).base.path(),
+            IconName::Speaker.path()
+        );
+        let thread = ChannelTabContext {
+            is_thread: true,
+            ..restricted
+        };
+        assert_eq!(
+            channel_tab_icon(thread).base.path(),
+            IconName::ThreadIcon.path()
+        );
+        let forum = ChannelTabContext {
+            channel_type: ChannelType::Forum,
+            ..restricted
+        };
+        assert_eq!(
+            channel_tab_icon(forum).base.path(),
+            IconName::Hashtag.path()
+        );
+    }
+
+    #[test]
+    fn settings_sidebar_icon_locks_a_private_channel_like_its_sidebar_row() {
+        let private = |channel_type, is_thread| ChannelTabContext {
+            private: true,
+            ..ctx(channel_type, is_thread, false, true)
+        };
+        let voice = channel_tab_icon(private(ChannelType::Voice, false));
+        assert_eq!(voice.base, IconName::SpeakerLocked);
+        assert_eq!(voice.lock, None);
+        let text = channel_tab_icon(private(ChannelType::Text, false));
+        assert_eq!(text.base, IconName::Hashtag);
+        assert_eq!(text.lock, Some(IconName::HashtagLock));
+        let thread = channel_tab_icon(private(ChannelType::Thread, true));
+        assert_eq!(thread.base, IconName::ThreadIcon);
+        assert_eq!(thread.lock, Some(IconName::ThreadLock));
+        let public_voice = channel_tab_icon(ctx(ChannelType::Voice, false, false, true));
+        assert_eq!(public_voice.base, IconName::Speaker);
+        assert_eq!(public_voice.lock, None);
     }
 
     #[test]
@@ -786,8 +984,24 @@ mod tests {
     }
 
     #[test]
-    fn permissions_tab_hidden_for_thread_voice_stream_app_and_welcome() {
-        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+    fn permissions_tab_shown_for_voice_with_manage_channel() {
+        assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn permissions_tab_hidden_for_thread_stream_app_and_welcome() {
+        for channel_type in [ChannelType::Stream, ChannelType::App] {
             assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
                 channel_type,
                 false,
@@ -980,7 +1194,7 @@ mod tests {
         let detected = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
-        assert_eq!(channel_tab_icon(detected), IconName::ThreadIcon);
+        assert_eq!(channel_tab_icon(detected).base, IconName::ThreadIcon);
     }
 
     #[test]

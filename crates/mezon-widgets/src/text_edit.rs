@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use gpui::SharedString;
 
-pub const MAX_UNDO_HISTORY: usize = 256;
+const MAX_UNDO_HISTORY: usize = 256;
+const MAX_UNDO_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CharKind {
@@ -178,15 +179,15 @@ pub struct HistoryEntry {
     pub payload: Option<Rc<dyn Any>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EditKind {
-    Insert,
-    Delete,
-    Other,
-}
-
-pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
-    matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
+pub fn push_undo_entry(stack: &mut Vec<HistoryEntry>, entry: HistoryEntry) {
+    stack.push(entry);
+    let mut dropped = stack.len().saturating_sub(MAX_UNDO_HISTORY);
+    let mut bytes: usize = stack[dropped..].iter().map(|kept| kept.content.len()).sum();
+    while bytes > MAX_UNDO_HISTORY_BYTES && dropped + 1 < stack.len() {
+        bytes -= stack[dropped].content.len();
+        dropped += 1;
+    }
+    stack.drain(..dropped);
 }
 
 pub fn floor_char_boundary(text: &str, index: usize) -> usize {
@@ -221,6 +222,25 @@ pub fn ceil_char_boundary(text: &str, index: usize) -> usize {
 
 pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>) -> Range<usize> {
     marked.cloned().unwrap_or_else(|| selected.clone())
+}
+
+pub fn splice_out_byte_range(
+    content: &str,
+    range: Range<usize>,
+) -> Option<(String, String, usize)> {
+    if range.start >= range.end {
+        return None;
+    }
+    let start = floor_char_boundary(content, range.start);
+    let end = ceil_char_boundary(content, range.end).max(start);
+    if start >= end {
+        return None;
+    }
+    let discarded = content[start..end].to_string();
+    let mut next = String::with_capacity(content.len() - (end - start));
+    next.push_str(&content[..start]);
+    next.push_str(&content[end..]);
+    Some((next, discarded, start))
 }
 
 fn offset_after_delete(offset: usize, deleted: &Range<usize>) -> usize {
@@ -357,9 +377,118 @@ pub fn marked_caret_range(
     }
 }
 
+pub fn clip_insert_to_byte_limit(
+    current_len: usize,
+    replaced_len: usize,
+    new_text: &str,
+    max_bytes: usize,
+) -> &str {
+    let kept = current_len.saturating_sub(replaced_len);
+    let budget = max_bytes.saturating_sub(kept);
+    &new_text[..floor_char_boundary(new_text, budget)]
+}
+
+pub fn clipped_edit_is_rejected(requested: &str, clipped: &str, composing: bool) -> bool {
+    clipped.is_empty() && !requested.is_empty() && !composing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(content: String) -> HistoryEntry {
+        HistoryEntry {
+            content: content.into(),
+            selected_range: 0..0,
+            selection_reversed: false,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn undo_history_keeps_only_the_newest_steps() {
+        let mut stack = Vec::new();
+        for step in 0..MAX_UNDO_HISTORY + 10 {
+            push_undo_entry(&mut stack, entry(step.to_string()));
+        }
+        assert_eq!(stack.len(), MAX_UNDO_HISTORY);
+        assert_eq!(stack[0].content.as_ref(), "10");
+        assert_eq!(
+            stack[MAX_UNDO_HISTORY - 1].content.to_string(),
+            (MAX_UNDO_HISTORY + 9).to_string()
+        );
+    }
+
+    #[test]
+    fn undo_history_drops_the_oldest_steps_past_the_byte_budget() {
+        let mut stack = Vec::new();
+        let step_len = 100_000;
+        for step in 0..MAX_UNDO_HISTORY {
+            push_undo_entry(&mut stack, entry(step.to_string().repeat(step_len / 3)));
+        }
+        let bytes: usize = stack.iter().map(|kept| kept.content.len()).sum();
+        assert!(bytes <= MAX_UNDO_HISTORY_BYTES);
+        assert!(stack.len() < MAX_UNDO_HISTORY);
+        assert!(
+            stack
+                .last()
+                .unwrap()
+                .content
+                .starts_with(&(MAX_UNDO_HISTORY - 1).to_string())
+        );
+    }
+
+    #[test]
+    fn a_single_step_larger_than_the_budget_is_still_kept() {
+        let mut stack = Vec::new();
+        push_undo_entry(&mut stack, entry("a".repeat(16)));
+        push_undo_entry(&mut stack, entry("b".repeat(MAX_UNDO_HISTORY_BYTES + 1)));
+        assert_eq!(stack.len(), 1);
+        assert!(stack[0].content.starts_with('b'));
+    }
+
+    #[test]
+    fn an_insert_that_fits_is_kept_whole() {
+        assert_eq!(clip_insert_to_byte_limit(10, 0, "abc", 512), "abc");
+        assert_eq!(clip_insert_to_byte_limit(509, 0, "abc", 512), "abc");
+    }
+
+    #[test]
+    fn an_insert_past_the_limit_is_cut_to_the_remaining_budget() {
+        assert_eq!(
+            clip_insert_to_byte_limit(505, 0, "bbbbbbbbbb", 512),
+            "bbbbbbb"
+        );
+        assert_eq!(clip_insert_to_byte_limit(512, 0, "b", 512), "");
+        assert_eq!(clip_insert_to_byte_limit(600, 0, "b", 512), "");
+    }
+
+    #[test]
+    fn replaced_bytes_free_up_budget() {
+        assert_eq!(clip_insert_to_byte_limit(512, 3, "abcd", 512), "abc");
+        assert_eq!(
+            clip_insert_to_byte_limit(14, 14, &"a".repeat(600), 512).len(),
+            512
+        );
+    }
+
+    #[test]
+    fn an_edit_with_nothing_left_to_insert_is_rejected_unless_it_commits_a_preedit() {
+        assert!(clipped_edit_is_rejected("ê", "", false));
+        assert!(!clipped_edit_is_rejected("ê", "", true));
+        assert!(!clipped_edit_is_rejected("ê", "ê", false));
+        assert!(!clipped_edit_is_rejected("", "", false));
+    }
+
+    #[test]
+    fn a_multibyte_char_is_never_split_at_the_limit() {
+        assert_eq!(clip_insert_to_byte_limit(510, 0, "ệa", 512), "");
+        assert_eq!(clip_insert_to_byte_limit(509, 0, "ệa", 512), "ệ");
+        assert_eq!(
+            clip_insert_to_byte_limit(0, 0, &"ệ".repeat(200), 512),
+            "ệ".repeat(170)
+        );
+    }
 
     #[test]
     fn previous_word_boundary_skips_trailing_space_then_word() {
@@ -521,6 +650,45 @@ mod tests {
     #[test]
     fn ime_replace_uses_marked_when_preedit_is_present() {
         assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn splice_out_byte_range_snaps_off_boundary_vietnamese_preedit() {
+        let content = "xin chào";
+        assert_eq!("chào".len(), 5);
+        assert!(!content.is_char_boundary(7));
+        let (next, discarded, caret) = splice_out_byte_range(content, 7..8).unwrap();
+        assert_eq!(discarded, "à");
+        assert_eq!(next, "xin cho");
+        assert_eq!(caret, 6);
+        assert!(next.is_char_boundary(caret));
+    }
+
+    #[test]
+    fn splice_out_byte_range_drops_cjk_preedit() {
+        let content = "你好";
+        assert_eq!("你".len(), 3);
+        let (next, discarded, caret) = splice_out_byte_range(content, 0..3).unwrap();
+        assert_eq!(discarded, "你");
+        assert_eq!(next, "好");
+        assert_eq!(caret, 0);
+    }
+
+    #[test]
+    fn splice_out_byte_range_returns_none_when_empty_after_clamp() {
+        assert_eq!(splice_out_byte_range("à", 1..1), None);
+        assert_eq!(splice_out_byte_range("", 0..0), None);
+    }
+
+    #[test]
+    fn splice_out_byte_range_ceils_end_so_last_preedit_char_is_not_left_behind() {
+        let content = "xin chào";
+        assert!(!content.is_char_boundary(7));
+        let (next, discarded, caret) = splice_out_byte_range(content, 6..7).unwrap();
+        assert_eq!(discarded, "à");
+        assert_eq!(next, "xin cho");
+        assert_eq!(caret, 6);
+        assert!(next.is_char_boundary(caret));
     }
 
     #[test]

@@ -4,10 +4,12 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
+    AuthState, AutoUpdateStatus, ClanList, RealtimeServer, Settings, effective_update_status,
     update_available_clicked, update_check_clicked, update_error_clicked,
     update_manual_install_clicked, update_restart_clicked,
 };
+
+use crate::app::shell::Shell;
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -17,6 +19,7 @@ use super::device_page::DevicePage;
 use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
+use super::server_page::ServerPage;
 use super::voice_page::VoicePage;
 use crate::theme::{ActiveTheme, Theme};
 
@@ -30,6 +33,7 @@ pub enum SettingsPage {
     Notifications,
     Language,
     Voice,
+    Server,
     Advanced,
 }
 
@@ -44,6 +48,7 @@ impl SettingsPage {
             Self::Notifications => "setting.appSettings.notifications",
             Self::Language => "setting.language.title",
             Self::Voice => "setting.appSettings.voice",
+            Self::Server => "setting.appSettings.server",
             Self::Advanced => "setting.appSettings.advanced",
         }
     }
@@ -62,6 +67,7 @@ pub struct SettingsScreen {
     notifications_page: Option<Entity<NotificationsPage>>,
     language_page: Option<Entity<LanguagePage>>,
     voice_page: Option<Entity<VoicePage>>,
+    server_page: Option<Entity<ServerPage>>,
     advanced_page: Option<Entity<AdvancedPage>>,
     prev_page: SettingsPage,
     scroll: ScrollHandle,
@@ -96,6 +102,7 @@ impl SettingsScreen {
             notifications_page: None,
             language_page: None,
             voice_page: None,
+            server_page: None,
             advanced_page: None,
             prev_page: SettingsPage::Account,
             scroll: ScrollHandle::new(),
@@ -207,6 +214,12 @@ impl SettingsScreen {
                     self.voice_page = Some(cx.new(|cx| VoicePage::new(s, cx)));
                 }
             }
+            SettingsPage::Server => {
+                if self.server_page.is_none() {
+                    let s = self.settings.clone();
+                    self.server_page = Some(cx.new(|cx| ServerPage::new(s, cx)));
+                }
+            }
             SettingsPage::Advanced => {
                 if self.advanced_page.is_none() {
                     let s = self.settings.clone();
@@ -248,6 +261,10 @@ impl SettingsScreen {
                 .map(|p| p.clone().into_any_element()),
             SettingsPage::Voice => self
                 .voice_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Server => self
+                .server_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             SettingsPage::Advanced => self
@@ -296,6 +313,8 @@ impl Render for SettingsScreen {
         let is_notifications = page == SettingsPage::Notifications;
         let is_language = page == SettingsPage::Language;
         let is_voice = page == SettingsPage::Voice;
+        let is_server = page == SettingsPage::Server;
+        let server_choice_offered = RealtimeServer::is_offered(cx);
         let is_advanced = page == SettingsPage::Advanced;
 
         fn nav_item(
@@ -565,6 +584,15 @@ impl Render for SettingsScreen {
                 &theme,
                 "/settings/voice",
             ))
+            .when(server_choice_offered, |nav| {
+                nav.child(nav_item(
+                    "server-page",
+                    mezon_i18n::t(&locale, "setting.appSettings.server"),
+                    is_server,
+                    &theme,
+                    "/settings/server",
+                ))
+            })
             .child(nav_item(
                 "advanced-page",
                 mezon_i18n::t(&locale, "setting.appSettings.advanced"),
@@ -572,6 +600,7 @@ impl Render for SettingsScreen {
                 &theme,
                 "/settings/advanced",
             ))
+            .child(crate::tour::settings_entry_row("guided-tour-btn", &locale, &theme).mb(px(4.0)))
             .child(div().mt(px(4.0)).border_b_1().border_color(theme.border))
             .child(
                 div()
@@ -587,9 +616,12 @@ impl Render for SettingsScreen {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "setting.logOut"))
-                    .on_click(move |_, _, cx| {
-                        LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));
-                    }),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let locale = this.settings.read(cx).language.clone();
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.confirm_logout(&locale, window, cx);
+                        });
+                    })),
             )
             .child(
                 div()

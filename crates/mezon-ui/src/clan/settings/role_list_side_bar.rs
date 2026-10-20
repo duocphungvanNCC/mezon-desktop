@@ -32,6 +32,7 @@ impl Render for RoleDragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         div()
+            .font_family(crate::theme::ui_font_family(cx))
             .py(px(6.0))
             .px(px(10.0))
             .rounded(px(4.0))
@@ -381,6 +382,7 @@ pub(super) fn role_icon_thumbnail(
         .child(
             gpui::img(crate::util::imgproxy::role_icon_url(cx, &icon))
                 .size_full()
+                .aspect_square()
                 .object_fit(gpui::ObjectFit::Cover)
                 .image_cache(cache),
         )
@@ -407,6 +409,7 @@ pub(super) fn role_glyph(
     } else {
         img(crate::util::imgproxy::role_icon_url(cx, icon))
             .size(px(20.0))
+            .aspect_square()
             .flex_shrink_0()
             .image_cache(cache)
             .into_any_element()

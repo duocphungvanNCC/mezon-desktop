@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use libwebrtc::video_frame::VideoRotation;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -35,6 +36,7 @@ pub struct VideoFrameData {
 }
 
 pub struct VideoFrameStore {
+    pub screen_views: Arc<crate::screen_recovery::ScreenViews>,
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
     recording: AtomicBool,
@@ -45,6 +47,7 @@ impl Default for VideoFrameStore {
     fn default() -> Self {
         Self {
             state: Mutex::new(VideoFrameState::default()),
+            screen_views: Arc::default(),
             seq: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
@@ -52,15 +55,20 @@ impl Default for VideoFrameStore {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct FramePathCounters {
+    received: u64,
+    published: u64,
+    taken: u64,
+}
+
 #[derive(Default)]
 struct VideoFrameState {
     frames: HashMap<u64, Arc<VideoFrameData>>,
     recycled: HashMap<u64, Vec<Vec<u8>>>,
     active: HashSet<u64>,
-    // The render path consumes frames with take_new, so a second reader would
-    // race the UI for every frame and mostly lose. While a recording is running
-    // each published frame is also kept here, where reads never remove it.
     recorded: HashMap<u64, Arc<VideoFrameData>>,
+    path_counters: HashMap<u64, FramePathCounters>,
 }
 
 impl VideoFrameStore {
@@ -78,6 +86,7 @@ impl VideoFrameStore {
         let recycled = {
             let mut state = self.state.lock();
             state.active.insert(key);
+            state.path_counters.entry(key).or_default().published += 1;
             if self.recording.load(Ordering::Relaxed) {
                 state.recorded.insert(key, frame.clone());
             } else if !state.recorded.is_empty() {
@@ -131,7 +140,40 @@ impl VideoFrameStore {
             return None;
         }
         let frame = state.frames.remove(&key)?;
+        state.path_counters.entry(key).or_default().taken += 1;
         Some(Arc::try_unwrap(frame).unwrap_or_else(|frame| (*frame).clone()))
+    }
+
+    pub fn note_received(&self, key: u64) {
+        self.state
+            .lock()
+            .path_counters
+            .entry(key)
+            .or_default()
+            .received += 1;
+    }
+
+    pub fn log_frame_path(&self) {
+        let snapshot: Vec<(u64, FramePathCounters)> = {
+            let mut state = self.state.lock();
+            state
+                .path_counters
+                .iter_mut()
+                .map(|(key, counters)| (*key, std::mem::take(counters)))
+                .collect()
+        };
+        for (key, counters) in snapshot {
+            if counters.received == 0 && counters.published == 0 && counters.taken == 0 {
+                continue;
+            }
+            tracing::info!(
+                key,
+                received = counters.received,
+                published = counters.published,
+                taken = counters.taken,
+                "video frame path"
+            );
+        }
     }
 
     pub fn recycle(&self, key: u64, mut buffer: Vec<u8>) {
@@ -152,6 +194,7 @@ impl VideoFrameStore {
         state.recorded.remove(&key);
         state.recycled.remove(&key);
         state.active.remove(&key);
+        state.path_counters.remove(&key);
     }
 }
 
@@ -253,8 +296,19 @@ fn pack_to_i420(
     }
 }
 
+fn plane_fits(len: usize, stride: usize, row_bytes: usize, rows: usize) -> bool {
+    row_bytes > 0
+        && rows > 0
+        && stride >= row_bytes
+        && (rows - 1)
+            .checked_mul(stride)
+            .and_then(|offset| offset.checked_add(row_bytes))
+            .is_some_and(|required| required <= len)
+}
+
 #[allow(clippy::too_many_arguments)]
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
+#[must_use]
 pub fn bgra_to_i420(
     bgra: &[u8],
     width: usize,
@@ -266,7 +320,30 @@ pub fn bgra_to_i420(
     stride_y: usize,
     stride_u: usize,
     stride_v: usize,
-) {
+) -> bool {
+    let Some(row_bytes) = width.checked_mul(4) else {
+        return false;
+    };
+    if [width, height, src_row_stride, stride_y, stride_u, stride_v]
+        .iter()
+        .any(|&value| value > u32::MAX as usize)
+        || !plane_fits(bgra.len(), src_row_stride, row_bytes, height)
+        || !plane_fits(y_plane.len(), stride_y, width, height)
+        || !plane_fits(
+            u_plane.len(),
+            stride_u,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+        || !plane_fits(
+            v_plane.len(),
+            stride_v,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+    {
+        return false;
+    }
     let mut planar = yuv::YuvPlanarImageMut {
         y_plane: yuv::BufferStoreMut::Borrowed(y_plane),
         y_stride: stride_y as u32,
@@ -277,14 +354,15 @@ pub fn bgra_to_i420(
         width: width as u32,
         height: height as u32,
     };
-    let _ = yuv::bgra_to_yuv420(
+    yuv::bgra_to_yuv420(
         &mut planar,
         bgra,
         src_row_stride as u32,
         yuv::YuvRange::Limited,
         yuv::YuvStandardMatrix::Bt601,
         yuv::YuvConversionMode::Balanced,
-    );
+    )
+    .is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,9 +377,51 @@ pub fn i420_to_bgra_into(
     width: usize,
     height: usize,
 ) {
-    let needed = width * height * 4;
-    if out.len() < needed {
-        return;
+    if !try_i420_to_bgra_into(
+        out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
+    ) {
+        out.fill(0);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_i420_to_bgra_into(
+    out: &mut [u8],
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    let Some(needed) = width
+        .checked_mul(height)
+        .and_then(|size| size.checked_mul(4))
+    else {
+        return false;
+    };
+    if width > u32::MAX as usize / 4
+        || [height, stride_y, stride_u, stride_v]
+            .iter()
+            .any(|&value| value > u32::MAX as usize)
+        || out.len() < needed
+        || !plane_fits(y_plane.len(), stride_y, width, height)
+        || !plane_fits(
+            u_plane.len(),
+            stride_u,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+        || !plane_fits(
+            v_plane.len(),
+            stride_v,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+    {
+        return false;
     }
 
     let planar = yuv::YuvPlanarImage {
@@ -323,12 +443,46 @@ pub fn i420_to_bgra_into(
     )
     .is_ok()
     {
-        return;
+        return true;
     }
 
     i420_to_bgra_scalar(
         out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
     );
+    true
+}
+
+pub fn rotate_bgra_into(
+    out: &mut Vec<u8>,
+    src: &[u8],
+    width: u32,
+    height: u32,
+    rotation: VideoRotation,
+) -> (u32, u32) {
+    let (rotated_width, rotated_height) = match rotation {
+        VideoRotation::VideoRotation90 | VideoRotation::VideoRotation270 => (height, width),
+        VideoRotation::VideoRotation0 | VideoRotation::VideoRotation180 => (width, height),
+    };
+    let (width, height) = (width as usize, height as usize);
+    out.clear();
+    out.resize(width * height * 4, 0);
+    if width == 0 || height == 0 {
+        return (rotated_width, rotated_height);
+    }
+    let rotated_row = rotated_width as usize;
+    for (y, row) in src.chunks_exact(width * 4).take(height).enumerate() {
+        for (x, pixel) in row.chunks_exact(4).enumerate() {
+            let (to_x, to_y) = match rotation {
+                VideoRotation::VideoRotation0 => (x, y),
+                VideoRotation::VideoRotation90 => (height - 1 - y, x),
+                VideoRotation::VideoRotation180 => (width - 1 - x, height - 1 - y),
+                VideoRotation::VideoRotation270 => (y, width - 1 - x),
+            };
+            let at = (to_y * rotated_row + to_x) * 4;
+            out[at..at + 4].copy_from_slice(pixel);
+        }
+    }
+    (rotated_width, rotated_height)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,5 +940,128 @@ mod tests {
         assert_eq!(y, [16, 235, 126, 71]);
         assert_eq!(u, [16]);
         assert_eq!(v, [240]);
+    }
+}
+
+#[cfg(test)]
+mod frame_validation_tests {
+    use super::{bgra_to_i420, plane_fits, try_i420_to_bgra_into};
+
+    #[test]
+    fn plane_layout_rejects_short_rows_and_overflow() {
+        assert!(!plane_fits(16, 1, 2, 2));
+        assert!(!plane_fits(usize::MAX, usize::MAX, 2, 2));
+        assert!(!plane_fits(0, 0, 0, 0));
+        assert!(plane_fits(6, 4, 2, 2));
+    }
+
+    #[test]
+    fn truncated_chroma_is_rejected_before_rendering() {
+        let mut output = [77; 16];
+        assert!(!try_i420_to_bgra_into(
+            &mut output,
+            &[16; 4],
+            &[],
+            &[128],
+            2,
+            1,
+            1,
+            2,
+            2,
+        ));
+        assert_eq!(output, [77; 16]);
+    }
+
+    #[test]
+    fn overlapping_i420_rows_are_rejected() {
+        let mut output = [77; 16];
+        assert!(!try_i420_to_bgra_into(
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            1,
+            1,
+            1,
+            2,
+            2,
+        ));
+        assert_eq!(output, [77; 16]);
+    }
+
+    #[test]
+    fn invalid_dimensions_and_short_output_are_rejected() {
+        let mut output = [77; 15];
+        assert!(!try_i420_to_bgra_into(
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            2,
+            1,
+            1,
+            2,
+            2,
+        ));
+        assert!(!try_i420_to_bgra_into(
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            2,
+            1,
+            1,
+            usize::MAX,
+            2,
+        ));
+        assert_eq!(output, [77; 15]);
+    }
+
+    #[test]
+    fn padded_i420_rows_render_without_reading_padding() {
+        let mut output = [77; 16];
+        assert!(try_i420_to_bgra_into(
+            &mut output,
+            &[16, 16, 255, 255, 16, 16],
+            &[128],
+            &[128],
+            4,
+            1,
+            1,
+            2,
+            2,
+        ));
+        assert_eq!(output, [0, 0, 0, 255].repeat(4).as_slice());
+    }
+
+    #[test]
+    fn invalid_bgra_is_rejected_before_writing_planes() {
+        for (input, stride) in [(&[0u8; 15][..], 8), (&[0u8; 16][..], 4)] {
+            let mut y = [77; 4];
+            let mut u = [77];
+            let mut v = [77];
+            assert!(!bgra_to_i420(
+                input, 2, 2, stride, &mut y, &mut u, &mut v, 2, 1, 1
+            ));
+            assert_eq!(y, [77; 4]);
+            assert_eq!(u, [77]);
+            assert_eq!(v, [77]);
+        }
+    }
+
+    #[test]
+    fn padded_bgra_rows_convert_without_using_padding_as_pixels() {
+        let mut input = [255; 24];
+        input[..8].fill(0);
+        input[12..20].fill(0);
+        let mut y = [77; 4];
+        let mut u = [77];
+        let mut v = [77];
+        assert!(bgra_to_i420(
+            &input, 2, 2, 12, &mut y, &mut u, &mut v, 2, 1, 1
+        ));
+        assert_eq!(y, [16; 4]);
+        assert_eq!(u, [128]);
+        assert_eq!(v, [128]);
     }
 }

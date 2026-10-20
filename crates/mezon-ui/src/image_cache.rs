@@ -618,7 +618,21 @@ fn retryable_failure(error: &ImageCacheError) -> bool {
 
 fn resource_source(resource: &Resource) -> String {
     match resource {
-        Resource::Uri(uri) => uri.to_string(),
+        Resource::Uri(uri) => {
+            let uri = uri.as_ref();
+            if uri
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+            {
+                let metadata = uri[5..]
+                    .split_once(',')
+                    .map_or("unknown", |(metadata, _)| metadata);
+                let metadata = metadata.get(..metadata.len().min(80)).unwrap_or("unknown");
+                format!("data:{metadata},<redacted> (length={})", uri.len())
+            } else {
+                uri.to_string()
+            }
+        }
         Resource::Path(path) => path.display().to_string(),
         Resource::Embedded(path) => path.to_string(),
     }
@@ -717,6 +731,32 @@ impl LruImageCache {
                 ImageCacheItem::Loaded(Ok(image)) => Some(image.clone()),
                 _ => None,
             })
+    }
+
+    pub fn ready_render_image(&self, resource: &Resource) -> Option<Arc<RenderImage>> {
+        match &self.cache.get(&hash(resource))?.item {
+            ImageCacheItem::Loaded(Ok(image)) => Some(image.clone()),
+            ImageCacheItem::Loading(task) => task.clone().now_or_never().and_then(Result::ok),
+            ImageCacheItem::Loaded(Err(_)) => None,
+        }
+    }
+
+    pub fn cached_bitmap_size(&self, src: &str) -> Option<(u32, u32)> {
+        if src.is_empty() {
+            return None;
+        }
+        let resource = Resource::Uri(src.into());
+        let image = self
+            .cache
+            .get(&hash(&resource))
+            .and_then(|entry| match &entry.item {
+                ImageCacheItem::Loaded(Ok(image)) => Some(image),
+                _ => None,
+            })?;
+        let size = image.size(0);
+        let width = u32::try_from(size.width.0).unwrap_or(0);
+        let height = u32::try_from(size.height.0).unwrap_or(0);
+        (width > 0 && height > 0).then_some((width, height))
     }
 
     pub fn new(max_items: usize, max_bytes: u64, cx: &mut Context<Self>) -> Self {
@@ -1370,6 +1410,10 @@ impl LruImageCache {
     pub fn prefetch(&mut self, resource: &Resource, window: &mut Window, cx: &mut App) {
         let _ = self.load(resource, window, cx);
     }
+
+    pub fn is_resident(&self, resource: &Resource) -> bool {
+        self.cache.contains_key(&hash(resource))
+    }
 }
 
 impl ImageCache for LruImageCache {
@@ -1406,6 +1450,24 @@ struct AnimationCaps {
     max_px: u32,
     max_frames: usize,
     max_bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+enum FrameShape {
+    SquareCrop,
+    KeepAspect,
+}
+
+impl FrameShape {
+    fn target_size(self, width: u32, height: u32, max_px: u32) -> (u32, u32) {
+        match self {
+            FrameShape::SquareCrop => {
+                let side = width.min(height).clamp(1, max_px);
+                (side, side)
+            }
+            FrameShape::KeepAspect => downscale_dimensions(width, height, max_px),
+        }
+    }
 }
 
 /// Emoji painted in the message list: a 24px inline `:emoji:` span, a 48px
@@ -1453,6 +1515,7 @@ fn load_avatar_scaled(
     source: Resource,
     max_px: u32,
     animation: AnimationCaps,
+    shape: FrameShape,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
@@ -1463,7 +1526,7 @@ fn load_avatar_scaled(
         let bytes = match source.clone() {
             Resource::Path(uri) => {
                 if let Some(decoded) = decode_scaled_dynamic_path(uri.as_ref(), max_px) {
-                    return Ok(avatar_render_image(decoded, max_px));
+                    return Ok(avatar_render_image(decoded, max_px, shape));
                 }
                 std::fs::read(uri.as_ref())?
             }
@@ -1498,7 +1561,7 @@ fn load_avatar_scaled(
         };
 
         if image::guess_format(&bytes).is_ok() {
-            decode_avatar_image(&bytes, max_px, animation)
+            decode_avatar_image(&bytes, max_px, animation, shape)
         } else {
             svg_renderer
                 .render_single_frame(&bytes, 1.0)
@@ -1525,6 +1588,7 @@ impl Asset for AvatarImageLoader {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
             cx,
         )
     }
@@ -1548,6 +1612,7 @@ impl Asset for AvatarImageLoaderSmall {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ANIMATION_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
             cx,
         )
     }
@@ -1571,6 +1636,7 @@ impl Asset for IconImageLoader {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: ICON_ENTRY_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
             cx,
         )
     }
@@ -1598,6 +1664,7 @@ impl Asset for EmojiImageLoader {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
             cx,
         )
     }
@@ -1772,6 +1839,7 @@ fn downscaled_avatar_animation_frames<I>(
     max_px: u32,
     frame_cap: usize,
     byte_budget: u64,
+    shape: FrameShape,
 ) -> Result<Vec<image::Frame>, AnimationDecodeError>
 where
     I: Iterator<Item = image::ImageResult<image::Frame>>,
@@ -1783,9 +1851,9 @@ where
         let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
         let delay = frame.delay();
         let buffer = frame.into_buffer();
-        let side = buffer.width().min(buffer.height()).clamp(1, max_px);
+        let (width, height) = shape.target_size(buffer.width(), buffer.height(), max_px);
         if max_frames == usize::MAX {
-            let frame_bytes = u64::from(side) * u64::from(side) * 4;
+            let frame_bytes = u64::from(width) * u64::from(height) * 4;
             max_frames = ((byte_budget / frame_bytes) as usize).clamp(2, frame_cap);
         }
 
@@ -1801,7 +1869,7 @@ where
             continue;
         }
         let mut buffer = image::DynamicImage::ImageRgba8(buffer)
-            .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
+            .resize_to_fill(width, height, image::imageops::FilterType::Triangle)
             .into_rgba8();
         for pixel in buffer.chunks_exact_mut(4) {
             pixel.swap(0, 2);
@@ -1843,10 +1911,10 @@ fn decode_scaled_dynamic_path(path: &std::path::Path, max_px: u32) -> Option<ima
     scaled_to_dynamic(mezon_video::scaled_image_decode_path(path, max_px)?)
 }
 
-fn avatar_frame(decoded: image::DynamicImage, max_px: u32) -> image::Frame {
-    let side = decoded.width().min(decoded.height()).clamp(1, max_px);
+fn avatar_frame(decoded: image::DynamicImage, max_px: u32, shape: FrameShape) -> image::Frame {
+    let (width, height) = shape.target_size(decoded.width(), decoded.height(), max_px);
     let mut data = decoded
-        .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
+        .resize_to_fill(width, height, image::imageops::FilterType::Triangle)
         .into_rgba8();
     for pixel in data.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -1854,8 +1922,12 @@ fn avatar_frame(decoded: image::DynamicImage, max_px: u32) -> image::Frame {
     image::Frame::new(data)
 }
 
-fn avatar_render_image(decoded: image::DynamicImage, max_px: u32) -> Arc<RenderImage> {
-    Arc::new(RenderImage::new(vec![avatar_frame(decoded, max_px)]))
+fn avatar_render_image(
+    decoded: image::DynamicImage,
+    max_px: u32,
+    shape: FrameShape,
+) -> Arc<RenderImage> {
+    Arc::new(RenderImage::new(vec![avatar_frame(decoded, max_px, shape)]))
 }
 
 fn decode_static_image(
@@ -1870,13 +1942,14 @@ fn decode_static_image(
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
-const MAX_DECODE_PIXELS: u64 = 48_000_000;
-const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_DECODE_PIXELS: u64 = 48_000_000;
+pub(crate) const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_DECODE_DIMENSION: u32 = 16_384;
 
 fn decoder_limits() -> image::Limits {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
+    limits.max_image_width = Some(MAX_IMAGE_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DECODE_DIMENSION);
     limits.max_alloc = Some(MAX_DECODER_ALLOC_BYTES);
     limits
 }
@@ -1953,6 +2026,7 @@ fn decode_avatar_image(
     bytes: &[u8],
     max_px: u32,
     animation: AnimationCaps,
+    shape: FrameShape,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     use image::AnimationDecoder as _;
     let format = image::guess_format(bytes)?;
@@ -1967,11 +2041,13 @@ fn decode_avatar_image(
                 animation.max_px,
                 animation.max_frames,
                 animation.max_bytes,
+                shape,
             ) {
                 Ok(frames) => frames,
                 Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
                     decode_static_image(bytes, format, max_px)?,
                     max_px,
+                    shape,
                 )],
                 Err(AnimationDecodeError::Image(err)) => return Err(err),
             }
@@ -1985,11 +2061,13 @@ fn decode_avatar_image(
                     animation.max_px,
                     animation.max_frames,
                     animation.max_bytes,
+                    shape,
                 ) {
                     Ok(frames) => frames,
                     Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
                         decode_static_image(bytes, format, max_px)?,
                         max_px,
+                        shape,
                     )],
                     Err(AnimationDecodeError::Image(err)) => return Err(err),
                 }
@@ -1997,12 +2075,14 @@ fn decode_avatar_image(
                 vec![avatar_frame(
                     decode_static_image(bytes, format, max_px)?,
                     max_px,
+                    shape,
                 )]
             }
         }
         _ => vec![avatar_frame(
             decode_static_image(bytes, format, max_px)?,
             max_px,
+            shape,
         )],
     };
     Ok(Arc::new(RenderImage::new(frames)))
@@ -2679,6 +2759,184 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn a_finished_load_is_ready_before_layout_polls_it(cx: &mut gpui::TestAppContext) {
+        let (abort, _reg) = AbortHandle::new_pair();
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(48, 96),
+        )]));
+        let finished = Resource::Uri("https://cdn.example/finished.webp".into());
+        let missing = Resource::Uri("https://cdn.example/missing.webp".into());
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1 << 20, cx));
+            cache.update(cx, |cache, _| {
+                cache.cache.insert(
+                    hash(&finished),
+                    CacheEntry {
+                        item: ImageCacheItem::Loading(
+                            gpui::Task::ready(Ok(image.clone())).shared(),
+                        ),
+                        abort,
+                        bytes: None,
+                        touched_epoch: 0,
+                        last_used: Instant::now(),
+                        failed_at: None,
+                    },
+                );
+                assert!(cache.cached_render_image(&finished).is_none());
+                assert_eq!(
+                    cache.ready_render_image(&finished).map(|ready| ready.id),
+                    Some(image.id)
+                );
+                assert!(cache.ready_render_image(&missing).is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn residency_covers_loaded_and_in_flight_entries_only(cx: &mut gpui::TestAppContext) {
+        fn entry(item: ImageCacheItem) -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            CacheEntry {
+                item,
+                abort,
+                bytes: None,
+                touched_epoch: 0,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1024, cx));
+            cache.update(cx, |cache, _| {
+                let loaded = Resource::Uri("https://cdn.example/loaded.webp".into());
+                let in_flight = Resource::Uri("https://cdn.example/in-flight.webp".into());
+                let never_requested = Resource::Uri("https://cdn.example/fresh.webp".into());
+                cache.cache.insert(
+                    hash(&loaded),
+                    entry(ImageCacheItem::Loaded(Err(ImageCacheError::Asset(
+                        "test".into(),
+                    )))),
+                );
+                cache.cache.insert(
+                    hash(&in_flight),
+                    entry(ImageCacheItem::Loading(
+                        gpui::Task::ready(Err(ImageCacheError::Asset("test".into()))).shared(),
+                    )),
+                );
+                assert!(cache.is_resident(&loaded));
+                assert!(
+                    cache.is_resident(&Resource::Uri(
+                        gpui::SharedString::from("https://cdn.example/loaded.webp").into()
+                    )),
+                    "the key built from the cell's SharedString must hash like the one img() \
+                     builds from a String, or the grid never sees its own entries"
+                );
+                assert!(
+                    cache.is_resident(&in_flight),
+                    "a request already queued keeps its element so it paints when it lands"
+                );
+                assert!(
+                    !cache.is_resident(&never_requested),
+                    "a cell that has never asked for its image must not be treated as loaded, \
+                     or the sticker grid would paint it mid-scroll and enqueue the fetch"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unswept_cache_still_holds_to_its_item_and_byte_budgets(cx: &mut gpui::TestAppContext) {
+        const SIDE: u32 = 32;
+        const ENTRY_BYTES: u64 = (SIDE * SIDE * 4) as u64;
+        const MAX_ITEMS: usize = 8;
+        const MAX_BYTES: u64 = ENTRY_BYTES * 4;
+
+        fn loaded(touched_epoch: u64) -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            let pixels = image::RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([0, 0, 0, 255]));
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
+            assert_eq!(image_bytes(&image), ENTRY_BYTES);
+            CacheEntry {
+                item: ImageCacheItem::Loaded(Ok(image)),
+                abort,
+                bytes: Some(ENTRY_BYTES),
+                touched_epoch,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let cache = cx.new(|cx| LruImageCache::new(MAX_ITEMS, MAX_BYTES, cx));
+            cache.update(cx, |cache, cx| {
+                for epoch in 0..64u64 {
+                    cache.epoch = epoch;
+                    let key = hash(&Resource::Uri(
+                        format!("https://cdn.example/{epoch}.webp").into(),
+                    ));
+                    cache.cache.insert(key, loaded(epoch));
+                    cache.total_bytes += ENTRY_BYTES;
+                    cache.evict_to_budget(window, cx);
+                    assert!(
+                        cache.cache.len() <= MAX_ITEMS && cache.total_bytes <= MAX_BYTES,
+                        "a surface that never sweeps relies on the budget alone to bound its \
+                         memory; at epoch {epoch} it holds {} entries / {} bytes",
+                        cache.cache.len(),
+                        cache.total_bytes
+                    );
+                }
+                let newest = hash(&Resource::Uri("https://cdn.example/63.webp".into()));
+                let oldest = hash(&Resource::Uri("https://cdn.example/0.webp".into()));
+                assert!(cache.cache.contains_key(&newest));
+                assert!(
+                    !cache.cache.contains_key(&oldest),
+                    "eviction must drop the least recently used entry, not a recent one"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn releasing_the_cache_entity_queues_every_decoded_image_for_the_atlas(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn loaded() -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            let pixels = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255]));
+            CacheEntry {
+                item: ImageCacheItem::Loaded(Ok(Arc::new(RenderImage::new(vec![
+                    image::Frame::new(pixels),
+                ])))),
+                abort,
+                bytes: Some(64),
+                touched_epoch: 0,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        cx.update(|cx| {
+            cx.default_global::<PendingAtlasDrops>().0.clear();
+            let cache = cx.new(|cx| LruImageCache::new(8, 1 << 20, cx));
+            cache.update(cx, |cache, _| {
+                for key in 0..3u64 {
+                    cache.cache.insert(key, loaded());
+                }
+            });
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                cx.default_global::<PendingAtlasDrops>().0.len(),
+                3,
+                "a picker that keeps its cache while open must hand every image back when it \
+                 closes, or each open/close cycle pins another screenful in the atlas"
+            );
+        });
+    }
+
     #[test]
     fn budget_eviction_spares_the_visible_working_set() {
         assert!(entry_in_working_set(7, 7));
@@ -2915,6 +3173,7 @@ mod tests {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
         )
         .expect("animated avatar");
         assert_eq!(image.frame_count(), 2);
@@ -2946,11 +3205,110 @@ mod tests {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
         )
         .expect("static WebP decodes");
 
         assert_eq!(image.frame_count(), 1);
         assert_eq!(image.size(0).width, image.size(0).height);
+    }
+
+    fn decoded_size<L>(source: &Resource, cx: &mut gpui::TestAppContext) -> (i32, i32)
+    where
+        L: Asset<Source = Resource, Output = Result<Arc<RenderImage>, ImageCacheError>>,
+    {
+        let size = cx
+            .update(|cx| futures::executor::block_on(L::load(source.clone(), cx)))
+            .expect("fixture decodes")
+            .size(0);
+        (size.width.0, size.height.0)
+    }
+
+    #[gpui::test]
+    fn a_wide_emoji_is_decoded_whole_while_an_avatar_stays_square(cx: &mut gpui::TestAppContext) {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(200, 50, image::Rgba([200, 40, 40, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("wide PNG encodes");
+        let path =
+            std::env::temp_dir().join(format!("mezon-wide-emoji-{}.png", std::process::id()));
+        std::fs::write(&path, &bytes).expect("fixture written");
+        let source = Resource::Path(Arc::from(path.as_path()));
+
+        let message_emoji = decoded_size::<EmojiImageLoader>(&source, cx);
+        let picker_emoji = decoded_size::<IconImageLoader>(&source, cx);
+        let avatar = decoded_size::<AvatarImageLoader>(&source, cx);
+        std::fs::remove_file(&path).ok();
+
+        for (surface, (width, height)) in [
+            ("message and reaction", message_emoji),
+            ("picker", picker_emoji),
+        ] {
+            assert_eq!(
+                width,
+                height * 4,
+                "the {surface} emoji loader decoded a 4:1 emoji to {width}x{height}: cropping it \
+                 to its centre square is what turned a wide `:20k:` emoji into `0k`"
+            );
+        }
+        assert_eq!(
+            avatar.0, avatar.1,
+            "avatars are painted into circles and must still be cropped square"
+        );
+    }
+
+    #[test]
+    fn a_wide_animated_emoji_keeps_its_aspect_in_every_frame() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                let buffer = image::RgbaImage::from_pixel(200, 50, image::Rgba(color));
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let image = decode_avatar_image(
+            &bytes,
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+            FrameShape::KeepAspect,
+        )
+        .expect("animated emoji");
+
+        assert_eq!(
+            image.frame_count(),
+            2,
+            "keeping the aspect must not cost the animation"
+        );
+        for index in 0..image.frame_count() {
+            let size = image.size(index);
+            assert_eq!(
+                (size.width.0, size.height.0),
+                (96, 24),
+                "frame {index} of a 4:1 animated emoji lost its aspect"
+            );
+        }
     }
 
     #[test]
@@ -3099,7 +3457,7 @@ mod tests {
         }
 
         let decode = |max_px: u32, caps: AnimationCaps| {
-            decode_avatar_image(&bytes, max_px, caps)
+            decode_avatar_image(&bytes, max_px, caps, FrameShape::KeepAspect)
                 .expect("animated emoji")
                 .frame_count()
         };
@@ -3164,6 +3522,14 @@ mod tests {
     }
 
     #[test]
+    fn inline_image_source_is_redacted_from_logs() {
+        let resource = Resource::Uri("data:image/png;base64,secret-qr-token".to_string().into());
+        let source = resource_source(&resource);
+        assert!(source.starts_with("data:image/png;base64,<redacted>"));
+        assert!(!source.contains("secret-qr-token"));
+    }
+
+    #[test]
     fn an_animated_icon_decodes_within_the_icon_cache_entry_cap() {
         use image::codecs::gif::{GifEncoder, Repeat};
         const _: () = assert!(
@@ -3201,6 +3567,7 @@ mod tests {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
         )
         .expect("animated icon");
         assert!(
@@ -3254,6 +3621,7 @@ mod tests {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
         )
         .expect("animated emoji");
 

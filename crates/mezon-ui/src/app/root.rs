@@ -5,6 +5,7 @@ use crate::auth::login_view::LoginView;
 use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
+use crate::chat::media_permission_prompt::MediaPermissionOverlay;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
@@ -15,13 +16,18 @@ use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
 use gpui::{
-    Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
-    MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
+    Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FocusHandle,
+    FontWeight, MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img,
+    prelude::*, px,
 };
-use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use mezon_store::{
+    AuthState, ChannelList, ClanId, ClanList, ConnectionStore, OnboardingStore, Settings,
+};
 use std::time::{Duration, Instant};
 
 pub struct RootView {
+    focus_handle: FocusHandle,
+    reclaim_focus_after_route: bool,
     title_bar: Entity<TitleBar>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
@@ -38,11 +44,18 @@ pub struct RootView {
     connecting_since: Option<Instant>,
     network_online: bool,
     call_overlay: Entity<CallOverlay>,
+    media_permission_overlay: Entity<MediaPermissionOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
+    tour_autostart: Option<Task<()>>,
+    tour_autostart_for: Option<&'static str>,
+    tour_autostart_last: Option<&'static str>,
+    tour_autostart_attempts: u8,
+    tour_autostart_armed: bool,
+    first_join_prompted: bool,
 }
 
-fn surface_recording_toast(
+fn surface_voice_toast(
     root: &mut RootView,
     _voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
@@ -50,6 +63,46 @@ fn surface_recording_toast(
 ) {
     let locale = root.cached_locale.clone();
     let toast = match event {
+        mezon_store::VoiceStoreEvent::RemovedFromChannel(cause) => {
+            let key = match cause {
+                mezon_store::RemovalCause::Kicked => "channelVoice.removedFromChannel",
+                mezon_store::RemovalCause::AloneTimeout => "channelVoice.disconnectedAlone",
+                mezon_store::RemovalCause::DuplicateSession => {
+                    "channelVoice.disconnectedOtherDevice"
+                }
+                mezon_store::RemovalCause::Disconnected => "channelVoice.disconnectedRejoin",
+            };
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Info,
+                    mezon_i18n::t(&locale, key).to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::MediaRefused(refusal) => {
+            let key = match refusal {
+                mezon_store::MediaRefusal::CameraLimit => "channelVoice.toast.cameraLimitReached",
+                mezon_store::MediaRefusal::ScreenShareLimit => {
+                    "channelVoice.toast.screenShareLimitReached"
+                }
+                mezon_store::MediaRefusal::CameraUpdateFailed => {
+                    "channelVoice.toast.cameraUpdateFailed"
+                }
+                mezon_store::MediaRefusal::ScreenShareUpdateFailed => {
+                    "channelVoice.toast.screenShareUpdateFailed"
+                }
+            };
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Error,
+                    mezon_i18n::t(&locale, key).to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
@@ -100,6 +153,14 @@ fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
 }
 
 impl RootView {
+    /// Repaint only when the first-join prompt has actually become showable — the root view is
+    /// expensive to redraw, and these stores notify on every badge and profile change.
+    fn notify_if_first_join_due(&self, cx: &mut Context<Self>) {
+        if !self.first_join_prompted && crate::clan::first_join_modal::should_prompt(cx) {
+            cx.notify();
+        }
+    }
+
     pub fn new(
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
@@ -111,7 +172,7 @@ impl RootView {
         let shell = Shell::init(cx);
 
         let recording_toasts = mezon_store::VoiceStore::try_global(cx)
-            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
+            .map(|voice| cx.subscribe(&voice, surface_voice_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {
@@ -137,10 +198,45 @@ impl RootView {
         });
 
         cx.observe(&Router::global(cx), |this, _router, cx| {
+            this.reclaim_focus_after_route = true;
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
+            this.schedule_tour_autostart(cx);
+            end_preview_off_its_own_screens(cx);
             cx.notify();
+        })
+        .detach();
+
+        cx.observe(&ClanList::global(cx), |this, _clans, cx| {
+            if crate::tour::eligibility_undecided(cx) {
+                this.schedule_tour_autostart(cx);
+            }
+            this.notify_if_first_join_due(cx);
+        })
+        .detach();
+
+        // The clan list and the account both land after the render that follows sign-in, and
+        // neither observer above repaints the root — without this the first-join prompt would
+        // become due while nothing was left to notice it.
+        cx.observe(
+            &mezon_store::AccountStore::global(cx),
+            |this, _account, cx| {
+                this.notify_if_first_join_due(cx);
+            },
+        )
+        .detach();
+
+        cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+
+        // Nothing else re-arms the tour once a modal has waved it off, and dismissing a modal is
+        // not a route change — without this the first-join prompt would swallow the tour for good.
+        cx.observe(&shell, |this, shell, cx| {
+            if !shell.read(cx).has_modal() {
+                this.schedule_tour_autostart(cx);
+                this.notify_if_first_join_due(cx);
+            }
         })
         .detach();
 
@@ -154,7 +250,19 @@ impl RootView {
                 this.connecting_since = None;
                 this._splash_delay = None;
             }
+            if matches!(*auth_state.read(cx), AuthState::Authenticated(_)) {
+                this.tour_autostart_armed = true;
+                this.schedule_tour_autostart(cx);
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                this.tour_autostart_armed = false;
+                this.first_join_prompted = false;
+                this.tour_autostart = None;
+                this.tour_autostart_for = None;
+                this.tour_autostart_last = None;
+                this.tour_autostart_attempts = 0;
+                crate::tour::shutdown(cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 crate::image_viewer::close_image_viewer(cx);
                 crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
@@ -277,8 +385,12 @@ impl RootView {
             (None, None)
         };
         let call_overlay = cx.new(CallOverlay::new);
+        let media_permission_overlay = cx.new(MediaPermissionOverlay::new);
         Self {
+            focus_handle: cx.focus_handle().tab_stop(false),
+            reclaim_focus_after_route: true,
             call_overlay,
+            media_permission_overlay,
             title_bar,
             auth_state,
             login_view,
@@ -296,7 +408,55 @@ impl RootView {
             network_online,
             _splash_delay: splash_delay,
             _recording_toasts: recording_toasts,
+            tour_autostart: None,
+            tour_autostart_for: None,
+            tour_autostart_last: None,
+            tour_autostart_attempts: 0,
+            tour_autostart_armed: false,
+            first_join_prompted: false,
         }
+    }
+
+    fn schedule_tour_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.tour_autostart_armed {
+            return;
+        }
+        let Some(id) = crate::tour::pending_core_track(cx) else {
+            return;
+        };
+        if self.tour_autostart_for == Some(id) {
+            return;
+        }
+        if self.tour_autostart_last == Some(id) {
+            if self.tour_autostart_attempts >= TOUR_AUTOSTART_MAX_ATTEMPTS {
+                return;
+            }
+        } else {
+            self.tour_autostart_attempts = 0;
+        }
+        self.tour_autostart_attempts += 1;
+        self.tour_autostart_last = Some(id);
+        self.tour_autostart_for = Some(id);
+        self.tour_autostart = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
+            let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
+            if !started {
+                // A modal on screen is a "not yet", not a "this context will never hold": the
+                // first-join prompt goes up for exactly the account the tour autostarts for, and
+                // counting that would spend the whole budget before anybody dismissed it.
+                let blocked_by_modal = cx.update(|cx| Shell::global(cx).read(cx).has_modal());
+                this.update(cx, |this, _| {
+                    if this.tour_autostart_for == Some(id) {
+                        this.tour_autostart_for = None;
+                    }
+                    if blocked_by_modal {
+                        this.tour_autostart_attempts =
+                            this.tour_autostart_attempts.saturating_sub(1);
+                    }
+                })
+                .ok();
+            }
+        }));
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
@@ -318,6 +478,9 @@ impl RootView {
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+            Route::SettingsServer if mezon_store::RealtimeServer::is_offered(cx) => {
+                crate::settings::SettingsPage::Server
+            }
             Route::SettingsAdvanced => crate::settings::SettingsPage::Advanced,
             Route::SettingsAccount => crate::settings::SettingsPage::Account,
             _ => return,
@@ -359,17 +522,53 @@ impl RootView {
             }
         }
     }
+
+    fn ensure_shell_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+            self.reclaim_focus_after_route = false;
+            return;
+        }
+        if !self.reclaim_focus_after_route {
+            return;
+        }
+        self.reclaim_focus_after_route = false;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                if window.context_stack().is_empty() {
+                    this.focus_handle.focus(window, cx);
+                }
+            });
+        });
+    }
 }
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_shell_focus(window, cx);
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
+
+        // Someone who just signed up and has landed with no clans gets the same nudge the web
+        // client gives them. Deferred because a modal cannot be opened from inside a render.
+        let authenticated = matches!(*self.auth_state.read(cx), AuthState::Authenticated(_));
+        if authenticated
+            && !self.first_join_prompted
+            && crate::clan::first_join_modal::should_prompt(cx)
+        {
+            self.first_join_prompted = true;
+            cx.defer_in(window, |_, window, cx| {
+                crate::clan::first_join_modal::FirstJoinModal::open(window, cx);
+            });
+        }
+
         let locale = self.cached_locale.as_str();
-        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
+        let base_font_family = crate::theme::ui_font_family(cx);
         let theme = cx.theme();
 
+        let mut preview_bar = None;
         let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
@@ -392,6 +591,14 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
+                if previewable_route(&route) {
+                    preview_bar = OnboardingStore::try_global(cx)
+                        .and_then(|store| store.read(cx).preview_clan())
+                        .filter(|clan_id| {
+                            ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id)
+                        })
+                        .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
+                }
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -402,6 +609,7 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
+                    | Route::SettingsServer
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
                     Route::ChannelSettings { .. } => {
@@ -420,6 +628,14 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
+            .key_context(crate::APP_SHELL_KEY_CONTEXT)
+            .child(
+                div()
+                    .id("app-shell-focus")
+                    .absolute()
+                    .size_0()
+                    .track_focus(&self.focus_handle),
+            )
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()
@@ -429,6 +645,21 @@ impl Render for RootView {
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key != "space"
+                    || event.is_held
+                    || event.keystroke.modifiers.modified()
+                {
+                    return;
+                }
+                voice_hold_to_talk(true, window, cx);
+            })
+            .on_key_up(|event, window, cx| {
+                if event.keystroke.key != "space" {
+                    return;
+                }
+                voice_hold_to_talk(false, window, cx);
+            })
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 |_, _, cx| crate::router::go_back(cx),
@@ -440,13 +671,125 @@ impl Render for RootView {
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
+            .children(preview_bar)
             .child(content)
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
             })
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
+            .child(self.media_permission_overlay.clone())
     }
+}
+
+pub(crate) fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
+    let typing = active
+        && window.context_stack().iter().any(|context| {
+            context.contains(crate::components::primitives::text_actions::TEXT_INPUT_CONTEXT)
+        });
+    if typing {
+        return;
+    }
+    let Some(voice) = mezon_store::VoiceStore::try_global(cx) else {
+        return;
+    };
+    if voice.read(cx).connection().connected_channel().is_none() {
+        return;
+    }
+    voice.update(cx, |store, cx| store.set_push_to_talk(active, cx));
+}
+
+/// The strip React drops across the top while an owner is previewing their clan the way a new
+/// member sees it. Closing it hands them back to the onboarding settings they opened it from.
+fn previewable_route(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
+    )
+}
+
+fn end_preview_off_its_own_screens(cx: &mut App) {
+    let Some(store) = OnboardingStore::try_global(cx) else {
+        return;
+    };
+    if store.read(cx).preview_clan().is_none() {
+        return;
+    }
+    let route = Router::global(cx).read(cx).route();
+    if !previewable_route(&route) {
+        store.update(cx, |store, cx| store.close_preview(cx));
+    }
+}
+
+fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
+    let leading_inset = if cfg!(target_os = "macos") {
+        px(80.)
+    } else {
+        px(16.)
+    };
+    div()
+        .occlude()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap_4()
+        .w_full()
+        .h(px(48.))
+        .pl(leading_inset)
+        .pr_4()
+        .bg(theme.bg_secondary)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .id("onboarding-close-preview")
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(|style| style.bg(theme.bg_hover))
+                .child(
+                    Icon::new(IconName::ArrowLeft)
+                        .size(px(14.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(mezon_i18n::t(locale, "common.closePreviewMode")),
+                )
+                .on_click(move |_, _, cx| {
+                    OnboardingStore::global(cx).update(cx, |store, cx| store.close_preview(cx));
+                    crate::router::navigate(
+                        cx,
+                        Route::ClanSettings {
+                            clan_id,
+                            page: ClanSettingsPage::Onboarding,
+                        },
+                    );
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(mezon_i18n::t(locale, "common.previewModeDescription")),
+        )
+        .into_any_element()
 }
 
 fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
@@ -497,6 +840,8 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
+const TOUR_AUTOSTART_MAX_ATTEMPTS: u8 = 3;
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;

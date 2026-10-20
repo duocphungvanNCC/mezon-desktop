@@ -339,7 +339,7 @@ impl EventDetailView {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let media_paths: Vec<PathBuf> = paths
@@ -358,9 +358,11 @@ impl EventDetailView {
             let mut uploaded = Vec::new();
             for path in media_paths {
                 let upload_task = this
-                    .update(cx, |_, cx| {
-                        ChannelMediaStore::global(cx)
-                            .update(cx, |store, cx| store.upload_attachment(&path, cx))
+                    .update(cx, |view, cx| {
+                        let channel_id = view.channel_id;
+                        ChannelMediaStore::global(cx).update(cx, |store, cx| {
+                            store.upload_attachment(&path, channel_id, cx)
+                        })
                     })
                     .ok();
                 if let Some(task) = upload_task

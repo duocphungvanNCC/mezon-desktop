@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
@@ -9,32 +7,35 @@ use gpui::{
 use mezon_store::{
     AccountEvent, AccountStore, AuthState, AutoUpdateStatus, AutoUpdateStore,
     CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
-    ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore,
-    MessagesStore, PinnedEvent, PinnedMessagesStore, Settings, StreamStore, THREAD_STATUS_ARCHIVED,
-    ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember,
-    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind, DirectMessageStore,
+    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
+    NoiseSuppressionStatus, PickedSearchUser, PinnedEvent, PinnedMessagesStore, Settings,
+    StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore,
+    UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_user_name_tokens, retain_picked_search_users,
 };
-use ui::PopoverMenuHandle;
+use ui::{PopoverMenuHandle, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::chat::age_restricted::{AgeRestrictedGate, age_gate_blocks};
 use crate::chat::area::ChatArea;
 use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::message_search::{
     MessageSearchPanel, apply_search_dropdown_item, register_chat_layout,
 };
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::chat::stream::StreamOutputMenu;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
 use crate::chat::{CanvasPopoverPanel, CanvasView};
 use crate::components::compositions::channel_row::channel_icon;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::components::primitives::{
-    Icon, IconName, InputEvent, InputState, Slider, SliderEvent, SliderState,
+    Icon, IconName, InputEvent, InputState, SliderEvent, SliderState, Spinner,
 };
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -63,7 +64,6 @@ pub struct ChatLayout {
     voice_grid_page: usize,
     voice_grid_wheel_accum: f32,
     voice_grid_size: Size<Pixels>,
-    voice_show_members: bool,
     voice_show_chat: bool,
     voice_session_key: Option<String>,
     voice_visual: crate::chat::voice::VoiceVisualState,
@@ -72,13 +72,14 @@ pub struct ChatLayout {
     displayed_stream_fullscreen: bool,
     stream_fullscreen_focus: FocusHandle,
     stream_fullscreen_focused: bool,
+    voice_focus: FocusHandle,
+    _voice_ptt_activation: Option<Subscription>,
     pending_channel_id: Option<ChannelId>,
-    prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
-    _stream_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    show_profile_dm: bool,
     ui_state: UiState,
     media_channel_view_mode: bool,
     message_search_expanded: bool,
@@ -88,8 +89,8 @@ pub struct ChatLayout {
     message_search_panel: Option<Entity<MessageSearchPanel>>,
     message_search_input: Option<Entity<InputState>>,
     message_search_context: Option<(ChannelId, ClanId, bool)>,
-    search_dropdown_index: usize,
-    search_mention_ids: HashMap<String, String>,
+    search_dropdown_index: Option<usize>,
+    search_picked_users: Vec<PickedSearchUser>,
     _message_search_input_sub: Option<Subscription>,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
@@ -118,14 +119,9 @@ pub struct ChatLayout {
     voice_sound_picker: Option<Entity<VoiceSoundPicker>>,
     _voice_sound_picker_sub: Option<Subscription>,
     _voice_sound_picker_dismiss_sub: Option<Subscription>,
-    ns_slider: Entity<SliderState>,
-    _ns_slider_sub: Subscription,
     stream_volume_slider: Entity<SliderState>,
     _stream_volume_slider_sub: Subscription,
-    ns_popover_open: bool,
-    ns_hovered: bool,
-    ns_dragging: bool,
-    _ns_popover_close: Option<Task<()>>,
+    stream_output_menu: PopoverMenuHandle<StreamOutputMenu>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -174,6 +170,7 @@ impl ActiveChannelSlice {
 struct VoiceMiniSlice {
     channel_id: String,
     clan_id: String,
+    connecting: bool,
     label: String,
     clan_name: String,
     mic_enabled: bool,
@@ -181,7 +178,7 @@ struct VoiceMiniSlice {
     screen_enabled: bool,
     link_copied: bool,
     noise_suppression_enabled: bool,
-    noise_suppression_level: u8,
+    noise_suppression_status: Option<NoiseSuppressionStatus>,
 }
 
 impl ChatLayout {
@@ -192,6 +189,12 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.on_release(|this, cx| {
+            if let Some(store) = this.voice_store.read(cx).frame_store() {
+                store.screen_views.clear_main();
+            }
+        })
+        .detach();
         cx.subscribe(
             &AccountStore::global(cx),
             |_, _, event: &AccountEvent, cx| {
@@ -281,9 +284,13 @@ impl ChatLayout {
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
+            if voice.update(cx, |store, _| store.take_muted_by_moderator()) {
+                let locale = this.settings.read(cx).language.clone();
+                let msg = mezon_i18n::t(&locale, "channelVoice.mutedByModerator").to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+            }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
@@ -293,6 +300,9 @@ impl ChatLayout {
         let call_panel = cx.new(CallPanelView::new);
         cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        if let Some(media_access) = crate::chat::media_permission_prompt::observe_media_access(cx) {
+            media_access.detach();
+        }
 
         let stream_store = StreamStore::global(cx);
         cx.observe(&stream_store, |this, store, cx| {
@@ -306,7 +316,6 @@ impl ChatLayout {
             if !fullscreen {
                 this.stream_fullscreen_focused = false;
             }
-            this.sync_stream_frame_pump(cx);
             cx.notify();
         })
         .detach();
@@ -360,7 +369,6 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
@@ -372,6 +380,10 @@ impl ChatLayout {
         })
         .detach();
         cx.subscribe(&channel_list, |this, _, event, cx| {
+            if let ChannelEvent::AccessLost(channel_id) = event {
+                Self::leave_lost_channel_screen(*channel_id, cx);
+                return;
+            }
             let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
                 return;
             };
@@ -392,6 +404,9 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if next_route.is_clan_space() {
+                    this.show_profile_dm = false;
+                }
                 if matches!(this.last_route, Route::Thread { .. }) {
                     this.focused_channel_id = None;
                 }
@@ -423,13 +438,23 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        // The banned notice replaces the composer, and its answer arrives from `IsBanned` well
+        // after the channel opened — without this the strip would not paint until something
+        // else happened to redraw the chat.
+        cx.observe(&mezon_store::BannedUsersStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
+        cx.observe(&mezon_store::OnboardingStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
         cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
             TopicsEvent::Opened => {
                 ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));
@@ -458,24 +483,6 @@ impl ChatLayout {
             }
         })
         .detach();
-        let ns_level = voice_store.read(cx).noise_suppression_level();
-        let ns_slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.)
-                .max(100.)
-                .step(1.)
-                .default_value(ns_level as f32)
-        });
-        let ns_slider_sub = cx.subscribe(
-            &ns_slider,
-            |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let level = value.end().round().clamp(0., 100.) as u8;
-                VoiceStore::global(cx).update(cx, |store, cx| {
-                    store.set_noise_suppression_level(level, cx);
-                });
-            },
-        );
         let stream_volume_slider = cx.new(|_| {
             SliderState::new()
                 .min(0.)
@@ -517,7 +524,6 @@ impl ChatLayout {
             voice_grid_page: 0,
             voice_grid_wheel_accum: 0.,
             voice_grid_size: Size::default(),
-            voice_show_members: true,
             voice_show_chat: false,
             voice_session_key: None,
             voice_visual: Default::default(),
@@ -526,13 +532,14 @@ impl ChatLayout {
             displayed_stream_fullscreen: false,
             stream_fullscreen_focus: cx.focus_handle(),
             stream_fullscreen_focused: false,
+            voice_focus: cx.focus_handle(),
+            _voice_ptt_activation: None,
             pending_channel_id: None,
-            prefetched_voice_channel: None,
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
-            _stream_frame_pump: None,
             show_member_list,
+            show_profile_dm: false,
             ui_state,
             media_channel_view_mode: false,
             message_search_expanded: false,
@@ -542,8 +549,8 @@ impl ChatLayout {
             message_search_panel: None,
             message_search_input: None,
             message_search_context: None,
-            search_dropdown_index: 0,
-            search_mention_ids: HashMap::new(),
+            search_dropdown_index: None,
+            search_picked_users: Vec::new(),
             _message_search_input_sub: None,
             inbox_handle: PopoverMenuHandle::default(),
             thread_popover_handle: PopoverMenuHandle::default(),
@@ -572,31 +579,25 @@ impl ChatLayout {
             voice_sound_picker: None,
             _voice_sound_picker_sub: None,
             _voice_sound_picker_dismiss_sub: None,
-            ns_slider,
-            _ns_slider_sub: ns_slider_sub,
             stream_volume_slider,
             _stream_volume_slider_sub: stream_volume_slider_sub,
-            ns_popover_open: false,
-            ns_hovered: false,
-            ns_dragging: false,
-            _ns_popover_close: None,
+            stream_output_menu: PopoverMenuHandle::default(),
         };
         this.sync_active_from_route(cx);
         this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
-        this.sync_stream_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
 
-    pub(crate) fn search_dropdown_index(&self) -> usize {
+    pub(crate) fn search_dropdown_index(&self) -> Option<usize> {
         self.search_dropdown_index
     }
 
     fn reset_search_dropdown_index(&mut self, cx: &mut Context<Self>) {
-        if self.search_dropdown_index != 0 {
-            self.search_dropdown_index = 0;
+        if self.search_dropdown_index.is_some() {
+            self.search_dropdown_index = None;
             cx.notify();
         }
     }
@@ -606,14 +607,24 @@ impl ChatLayout {
             return;
         };
         let query = input.read(cx).value().to_string();
+        if matches!(
+            mezon_store::search_dropdown_mode(&query),
+            mezon_store::SearchDropdownMode::PlainMembers
+        ) {
+            return;
+        }
         let count = crate::chat::message_search::search_dropdown_item_count(&query, cx);
         if count == 0 {
             return;
         }
-        let next =
-            (self.search_dropdown_index as isize + delta).rem_euclid(count as isize) as usize;
-        if next != self.search_dropdown_index {
-            self.search_dropdown_index = next;
+        let next = match self.search_dropdown_index {
+            None if delta > 0 => 0,
+            None if delta < 0 => count - 1,
+            None => return,
+            Some(current) => (current as isize + delta).rem_euclid(count as isize) as usize,
+        };
+        if self.search_dropdown_index != Some(next) {
+            self.search_dropdown_index = Some(next);
             cx.notify();
         }
     }
@@ -643,6 +654,9 @@ impl ChatLayout {
         };
         let query = input.read(cx).value().to_string();
         let mode = mezon_store::search_dropdown_mode(&query);
+        if matches!(mode, mezon_store::SearchDropdownMode::PlainMembers) {
+            return false;
+        }
         if matches!(
             mode,
             mezon_store::SearchDropdownMode::FromUser
@@ -656,7 +670,7 @@ impl ChatLayout {
         if items.is_empty() {
             return false;
         }
-        let index = self.search_dropdown_index.min(items.len() - 1);
+        let index = self.search_dropdown_index.unwrap_or(0).min(items.len() - 1);
         apply_search_dropdown_item(self, &items[index], window, cx);
         true
     }
@@ -763,13 +777,9 @@ impl ChatLayout {
         if query.trim().is_empty() {
             return;
         }
-        let mention_ids = self.search_mention_ids.clone();
-        let query = expand_mention_name_tokens(&query, |name| {
-            let key = name.to_lowercase();
-            if let Some(id) = mention_ids.get(&key) {
-                return Some(id.clone());
-            }
-            resolve_mention_name_to_user_id(name, clan_id, is_direct, channel_id, cx)
+        let members = mention_member_pool(cx);
+        let query = expand_user_name_tokens(&query, &self.search_picked_users, |name| {
+            resolve_member_name_to_user_id(&members, name)
         });
         self.show_search_options = false;
         self.show_results_panel = true;
@@ -820,7 +830,7 @@ impl ChatLayout {
         }
         self.message_search_panel = None;
         self.message_search_context = None;
-        self.search_mention_ids.clear();
+        self.search_picked_users.clear();
         cx.notify();
     }
 
@@ -869,9 +879,14 @@ impl ChatLayout {
         let Some(input) = self.message_search_input.clone() else {
             return;
         };
-        if trigger == '~' && !display.is_empty() && !id.is_empty() {
-            self.search_mention_ids
-                .insert(display.to_lowercase(), id.to_string());
+        if matches!(trigger, '~' | '>') && !display.is_empty() && !id.is_empty() {
+            self.search_picked_users
+                .retain(|pick| pick.trigger != trigger || pick.display != display);
+            self.search_picked_users.push(PickedSearchUser {
+                trigger,
+                display: display.to_string(),
+                user_id: id.to_string(),
+            });
         }
         let current = input.read(cx).value().to_string();
         let next = mezon_store::insert_filter_markup(&current, trigger, display, id);
@@ -886,11 +901,11 @@ impl ChatLayout {
     }
 
     pub(crate) fn on_search_input_cleared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_picked_users.clear();
         if self.show_results_panel {
             self.close_results_panel(cx);
             self.message_search_expanded = false;
             self.show_search_options = false;
-            self.search_mention_ids.clear();
             self.blur_message_search(window, cx);
         } else {
             self.show_search_options = false;
@@ -932,6 +947,7 @@ impl ChatLayout {
                 }
                 InputEvent::Change => {
                     let query = input_for_sub.read(cx).value().to_string();
+                    retain_picked_search_users(&mut this.search_picked_users, &query);
                     this.show_search_options = this.message_search_expanded
                         && crate::chat::message_search::should_show_message_search_dropdown(&query);
                     this.reset_search_dropdown_index(cx);
@@ -944,15 +960,27 @@ impl ChatLayout {
         self.message_search_input = Some(input);
     }
 
-    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_member_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dm = self.is_dm_route(cx);
+        if dm && !self.show_member_list {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.show_member_list = !self.show_member_list;
-        if dm {
-            self.ui_state.show_member_list_dm = self.show_member_list;
+        let persist = if dm {
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm = self.show_member_list;
+                true
+            } else {
+                self.show_profile_dm = self.show_member_list;
+                false
+            }
         } else {
             self.ui_state.show_member_list = self.show_member_list;
+            true
+        };
+        if persist {
+            self.persist_ui_state(cx);
         }
-        self.persist_ui_state(cx);
         cx.notify();
     }
 
@@ -977,7 +1005,11 @@ impl ChatLayout {
 
     fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
         self.show_member_list = if self.is_dm_route(cx) {
-            self.ui_state.show_member_list_dm
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm
+            } else {
+                self.show_profile_dm
+            }
         } else {
             self.ui_state.show_member_list
         };
@@ -1129,6 +1161,7 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         } else {
             self.pending_channel_id = Some(channel_id);
             self.channel_list.update(cx, |channel_list, cx| {
@@ -1160,7 +1193,23 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         }
+    }
+
+    fn load_channel_activity(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.fetch_if_needed(&clan_key, cx);
+            store.hydrate_latest_topic_preview_for_channel(Some(&channel_key), cx);
+        });
+        PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
     }
 
     fn redirect_archived_thread_route(&mut self, cx: &mut Context<Self>) {
@@ -1204,6 +1253,27 @@ impl ChatLayout {
                 channel_id,
             },
         );
+    }
+
+    /// The settings or canvas of a channel we can no longer see would stay on
+    /// screen with nothing behind it. `redirect_removed_thread_route` only
+    /// leaves a deleted channel, so a lost one is left here. A chat route is
+    /// already moved on by `ensure_active_channel_for_clan`.
+    fn leave_lost_channel_screen(lost: ChannelId, cx: &mut App) {
+        let clan_id = match Router::global(cx).read(cx).route() {
+            Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } if channel_id == lost => clan_id,
+            _ => return,
+        };
+        crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, lost);
     }
 
     fn redirect_removed_thread_route(&mut self, cx: &mut Context<Self>) {
@@ -1369,26 +1439,6 @@ impl ChatLayout {
         }
     }
 
-    fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
-        let active_voice_channel = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .filter(|ch| ch.channel_type == ChannelType::Voice)
-            .map(|ch| ch.id);
-
-        if active_voice_channel == self.prefetched_voice_channel {
-            return;
-        }
-        self.prefetched_voice_channel = active_voice_channel;
-
-        if let Some(channel_id) = active_voice_channel {
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
-        }
-    }
-
     fn threads_panel_state_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = ThreadsStore::global(cx);
         let store = store.read(cx);
@@ -1463,7 +1513,6 @@ impl ChatLayout {
     }
 
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const VOICE_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         let want_pump =
             self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
         if !want_pump {
@@ -1473,42 +1522,7 @@ impl ChatLayout {
         if self._voice_frame_pump.is_some() {
             return;
         }
-        self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                let store =
-                    match this.update(cx, |_, cx| VoiceStore::global(cx).read(cx).frame_store()) {
-                        Ok(store) => store,
-                        Err(_) => break,
-                    };
-                let Some(store) = store else {
-                    cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
-                    continue;
-                };
-                let mut rx = store.frame_watch();
-                loop {
-                    let seq = store.publish_seq();
-                    if seq != last_seq {
-                        last_seq = seq;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                    let frame_published = {
-                        let changed = std::pin::pin!(rx.changed());
-                        let fallback =
-                            std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
-                        matches!(
-                            futures::future::select(changed, fallback).await,
-                            futures::future::Either::Left((Ok(()), _))
-                        )
-                    };
-                    if !frame_published {
-                        break;
-                    }
-                }
-            }
-        }));
+        self._voice_frame_pump = Some(crate::chat::voice::spawn_voice_frame_pump(cx));
     }
 
     fn sync_stream_session(&mut self, cx: &mut Context<Self>) {
@@ -1521,55 +1535,6 @@ impl ChatLayout {
             store.sync_chat_for_active_channel(active, cx);
             store.clear_error_on_active_channel_change(active, cx);
         });
-    }
-
-    fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const STREAM_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
-        let stream = self.stream_store.read(cx);
-        let on_stream = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .is_some_and(|ch| {
-                ch.channel_type == ChannelType::Stream && stream.is_session_channel(ch.id)
-            });
-        let want_pump =
-            stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
-        if !want_pump {
-            self._stream_frame_pump = None;
-            return;
-        }
-        if self._stream_frame_pump.is_some() {
-            return;
-        }
-        let frame_store = stream.frame_store().clone();
-        self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                let mut rx = frame_store.frame_watch();
-                loop {
-                    let seq = frame_store.publish_seq();
-                    if seq != last_seq {
-                        last_seq = seq;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                    let frame_published = {
-                        let changed = std::pin::pin!(rx.changed());
-                        let fallback =
-                            std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
-                        matches!(
-                            futures::future::select(changed, fallback).await,
-                            futures::future::Either::Left((Ok(()), _))
-                        )
-                    };
-                    if !frame_published {
-                        break;
-                    }
-                }
-            }
-        }));
     }
 
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
@@ -1622,9 +1587,10 @@ impl ChatLayout {
 
     fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = self.voice_store.read(cx);
-        let Some((channel_id, clan_id)) = store.connection().connected_channel() else {
+        let Some((channel_id, clan_id)) = store.connection().active_channel() else {
             return self.displayed_voice_mini.take().is_some();
         };
+        let connecting = store.connection().is_connecting();
 
         if let Some(prev) = self.displayed_voice_mini.as_mut()
             && prev.channel_id == channel_id
@@ -1636,24 +1602,26 @@ impl ChatLayout {
             let screen_enabled = store.screen_share_enabled();
             let link_copied = store.link_copied();
             let noise_suppression_enabled = store.noise_suppression_enabled();
-            let noise_suppression_level = store.noise_suppression_level();
-            let changed = prev.label != label
+            let noise_suppression_status = store.noise_suppression_status();
+            let changed = prev.connecting != connecting
+                || prev.label != label
                 || prev.mic_enabled != mic_enabled
                 || prev.camera_enabled != camera_enabled
                 || prev.screen_enabled != screen_enabled
                 || prev.link_copied != link_copied
                 || prev.noise_suppression_enabled != noise_suppression_enabled
-                || prev.noise_suppression_level != noise_suppression_level;
+                || prev.noise_suppression_status != noise_suppression_status;
             if changed {
                 if prev.label != label {
                     prev.label = label.to_string();
                 }
+                prev.connecting = connecting;
                 prev.mic_enabled = mic_enabled;
                 prev.camera_enabled = camera_enabled;
                 prev.screen_enabled = screen_enabled;
                 prev.link_copied = link_copied;
                 prev.noise_suppression_enabled = noise_suppression_enabled;
-                prev.noise_suppression_level = noise_suppression_level;
+                prev.noise_suppression_status = noise_suppression_status;
             }
             return changed;
         }
@@ -1666,6 +1634,7 @@ impl ChatLayout {
         self.displayed_voice_mini = Some(VoiceMiniSlice {
             channel_id: channel_id.to_string(),
             clan_id: clan_id.to_string(),
+            connecting,
             label: store.channel_label().to_string(),
             clan_name,
             mic_enabled: store.mic_enabled(),
@@ -1673,24 +1642,67 @@ impl ChatLayout {
             screen_enabled: store.screen_share_enabled(),
             link_copied: store.link_copied(),
             noise_suppression_enabled: store.noise_suppression_enabled(),
-            noise_suppression_level: store.noise_suppression_level(),
+            noise_suppression_status: store.noise_suppression_status(),
         });
         true
+    }
+}
+
+impl crate::chat::voice::CallLayoutHost for ChatLayout {
+    fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.voice_grid_size != size {
+            self.voice_grid_size = size;
+            cx.notify();
+        }
+    }
+
+    fn scroll_voice_grid_page(&mut self, delta: f32, total_pages: usize, cx: &mut Context<Self>) {
+        let page = crate::chat::voice::next_voice_grid_page(
+            self.voice_grid_page,
+            &mut self.voice_grid_wheel_accum,
+            delta,
+            total_pages,
+        );
+        if page != self.voice_grid_page {
+            self.voice_grid_page = page;
+            cx.notify();
+        }
+    }
+
+    fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if (self.voice_strip_width - width).abs() > px(0.5) {
+            self.voice_strip_width = width;
+            cx.notify();
+        }
+    }
+
+    fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.voice_store
+            .clone()
+            .update(cx, |store, cx| store.toggle_member_strip(cx));
+        cx.notify();
+    }
+
+    fn toggle_voice_chat(&mut self, cx: &mut Context<Self>) {
+        ChatLayout::toggle_voice_chat(self, cx);
     }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
+        let _screen_recovery_view = self
+            .voice_store
+            .read(cx)
+            .begin_screen_recovery_view(window.is_window_active());
         self.chat_area.ensure_input(window, cx);
+        if self.show_member_list && self.is_dm_route(cx) {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
-        self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        self.stream_store
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
@@ -1888,13 +1900,14 @@ impl Render for ChatLayout {
                 &self.voice_store,
                 &self.settings,
                 self.voice_store.read(cx),
-                &chat,
+                Some(&chat),
                 cx,
             )
         } else if self.stream_store.read(cx).fullscreen() {
             crate::chat::stream::render_stream_fullscreen_overlay(
                 window,
                 cx.theme(),
+                &locale,
                 self.stream_store.read(cx),
                 self.stream_store.clone(),
                 &self.stream_volume_slider,
@@ -1927,13 +1940,13 @@ impl Render for ChatLayout {
                             .inset_0()
                             .flex()
                             .flex_row()
+                            .child(div().w(px(72.0)).h_full().bg(theme.surfaces.primary.ramp()))
                             .child(
                                 div()
-                                    .w(px(72.0))
+                                    .flex_1()
                                     .h_full()
-                                    .bg(theme.surface_for(theme.bg_tertiary)),
-                            )
-                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                                    .bg(theme.surfaces.direct_message.ramp()),
+                            ),
                     )
                     .child(
                         div()
@@ -2031,6 +2044,20 @@ impl ChatLayout {
             );
             return;
         }
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
+        {
+            let invocation = command.invocation(&content);
+            crate::chat::ChatSending::send_to_bot(
+                content,
+                content_tokens,
+                attachments,
+                invocation,
+                &self.auth_state,
+                cx,
+            );
+            return;
+        }
         crate::chat::ChatSending::send_text(
             content,
             content_tokens,
@@ -2111,6 +2138,7 @@ impl ChatLayout {
         clan_id: &str,
         parent_id: &str,
         label: &str,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
         let Ok(channel_id) = channel_id.parse::<ChannelId>() else {
@@ -2122,10 +2150,9 @@ impl ChatLayout {
         self.dismiss_threads_popover(cx);
         let label = label.to_string();
         let parent = parent_id.parse::<ChannelId>().ok();
-        let (active, active_confirmed) = match ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-        {
+        let channel_key = channel_id.to_string();
+        let threads = ThreadsStore::global(cx).read(cx);
+        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
             Some(status) => (
                 if status == THREAD_STATUS_ARCHIVED {
                     CHANNEL_ACTIVE_ARCHIVED
@@ -2136,6 +2163,8 @@ impl ChatLayout {
             ),
             None => (CHANNEL_ACTIVE_JOINED, false),
         };
+        let private =
+            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2145,6 +2174,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             } else {
@@ -2153,6 +2183,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             }
@@ -2171,9 +2202,12 @@ impl ChatLayout {
             ThreadsEvent::ThreadCreated {
                 channel_id,
                 clan_id,
+                parent_id,
+                name,
+                private,
             } => {
                 self.close_create_thread(cx);
-                self.navigate_to_thread(channel_id, clan_id, "", "", cx);
+                self.navigate_to_thread(channel_id, clan_id, parent_id, name, Some(*private), cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
             ThreadsEvent::CreateFailed { .. } | ThreadsEvent::LeaveFailed => {}
@@ -2266,8 +2300,21 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true));
+            let input_for_sub = input.clone();
+            cx.subscribe_in(&input, window, move |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let name = input_for_sub.read(cx).value();
+                    let invalid = !name.trim().is_empty()
+                        && mezon_store::validate_channel_name(name).is_err();
+                    ThreadsStore::global(cx).update(cx, |store, cx| {
+                        store.clear_name_error(cx);
+                        store.set_name_live_invalid(invalid, cx);
+                    });
+                }
+            })
+            .detach();
+            self.thread_name_input = Some(input);
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
@@ -2378,6 +2425,21 @@ impl ChatLayout {
         self.direct_store.read(cx).find(direct_id).cloned()
     }
 
+    fn with_call_panel(&self, dm_chat: gpui::AnyElement) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(self.call_panel.clone())
+            .child(dm_chat)
+            .into_any_element()
+    }
+
     fn is_dm_route(&self, cx: &Context<Self>) -> bool {
         matches!(
             Router::global(cx).read(cx).route(),
@@ -2385,9 +2447,28 @@ impl ChatLayout {
         )
     }
 
+    fn is_group_dm_route(&self, cx: &Context<Self>) -> bool {
+        let Route::DirectMessage {
+            direct_id,
+            message_type,
+        } = Router::global(cx).read(cx).route()
+        else {
+            return false;
+        };
+        self.direct_store
+            .read(cx)
+            .current()
+            .filter(|(id, _)| *id == direct_id)
+            .map(|(_, channel_type)| channel_type == DirectKind::Group.channel_type())
+            .unwrap_or_else(|| {
+                message_type.parse::<i32>().ok() == Some(DirectKind::Group.channel_type())
+            })
+    }
+
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let store = self.voice_store.read(cx);
-        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().active_channel()?;
+        let connecting = store.connection().is_connecting();
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
         let clan_name = clan_id
@@ -2396,10 +2477,22 @@ impl ChatLayout {
             .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
             .unwrap_or_default();
         let label = store.channel_label().to_string();
+        let meeting_code = store.external_meeting().map(|meeting| meeting.code.clone());
         let mic_enabled = store.mic_enabled();
         let camera_enabled = store.camera_enabled();
         let screen_enabled = store.screen_share_enabled();
+        let is_audience = store.is_audience();
+        let ptt_active = store.push_to_talk_active();
         let link_copied = store.link_copied();
+        let mic_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Microphone,
+            cx,
+        );
+        let camera_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Camera,
+            cx,
+        );
+        let noise_status = store.noise_suppression_status();
         let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -2410,12 +2503,19 @@ impl ChatLayout {
             &clan_name,
             &channel_id,
             &clan_id,
+            meeting_code.as_deref(),
             &self.voice_store,
             &self.settings,
+            connecting,
             mic_enabled,
             camera_enabled,
             screen_enabled,
+            is_audience,
+            ptt_active,
             link_copied,
+            mic_access_missing,
+            camera_access_missing,
+            noise_status,
             noise_control,
         ))
     }
@@ -2438,7 +2538,6 @@ impl ChatLayout {
         };
         if self.voice_session_key != key {
             self.voice_session_key = key;
-            self.voice_show_members = true;
             self.voice_show_chat = false;
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
@@ -2449,11 +2548,6 @@ impl ChatLayout {
         }
     }
 
-    pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
-        self.voice_show_members = !self.voice_show_members;
-        cx.notify();
-    }
-
     pub(crate) fn toggle_voice_chat(&mut self, cx: &mut Context<Self>) {
         self.voice_show_chat = !self.voice_show_chat;
         cx.notify();
@@ -2461,44 +2555,6 @@ impl ChatLayout {
 
     pub(crate) fn voice_show_chat(&self) -> bool {
         self.voice_show_chat
-    }
-
-    pub(crate) fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
-        if (self.voice_strip_width - width).abs() > px(0.5) {
-            self.voice_strip_width = width;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
-        if self.voice_grid_size != size {
-            self.voice_grid_size = size;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn scroll_voice_grid_page(
-        &mut self,
-        delta: f32,
-        total_pages: usize,
-        cx: &mut Context<Self>,
-    ) {
-        const STEP: f32 = 100.;
-        let last_page = total_pages.saturating_sub(1);
-        self.voice_grid_wheel_accum += delta;
-        let mut page = self.voice_grid_page.min(last_page);
-        while self.voice_grid_wheel_accum <= -STEP {
-            self.voice_grid_wheel_accum += STEP;
-            page = (page + 1).min(last_page);
-        }
-        while self.voice_grid_wheel_accum >= STEP {
-            self.voice_grid_wheel_accum -= STEP;
-            page = page.saturating_sub(1);
-        }
-        if page != self.voice_grid_page {
-            self.voice_grid_page = page;
-            cx.notify();
-        }
     }
 
     pub(crate) fn toggle_voice_emoji_picker(
@@ -2576,64 +2632,11 @@ impl ChatLayout {
         cx.notify();
     }
 
-    fn set_ns_popover_hover(&mut self, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if hovered {
-            self.ns_hovered = true;
-            self._ns_popover_close = None;
-            if !self.ns_popover_open {
-                let level = self.voice_store.read(cx).noise_suppression_level();
-                self.ns_slider.update(cx, |slider, cx| {
-                    slider.set_value(level as f32, window, cx);
-                });
-                self.ns_popover_open = true;
-                cx.notify();
-            }
-        } else {
-            self.ns_hovered = false;
-            if !self.ns_dragging {
-                self.schedule_ns_close(cx);
-            }
-        }
-    }
-
-    fn schedule_ns_close(&mut self, cx: &mut Context<Self>) {
-        if !self.ns_popover_open || self._ns_popover_close.is_some() {
-            return;
-        }
-        self._ns_popover_close = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(300))
-                .await;
-            this.update(cx, |this, cx| {
-                this.ns_popover_open = false;
-                this._ns_popover_close = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn ns_drag_started(&mut self) {
-        self.ns_dragging = true;
-        self._ns_popover_close = None;
-    }
-
-    fn ns_drag_ended(&mut self, inside: bool, cx: &mut Context<Self>) {
-        let was_dragging = std::mem::take(&mut self.ns_dragging);
-        if inside {
-            self.ns_hovered = true;
-            self._ns_popover_close = None;
-        } else if was_dragging || !self.ns_hovered {
-            self.ns_hovered = false;
-            self.schedule_ns_close(cx);
-        }
-    }
-
     fn render_noise_control(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let store = self.voice_store.read(cx);
         let enabled = store.noise_suppression_enabled();
-        let level = store.noise_suppression_level();
+        let loading = store.noise_suppression_loading();
         let icon = if enabled {
             Icon::new(IconName::NoiseSupressionIcon)
                 .size(px(20.))
@@ -2650,77 +2653,20 @@ impl ChatLayout {
             .justify_center()
             .size(px(24.))
             .rounded(px(4.))
-            .cursor_pointer()
+            .when(!loading, |button| button.cursor_pointer())
             .hover(|s| s.bg(theme.bg_hover))
-            .child(icon)
-            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                this.set_ns_popover_hover(*hovered, window, cx);
-            }))
+            .tooltip(Tooltip::text("Noise Suppression"))
+            .child(if loading {
+                Spinner::new().into_any_element()
+            } else {
+                icon.into_any_element()
+            })
             .on_click(cx.listener(|_this, _, _, cx| {
                 VoiceStore::global(cx).update(cx, |store, cx| {
                     store.toggle_noise_suppression(cx);
                 });
             }));
-
-        let mut root = div().relative().child(button);
-        if self.ns_popover_open && enabled {
-            root = root.child(deferred(
-                div()
-                    .id("voice-ns-popover")
-                    .absolute()
-                    .bottom(px(28.))
-                    .right(px(-16.))
-                    .w(px(240.))
-                    .p_3()
-                    .rounded_md()
-                    .bg(theme.tokens.bg_theme_contexify)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
-                    .occlude()
-                    .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                        this.set_ns_popover_hover(*hovered, window, cx);
-                    }))
-                    .capture_any_mouse_down(
-                        cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.ns_drag_started()),
-                    )
-                    .on_mouse_up(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
-                            this.ns_drag_ended(true, cx);
-                        }),
-                    )
-                    .on_mouse_up_out(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
-                            this.ns_drag_ended(false, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .mb_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_primary)
-                                    .child("Noise Suppression"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.text_primary)
-                                    .child(format!("{level}%")),
-                            ),
-                    )
-                    .child(Slider::new(&self.ns_slider).horizontal()),
-            ));
-        }
-        root.into_any_element()
+        button.into_any_element()
     }
 
     fn get_app_channel_bar(&self, cx: &Context<Self>) -> Option<ChannelAppBarTarget> {
@@ -2842,11 +2788,8 @@ impl ChatLayout {
                         true,
                         in_voice,
                         Some(dm.id),
-                        is_group,
-                        is_group
-                            && self.show_member_list
-                            && !show_results_panel
-                            && !side_panel_open,
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
                         false,
                         false,
                         false,
@@ -2867,24 +2810,13 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
-                return div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .w_full()
-                    .h_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.call_panel.clone())
-                    .child(dm_chat)
-                    .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             if matches!(
                 Router::global(cx).read(cx).route(),
                 Route::DirectMessage { .. }
             ) {
-                return self
+                let dm_chat = self
                     .chat_area
                     .render(
                         &locale,
@@ -2915,6 +2847,7 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             return self.friends_page.clone().into_any_element();
         }
@@ -2923,7 +2856,7 @@ impl ChatLayout {
             if let Some(gate) = self.age_gate.clone() {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 return self
                     .chat_area
                     .render_panel_body(
@@ -2956,7 +2889,7 @@ impl ChatLayout {
             {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 let canvas = self
                     .ensure_canvas_view(clan_id, channel_id, canvas_id, window, cx)
                     .into_any_element();
@@ -2986,6 +2919,20 @@ impl ChatLayout {
 
             if ch.channel_type == ChannelType::Voice {
                 self.sync_voice_session_defaults(cx);
+                if self._voice_ptt_activation.is_none() {
+                    self._voice_ptt_activation =
+                        Some(cx.observe_window_activation(window, |this, window, cx| {
+                            if !window.is_window_active() {
+                                if let Some(store) = this.voice_store.read(cx).frame_store() {
+                                    store.screen_views.clear_main();
+                                }
+                                this.voice_store.update(cx, |store, cx| {
+                                    store.set_push_to_talk(false, cx);
+                                });
+                            }
+                            cx.notify();
+                        }));
+                }
                 let channel = ch.clone();
                 let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
@@ -3008,7 +2955,7 @@ impl ChatLayout {
                     self.voice_strip_width,
                     self.voice_grid_page,
                     self.voice_grid_size,
-                    self.voice_show_members,
+                    self.voice_store.read(cx).member_strip_visible(),
                     show_chat,
                     self.inbox_handle.clone(),
                     &mut self.voice_visual,
@@ -3022,7 +2969,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3061,6 +3012,8 @@ impl ChatLayout {
                     .min_w_0()
                     .child(
                         div()
+                            .id("voice-focus-scope")
+                            .track_focus(&self.voice_focus)
                             .relative()
                             .flex()
                             .flex_col()
@@ -3068,6 +3021,10 @@ impl ChatLayout {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
+                            .on_mouse_down(gpui::MouseButton::Left, {
+                                let focus = self.voice_focus.clone();
+                                move |_, window, cx| window.focus(&focus, cx)
+                            })
                             .child(voice_view)
                             .when_some(self.voice_emoji_picker.clone(), |el, picker| {
                                 el.child(deferred(
@@ -3130,6 +3087,7 @@ impl ChatLayout {
                     &self.auth_state,
                     &layout_entity,
                     &self.stream_volume_slider,
+                    &self.stream_output_menu,
                     output_device_id,
                     f32::from(window_width),
                     cx,
@@ -3140,7 +3098,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3218,7 +3180,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     Some(channel_name.as_str()),
-                    Some(channel_icon(ch.channel_type, ch.private)),
+                    Some(channel_icon(ch.channel_type, ch.private, ch.age_restricted)),
                     false,
                     None,
                     Some(channel_id),
@@ -3349,6 +3311,7 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
+            | Route::SettingsServer
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }
             | Route::ChannelSettings { .. }
@@ -3393,28 +3356,11 @@ impl ChatLayout {
     }
 }
 
-fn resolve_mention_name_to_user_id(
-    name: &str,
-    clan_id: ClanId,
-    is_direct: bool,
-    channel_id: ChannelId,
-    cx: &App,
-) -> Option<String> {
+fn resolve_member_name_to_user_id(members: &[MentionMemberRaw], name: &str) -> Option<String> {
     let needle = name.to_lowercase();
-    if is_direct {
-        let store = GroupMembersStore::global(cx);
-        let store = store.read(cx);
-        return store.members(channel_id).iter().find_map(|member| {
-            let username_match = member.user.username.eq_ignore_ascii_case(name);
-            let name_match = member.name().to_lowercase() == needle;
-            (username_match || name_match).then(|| member.id().to_string())
-        });
-    }
-    let store = ClanMembersStore::global(cx);
-    let store = store.read(cx);
-    store.members(clan_id).into_iter().find_map(|member| {
-        let username_match = member.user.username.eq_ignore_ascii_case(name);
-        let name_match = member.name().to_lowercase() == needle;
-        (username_match || name_match).then(|| member.id().to_string())
-    })
+    members
+        .iter()
+        .find(|member| member.username.eq_ignore_ascii_case(name))
+        .or_else(|| members.iter().find(|member| member.display_lc == needle))
+        .map(|member| member.user_id.clone())
 }

@@ -2,8 +2,8 @@ use gpui::{
     AnyElement, App, ClickEvent, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
 };
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelType, ClanList, ClanMembersStore, Message,
-    MessageCode, MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
+    AccountStore, BadgeService, ChannelId, ChannelList, ChannelType, ClanList, ClanMembersStore,
+    Message, MessageCode, MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
 };
 
 use super::content::{
@@ -132,7 +132,7 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     if let Some(reactions) = reactions {
         col = col.child(reactions);
     }
-    if is_welcome {
+    if is_welcome && (ctx.can_send_message || ctx.is_dm) {
         col = col.child(render_wave_button(msg, ctx));
     }
     col.into_any_element()
@@ -171,6 +171,7 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         crate::util::imgproxy::cdn_asset_url(ctx.app, WAVE_STICKER_PATHS[sticker_idx]);
     let label = mezon_i18n::t(ctx.locale, "dmMessage.waveWelcome");
     let selection = ctx.selection.clone();
+    let welcome_id = msg.id;
 
     div()
         .flex()
@@ -179,7 +180,7 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .ml(px(CONTENT_INSET))
         .child(
             div()
-                .id("wave-say-hi")
+                .id(("wave-say-hi", msg.id.0 as usize))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -200,12 +201,22 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                             return;
                         };
                         let sender_id = user_id.0.to_string();
+                        let sender_name = AccountStore::try_global(cx)
+                            .and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .account
+                                    .as_ref()
+                                    .map(|account| account.username.clone())
+                            })
+                            .unwrap_or_default();
                         MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.send_sticker(
+                            store.send_sticker_reply(
                                 url.clone(),
                                 WAVE_STICKER_NAME.to_string(),
                                 sender_id,
-                                String::new(),
+                                sender_name,
+                                welcome_id,
                                 cx,
                             );
                         });
@@ -214,6 +225,7 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(
                     gpui::img(SharedString::from(sticker_url.clone()))
                         .size(px(32.))
+                        .aspect_square()
                         .flex_none(),
                 )
                 .child(
@@ -489,7 +501,7 @@ pub(crate) fn selectable_system_message_text(msg: &Message, locale: &str) -> Str
 
 fn jump_to_message(message_id: MessageId, cx: &mut App) {
     MessagesStore::global(cx).update(cx, |store, cx| {
-        store.jump_to_message(message_id, cx);
+        store.jump_to_message(message_id, None, cx);
     });
 }
 
@@ -794,11 +806,16 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             name,
             private,
             is_stream,
+            age_restricted,
         } => {
             col = col
                 .child(welcome_icon_circle(
                     if is_stream {
                         Icon::new(IconName::Stream).size_10().text_color(icon_fill)
+                    } else if mezon_store::is_age_restricted(age_restricted) {
+                        Icon::new(IconName::HashtagWarning)
+                            .size_10()
+                            .text_color(icon_fill)
                     } else if private {
                         Icon::new(IconName::HashtagLocked)
                             .size_10()
@@ -848,7 +865,7 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             col = col
                 .child(welcome_icon_circle(
                     render_channel_icon(
-                        channel_icon(ChannelType::Thread, private),
+                        channel_icon(ChannelType::Thread, private, 0),
                         px(40.),
                         icon_fill.into(),
                         theme.tokens.bg_icon_theme_active.into(),
@@ -1065,5 +1082,6 @@ pub fn build_welcome_context(
         name,
         private: channel.private,
         is_stream: channel.channel_type == ChannelType::Stream,
+        age_restricted: channel.age_restricted,
     })
 }

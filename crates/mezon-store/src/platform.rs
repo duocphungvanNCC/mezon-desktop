@@ -1,11 +1,36 @@
+use crate::dialog::{DialogOutcome, classify_dialog};
 use gpui::{App, AppContext, ClipboardItem, Entity, Global, Image, ImageFormat, SharedString};
 use std::sync::Arc;
 
 pub enum DownloadEvent {
     Started,
-    Progress { written: u64, total: Option<u64> },
-    Finished { path: std::path::PathBuf },
+    Progress {
+        written: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        path: std::path::PathBuf,
+        asked: bool,
+    },
     Failed,
+    DialogFailed,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the no-dialog fallback writes during tests. Production always uses the
+    /// real downloads folder; a test must never write into the user's own.
+    static TEST_DOWNLOAD_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Where a download goes when the user could not be asked.
+fn downloads_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DOWNLOAD_DIR.with(|dir| dir.borrow().clone()) {
+        return Some(dir);
+    }
+    dirs::download_dir().or_else(dirs::home_dir)
 }
 
 pub fn download_url_with_dialog(
@@ -14,16 +39,51 @@ pub fn download_url_with_dialog(
     on_event: impl Fn(DownloadEvent, &mut App) + 'static,
     cx: &mut App,
 ) {
-    let directory = dirs::download_dir()
-        .or_else(dirs::home_dir)
+    let downloads = downloads_dir();
+    let directory = downloads
+        .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let suggested = filename.to_string();
-    let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
     let url = url.to_string();
+    let suggested = mezon_client::resolve_download_filename(&filename, &url);
+    let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
     cx.spawn(async move |cx| {
-        let path = match receiver.await {
-            Ok(Ok(Some(path))) => path,
-            _ => return,
+        let mut asked = true;
+        let path = match classify_dialog(receiver.await) {
+            DialogOutcome::Picked(path) => path,
+            DialogOutcome::Cancelled => return,
+            DialogOutcome::Lost => {
+                tracing::warn!("the save dialog went away before answering");
+                return;
+            }
+            DialogOutcome::Unavailable(failure) => {
+                tracing::warn!(
+                    "could not ask where to save the download: {}",
+                    failure.reason
+                );
+                // Asking is a convenience; the download itself is what the user wanted.
+                // Fall back to their downloads folder so a machine with no desktop
+                // portal can still receive files.
+                let Some(downloads) = downloads else {
+                    cx.update(|cx| on_event(DownloadEvent::DialogFailed, cx));
+                    return;
+                };
+                let suggested = suggested.clone();
+                let reserved = cx
+                    .background_executor()
+                    .spawn(async move { mezon_client::reserve_path_in(&downloads, &suggested) })
+                    .await;
+                match reserved {
+                    Ok(path) => {
+                        asked = false;
+                        path
+                    }
+                    Err(error) => {
+                        tracing::error!("could not reserve a path for the download: {error}");
+                        cx.update(|cx| on_event(DownloadEvent::DialogFailed, cx));
+                        return;
+                    }
+                }
+            }
         };
         let finished_path = path.clone();
         cx.update(|cx| on_event(DownloadEvent::Started, cx));
@@ -40,6 +100,7 @@ pub fn download_url_with_dialog(
         let event = match download.await {
             Ok(()) => DownloadEvent::Finished {
                 path: finished_path,
+                asked,
             },
             Err(error) => {
                 tracing::error!("attachment download failed: {error}");
@@ -102,7 +163,48 @@ pub fn copy_image_url_to_clipboard(
     .detach();
 }
 
+async fn signed_media_url(url: String) -> String {
+    mezon_client::cdn_signature::sign(&url)
+        .await
+        .map_or(url, |signed| signed.url)
+}
+
+pub async fn transcoded_hls_playlist(url: &str) -> Option<String> {
+    mezon_client::video_source::transcoded_hls_playlist(url).await
+}
+
+pub fn may_be_transcoded(url: &str) -> bool {
+    mezon_client::video_source::may_be_transcoded(url)
+}
+
+pub fn open_media_url_external(url: String, cx: &mut App) {
+    if url.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let url = signed_media_url(url).await;
+        cx.update(|cx| {
+            if let Some(store) = PlatformStore::try_global(cx) {
+                let _ = store.read(cx).open_url_external(&url);
+            }
+        });
+    })
+    .detach();
+}
+
+pub fn copy_media_url_to_clipboard(url: String, cx: &mut App) {
+    if url.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let url = signed_media_url(url).await;
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(url)));
+    })
+    .detach();
+}
+
 pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
+pub type OpenManagedAppWindowFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
@@ -110,8 +212,10 @@ pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
 pub type McpStatusFn = Arc<dyn Fn() -> McpServerStatus + Send + Sync>;
-pub type McpStartFn = Arc<dyn Fn(bool) -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpStartFn =
+    Arc<dyn Fn(bool, Option<u16>) -> anyhow::Result<McpServerStatus> + Send + Sync>;
 pub type McpStopFn = Arc<dyn Fn() -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpSetPortFn = Arc<dyn Fn(u16) + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CurrentLocationFn = Arc<dyn Fn() -> anyhow::Result<(f64, f64)> + Send + Sync>;
@@ -128,6 +232,7 @@ pub struct McpServerHooks {
     pub status: McpStatusFn,
     pub start: McpStartFn,
     pub stop: McpStopFn,
+    pub set_port: McpSetPortFn,
 }
 
 pub struct CliInstallHooks {
@@ -136,12 +241,19 @@ pub struct CliInstallHooks {
     pub toggle: CliInstallToggleFn,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationTopicReply {
+    pub topic_id: String,
+    pub message_id: String,
+}
+
 pub struct DesktopNotification {
     pub title: String,
     pub body: String,
     pub channel_id: Option<String>,
     pub clan_id: Option<String>,
     pub link: Option<String>,
+    pub topic_reply: Option<NotificationTopicReply>,
     /// Local path to a downloaded sender-avatar image, attached as the icon.
     pub icon_path: Option<String>,
 }
@@ -149,6 +261,7 @@ pub struct DesktopNotification {
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     open_url_app_window: Option<OpenUrlFn>,
+    open_managed_app_window: Option<OpenManagedAppWindowFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     cli_install: Option<CliInstallHooks>,
@@ -162,6 +275,7 @@ impl PlatformStore {
         let entity = cx.new(|_| Self {
             open_url: None,
             open_url_app_window: None,
+            open_managed_app_window: None,
             save_attachment: None,
             notifier: None,
             cli_install: None,
@@ -199,6 +313,18 @@ impl PlatformStore {
         entity.update(cx, |store, _| {
             store.open_url_app_window = Some(f);
         });
+    }
+
+    pub fn set_open_managed_app_window(
+        entity: &Entity<Self>,
+        f: OpenManagedAppWindowFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| store.open_managed_app_window = Some(f));
+    }
+
+    pub fn managed_app_window_opener(&self) -> Option<OpenManagedAppWindowFn> {
+        self.open_managed_app_window.clone()
     }
 
     /// Hand back the toolbar-less-window opener, falling back to the normal-tab
@@ -313,6 +439,10 @@ impl PlatformStore {
             .map(|hooks| Arc::clone(&hooks.start))
     }
 
+    pub fn mcp_server_set_port_fn(&self) -> Option<McpSetPortFn> {
+        self.mcp_server.as_ref().map(|hooks| hooks.set_port.clone())
+    }
+
     pub fn mcp_server_stop_fn(&self) -> Option<McpStopFn> {
         self.mcp_server
             .as_ref()
@@ -353,3 +483,197 @@ impl PlatformStore {
 
 struct GlobalPlatformStore(Entity<PlatformStore>);
 impl Global for GlobalPlatformStore {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    const PORTAL_MISSING: &str =
+        "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
+
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("mezon-{label}-{}-{unique}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn record(seen: &Rc<RefCell<Vec<&'static str>>>) -> impl Fn(DownloadEvent, &mut App) + use<> {
+        let seen = seen.clone();
+        move |event, _| {
+            seen.borrow_mut().push(match event {
+                DownloadEvent::Started => "started",
+                DownloadEvent::Progress { .. } => "progress",
+                DownloadEvent::Finished { asked: true, .. } => "finished-asked",
+                DownloadEvent::Finished { asked: false, .. } => "finished-unasked",
+                DownloadEvent::Failed => "failed",
+                DownloadEvent::DialogFailed => "dialog-failed",
+            })
+        }
+    }
+
+    #[gpui::test]
+    async fn dismissing_the_save_dialog_emits_no_download_events(cx: &mut TestAppContext) {
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                "ca.crt".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+
+        assert!(
+            seen.borrow().is_empty(),
+            "a dismissed save dialog must not toast anything, got {:?}",
+            seen.borrow()
+        );
+    }
+
+    #[gpui::test]
+    async fn a_dialog_that_cannot_open_still_downloads_the_file(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-fallback");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                // A name straight off the wire, chosen by whoever sent the attachment.
+                "../../.config/autostart/x.desktop".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let events = seen.borrow().clone();
+        assert!(
+            events.contains(&"started"),
+            "a machine with no file dialog must still get its download, got {events:?}"
+        );
+        assert!(
+            !events.contains(&"dialog-failed"),
+            "there is a folder to save into, so nothing should be reported as a dead end: {events:?}"
+        );
+
+        let reserved: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            reserved.iter().all(|name| name == "x.desktop"),
+            "the wire name must be reduced to a plain file inside the folder, got {reserved:?}"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn a_sound_named_by_its_label_is_saved_with_the_extension_of_its_object(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = scratch_dir("dl-sound");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1840673171137630208/2097582928409137152.wav".into(),
+                // A pick from the sound panel is named after the sound, not the file.
+                "u need to leave".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let reserved: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            reserved,
+            vec!["u need to leave.wav".to_string()],
+            "a bare label saves as a typeless file the OS opens as text"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn with_nowhere_to_save_the_user_is_told_instead(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-nowhere");
+        let blocked = dir.join("not-a-directory");
+        std::fs::write(&blocked, b"x").expect("occupy the path");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(blocked.join("Downloads")));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                "ca.crt".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let events = seen.borrow().clone();
+        assert_eq!(
+            events,
+            vec!["dialog-failed"],
+            "no dialog and nowhere to save is the one case the user has to hear about"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn media_links_carry_the_cdn_signature_of_their_channel() {
+        crate::cdn_test_signer::install();
+
+        let signed = futures::executor::block_on(signed_media_url(
+            "https://cdn.example/1cb164dbdac01000/2107444226227703808_a.png".to_string(),
+        ));
+        assert_eq!(
+            signed,
+            "https://cdn.example/1cb164dbdac01000/2107444226227703808_a.png?1791259679-mac"
+        );
+
+        let legacy = futures::executor::block_on(signed_media_url(
+            "https://cdn.example/1840673171137630208/2097582928409137152.png".to_string(),
+        ));
+        assert_eq!(
+            legacy,
+            "https://cdn.example/1840673171137630208/2097582928409137152.png"
+        );
+    }
+}

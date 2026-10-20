@@ -1,0 +1,3676 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result};
+use base64::Engine as _;
+use futures::{SinkExt as _, StreamExt as _};
+use libwebrtc::audio_track::RtcAudioTrack;
+use libwebrtc::media_stream_track::{MediaStreamTrack, RtcTrackState};
+use libwebrtc::peer_connection::{
+    AnswerOptions, IceConnectionState, PeerConnection, PeerConnectionState, SignalingState,
+};
+use libwebrtc::peer_connection_factory::{
+    ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
+};
+use libwebrtc::rtp_parameters::{DegradationPreference, Priority};
+use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
+use libwebrtc::session_description::{SdpType, SessionDescription};
+use libwebrtc::stats::RtcStats;
+use libwebrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::video_track::RtcVideoTrack;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+use crate::playback_health::{AudioRecoveryProgress, PlaybackRecovery};
+use crate::reconnect::MuteSync;
+use crate::screen_recovery::{FrameReceipt, ScreenRecovery, ScreenSource, ScreenViews};
+use crate::video::track_frame_key;
+use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
+use crate::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
+
+use super::messages::{
+    AssignedSlot, ClientMessage, IceServerSpec, MEDIA_POOL_VERSION, PoolSlotAssignment,
+    ServerMessage, SlotAssignment, SnapshotMember,
+};
+use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, MidLayout, PoolLayout, RemoteKind};
+use super::network_quality::NetworkQuality;
+use super::screen_adaptation::{
+    ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
+};
+use super::sdp;
+
+struct CameraTier {
+    max_cameras: usize,
+    scale_down: f64,
+    max_bitrate: u64,
+    max_framerate: f64,
+}
+
+static CAMERA_TIERS: [CameraTier; 4] = [
+    CameraTier {
+        max_cameras: 2,
+        scale_down: 1.0,
+        max_bitrate: 1_000_000,
+        max_framerate: 30.0,
+    },
+    CameraTier {
+        max_cameras: 4,
+        scale_down: 1.333,
+        max_bitrate: 500_000,
+        max_framerate: 24.0,
+    },
+    CameraTier {
+        max_cameras: 8,
+        scale_down: 2.0,
+        max_bitrate: 300_000,
+        max_framerate: 20.0,
+    },
+    CameraTier {
+        max_cameras: usize::MAX,
+        scale_down: 2.0,
+        max_bitrate: 200_000,
+        max_framerate: 15.0,
+    },
+];
+
+const CAMERA_TIER_DOWNGRADE: Duration = Duration::from_millis(1500);
+const CAMERA_TIER_UPGRADE: Duration = Duration::from_millis(6000);
+
+fn camera_tier_at(index: usize) -> &'static CameraTier {
+    CAMERA_TIERS.get(index).unwrap_or(&CAMERA_TIERS[0])
+}
+
+fn camera_tier_index_for(cameras: usize, margin: usize) -> usize {
+    CAMERA_TIERS
+        .iter()
+        .position(|tier| cameras <= tier.max_cameras.saturating_sub(margin))
+        .unwrap_or(CAMERA_TIERS.len() - 1)
+}
+
+fn resolve_camera_tier(cameras: usize, current: usize) -> usize {
+    let target = camera_tier_index_for(cameras, 0);
+    if target >= current {
+        target
+    } else {
+        current.min(camera_tier_index_for(cameras, 1))
+    }
+}
+
+fn schedule_camera_tier(
+    membership: &Membership,
+    local: &LocalTracks,
+    current: usize,
+    pending: Option<(usize, tokio::time::Instant)>,
+) -> Option<(usize, tokio::time::Instant)> {
+    let cameras = membership.active_cameras() + usize::from(local.camera.is_some());
+    let next = resolve_camera_tier(cameras, current);
+    if next == current {
+        return None;
+    }
+    if matches!(pending, Some((tier, _)) if tier == next) {
+        return pending;
+    }
+    let delay = if next > current {
+        CAMERA_TIER_DOWNGRADE
+    } else {
+        CAMERA_TIER_UPGRADE
+    };
+    Some((next, tokio::time::Instant::now() + delay))
+}
+const SCREEN_SCALABILITY_MODE: &str = "L1T1";
+
+#[derive(Clone, Copy, Default)]
+struct PublishTiers {
+    camera: usize,
+    screen: usize,
+}
+
+fn screen_profile(mode: ScreenShareMode) -> &'static ScreenProfile {
+    match mode {
+        ScreenShareMode::Text => &TEXT_TIERS,
+        ScreenShareMode::Video => &VIDEO_TIERS,
+    }
+}
+
+const SCREEN_CODEC: &str = "vp9";
+const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
+const UPLINK_START_KBPS: u32 = 2_500;
+const MEDIA_STATS_INTERVAL: Duration = Duration::from_secs(5);
+const TRANSPORT_DISCONNECTED_GRACE: Duration = Duration::from_secs(4);
+const NET_PATH_POLL: Duration = Duration::from_secs(1);
+const LINK_DOWN_TICKS: u32 = 2;
+const HEALTHY_SESSION: Duration = Duration::from_secs(30);
+const ROUTE_PROBE_TARGETS: [&str; 2] = ["203.0.113.9:9", "[2001:db8::9]:9"];
+const MEDIA_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
+const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
+const CONNECT_POLL: Duration = Duration::from_millis(250);
+const RENEGOTIATION_SETTLE: Duration = Duration::from_millis(50);
+const MAX_RECONNECT_ATTEMPTS: u32 = 4;
+const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 3;
+const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
+const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
+const STATS_TIMEOUT: Duration = Duration::from_secs(2);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNALING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfuRole {
+    Speaker,
+    Audience,
+}
+
+impl SfuRole {
+    pub fn wire(self) -> &'static str {
+        match self {
+            SfuRole::Speaker => "speaker",
+            SfuRole::Audience => "audience",
+        }
+    }
+
+    pub fn is_audience(self) -> bool {
+        matches!(self, SfuRole::Audience)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SfuConfig {
+    pub screen_views: Arc<ScreenViews>,
+    pub ws_url: String,
+    pub token: String,
+    pub room: String,
+    pub role: SfuRole,
+    pub muted: bool,
+    pub fallback_ice_servers: Vec<IceServerConfig>,
+    pub refresh_token: Option<TokenRefresher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuPeer {
+    pub peer_id: u32,
+    pub user_id: String,
+    pub metadata: String,
+    pub muted: bool,
+    pub is_audience: bool,
+    pub audio: Option<u64>,
+    pub camera: Option<u64>,
+    pub screenshare: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct ScreenTrack {
+    pub track: RtcVideoTrack,
+    pub width: u32,
+    pub mode: ScreenShareMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalCause {
+    Kicked,
+    AloneTimeout,
+    DuplicateSession,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaRefusal {
+    CameraLimit,
+    ScreenShareLimit,
+    CameraUpdateFailed,
+    ScreenShareUpdateFailed,
+}
+
+pub enum SfuEvent {
+    Connected {
+        room: String,
+    },
+    Peers(Vec<SfuPeer>),
+    RoomSnapshot,
+    RemoteAudio {
+        key: u64,
+        track: RtcAudioTrack,
+        recovery: bool,
+    },
+    RemoteVideo {
+        key: u64,
+        stream: NativeVideoStream,
+        receipt: Arc<FrameReceipt>,
+    },
+    RemoteGone {
+        key: u64,
+    },
+    PttActive(bool),
+    NetworkWeak(bool),
+    Reconnecting,
+    Reconnected,
+    Disconnected {
+        reason: String,
+    },
+    Removed {
+        cause: RemovalCause,
+        reason: String,
+    },
+    MutedByModerator,
+    MediaRefused(MediaRefusal),
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
+    Error(String),
+}
+
+enum EngineCommand {
+    SetLocalAudio(Option<RtcAudioTrack>),
+    RefreshRemoteAudio(u64, PlaybackRecovery),
+    SetLocalCamera(Option<RtcVideoTrack>),
+    SetLocalScreen(Option<ScreenTrack>),
+    SetMute(bool),
+    SetCameraActive(bool),
+    SetScreenActive(bool),
+    SetScreenAudio(bool),
+    SetScreenShareMode(ScreenShareMode),
+    PushToTalk(bool),
+    ParticipantAction(String),
+    SendRoomMessage(String),
+    Close,
+}
+
+pub struct SfuEngine {
+    cmd_tx: flume::Sender<EngineCommand>,
+}
+
+impl SfuEngine {
+    pub fn spawn(
+        config: SfuConfig,
+        factory: PeerConnectionFactory,
+        evt_tx: flume::Sender<SfuEvent>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        let (cmd_tx, cmd_rx) = flume::unbounded();
+        let handle = crate::runtime::runtime().spawn(async move {
+            if let Err(e) = engine_main(config, factory, cmd_rx, &evt_tx).await {
+                tracing::error!("sfu engine stopped: {e:#}");
+                let _ = evt_tx.send(SfuEvent::Disconnected {
+                    reason: e.to_string(),
+                });
+            }
+        });
+        (Self { cmd_tx }, handle)
+    }
+
+    pub fn set_local_audio(&self, track: Option<RtcAudioTrack>) {
+        let _ = self.cmd_tx.send(EngineCommand::SetLocalAudio(track));
+    }
+
+    pub fn set_local_camera(&self, track: Option<RtcVideoTrack>) {
+        let _ = self.cmd_tx.send(EngineCommand::SetLocalCamera(track));
+    }
+
+    pub fn set_local_screen(&self, screen: Option<ScreenTrack>) {
+        let _ = self.cmd_tx.send(EngineCommand::SetLocalScreen(screen));
+    }
+
+    pub fn set_mute(&self, muted: bool) {
+        let _ = self.cmd_tx.send(EngineCommand::SetMute(muted));
+    }
+
+    pub fn set_camera_active(&self, active: bool) {
+        let _ = self.cmd_tx.send(EngineCommand::SetCameraActive(active));
+    }
+
+    pub fn set_screen_active(&self, active: bool) {
+        let _ = self.cmd_tx.send(EngineCommand::SetScreenActive(active));
+    }
+
+    pub fn set_screen_audio(&self, active: bool) {
+        let _ = self.cmd_tx.send(EngineCommand::SetScreenAudio(active));
+    }
+
+    pub fn set_screen_share_mode(&self, mode: ScreenShareMode) {
+        let _ = self.cmd_tx.send(EngineCommand::SetScreenShareMode(mode));
+    }
+
+    pub fn push_to_talk(&self, active: bool) {
+        let _ = self.cmd_tx.send(EngineCommand::PushToTalk(active));
+    }
+
+    pub fn participant_action(&self, token: String) {
+        let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
+    }
+
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(EngineCommand::SendRoomMessage(message));
+    }
+
+    pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
+        let _ = self
+            .cmd_tx
+            .send(EngineCommand::RefreshRemoteAudio(key, recovery));
+    }
+
+    pub fn close(&self) {
+        let _ = self.cmd_tx.send(EngineCommand::Close);
+    }
+}
+
+fn remote_frame_key(mid: &str) -> u64 {
+    track_frame_key("__sfu_remote__", mid)
+}
+
+struct SlotState<A> {
+    generation: u64,
+    assignment: Option<A>,
+}
+
+#[derive(Default)]
+struct Membership {
+    fixed_pool: bool,
+    layout: MidLayout,
+    slots: HashMap<u32, SlotState<SlotAssignment>>,
+    pool_slots: HashMap<(RemoteKind, u32), SlotState<PoolSlotAssignment>>,
+    self_peer_id: u32,
+    by_peer: HashMap<u32, SnapshotMember>,
+    peer_by_mid: HashMap<String, u32>,
+    user_by_mid: HashMap<String, String>,
+    live_tracks: HashMap<u64, mid::TrackBinding>,
+    video_receipts: HashMap<u64, Arc<FrameReceipt>>,
+    retired_mids: HashMap<String, mid::MsidOccupant>,
+}
+
+impl Membership {
+    fn apply(&mut self, mut member: SnapshotMember) {
+        let seeded = member
+            .slot
+            .filter(|slot| *slot != u32::MAX)
+            .map(|slot| SlotAssignment {
+                slot,
+                generation: member.assignment_generation,
+                peer_id: member.peer_id,
+                user_id: member.user_id.clone(),
+                mid_audio: member.mid_audio,
+                mid_video: member.mid_video,
+                mid_screen: member.mid_screen,
+                audio_active: true,
+                video_active: member.camera_active,
+                screen_active: member.is_sharing_screen(),
+            });
+        let pooled: Vec<PoolSlotAssignment> = member
+            .media_slots
+            .iter()
+            .flat_map(|slots| slots.entries())
+            .map(|(kind, granted)| PoolSlotAssignment {
+                kind,
+                slot: granted.slot,
+                generation: granted.generation,
+                mid: granted.mid,
+                peer_id: member.peer_id,
+                user_id: member.user_id.clone(),
+                active: true,
+            })
+            .collect();
+        let [audio, camera, screen] = self.mids_of(member.peer_id);
+        if member.mid_audio == 0 {
+            member.mid_audio = audio;
+        }
+        if member.mid_video == 0 {
+            member.mid_video = camera;
+        }
+        if member.mid_screen == 0 {
+            member.mid_screen = screen;
+        }
+        let peer_id = member.peer_id;
+        if member.metadata.is_empty()
+            && let Some(previous) = self.by_peer.get(&peer_id)
+            && previous.user_id == member.user_id
+        {
+            member.metadata.clone_from(&previous.metadata);
+        }
+        let user_id = member.user_id.clone();
+        let mids = member_mids(&member);
+        self.by_peer.insert(peer_id, member);
+        if let Some(assignment) = seeded {
+            self.assign_slot(assignment, true);
+        }
+        for assignment in pooled {
+            self.assign_pool_slot(assignment, true);
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
+        for (mid, _) in mids {
+            self.claim(peer_id, &mid);
+            if !user_id.is_empty() {
+                self.user_by_mid.insert(mid, user_id.clone());
+            }
+        }
+    }
+
+    fn assign_slot(&mut self, assignment: SlotAssignment, membership: bool) -> bool {
+        if assignment.mids().is_none() {
+            return false;
+        }
+        if let Some(previous) = self.slots.get(&assignment.slot) {
+            if previous.generation > assignment.generation
+                || (membership && previous.generation == assignment.generation)
+                || (previous.generation == assignment.generation
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
+            {
+                return false;
+            }
+        }
+        if !membership {
+            self.fixed_pool = true;
+        }
+        let member = self
+            .by_peer
+            .entry(assignment.peer_id)
+            .or_insert_with(|| SnapshotMember {
+                peer_id: assignment.peer_id,
+                ..Default::default()
+            });
+        if !assignment.user_id.is_empty() {
+            member.user_id = assignment.user_id.clone();
+        }
+        self.slots.insert(
+            assignment.slot,
+            SlotState {
+                generation: assignment.generation,
+                assignment: Some(assignment),
+            },
+        );
+        if self.fixed_pool {
+            self.sync_slot_members();
+        }
+        true
+    }
+
+    fn release_slot(&mut self, slot: u32, generation: u64) -> bool {
+        if generation == 0
+            || slot > (u32::MAX - 5) / 3
+            || self
+                .slots
+                .get(&slot)
+                .is_some_and(|previous| previous.generation > generation)
+        {
+            return false;
+        }
+        self.fixed_pool = true;
+        self.slots.insert(
+            slot,
+            SlotState {
+                generation,
+                assignment: None,
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn assign_pool_slot(&mut self, assignment: PoolSlotAssignment, membership: bool) -> bool {
+        let MidLayout::Pools(pools) = self.layout else {
+            return false;
+        };
+        let Some(mid) = pools.mid(assignment.kind, assignment.slot) else {
+            return false;
+        };
+        if assignment.generation == 0
+            || assignment.peer_id == 0
+            || (assignment.mid != 0 && assignment.mid != mid)
+        {
+            return false;
+        }
+        let key = (assignment.kind, assignment.slot);
+        if let Some(previous) = self.pool_slots.get(&key) {
+            if previous.generation > assignment.generation
+                || (membership && previous.generation == assignment.generation)
+                || (previous.generation == assignment.generation
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
+            {
+                return false;
+            }
+        }
+        let member = self
+            .by_peer
+            .entry(assignment.peer_id)
+            .or_insert_with(|| SnapshotMember {
+                peer_id: assignment.peer_id,
+                ..Default::default()
+            });
+        if !assignment.user_id.is_empty() {
+            member.user_id = assignment.user_id.clone();
+        }
+        self.pool_slots.insert(
+            key,
+            SlotState {
+                generation: assignment.generation,
+                assignment: Some(assignment),
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn release_pool_slot(&mut self, kind: RemoteKind, slot: u32, generation: u64) -> bool {
+        let MidLayout::Pools(pools) = self.layout else {
+            return false;
+        };
+        if generation == 0
+            || pools.mid(kind, slot).is_none()
+            || self
+                .pool_slots
+                .get(&(kind, slot))
+                .is_some_and(|previous| previous.generation > generation)
+        {
+            return false;
+        }
+        self.pool_slots.insert(
+            (kind, slot),
+            SlotState {
+                generation,
+                assignment: None,
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn release_pool_slots_of(&mut self, peer_id: u32) {
+        let held: Vec<_> = self
+            .pool_slots
+            .iter()
+            .filter(|(_, state)| matches!(&state.assignment, Some(a) if a.peer_id == peer_id))
+            .map(|(&(kind, slot), state)| (kind, slot, state.generation))
+            .collect();
+        for (kind, slot, generation) in held {
+            self.release_pool_slot(kind, slot, generation);
+        }
+    }
+
+    fn sync_slot_members(&mut self) {
+        self.peer_by_mid.clear();
+        self.user_by_mid.clear();
+        self.retired_mids.clear();
+        for member in self.by_peer.values_mut() {
+            member.mid_audio = 0;
+            member.mid_video = 0;
+            member.mid_screen = 0;
+        }
+        for state in self.slots.values() {
+            let Some(a) = &state.assignment else {
+                continue;
+            };
+            let Some(mids) = a.mids() else {
+                continue;
+            };
+            let Some(member) = self.by_peer.get_mut(&a.peer_id) else {
+                continue;
+            };
+            for mid in mids {
+                self.peer_by_mid.insert(mid.to_string(), a.peer_id);
+                self.user_by_mid
+                    .insert(mid.to_string(), member.user_id.clone());
+            }
+            member.mid_audio = if a.audio_active { mids[0] } else { 0 };
+            member.mid_video = if a.video_active { mids[1] } else { 0 };
+            member.mid_screen = if a.screen_active { mids[2] } else { 0 };
+            member.camera_active = a.video_active;
+            member.screen_active = a.screen_active;
+            member.screen_requested = Some(a.screen_active);
+        }
+        let MidLayout::Pools(pools) = self.layout else {
+            return;
+        };
+        for (&(kind, slot), state) in &self.pool_slots {
+            let Some(a) = &state.assignment else {
+                continue;
+            };
+            let Some(mid) = pools.mid(kind, slot) else {
+                continue;
+            };
+            let Some(member) = self.by_peer.get_mut(&a.peer_id) else {
+                continue;
+            };
+            self.peer_by_mid.insert(mid.to_string(), a.peer_id);
+            self.user_by_mid
+                .insert(mid.to_string(), member.user_id.clone());
+            match kind {
+                RemoteKind::Audio => member.mid_audio = if a.active { mid } else { 0 },
+                RemoteKind::Camera => member.mid_video = mid,
+                RemoteKind::Screen => member.mid_screen = mid,
+            }
+        }
+    }
+
+    fn slot_active(&self, mid: &str) -> bool {
+        let Some(remote) = self.layout.classify(mid) else {
+            return false;
+        };
+        if matches!(self.layout, MidLayout::Pools(_)) {
+            return self
+                .pool_slots
+                .get(&(remote.kind, remote.slot))
+                .and_then(|state| state.assignment.as_ref())
+                .is_some_and(|a| a.active || remote.kind != RemoteKind::Audio);
+        }
+        let Ok(number) = mid.parse::<u32>() else {
+            return false;
+        };
+        let Some(a) = self
+            .slots
+            .get(&((number - 3) / 3))
+            .and_then(|state| state.assignment.as_ref())
+        else {
+            return false;
+        };
+        [a.audio_active, a.video_active, a.screen_active][kind_index(remote.kind)]
+    }
+
+    fn mids_of(&self, peer_id: u32) -> [u32; 3] {
+        let mut mids = [0u32; 3];
+        for (mid, owner) in &self.peer_by_mid {
+            if *owner != peer_id {
+                continue;
+            }
+            let (Some(remote), Ok(n)) = (self.layout.classify(mid), mid.parse::<u32>()) else {
+                continue;
+            };
+            mids[kind_index(remote.kind)] = n;
+        }
+        mids
+    }
+
+    fn claim(&mut self, peer_id: u32, mid: &str) {
+        let (Some(remote), Ok(n)) = (mid::classify(mid), mid.parse::<u32>()) else {
+            return;
+        };
+        self.peer_by_mid.retain(|other, owner| {
+            *owner != peer_id
+                || other == mid
+                || !matches!(mid::classify(other), Some(r) if r.kind == remote.kind)
+        });
+        self.peer_by_mid.insert(mid.to_owned(), peer_id);
+        for (id, member) in self.by_peer.iter_mut() {
+            let slot = match remote.kind {
+                RemoteKind::Audio => &mut member.mid_audio,
+                RemoteKind::Camera => &mut member.mid_video,
+                RemoteKind::Screen => &mut member.mid_screen,
+            };
+            if *id == peer_id {
+                *slot = n;
+            } else if *slot == n {
+                *slot = 0;
+            }
+        }
+    }
+
+    fn remove_peer(&mut self, peer_id: u32, mids: [u32; 3]) -> Vec<String> {
+        let departed = self.by_peer.remove(&peer_id);
+        let leaving_user = departed.as_ref().map(|member| member.user_id.as_str());
+        let released = mid::mids_to_release(
+            peer_id,
+            mids,
+            &self.peer_by_mid,
+            &self.user_by_mid,
+            leaving_user,
+        );
+        for mid in &released {
+            self.peer_by_mid.remove(mid);
+            let user_id = self.user_by_mid.remove(mid).unwrap_or_default();
+            self.retired_mids
+                .insert(mid.clone(), mid::MsidOccupant { peer_id, user_id });
+        }
+        self.peer_by_mid.retain(|_, id| *id != peer_id);
+        released
+    }
+
+    fn absorb_msids(&mut self, sdp: &str) {
+        if sdp.lines().any(|line| line.starts_with("a=msid:slot-")) {
+            self.fixed_pool = true;
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
+        for (mid, occupant) in mid::parse_msid_occupants(sdp) {
+            if self.retired_mids.get(&mid).is_some_and(|retired| {
+                retired.blocks_reactivation(&occupant, self.peer_by_mid.get(&mid).copied())
+            }) {
+                continue;
+            }
+            self.retired_mids.remove(&mid);
+            if occupant.peer_id != 0 {
+                self.claim(occupant.peer_id, &mid);
+            }
+            self.user_by_mid.insert(mid, occupant.user_id);
+        }
+    }
+
+    fn peers(&self) -> Vec<SfuPeer> {
+        let mut peers: Vec<SfuPeer> = self
+            .by_peer
+            .values()
+            .filter(|m| m.peer_id != self.self_peer_id && !m.user_id.is_empty())
+            .map(|m| {
+                let camera_mid = m.mid_video.to_string();
+                let screen_mid = m.mid_screen.to_string();
+                SfuPeer {
+                    peer_id: m.peer_id,
+                    user_id: m.user_id.clone(),
+                    metadata: m.metadata.clone(),
+                    muted: m.is_mute,
+                    is_audience: m.is_audience(),
+                    audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
+                    camera: (m.camera_active && m.mid_video != 0)
+                        .then(|| remote_frame_key(&camera_mid)),
+                    screenshare: (m.is_sharing_screen() && m.mid_screen != 0)
+                        .then(|| remote_frame_key(&screen_mid)),
+                }
+            })
+            .collect();
+        peers.sort_by(|a, b| a.user_id.cmp(&b.user_id).then(a.peer_id.cmp(&b.peer_id)));
+        peers
+    }
+
+    fn active_cameras(&self) -> usize {
+        self.by_peer
+            .values()
+            .filter(|m| m.peer_id != self.self_peer_id && m.camera_active && m.mid_video != 0)
+            .count()
+    }
+}
+
+fn member_mids(member: &SnapshotMember) -> Vec<(String, RemoteKind)> {
+    [
+        (member.mid_audio, RemoteKind::Audio),
+        (member.mid_video, RemoteKind::Camera),
+        (member.mid_screen, RemoteKind::Screen),
+    ]
+    .into_iter()
+    .filter(|(mid, _)| *mid != 0)
+    .map(|(mid, kind)| (mid.to_string(), kind))
+    .collect()
+}
+
+fn kind_index(kind: RemoteKind) -> usize {
+    match kind {
+        RemoteKind::Audio => 0,
+        RemoteKind::Camera => 1,
+        RemoteKind::Screen => 2,
+    }
+}
+
+struct LocalTracks {
+    audio: Option<RtcAudioTrack>,
+    camera: Option<RtcVideoTrack>,
+    screen: Option<ScreenTrack>,
+    screen_audio: bool,
+    muted: bool,
+    mute_revision: u64,
+    ptt_active: bool,
+    ptt_requested: bool,
+}
+
+impl LocalTracks {
+    fn new(muted: bool) -> Self {
+        Self {
+            audio: None,
+            camera: None,
+            screen: None,
+            screen_audio: false,
+            muted,
+            mute_revision: 0,
+            ptt_active: false,
+            ptt_requested: false,
+        }
+    }
+
+    fn microphone_open(&self, role: SfuRole) -> bool {
+        match role {
+            SfuRole::Speaker => !self.muted,
+            SfuRole::Audience => self.ptt_active,
+        }
+    }
+
+    fn uplink_open(&self, role: SfuRole) -> bool {
+        self.microphone_open(role) || self.screen_audio
+    }
+
+    fn resumes_push_to_talk(&self, role: SfuRole) -> bool {
+        role == SfuRole::Audience && self.ptt_requested
+    }
+
+    fn announced_mute(&self, role: SfuRole) -> bool {
+        self.muted && !self.resumes_push_to_talk(role)
+    }
+
+    fn apply_audio_gate(&self, pc: Option<&PeerConnection>, role: SfuRole) {
+        let flowing = self.uplink_open(role);
+        if flowing {
+            set_audio_encoding_active(pc, true);
+        }
+        if let Some(track) = &self.audio {
+            track.set_enabled(flowing);
+        }
+        if !flowing {
+            set_audio_encoding_active(pc, false);
+        }
+    }
+}
+
+fn set_audio_encoding_active(pc: Option<&PeerConnection>, active: bool) {
+    let Some(pc) = pc else {
+        return;
+    };
+    for transceiver in pc.transceivers() {
+        if transceiver.mid().as_deref() != Some(MID_AUDIO) {
+            continue;
+        }
+        let sender = transceiver.sender();
+        let mut parameters = sender.parameters();
+        if parameters.encodings.is_empty()
+            || parameters.encodings.iter().all(|e| e.active == active)
+        {
+            return;
+        }
+        for encoding in parameters.encodings.iter_mut() {
+            encoding.active = active;
+        }
+        match sender.set_parameters(parameters) {
+            Ok(()) => tracing::info!(active, "audio uplink encoding gated"),
+            Err(e) => tracing::warn!("audio uplink encoding active={active} rejected: {e}"),
+        }
+        return;
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LocalRoutes(Vec<IpAddr>);
+
+impl LocalRoutes {
+    fn probe() -> Self {
+        let mut addresses: Vec<IpAddr> = ROUTE_PROBE_TARGETS
+            .into_iter()
+            .filter_map(route_source_address)
+            .map(stable_prefix)
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        Self(addresses)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn describe(&self) -> String {
+        if self.0.is_empty() {
+            return "-".to_owned();
+        }
+        self.0
+            .iter()
+            .map(IpAddr::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn stable_prefix(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
+
+fn route_source_address(target: &str) -> Option<IpAddr> {
+    let target: SocketAddr = target.parse().ok()?;
+    let bind = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let socket = UdpSocket::bind(bind).ok()?;
+    socket.connect(target).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_unspecified()).then_some(address)
+}
+
+async fn engine_main(
+    mut config: SfuConfig,
+    factory: PeerConnectionFactory,
+    cmd_rx: flume::Receiver<EngineCommand>,
+    evt_tx: &flume::Sender<SfuEvent>,
+) -> Result<()> {
+    let mut local = LocalTracks::new(config.muted);
+    let mut attempts: u32 = 0;
+    let mut token_refreshes: u32 = 0;
+    let mut ever_joined = false;
+    let mut ever_connected = false;
+    let mut retiring = ClosingPeerConnection(None);
+    let mut first_session = true;
+    let mut token_rejected = false;
+    let mut auth_rejections = 0u32;
+
+    loop {
+        if !first_session {
+            let role = config.role;
+            let refresh = ensure_fresh_token(&mut config, &mut token_refreshes, token_rejected);
+            tokio::pin!(refresh);
+            let ready = loop {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv_async() => match command {
+                        Ok(EngineCommand::Close) | Err(_) => {
+                            let _ = evt_tx.send(SfuEvent::Disconnected { reason: "left".into() });
+                            return Ok(());
+                        }
+                        Ok(other) => apply_offline_command(other, &mut local, role, evt_tx),
+                    },
+                    ready = &mut refresh => break ready,
+                }
+            };
+            if !ready {
+                let _ = evt_tx.send(SfuEvent::Disconnected {
+                    reason: if token_rejected {
+                        "invalid_token: SFU token refresh failed".into()
+                    } else {
+                        "SFU token refresh failed".into()
+                    },
+                });
+                return Ok(());
+            }
+            token_rejected = false;
+        }
+        first_session = false;
+        let (joined, reason) = match run_session(
+            &config,
+            &factory,
+            &mut local,
+            &cmd_rx,
+            evt_tx,
+            ever_joined,
+            &mut ever_connected,
+            &mut attempts,
+            &mut retiring.0,
+        )
+        .await
+        {
+            SessionOutcome::Closed => {
+                let _ = evt_tx.send(SfuEvent::Disconnected {
+                    reason: "left".into(),
+                });
+                return Ok(());
+            }
+            SessionOutcome::Fatal(reason) => {
+                let _ = evt_tx.send(SfuEvent::Disconnected { reason });
+                return Ok(());
+            }
+            SessionOutcome::Removed { cause, reason } => {
+                let _ = evt_tx.send(SfuEvent::Removed {
+                    cause,
+                    reason: reason.clone(),
+                });
+                let _ = evt_tx.send(SfuEvent::Disconnected { reason });
+                return Ok(());
+            }
+            SessionOutcome::RefreshToken { joined, reason } => {
+                auth_rejections += 1;
+                if auth_rejections >= 2 {
+                    tracing::warn!(auth_rejections, %reason, "SFU rejected both the original and refreshed join tokens");
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: format!("{reason}: refreshed token was also rejected"),
+                    });
+                    return Ok(());
+                }
+                token_rejected = true;
+                (joined, reason)
+            }
+            SessionOutcome::Dropped { joined, reason }
+            | SessionOutcome::Retryable { joined, reason } => (joined, reason),
+        };
+
+        if local.ptt_active {
+            local.ptt_active = false;
+            local.apply_audio_gate(None, config.role);
+            let _ = evt_tx.send(SfuEvent::PttActive(false));
+        }
+
+        ever_joined |= joined;
+        if joined {
+            token_refreshes = 0;
+            auth_rejections = 0;
+        }
+        let _ = evt_tx.send(SfuEvent::Reconnecting);
+        if LocalRoutes::probe().is_empty() {
+            tracing::warn!(
+                "sfu link dropped ({reason}); parking until the machine has a route again"
+            );
+            match wait_for_local_route(&cmd_rx, &mut local, config.role, evt_tx).await {
+                OfflineWait::Closed => {
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: "left".into(),
+                    });
+                    return Ok(());
+                }
+                OfflineWait::Online => {}
+            }
+        }
+        attempts += 1;
+        if attempts > attempt_cap(ever_joined) {
+            let _ = evt_tx.send(SfuEvent::Disconnected {
+                reason: "reconnect attempts exhausted".into(),
+            });
+            return Ok(());
+        }
+        tracing::warn!("sfu link dropped ({reason}); retry {attempts}");
+        if !wait_before_reconnect(
+            &cmd_rx,
+            &mut local,
+            config.role,
+            evt_tx,
+            sfu_reconnect_delay(attempts - 1),
+        )
+        .await
+        {
+            let _ = evt_tx.send(SfuEvent::Disconnected {
+                reason: "left".into(),
+            });
+            return Ok(());
+        }
+    }
+}
+
+async fn wait_before_reconnect(
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+    delay: Duration,
+) -> bool {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv_async() => match command {
+                Ok(EngineCommand::Close) | Err(_) => return false,
+                Ok(other) => apply_offline_command(other, local, role, evt_tx),
+            },
+            _ = &mut sleep => return true,
+        }
+    }
+}
+
+enum OfflineWait {
+    Online,
+    Closed,
+}
+
+async fn wait_for_local_route(
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+) -> OfflineWait {
+    let mut timer = tokio::time::interval(NET_PATH_POLL);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut quiet_ticks: u32 = 0;
+    loop {
+        tokio::select! {
+            command = cmd_rx.recv_async() => {
+                match command {
+                    Ok(EngineCommand::Close) | Err(_) => return OfflineWait::Closed,
+                    Ok(other) => apply_offline_command(other, local, role, evt_tx),
+                }
+            }
+            _ = timer.tick() => {
+                if !LocalRoutes::probe().is_empty() {
+                    tracing::info!("machine has a route again; resuming the sfu session");
+                    return OfflineWait::Online;
+                }
+                quiet_ticks = quiet_ticks.saturating_add(1);
+                if quiet_ticks >= RECONNECTING_HEARTBEAT_TICKS {
+                    quiet_ticks = 0;
+                    let _ = evt_tx.send(SfuEvent::Reconnecting);
+                }
+            }
+        }
+    }
+}
+
+fn apply_offline_command(
+    command: EngineCommand,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+) {
+    match command {
+        EngineCommand::SetLocalAudio(track) => local.audio = track,
+        EngineCommand::SetLocalCamera(track) => local.camera = track,
+        EngineCommand::SetLocalScreen(screen) => local.screen = screen,
+        EngineCommand::SetMute(muted) => local.muted = muted,
+        EngineCommand::SetScreenAudio(active) => local.screen_audio = active,
+        EngineCommand::SetScreenShareMode(mode) => {
+            if let Some(screen) = local.screen.as_mut() {
+                screen.mode = mode;
+            }
+        }
+        EngineCommand::PushToTalk(active) => {
+            local.ptt_requested = active;
+            if !active {
+                local.ptt_active = false;
+                let _ = evt_tx.send(SfuEvent::PttActive(false));
+            }
+        }
+        EngineCommand::SendRoomMessage(_) => {
+            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+        }
+        EngineCommand::SetCameraActive(_)
+        | EngineCommand::SetScreenActive(_)
+        | EngineCommand::ParticipantAction(_)
+        | EngineCommand::RefreshRemoteAudio(_, _)
+        | EngineCommand::Close => {}
+    }
+    local.apply_audio_gate(None, role);
+}
+
+fn token_refresh_budget_spent(refreshes: u32) -> bool {
+    refreshes >= MEET_TOKEN_RETRY_LIMIT
+}
+
+async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32, rejected: bool) -> bool {
+    let remaining = token_seconds_left(&config.token);
+    if !rejected && remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
+        return true;
+    }
+    let Some(refresher) = config.refresh_token.clone() else {
+        return !rejected;
+    };
+    if token_refresh_budget_spent(*refreshes) {
+        return !rejected;
+    }
+    *refreshes += 1;
+    match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, refresher.mint()).await {
+        Ok(Some(fresh)) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
+            config.token = fresh;
+            true
+        }
+        _ => !rejected,
+    }
+}
+
+fn token_seconds_left(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(exp - now)
+}
+
+fn attempt_cap(ever_joined: bool) -> u32 {
+    if ever_joined {
+        MAX_RECONNECT_ATTEMPTS
+    } else {
+        MAX_INITIAL_CONNECT_ATTEMPTS
+    }
+}
+
+fn connection_announcement(ever_connected: &mut bool, room: &str) -> SfuEvent {
+    if std::mem::replace(ever_connected, true) {
+        SfuEvent::Reconnected
+    } else {
+        SfuEvent::Connected {
+            room: room.to_owned(),
+        }
+    }
+}
+
+enum SessionOutcome {
+    Closed,
+    Fatal(String),
+    Removed { cause: RemovalCause, reason: String },
+    Retryable { joined: bool, reason: String },
+    Dropped { joined: bool, reason: String },
+    RefreshToken { joined: bool, reason: String },
+}
+
+struct ClosingPeerConnection(Option<PeerConnection>);
+
+impl Drop for ClosingPeerConnection {
+    fn drop(&mut self) {
+        if let Some(pc) = self.0.take() {
+            pc.close();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    config: &SfuConfig,
+    factory: &PeerConnectionFactory,
+    local: &mut LocalTracks,
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    evt_tx: &flume::Sender<SfuEvent>,
+    resuming: bool,
+    ever_connected: &mut bool,
+    attempts: &mut u32,
+    retiring: &mut Option<PeerConnection>,
+) -> SessionOutcome {
+    // Close the active transport even if the store cancels this session while
+    // signaling/negotiation is pending. Dropping a PC wrapper alone is not Close.
+    let mut pc = ClosingPeerConnection(None);
+    let outcome = session_loop(
+        config,
+        factory,
+        local,
+        cmd_rx,
+        evt_tx,
+        resuming,
+        ever_connected,
+        attempts,
+        &mut pc.0,
+        retiring,
+    )
+    .await;
+    // Each retry starts with fresh SDP/ICE/DTLS. Never retain a failed PC during backoff.
+    if let Some(previous) = retiring.take() {
+        previous.close();
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn session_loop(
+    config: &SfuConfig,
+    factory: &PeerConnectionFactory,
+    local: &mut LocalTracks,
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    evt_tx: &flume::Sender<SfuEvent>,
+    resuming: bool,
+    ever_connected: &mut bool,
+    attempts: &mut u32,
+    pc: &mut Option<PeerConnection>,
+    retiring: &mut Option<PeerConnection>,
+) -> SessionOutcome {
+    let url = build_ws_url(&config.ws_url, &config.token);
+    let ws = match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, connect_async(url.as_str()))
+        .await
+    {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
+            return SessionOutcome::Dropped {
+                joined: false,
+                reason: format!("websocket connect failed: {e}"),
+            };
+        }
+        Err(_) => {
+            return SessionOutcome::Dropped {
+                joined: false,
+                reason: "websocket connect timed out".into(),
+            };
+        }
+    };
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    tracing::info!(role = config.role.wire(), room = %config.room, "sfu websocket connected");
+
+    let join = ClientMessage::Join {
+        room: config.room.clone(),
+        token: config.token.clone(),
+        role: config.role.wire(),
+        screen_codec: SCREEN_CODEC,
+        media_pool_version: MEDIA_POOL_VERSION,
+    };
+    if let Err(e) = send(&mut ws_tx, &join).await {
+        return SessionOutcome::Dropped {
+            joined: false,
+            reason: format!("join send failed: {e}"),
+        };
+    }
+
+    let mut membership = Membership::default();
+    let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
+    let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
+    let mut screen_recovery = ScreenRecovery::default();
+    let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
+    let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
+    let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
+    let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
+    stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_quality = NetworkQuality::default();
+    let mut network_weak = false;
+    let mut pending_offer: Option<(u64, String)> = None;
+    let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
+    let mut mute_sync = MuteSync::default();
+    let mut tiers = PublishTiers::default();
+    let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
+    let mut screen_adaptation = ScreenAdaptation::default();
+    let mut media_wait_started: Option<Instant> = None;
+    let mut ice_up_since: Option<Instant> = None;
+    let mut transport_connected = false;
+    let mut disconnected_since: Option<Instant> = None;
+    let mut media_up_since: Option<Instant> = None;
+    let mut budget_reset = false;
+    let mut connect_timer = tokio::time::interval(CONNECT_POLL);
+    connect_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut routes = LocalRoutes::probe();
+    let mut route_candidate: Option<LocalRoutes> = None;
+    let mut offline_ticks: u32 = 0;
+    let mut link_down = false;
+    let mut net_path_timer = tokio::time::interval(NET_PATH_POLL);
+    net_path_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut announced_state = false;
+    let mut announced_connection = false;
+    let mut joined_room = config.room.clone();
+    let mut joined = false;
+    let session_started = Instant::now();
+    let mut last_signaling_received = session_started;
+
+    loop {
+        if joined && transport_connected && !announced_connection {
+            announced_connection = true;
+            let _ = evt_tx.send(connection_announcement(ever_connected, &joined_room));
+        }
+        let now = Instant::now();
+        membership
+            .video_receipts
+            .retain(|key, _| membership.live_tracks.contains_key(key));
+        let screens = membership
+            .by_peer
+            .values()
+            .filter_map(|member| {
+                if member.peer_id == 0
+                    || member.peer_id == membership.self_peer_id
+                    || !member.is_sharing_screen()
+                    || member.mid_screen == 0
+                {
+                    return None;
+                }
+                let mid = member.mid_screen.to_string();
+                let key = remote_frame_key(&mid);
+                let binding = membership.live_tracks.get(&key)?;
+                if binding.peer_id != Some(member.peer_id)
+                    || membership.peer_by_mid.get(&mid) != Some(&member.peer_id)
+                    || membership.retired_mids.contains_key(&mid)
+                {
+                    return None;
+                }
+                Some(ScreenSource {
+                    key,
+                    publisher: member.peer_id,
+                    receipt: membership.video_receipts.get(&key)?.clone(),
+                })
+            })
+            .collect();
+        screen_recovery.update(screens, &config.screen_views.snapshot(), now);
+        // Negotiation is awaited in this loop; never request while an offer is queued.
+        // The existing 250 ms connection timer also services these bounded retries.
+        let can_request_keyframe = joined
+            && transport_connected
+            && pending_offer.is_none()
+            && offer_reissue_deadline.is_none()
+            && pc.as_ref().is_some_and(|pc| {
+                pc.connection_state() == PeerConnectionState::Connected
+                    && pc.signaling_state() == SignalingState::Stable
+            });
+        if can_request_keyframe && let Some(publisher_id) = screen_recovery.next_request(now) {
+            let request = ClientMessage::RequestKeyframe {
+                kind: "screen",
+                publisher_id,
+            };
+            if send(&mut ws_tx, &request).await.is_err() {
+                tracing::warn!(publisher_id, "sfu keyframe request send failed");
+                return SessionOutcome::Dropped {
+                    joined,
+                    reason: "keyframe request send failed".into(),
+                };
+            }
+            screen_recovery.sent(publisher_id, Instant::now());
+        }
+        tokio::select! {
+            biased;
+            incoming = ws_rx.next() => {
+                let Some(frame) = incoming else {
+                    return SessionOutcome::Dropped { joined, reason: "websocket closed".into() };
+                };
+                last_signaling_received = Instant::now();
+                let text = match frame {
+                    Ok(Message::Text(text)) => text,
+                    Ok(Message::Ping(payload)) => {
+                        if send_frame(&mut ws_tx, Message::Pong(payload)).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "websocket pong send failed".into() };
+                        }
+                        continue;
+                    }
+                    Ok(Message::Close(frame)) => {
+                        let code = frame.as_ref().map(|f| f.code);
+                        let frame_reason = frame.as_ref().map(|f| f.reason.to_string());
+                        let reason = close_reason(code, frame_reason.as_deref());
+                        let verdict = classify_close(code);
+                        tracing::info!(
+                            code = code.map(u16::from),
+                            ?frame_reason,
+                            %reason,
+                            ?verdict,
+                            "sfu closed the link"
+                        );
+                        return match verdict {
+                            CloseVerdict::Retry => SessionOutcome::Retryable { joined, reason },
+                            CloseVerdict::RefreshToken => SessionOutcome::RefreshToken { joined, reason },
+                            CloseVerdict::Removed(cause) => SessionOutcome::Removed { cause, reason },
+                        };
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        return SessionOutcome::Dropped { joined, reason: format!("websocket error: {e}") };
+                    }
+                };
+                let message: ServerMessage = match serde_json::from_str(&text) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        tracing::warn!("sfu sent an unparsable frame: {e}");
+                        continue;
+                    }
+                };
+
+                match message {
+                    ServerMessage::Ping => {
+                        if send(&mut ws_tx, &ClientMessage::Pong).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "pong send failed".into() };
+                        }
+                    }
+                    ServerMessage::Pong => {}
+                    ServerMessage::Joined {
+                        room,
+                        ice_servers,
+                        media_pool_mode,
+                        max_audio_slots,
+                        max_camera_slots,
+                        max_screen_slots,
+                    } => {
+                        if media_pool_mode == "decoupled" {
+                            membership.layout = MidLayout::Pools(PoolLayout {
+                                audio: max_audio_slots,
+                                camera: max_camera_slots,
+                                screen: max_screen_slots,
+                            });
+                            membership.fixed_pool = true;
+                        }
+                        tracing::info!(%room, ice_servers = ice_servers.len(), layout = ?membership.layout, "sfu accepted join");
+                        joined_room = room;
+                        match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
+                            Ok(created) => {
+                                let attempt = *attempts;
+                                let media_tx = remote_media_tx.clone();
+                                created.on_track(Some(Box::new(move |_| {
+                                    let _ = media_tx.try_send(());
+                                })));
+                                let state_tx = transport_state_tx.clone();
+                                created.on_connection_state_change(Some(Box::new(move |state| {
+                                    tracing::info!(attempt, ?state, "sfu transport state");
+                                    let _ = state_tx.send(state);
+                                })));
+                                let ice_tx = ice_state_tx.clone();
+                                created.on_ice_connection_state_change(Some(Box::new(move |state| {
+                                    tracing::info!(attempt, ?state, "sfu ice state");
+                                    let _ = ice_tx.send(state);
+                                })));
+                                created.on_ice_gathering_state_change(Some(Box::new(|state| {
+                                    tracing::info!(?state, "sfu ice gathering");
+                                })));
+                                created.on_ice_candidate_error(Some(Box::new(|error| {
+                                    tracing::warn!(
+                                        url = %error.url,
+                                        code = error.error_code,
+                                        text = %error.error_text,
+                                        "sfu ice candidate error"
+                                    );
+                                })));
+                                *pc = Some(created);
+                                media_wait_started = Some(Instant::now());
+                                ice_up_since = None;
+                                transport_connected = false;
+                            }
+                            Err(e) => {
+                                return SessionOutcome::Fatal(format!("peer connection setup failed: {e:#}"));
+                            }
+                        }
+                    }
+                    ServerMessage::Offer { offer_generation, sdp } => {
+                        pending_offer = Some((offer_generation, sdp));
+                        offer_reissue_deadline = None;
+                    }
+                    ServerMessage::RoomSnapshot { self_peer_id, members } => {
+                        tracing::info!(members = members.len(), "sfu room snapshot");
+                        membership.self_peer_id = self_peer_id;
+                        joined = true;
+                        for member in members {
+                            membership.apply(member);
+                        }
+                        if !announced_state {
+                            announced_state = true;
+                            if announce_initial_state(&mut ws_tx, config, local, &mut mute_sync).await.is_err() {
+                                return SessionOutcome::Dropped { joined, reason: "initial state send failed".into() };
+                            }
+                        }
+                        let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                        let _ = evt_tx.send(SfuEvent::RoomSnapshot);
+                    }
+                    ServerMessage::PeerJoined { peer } => {
+                        if let Some(peer) = peer {
+                            membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::PeerUpdated { peer } => {
+                        if let Some(peer) = peer {
+                            if joined && peer.peer_id == membership.self_peer_id {
+                                mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
+                            }
+                            membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::SlotAssigned(assigned) => {
+                        let changed = match assigned {
+                            AssignedSlot::Triple(assignment) => membership.assign_slot(assignment, false),
+                            AssignedSlot::Pool(assignment) => membership.assign_pool_slot(assignment, false),
+                        };
+                        if changed {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::SlotReleased { kind, slot, generation } => {
+                        let changed = match kind {
+                            Some(kind) => membership.release_pool_slot(kind, slot, generation),
+                            None => membership.release_slot(slot, generation),
+                        };
+                        if changed {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen, assignment_generation } => {
+                        if membership.fixed_pool {
+                            if assignment_generation > 0 && membership.slots.values().any(|state| {
+                                state.generation > assignment_generation && state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                            }) { continue; }
+                            let slots: Vec<_> = membership.slots.iter().filter_map(|(slot, state)| {
+                                (state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                                    && (assignment_generation == 0 || state.generation == assignment_generation))
+                                    .then_some((*slot, state.generation))
+                            }).collect();
+                            for (slot, generation) in slots { membership.release_slot(slot, generation); }
+                            membership.release_pool_slots_of(peer_id);
+                            membership.by_peer.remove(&peer_id);
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            continue;
+                        }
+                        let released = membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]);
+                        tracing::info!(peer_id, ?released, remaining_peers = membership.by_peer.len(),
+                            "sfu peer left; retiring only its remote media");
+                        for mid in released {
+                            let key = remote_frame_key(&mid);
+                            audio_recovery.remove(&key);
+                            if membership.live_tracks.remove(&key).is_some() {
+                                let _ = evt_tx.send(SfuEvent::RemoteGone { key });
+                            }
+                        }
+                        let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                    }
+                    ServerMessage::PushToTalkChanged { active } => {
+                        tracing::info!(active, "sfu push-to-talk grant changed");
+                        let active = active && local.ptt_requested;
+                        local.ptt_active = active;
+                        local.apply_audio_gate(pc.as_ref(), config.role);
+                        let _ = evt_tx.send(SfuEvent::PttActive(active));
+                    }
+                    ServerMessage::MuteChanged { is_mute } => {
+                        mute_sync.acknowledge(is_mute);
+                    }
+                    ServerMessage::RoomMessage { message } => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessage(message));
+                    }
+                    ServerMessage::MessageSent => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessageSent);
+                    }
+                    ServerMessage::KeyframeRequested { .. }
+                    | ServerMessage::VisibilityChanged { .. }
+                    | ServerMessage::RoleChanged { .. }
+                    | ServerMessage::Unknown => {}
+                    ServerMessage::Error { message } => {
+                        if screen_recovery.is_recent_request_error(&message, Instant::now()) {
+                            tracing::warn!(%message, "sfu keyframe request rejected");
+                            continue;
+                        }
+                        if message == "invalid_message" {
+                            tracing::warn!("sfu rejected a room message");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+                            continue;
+                        }
+                        if matches!(message.as_str(), "invalid_push_to_talk" | "push_to_talk_rejected") {
+                            local.ptt_active = false;
+                            local.apply_audio_gate(pc.as_ref(), config.role);
+                            let _ = evt_tx.send(SfuEvent::PttActive(false));
+                            continue;
+                        }
+                        if matches!(message.as_str(), "stale_offer_generation" | "future_offer_generation") {
+                            if pending_offer.is_some() {
+                                tracing::info!(%message, joined, "sfu rejected an older answer; answering the newer offer");
+                                continue;
+                            }
+                            tracing::info!(%message, joined, "sfu rejected the answer generation; waiting for the reissued offer");
+                            offer_reissue_deadline
+                                .get_or_insert_with(|| tokio::time::Instant::now() + OFFER_REISSUE_DEADLINE);
+                            continue;
+                        }
+                        if joined
+                            && matches!(
+                                message.as_str(),
+                                "invalid_token"
+                                    | "token_room_mismatch"
+                                    | "target_not_found"
+                                    | "invalid_participant_action"
+                                    | "unsupported_participant_action"
+                                    | "auth_not_configured"
+                            )
+                        {
+                            tracing::warn!(%message, "sfu rejected the participant action");
+                            continue;
+                        }
+                        let refusal = match message.as_str() {
+                            "camera_capacity_full" => Some(MediaRefusal::CameraLimit),
+                            "screen_share_capacity_full" => Some(MediaRefusal::ScreenShareLimit),
+                            "camera_update_failed" => Some(MediaRefusal::CameraUpdateFailed),
+                            "screen_share_update_failed" => Some(MediaRefusal::ScreenShareUpdateFailed),
+                            _ => None,
+                        };
+                        if let Some(refusal) = refusal {
+                            tracing::warn!(%message, "sfu refused the media request");
+                            let _ = evt_tx.send(SfuEvent::MediaRefused(refusal));
+                            continue;
+                        }
+                        tracing::warn!(%message, joined, "sfu reported an error");
+                        if matches!(message.as_str(), "invalid_token" | "missing_token") {
+                            return SessionOutcome::RefreshToken { joined, reason: message };
+                        }
+                        let _ = evt_tx.send(SfuEvent::Error(message.clone()));
+                        if joined || resuming {
+                            return SessionOutcome::Dropped { joined, reason: message };
+                        }
+                        return SessionOutcome::Fatal(message);
+                    }
+                }
+            }
+            command = cmd_rx.recv_async() => {
+                let Ok(command) = command else {
+                    return SessionOutcome::Closed;
+                };
+                match command {
+                    EngineCommand::Close => {
+                        if let Some(pc) = &*pc {
+                            pc.close();
+                        }
+                        let _ = send_frame(&mut ws_tx, Message::Close(None)).await;
+                        return SessionOutcome::Closed;
+                    }
+                    EngineCommand::RefreshRemoteAudio(key, recovery) => {
+                        if !recovery.still_stalled() || !membership.live_tracks.contains_key(&key) {
+                            audio_recovery.remove(&key);
+                            continue;
+                        }
+                        if let Some(peer_connection) = pc.as_ref() {
+                            if transport_connected {
+                                if recovery_stats.as_ref().is_none_or(|(at, _)| at.elapsed() >= MEDIA_STATS_INTERVAL) {
+                                    let stats = tokio::time::timeout(STATS_TIMEOUT, peer_connection.get_stats())
+                                        .await.ok().and_then(|result| result.ok());
+                                    recovery_stats = Some((Instant::now(), stats));
+                                }
+                                for stat in recovery_stats.as_ref().and_then(|(_, stats)| stats.as_ref()).into_iter().flatten() {
+                                    if let RtcStats::InboundRtp(inbound) = stat
+                                        && inbound.stream.kind == "audio"
+                                        && remote_frame_key(&inbound.inbound.mid) == key
+                                        && audio_recovery.entry(key).or_default().observe(
+                                            &recovery, &inbound.rtc.id, inbound.received.packets_received,
+                                        )
+                                    {
+                                        tracing::warn!(key, attempt = recovery.attempt,
+                                            "audio RTP is arriving without playback callbacks; restarting the sfu session");
+                                        return SessionOutcome::Dropped {
+                                            joined,
+                                            reason: "audio playback stalled despite incoming RTP".into(),
+                                        };
+                                    }
+                                }
+                            }
+                            if recovery.rebind() && recovery.still_stalled() {
+                                sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            }
+                        }
+                    }
+                    EngineCommand::SetLocalAudio(track) => {
+                        local.audio = track;
+                        local.apply_audio_gate(pc.as_ref(), config.role);
+                        attach_local_tracks(pc.as_ref(), local, config.role);
+                    }
+                    EngineCommand::SetLocalCamera(track) => {
+                        local.camera = track;
+                        attach_local_tracks(pc.as_ref(), local, config.role);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        if let Some(peer_connection) = &*pc {
+                            tune_uplinks(peer_connection, local, tiers);
+                        }
+                    }
+                    EngineCommand::SetLocalScreen(track) => {
+                        local.screen = track;
+                        tiers.screen = 0;
+                        screen_adaptation = ScreenAdaptation::default();
+                        attach_local_tracks(pc.as_ref(), local, config.role);
+                        if let Some(peer_connection) = &*pc {
+                            tune_uplinks(peer_connection, local, tiers);
+                        }
+                    }
+                    EngineCommand::SetScreenShareMode(mode) => {
+                        screen_adaptation = ScreenAdaptation::default();
+                        if let Some(screen) = local.screen.as_mut() {
+                            screen.mode = mode;
+                        }
+                        if let Some(peer_connection) = &*pc {
+                            tune_uplinks(peer_connection, local, tiers);
+                        }
+                    }
+                    EngineCommand::SetMute(muted) => {
+                        mute_sync.cancel_inference();
+                        local.muted = muted;
+                        local.apply_audio_gate(pc.as_ref(), config.role);
+                        if joined && send_mute(&mut ws_tx, local, &mut mute_sync, muted).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
+                        }
+                    }
+                    EngineCommand::SetCameraActive(active) => {
+                        if joined && send(&mut ws_tx, &ClientMessage::Camera { active }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "camera send failed".into() };
+                        }
+                    }
+                    EngineCommand::SetScreenActive(active) => {
+                        if joined && send(&mut ws_tx, &ClientMessage::ShareScreen { active }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
+                        }
+                    }
+                    EngineCommand::SetScreenAudio(active) => {
+                        local.screen_audio = active;
+                        local.apply_audio_gate(pc.as_ref(), config.role);
+                    }
+                    EngineCommand::ParticipantAction(token) => {
+                        if !joined {
+                            tracing::warn!("sfu participant action dropped before the join completed");
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::ParticipantAction { token }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "participant_action send failed".into() };
+                        }
+                    }
+                    EngineCommand::SendRoomMessage(message) => {
+                        if !joined {
+                            tracing::warn!("sfu room message dropped before the join completed");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::SendMessage { message }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "room message send failed".into() };
+                        }
+                    }
+                    EngineCommand::PushToTalk(active) => {
+                        local.ptt_requested = active;
+                        if !active {
+                            local.ptt_active = false;
+                            local.apply_audio_gate(pc.as_ref(), config.role);
+                            let _ = evt_tx.send(SfuEvent::PttActive(false));
+                        }
+                        if !joined {
+                            continue;
+                        }
+                        let ordered: [ClientMessage; 2] = if active {
+                            [ClientMessage::Mute { is_mute: false }, ClientMessage::PushToTalk { active: true }]
+                        } else {
+                            [ClientMessage::PushToTalk { active: false }, ClientMessage::Mute { is_mute: true }]
+                        };
+                        for message in &ordered {
+                            let sent = match message {
+                                ClientMessage::Mute { is_mute } => send_mute(&mut ws_tx, local, &mut mute_sync, *is_mute).await,
+                                _ => send(&mut ws_tx, message).await,
+                            };
+                            if sent.is_err() {
+                                return SessionOutcome::Dropped { joined, reason: "push_to_talk send failed".into() };
+                            }
+                        }
+                    }
+                }
+            }
+            _ = remote_media_rx.recv_async() => {
+                if let Some(peer_connection) = pc.as_ref() {
+                    sync_remote_media(peer_connection, &mut membership, evt_tx, None);
+                    if !membership.live_tracks.is_empty()
+                        && let Some(previous) = retiring.take()
+                    {
+                        previous.close();
+                    }
+                }
+            }
+            state = transport_state_rx.recv_async() => {
+                match state {
+                    Ok(PeerConnectionState::Failed) => {
+                        return SessionOutcome::Dropped {
+                            joined,
+                            reason: "peer connection failed".into(),
+                        };
+                    }
+                    Ok(PeerConnectionState::Connected) => {
+                        transport_connected = true;
+                        media_wait_started = None;
+                        disconnected_since = None;
+                        media_up_since.get_or_insert_with(Instant::now);
+                    }
+                    Ok(PeerConnectionState::Disconnected) => {
+                        media_up_since = None;
+                        transport_connected = false;
+                        media_wait_started.get_or_insert_with(Instant::now);
+                        disconnected_since.get_or_insert_with(Instant::now);
+                    }
+                    Ok(_) => {
+                        if transport_connected {
+                            media_up_since = None;
+                            transport_connected = false;
+                            media_wait_started = Some(Instant::now());
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            ice = ice_state_rx.recv_async() => {
+                if let Ok(state) = ice {
+                    let up = matches!(
+                        state,
+                        IceConnectionState::Connected | IceConnectionState::Completed
+                    );
+                    let changed = up != ice_up_since.is_some();
+                    if up {
+                        ice_up_since.get_or_insert_with(Instant::now);
+                    } else {
+                        ice_up_since = None;
+                    }
+                    if changed && !transport_connected {
+                        media_wait_started = Some(Instant::now());
+                    }
+                }
+            }
+            _ = connect_timer.tick() => {
+                if let Some(revision) = mute_sync.timed_out_revision(Instant::now()) {
+                    tracing::warn!(mute_revision = revision, "sfu mute acknowledgement timed out; resynchronizing the session");
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu mute acknowledgement timed out".into(),
+                    };
+                }
+                if !joined && session_started.elapsed() >= JOIN_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu join or room snapshot timed out".into(),
+                    };
+                }
+                if last_signaling_received.elapsed() >= SIGNALING_IDLE_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu signaling heartbeat timed out".into(),
+                    };
+                }
+                if let Some(since) = disconnected_since {
+                    let waited = since.elapsed();
+                    if waited >= TRANSPORT_DISCONNECTED_GRACE {
+                        tracing::warn!(
+                            waited_ms = waited.as_millis(),
+                            "sfu transport stayed disconnected; restarting the session"
+                        );
+                        return SessionOutcome::Dropped {
+                            joined,
+                            reason: "peer connection stayed disconnected".into(),
+                        };
+                    }
+                }
+                if !budget_reset
+                    && transport_connected
+                    && pc.as_ref().is_some_and(|pc| pc.connection_state() == PeerConnectionState::Connected)
+                    && media_up_since.is_some_and(|since| since.elapsed() >= HEALTHY_SESSION)
+                {
+                    budget_reset = true;
+                    *attempts = 0;
+                }
+                if pc.is_some() && !transport_connected {
+                    let waited = media_wait_started
+                        .get_or_insert_with(Instant::now)
+                        .elapsed();
+                    let ice_up = ice_up_since.is_some();
+                    let limit = if ice_up { DTLS_CONNECT_DEADLINE } else { MEDIA_CONNECT_DEADLINE };
+                    if waited >= limit {
+                        let reason = if ice_up {
+                            "dtls handshake never completed"
+                        } else {
+                            "media transport never connected"
+                        };
+                        tracing::warn!(
+                            ice_up,
+                            waited_ms = waited.as_millis(),
+                            "sfu media transport stalled; dropping the session to reconnect"
+                        );
+                        if let Some(pc) = pc.as_ref()
+                            && let Some(stats) = read_media_stats(pc).await
+                        {
+                            log_media_stats(&stats);
+                        }
+                        return SessionOutcome::Dropped { joined, reason: reason.into() };
+                    }
+                }
+            }
+            _ = stats_timer.tick() => {
+                if let Some(peer_connection) = pc.clone() {
+                    sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
+                    match peer_connection.connection_state() {
+                        PeerConnectionState::Failed => {
+                            return SessionOutcome::Dropped {
+                                joined,
+                                reason: "peer connection failed".into(),
+                            };
+                        }
+                        PeerConnectionState::Disconnected => {
+                            media_up_since = None;
+                            transport_connected = false;
+                            disconnected_since.get_or_insert_with(Instant::now);
+                        }
+                        PeerConnectionState::Connected => disconnected_since = None,
+                        _ => {}
+                    }
+                    let media_stats = read_media_stats(&peer_connection).await;
+                    let stats = media_stats.as_deref().and_then(log_media_stats);
+                    if peer_connection.connection_state() == PeerConnectionState::Connected
+                        && let Some(media_stats) = media_stats.as_deref()
+                    {
+                        let weak = network_quality.update(media_stats);
+                        if weak != network_weak {
+                            network_weak = weak;
+                            let _ = evt_tx.send(SfuEvent::NetworkWeak(weak));
+                        }
+                    }
+                    if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
+                        let profile = screen_profile(screen.mode);
+                        if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
+                            tracing::info!(
+                                mode = ?screen.mode,
+                                target_kbps = sample.target_kbps,
+                                bwe_kbps = sample.bwe_kbps,
+                                available_kbps = sample.available_kbps,
+                                sent_kbps = sample.sent_kbps,
+                                encoded_fps = sample.encoded_fps,
+                                queue_ms = sample.queue_ms,
+                                pli_delta = sample.pli_delta,
+                                tier = tiers.screen,
+                                next_tier = next,
+                                "screen publish interval stats"
+                            );
+                            if next != tiers.screen {
+                                tracing::info!(
+                                    from = tiers.screen,
+                                    to = next,
+                                    target_kbps = sample.target_kbps,
+                                    bwe_kbps = sample.bwe_kbps,
+                                    queue_ms = sample.queue_ms,
+                                    fps_cap = profile[next].fps_cap,
+                                    scale = profile[next].scale_down,
+                                    "screen publish tier changed"
+                                );
+                                tiers.screen = next;
+                                tune_uplinks(&peer_connection, local, tiers);
+                            }
+                        }
+                    } else {
+                        screen_adaptation = ScreenAdaptation::default();
+                    }
+                }
+            }
+            _ = net_path_timer.tick() => {
+                let current = LocalRoutes::probe();
+                if current.is_empty() {
+                    route_candidate = None;
+                    offline_ticks = offline_ticks.saturating_add(1);
+                    link_down |= offline_ticks >= LINK_DOWN_TICKS;
+                } else if !joined || routes.is_empty() {
+                    routes = current;
+                    route_candidate = None;
+                    offline_ticks = 0;
+                    link_down = false;
+                } else if link_down {
+                    tracing::warn!(
+                        routes = %current.describe(),
+                        offline_ticks,
+                        "local network link came back; restarting the sfu session"
+                    );
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "local network link flapped".into(),
+                    };
+                } else if current == routes {
+                    route_candidate = None;
+                    offline_ticks = 0;
+                } else if route_candidate.as_ref() == Some(&current) {
+                    tracing::warn!(
+                        was = %routes.describe(),
+                        now = %current.describe(),
+                        "local network path changed; restarting the sfu session"
+                    );
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "local network path changed".into(),
+                    };
+                } else {
+                    route_candidate = Some(current);
+                    offline_ticks = 0;
+                }
+            }
+            () = tokio::time::sleep_until(camera_tier_pending.map_or_else(tokio::time::Instant::now, |(_, at)| at)), if camera_tier_pending.is_some() => {
+                if let Some((next, _)) = camera_tier_pending.take() {
+                    tiers.camera = next;
+                    if let Some(peer_connection) = &*pc {
+                        tune_uplinks(peer_connection, local, tiers);
+                    }
+                }
+            }
+            () = tokio::time::sleep_until(offer_reissue_deadline.unwrap_or_else(tokio::time::Instant::now)), if offer_reissue_deadline.is_some() => {
+                return SessionOutcome::Dropped {
+                    joined,
+                    reason: "sfu never reissued the rejected offer".into(),
+                };
+            }
+            () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
+                if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
+                    tracing::info!("sfu moderator muted this device");
+                    local.muted = true;
+                    local.apply_audio_gate(pc.as_ref(), config.role);
+                    let _ = evt_tx.send(SfuEvent::MutedByModerator);
+                }
+            }
+            () = std::future::ready(()), if pending_offer.is_some() => {
+                let Some((generation, offer_sdp)) = pending_offer.take() else {
+                    continue;
+                };
+                let Some(peer_connection) = pc.clone() else {
+                    tracing::warn!("sfu offered before the joined response; dropping the offer");
+                    continue;
+                };
+                match tokio::time::timeout(NEGOTIATION_TIMEOUT, negotiate(
+                    &peer_connection,
+                    generation,
+                    &offer_sdp,
+                    local,
+                    config.role,
+                    tiers,
+                    &mut ws_tx,
+                    &mut membership,
+                    evt_tx,
+                ))
+                .await
+                .context("sfu negotiation timed out")
+                .and_then(|result| result)
+                {
+                    Ok(()) => {
+                        sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
+                        if !membership.live_tracks.is_empty()
+                            && let Some(previous) = retiring.take()
+                        {
+                            previous.close();
+                        }
+                        let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                    }
+                    Err(e) => {
+                        return SessionOutcome::Dropped {
+                            joined,
+                            reason: format!("sfu negotiation failed: {e:#}"),
+                        };
+                    }
+                }
+                tokio::time::sleep(RENEGOTIATION_SETTLE).await;
+            }
+        }
+    }
+}
+
+type WsSink = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+
+async fn send(ws_tx: &mut WsSink, message: &ClientMessage) -> Result<()> {
+    let text = serde_json::to_string(message).context("serialize signaling message")?;
+    send_frame(ws_tx, Message::Text(text.into())).await
+}
+
+async fn send_frame(ws_tx: &mut WsSink, message: Message) -> Result<()> {
+    tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, ws_tx.send(message))
+        .await
+        .context("send signaling message timed out")?
+        .context("send signaling message")
+}
+
+async fn send_mute(
+    ws_tx: &mut WsSink,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
+    is_mute: bool,
+) -> Result<()> {
+    // Diagnostic revision only. Rejecting revisions on the wire requires SFU
+    // protocol support; do not silently add fields the server does not enforce.
+    local.mute_revision = local.mute_revision.wrapping_add(1);
+    send(ws_tx, &ClientMessage::Mute { is_mute }).await?;
+    mute_sync.sent(is_mute, local.mute_revision, Instant::now());
+    Ok(())
+}
+
+async fn announce_initial_state(
+    ws_tx: &mut WsSink,
+    config: &SfuConfig,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
+) -> Result<()> {
+    let resume_push_to_talk = local.resumes_push_to_talk(config.role);
+    if !local.announced_mute(config.role) {
+        send_mute(ws_tx, local, mute_sync, false).await?;
+    }
+    if resume_push_to_talk {
+        tracing::info!("re-asserting the held push-to-talk turn on the new sfu session");
+        send(ws_tx, &ClientMessage::PushToTalk { active: true }).await?;
+    }
+    if config.role == SfuRole::Speaker {
+        send(
+            ws_tx,
+            &ClientMessage::Camera {
+                active: local.camera.is_some(),
+            },
+        )
+        .await?;
+        if local.screen.is_some() {
+            send(ws_tx, &ClientMessage::ShareScreen { active: true }).await?;
+        }
+    }
+    send(ws_tx, &ClientMessage::Visibility { visible: true }).await
+}
+
+fn build_ws_url(base: &str, token: &str) -> String {
+    let base = base.trim();
+    if base.is_empty() {
+        return String::new();
+    }
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let encoded = percent_encoding::utf8_percent_encode(token, percent_encoding::NON_ALPHANUMERIC);
+    format!("{base}{separator}access_token={encoded}")
+}
+
+fn create_peer_connection(
+    factory: &PeerConnectionFactory,
+    from_server: &[IceServerSpec],
+    fallback: &[IceServerConfig],
+) -> Result<PeerConnection> {
+    let mut ice_servers: Vec<IceServer> = from_server
+        .iter()
+        .filter(|server| !server.urls.is_empty())
+        .map(|server| IceServer {
+            urls: server.urls.clone(),
+            username: server.username.clone(),
+            password: server.credential.clone(),
+        })
+        .collect();
+
+    if ice_servers.is_empty() {
+        ice_servers = fallback
+            .iter()
+            .filter(|server| !server.urls.is_empty())
+            .map(|server| IceServer {
+                urls: server.urls.clone(),
+                username: server.username.clone(),
+                password: server.credential.clone(),
+            })
+            .collect();
+    }
+
+    tracing::info!(
+        urls = %ice_servers
+            .iter()
+            .flat_map(|server| server.urls.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(","),
+        "sfu ice servers"
+    );
+
+    factory
+        .create_peer_connection(RtcConfiguration {
+            ice_servers,
+            continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
+            ice_transport_type: IceTransportsType::All,
+        })
+        .context("create peer connection")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseVerdict {
+    Retry,
+    RefreshToken,
+    Removed(RemovalCause),
+}
+
+fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
+    match sfu_close_action(code.map(u16::from)) {
+        SfuCloseAction::RefreshToken => CloseVerdict::RefreshToken,
+        SfuCloseAction::Retry | SfuCloseAction::ResetTransport => CloseVerdict::Retry,
+        SfuCloseAction::Stop => CloseVerdict::Removed(match code.map(u16::from) {
+            Some(4006) => RemovalCause::Kicked,
+            Some(4011) => RemovalCause::AloneTimeout,
+            Some(4012) => RemovalCause::DuplicateSession,
+            _ => RemovalCause::Disconnected,
+        }),
+    }
+}
+
+fn describe_close_code(code: CloseCode) -> Option<&'static str> {
+    Some(match u16::from(code) {
+        1000 => "normal closure",
+        1001 => "server going away",
+        1002 => "protocol error",
+        1008 => "policy violation",
+        1011 => "server internal error",
+        4001 => "client idle timeout",
+        4002 => "server failed to send ping",
+        4003 => "server auth not configured",
+        4004 => "missing token",
+        4005 => "invalid token",
+        4006 => "kicked by moderator",
+        4007 => "websocket handshake failed",
+        4008 => "websocket receive error",
+        4009 => "poll start failed",
+        4010 => "transport error",
+        4011 => "alone participant timeout",
+        4012 => "new session joined with the same user",
+        4013 => "DTLS or transport failure",
+        _ => return None,
+    })
+}
+
+fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
+    frame_reason
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .or_else(|| code.and_then(describe_close_code).map(str::to_owned))
+        .unwrap_or_else(|| "server closed link".to_owned())
+}
+
+async fn read_media_stats(pc: &PeerConnection) -> Option<Vec<RtcStats>> {
+    let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
+        tracing::warn!("sfu media stats unavailable or timed out");
+        return None;
+    };
+    Some(stats)
+}
+
+fn log_media_stats(stats: &[RtcStats]) -> Option<ScreenStats> {
+    let mut codecs: HashMap<String, String> = HashMap::new();
+    for stat in stats {
+        if let RtcStats::Codec(codec) = stat {
+            let mime = codec
+                .codec
+                .mime_type
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            codecs.insert(
+                codec.rtc.id.clone(),
+                format!("{mime}/{}", codec.codec.payload_type),
+            );
+        }
+    }
+    let codec_of = |id: &str| codecs.get(id).cloned().unwrap_or_else(|| "?".to_owned());
+
+    let sampled_at = Instant::now();
+    let mut screen_stats = None;
+    let mut screen_transport_id = None;
+    let mut lines: Vec<String> = Vec::new();
+    for stat in stats {
+        match stat {
+            RtcStats::OutboundRtp(out) => {
+                if out.outbound.mid == MID_SCREEN
+                    && out.stream.kind == "video"
+                    && !codec_of(&out.stream.codec_id).starts_with("rtx/")
+                {
+                    screen_transport_id = Some(out.stream.transport_id.as_str());
+                    screen_stats = Some(ScreenStats {
+                        at: sampled_at,
+                        ssrc: out.stream.ssrc,
+                        packets: out.sent.packets_sent,
+                        bytes: out.sent.bytes_sent,
+                        frames: out.outbound.frames_encoded,
+                        send_delay_seconds: out.outbound.total_packet_send_delay,
+                        pli: out.outbound.pli_count,
+                        target_kbps: (out.outbound.target_bitrate / 1000.0) as u32,
+                        bwe_kbps: 0,
+                        other_target_kbps: 0,
+                    });
+                }
+                let per_frame = |total: f64| {
+                    if out.outbound.frames_encoded > 0 {
+                        total / f64::from(out.outbound.frames_encoded)
+                    } else {
+                        0.0
+                    }
+                };
+                let queue_ms = if out.sent.packets_sent > 0 {
+                    out.outbound.total_packet_send_delay * 1000.0 / out.sent.packets_sent as f64
+                } else {
+                    0.0
+                };
+                lines.push(format!(
+                    "out mid={} ssrc={} {} {} pkts={} rtx={} kB={} rtxkB={} target={}kbps {}x{} fps={:.0} enc={} sent={} key={} huge={} qp={:.0} enc_ms={:.1} queue_ms={:.1} pli={} fir={} nack={} limit={:?} limit_s={:.0} downscales={} impl={}",
+                    out.outbound.mid,
+                    out.stream.ssrc,
+                    out.stream.kind,
+                    codec_of(&out.stream.codec_id),
+                    out.sent.packets_sent,
+                    out.outbound.retransmitted_packets_sent,
+                    out.sent.bytes_sent / 1000,
+                    out.outbound.retransmitted_bytes_sent / 1000,
+                    (out.outbound.target_bitrate / 1000.0) as u64,
+                    out.outbound.frame_width,
+                    out.outbound.frame_height,
+                    out.outbound.frames_per_second,
+                    out.outbound.frames_encoded,
+                    out.outbound.frames_sent,
+                    out.outbound.key_frames_encoded,
+                    out.outbound.huge_frames_sent,
+                    per_frame(out.outbound.qp_sum as f64),
+                    per_frame(out.outbound.total_encode_time * 1000.0),
+                    queue_ms,
+                    out.outbound.pli_count,
+                    out.outbound.fir_count,
+                    out.outbound.nack_count,
+                    out.outbound.quality_limitation_reason,
+                    out.outbound
+                        .quality_limitation_durations
+                        .iter()
+                        .filter(|(reason, _)| reason.as_str() != "none")
+                        .map(|(_, seconds)| seconds)
+                        .sum::<f64>(),
+                    out.outbound.quality_limitation_resolution_changes,
+                    out.outbound.encoder_implementation,
+                ));
+            }
+            RtcStats::RemoteInboundRtp(rr) => lines.push(format!(
+                "rr ssrc={} {} lost={} frac={:.3} rtt={:.0}ms jitter={:.0}ms",
+                rr.stream.ssrc,
+                rr.stream.kind,
+                rr.received.packets_lost,
+                rr.remote_inbound.fraction_lost,
+                rr.remote_inbound.round_trip_time * 1000.0,
+                rr.received.jitter * 1000.0,
+            )),
+            RtcStats::InboundRtp(inb) if inb.stream.kind == "audio" => lines.push(format!(
+                "in mid={} audio {} pkts={} lost={} disc={} played={:.1}s conceal={} depth={:.0}ms lvl={:.3}",
+                inb.inbound.mid,
+                codec_of(&inb.stream.codec_id),
+                inb.received.packets_received,
+                inb.received.packets_lost,
+                inb.inbound.packets_discarded,
+                inb.inbound.total_samples_duration,
+                inb.inbound.concealed_samples,
+                jitter_depth_ms(&inb.inbound),
+                inb.inbound.audio_level,
+            )),
+            RtcStats::InboundRtp(inb) => lines.push(format!(
+                "in mid={} {} {} pkts={} lost={} rtx={} {}x{} dec={} key={} dropped={} freeze={}/{:.0}ms depth={:.0}ms pli={} nack={} disc={}",
+                inb.inbound.mid,
+                inb.stream.kind,
+                codec_of(&inb.stream.codec_id),
+                inb.received.packets_received,
+                inb.received.packets_lost,
+                inb.inbound.retransmitted_packets_received,
+                inb.inbound.frame_width,
+                inb.inbound.frame_height,
+                inb.inbound.frames_decoded,
+                inb.inbound.key_frames_decoded,
+                inb.inbound.frames_dropped,
+                inb.inbound.freeze_count,
+                inb.inbound.total_freeze_duration * 1000.0,
+                jitter_depth_ms(&inb.inbound),
+                inb.inbound.pli_count,
+                inb.inbound.nack_count,
+                inb.inbound.packets_discarded,
+            )),
+            _ => {}
+        }
+    }
+
+    if !lines.is_empty() {
+        lines.sort();
+        tracing::info!(streams = %lines.join(" | "), "sfu media stats");
+    }
+
+    let mut candidates: HashMap<String, String> = HashMap::new();
+    for stat in stats {
+        match stat {
+            RtcStats::LocalCandidate(c) => {
+                candidates.insert(c.rtc.id.clone(), describe_candidate(&c.local_candidate));
+            }
+            RtcStats::RemoteCandidate(c) => {
+                candidates.insert(c.rtc.id.clone(), describe_candidate(&c.remote_candidate));
+            }
+            _ => {}
+        }
+    }
+
+    let endpoint = |id: &str| {
+        candidates
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "?".to_owned())
+    };
+    let selected_pair_id = stats.iter().find_map(|stat| match stat {
+        RtcStats::Transport(t) if Some(t.rtc.id.as_str()) == screen_transport_id => {
+            Some(t.transport.selected_candidate_pair_id.as_str())
+        }
+        _ => None,
+    });
+    let mut bwe_kbps: u32 = 0;
+    let mut pairs: Vec<String> = Vec::new();
+    for stat in stats {
+        match stat {
+            RtcStats::Transport(t) => tracing::info!(
+                dtls = ?t.transport.dtls_state,
+                ice = ?t.transport.ice_state,
+                role = ?t.transport.ice_role,
+                sent = t.transport.packets_sent,
+                received = t.transport.packets_received,
+                pair_changes = t.transport.selected_candidate_pair_changes,
+                "sfu transport stats"
+            ),
+            RtcStats::CandidatePair(p) => {
+                if Some(p.rtc.id.as_str()) == selected_pair_id {
+                    bwe_kbps = (p.candidate_pair.available_outgoing_bitrate / 1000.0) as u32;
+                }
+                pairs.push(format!(
+                    "{}->{} {:?}{} stun={}/{} rtp={}/{} bwe={}kbps rtt={:.0}ms dropped={}",
+                    endpoint(&p.candidate_pair.local_candidate_id),
+                    endpoint(&p.candidate_pair.remote_candidate_id),
+                    p.candidate_pair.state,
+                    if p.candidate_pair.nominated { "*" } else { "" },
+                    p.candidate_pair.requests_sent,
+                    p.candidate_pair.responses_received,
+                    p.candidate_pair.packets_sent,
+                    p.candidate_pair.packets_received,
+                    (p.candidate_pair.available_outgoing_bitrate / 1000.0) as u64,
+                    p.candidate_pair.current_round_trip_time * 1000.0,
+                    p.candidate_pair.packets_discarded_on_send,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if !pairs.is_empty() {
+        pairs.sort();
+        tracing::info!(pairs = %pairs.join(" | "), "sfu ice pairs");
+    }
+
+    if let Some(screen) = screen_stats.as_mut() {
+        screen.bwe_kbps = bwe_kbps;
+        for stat in stats {
+            if let RtcStats::OutboundRtp(out) = stat {
+                if out.outbound.mid != MID_SCREEN
+                    && Some(out.stream.transport_id.as_str()) == screen_transport_id
+                {
+                    screen.other_target_kbps = screen
+                        .other_target_kbps
+                        .saturating_add((out.outbound.target_bitrate / 1000.0) as u32);
+                }
+            }
+        }
+    }
+    screen_stats
+}
+
+fn jitter_depth_ms(inbound: &libwebrtc::stats::dictionaries::InboundRtpStreamStats) -> f64 {
+    if inbound.jitter_buffer_emitted_count == 0 {
+        return 0.0;
+    }
+    inbound.jitter_buffer_delay / inbound.jitter_buffer_emitted_count as f64 * 1000.0
+}
+
+fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateStats) -> String {
+    let kind = candidate
+        .candidate_type
+        .map_or_else(|| "?".to_owned(), |kind| format!("{kind:?}"));
+    let address = if candidate.address.is_empty() {
+        "-".to_owned()
+    } else {
+        format!("{}:{}", candidate.address, candidate.port)
+    };
+    format!("{kind}/{} {address}", candidate.protocol)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn negotiate(
+    pc: &PeerConnection,
+    generation: u64,
+    offer_sdp: &str,
+    local: &LocalTracks,
+    role: SfuRole,
+    tiers: PublishTiers,
+    ws_tx: &mut WsSink,
+    membership: &mut Membership,
+    evt_tx: &flume::Sender<SfuEvent>,
+) -> Result<()> {
+    let previous = pc.current_remote_description().map(|d| d.to_string());
+    let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
+    let hinted = sdp::munge_uplink_start_bitrate(&stabilized, UPLINK_START_KBPS);
+
+    let offer = SessionDescription::parse(&hinted, SdpType::Offer)
+        .map_err(|e| anyhow::anyhow!("parse offer: {e}"))?;
+    pc.set_remote_description(offer)
+        .await
+        .context("set remote description")?;
+
+    attach_local_tracks(Some(pc), local, role);
+    open_uplink_directions(pc, &stabilized);
+
+    let answer = pc
+        .create_answer(AnswerOptions::default())
+        .await
+        .context("create answer")?;
+
+    let derived = answer.to_string();
+    let opened = sdp::force_uplink_sendonly(&derived, &stabilized);
+    let answer = SessionDescription::parse(&opened, SdpType::Answer)
+        .map_err(|e| anyhow::anyhow!("parse patched answer: {e}"))?;
+
+    pc.set_local_description(answer)
+        .await
+        .context("set local description")?;
+
+    tune_uplinks(pc, local, tiers);
+    local.apply_audio_gate(Some(pc), role);
+
+    let local_sdp = pc
+        .current_local_description()
+        .map(|d| d.to_string())
+        .context("local description missing after set_local_description")?;
+
+    membership.absorb_msids(offer_sdp);
+    tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
+        "sfu media renegotiated");
+
+    // Attach receive sinks before the answer lets the SFU start forwarding media.
+    // Static screen shares may not produce another decoded frame immediately.
+    sync_remote_media(pc, membership, evt_tx, None);
+
+    send(
+        ws_tx,
+        &ClientMessage::Answer {
+            sdp: local_sdp,
+            offer_generation: generation,
+        },
+    )
+    .await
+}
+
+fn screen_scale_down(width: u32) -> f64 {
+    if width == 0 {
+        return 1.0;
+    }
+    (f64::from(width) / SCREEN_MAX_ENCODE_WIDTH).max(1.0)
+}
+
+fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
+    for transceiver in pc.transceivers() {
+        let Some(mid) = transceiver.mid() else {
+            continue;
+        };
+        let (max_bitrate, max_framerate, scalability, degradation, scale_down, priority) =
+            match mid.as_str() {
+                MID_CAMERA => {
+                    let tier = camera_tier_at(tiers.camera);
+                    (
+                        tier.max_bitrate,
+                        tier.max_framerate,
+                        None,
+                        DegradationPreference::MaintainFramerate,
+                        tier.scale_down,
+                        Priority::High,
+                    )
+                }
+                MID_SCREEN => {
+                    let mode = local
+                        .screen
+                        .as_ref()
+                        .map_or(ScreenShareMode::Text, |screen| screen.mode);
+                    let tier = &screen_profile(mode)[tiers.screen];
+                    let scale = local
+                        .screen
+                        .as_ref()
+                        .map_or(1.0, |screen| screen_scale_down(screen.width))
+                        * tier.scale_down;
+                    (
+                        mode.max_bitrate_bps(),
+                        mode.encode_max_fps().min(tier.fps_cap),
+                        Some(SCREEN_SCALABILITY_MODE.to_owned()),
+                        mode.degradation(),
+                        scale,
+                        Priority::High,
+                    )
+                }
+                _ => continue,
+            };
+
+        let sender = transceiver.sender();
+        let mut parameters = sender.parameters();
+        if parameters.encodings.is_empty() {
+            if matches!(
+                transceiver.direction(),
+                RtpTransceiverDirection::SendOnly | RtpTransceiverDirection::SendRecv
+            ) {
+                tracing::warn!("mid {mid} has no encoding to carry the publish limits");
+            }
+            continue;
+        }
+        for encoding in parameters.encodings.iter_mut() {
+            encoding.max_bitrate = Some(max_bitrate);
+            encoding.max_framerate = Some(max_framerate);
+            encoding.scalability_mode = scalability.clone();
+            encoding.scale_resolution_down_by = (scale_down > 1.0).then_some(scale_down);
+            encoding.priority = priority;
+        }
+        parameters.set_degradation_preference(degradation);
+
+        match sender.set_parameters(parameters) {
+            Ok(()) => tracing::info!(
+                mid = %mid,
+                bitrate = max_bitrate,
+                fps = max_framerate,
+                scale = scale_down,
+                scalability = scalability.as_deref().unwrap_or("-"),
+                "publish limits applied"
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "publish limits rejected on mid {mid}: {e}; retrying without scalability"
+                );
+                let mut retry = sender.parameters();
+                for encoding in retry.encodings.iter_mut() {
+                    encoding.max_bitrate = Some(max_bitrate);
+                    encoding.max_framerate = Some(max_framerate);
+                    encoding.scalability_mode = None;
+                    encoding.scale_resolution_down_by = (scale_down > 1.0).then_some(scale_down);
+                    encoding.priority = priority;
+                }
+                retry.set_degradation_preference(degradation);
+                if let Err(e) = sender.set_parameters(retry) {
+                    tracing::error!("publish limits could not be applied on mid {mid}: {e}");
+                }
+            }
+        }
+    }
+}
+
+fn open_uplink_directions(pc: &PeerConnection, offer_sdp: &str) {
+    let offered = sdp::directions_by_mid(offer_sdp);
+    for transceiver in pc.transceivers() {
+        let Some(mid) = transceiver.mid() else {
+            continue;
+        };
+        if !mid::is_local_mid(&mid) {
+            continue;
+        }
+        let invited = matches!(
+            offered.get(&mid).map(String::as_str),
+            Some("a=recvonly") | Some("a=sendrecv")
+        );
+        if !invited || transceiver.direction() == RtpTransceiverDirection::SendOnly {
+            continue;
+        }
+        if let Err(e) = transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
+            tracing::warn!("uplink mid {mid} could not be opened for sending: {e}");
+        }
+    }
+}
+
+fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: SfuRole) {
+    let Some(pc) = pc else { return };
+
+    let publishes_video = role == SfuRole::Speaker;
+
+    for transceiver in pc.transceivers() {
+        let Some(mid) = transceiver.mid() else {
+            continue;
+        };
+        let wanted = match mid.as_str() {
+            MID_AUDIO => local.audio.clone().map(MediaStreamTrack::from),
+            MID_CAMERA => local
+                .camera
+                .clone()
+                .filter(|_| publishes_video)
+                .map(MediaStreamTrack::from),
+            MID_SCREEN => local
+                .screen
+                .clone()
+                .filter(|_| publishes_video)
+                .map(|screen| MediaStreamTrack::from(screen.track)),
+            _ => continue,
+        };
+
+        let Some(track) = wanted else { continue };
+        if let Err(e) = transceiver.sender().set_track(Some(track)) {
+            tracing::warn!("failed to attach local track on mid {mid}: {e}");
+        }
+    }
+
+    local.apply_audio_gate(Some(pc), role);
+}
+
+fn sync_remote_media(
+    pc: &PeerConnection,
+    membership: &mut Membership,
+    evt_tx: &flume::Sender<SfuEvent>,
+    refresh_audio: Option<u64>,
+) {
+    for transceiver in pc.transceivers() {
+        let Some(mid) = transceiver.mid() else {
+            continue;
+        };
+        if mid::is_local_mid(&mid) {
+            continue;
+        }
+        let Some(remote) = membership.layout.classify(&mid) else {
+            continue;
+        };
+
+        let key = remote_frame_key(&mid);
+        let negotiated = transceiver
+            .current_direction()
+            .unwrap_or_else(|| transceiver.direction());
+        let idle = matches!(
+            negotiated,
+            RtpTransceiverDirection::Inactive | RtpTransceiverDirection::Stopped
+        );
+        let receiver_track = transceiver.receiver().track();
+        let assigned = !membership.fixed_pool || membership.slot_active(&mid);
+        if membership.fixed_pool
+            && let Some(MediaStreamTrack::Audio(audio)) = &receiver_track
+        {
+            audio.set_enabled(assigned && !idle);
+        }
+        let live = receiver_track.filter(|track| {
+            assigned
+                && !idle
+                && !membership.retired_mids.contains_key(&mid)
+                && track.state() == RtcTrackState::Live
+        });
+
+        let Some(track) = live else {
+            membership.video_receipts.remove(&key);
+            if membership.live_tracks.remove(&key).is_some() {
+                tracing::info!(mid = %mid, key, "remote media dropped");
+                let _ = evt_tx.send(SfuEvent::RemoteGone { key });
+            }
+            continue;
+        };
+
+        let binding = mid::TrackBinding {
+            track_id: track.id(),
+            peer_id: membership.peer_by_mid.get(&mid).copied(),
+            user_id: membership.user_by_mid.get(&mid).cloned(),
+        };
+        let unchanged = membership.live_tracks.get(&key) == Some(&binding);
+        if membership.fixed_pool && !unchanged && membership.live_tracks.contains_key(&key) {
+            membership.video_receipts.remove(&key);
+            let _ = evt_tx.send(SfuEvent::RemoteGone { key });
+        }
+        let recovery = unchanged && refresh_audio == Some(key) && remote.kind == RemoteKind::Audio;
+        if unchanged && !recovery {
+            continue;
+        }
+
+        match (track, remote.kind) {
+            (MediaStreamTrack::Audio(track), RemoteKind::Audio) => {
+                membership.live_tracks.insert(key, binding);
+                tracing::info!(mid = %mid, key, recovery, "remote audio attached");
+                let _ = evt_tx.send(SfuEvent::RemoteAudio {
+                    key,
+                    track,
+                    recovery,
+                });
+            }
+            (MediaStreamTrack::Video(track), RemoteKind::Camera | RemoteKind::Screen) => {
+                membership.live_tracks.insert(key, binding);
+                tracing::info!(mid = %mid, key, "remote video attached");
+                let stream = NativeVideoStream::new(track);
+                let receipt = Arc::new(FrameReceipt::default());
+                membership.video_receipts.insert(key, receipt.clone());
+                let _ = evt_tx.send(SfuEvent::RemoteVideo {
+                    key,
+                    stream,
+                    receipt,
+                });
+            }
+            (_, kind) => {
+                tracing::warn!("mid {mid} carries a track of the wrong media type for {kind:?}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::messages::{MediaSlots, PoolSlot};
+    use super::*;
+
+    #[test]
+    fn first_media_transport_is_connected_and_later_ones_reconnected() {
+        let mut ever_connected = false;
+        assert!(matches!(
+            connection_announcement(&mut ever_connected, "room"),
+            SfuEvent::Connected { room } if room == "room"
+        ));
+        assert!(ever_connected);
+        assert!(matches!(
+            connection_announcement(&mut ever_connected, "room"),
+            SfuEvent::Reconnected
+        ));
+    }
+
+    async fn reconnect_controls_wait_for_membership(held: bool) {
+        use serde_json::json;
+        use tokio::time::timeout;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = SfuConfig {
+            screen_views: Arc::default(),
+            ws_url: format!("ws://{}/ws", listener.local_addr().unwrap()),
+            token: "test-token".into(),
+            room: "test-room".into(),
+            role: SfuRole::Audience,
+            muted: true,
+            fallback_ice_servers: Vec::new(),
+            refresh_token: None,
+        };
+        let (cmd_tx, cmd_rx) = flume::unbounded();
+        let (evt_tx, evt_rx) = flume::unbounded();
+        if !held {
+            cmd_tx.send(EngineCommand::SetMute(true)).unwrap();
+            cmd_tx.send(EngineCommand::SetCameraActive(false)).unwrap();
+            cmd_tx.send(EngineCommand::SetScreenActive(false)).unwrap();
+            cmd_tx.send(EngineCommand::PushToTalk(true)).unwrap();
+            cmd_tx.send(EngineCommand::PushToTalk(false)).unwrap();
+        }
+        let session = tokio::spawn(async move {
+            let mut local = LocalTracks::new(true);
+            local.ptt_requested = true;
+            let factory = PeerConnectionFactory::default();
+            let mut attempts = 0;
+            let mut ever_connected = true;
+            let mut retiring = None;
+            run_session(
+                &config,
+                &factory,
+                &mut local,
+                &cmd_rx,
+                &evt_tx,
+                true,
+                &mut ever_connected,
+                &mut attempts,
+                &mut retiring,
+            )
+            .await
+        });
+
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut server = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let join = server.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&join).unwrap()["type"],
+            "join"
+        );
+        if !held {
+            assert!(matches!(
+                evt_rx.recv_async().await.unwrap(),
+                SfuEvent::PttActive(false)
+            ));
+        }
+        server
+            .send(Message::Text(
+                json!({
+                    "type": "joined", "room": "test-room", "iceServers": []
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        server
+            .send(Message::Text(json!({ "type": "ping" }).to_string().into()))
+            .await
+            .unwrap();
+        let pong = server.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pong).unwrap(),
+            json!({ "type": "pong" }),
+            "no room control may be sent before membership is confirmed"
+        );
+        assert!(
+            evt_rx.is_empty(),
+            "a joined acknowledgement must not report media reconnected"
+        );
+
+        server
+            .send(Message::Text(
+                json!({
+                    "type": "room_snapshot", "members": []
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut expected = Vec::new();
+        if held {
+            expected.push(json!({ "type": "mute", "is_mute": false }));
+            expected.push(json!({ "type": "push_to_talk", "active": true }));
+        }
+        expected.push(json!({ "type": "visibility", "visible": true }));
+        for wanted in expected {
+            let frame = server.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&frame).unwrap(),
+                wanted
+            );
+        }
+        assert!(matches!(
+            evt_rx.recv_async().await.unwrap(),
+            SfuEvent::Peers(_)
+        ));
+        assert!(
+            matches!(evt_rx.recv_async().await.unwrap(), SfuEvent::RoomSnapshot),
+            "the room snapshot must be announced right after its peer list"
+        );
+        if !held {
+            server
+                .send(Message::Text(
+                    json!({
+                        "type": "push_to_talk_changed", "active": true
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    evt_rx.recv_async().await.unwrap(),
+                    SfuEvent::PttActive(false)
+                ),
+                "a delayed grant must not reopen the mic after the button was released"
+            );
+        }
+        cmd_tx.send(EngineCommand::Close).unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), session)
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionOutcome::Closed
+        ));
+        assert!(
+            !evt_rx
+                .try_iter()
+                .any(|event| matches!(event, SfuEvent::Connected { .. } | SfuEvent::Reconnected)),
+            "room membership without a media transport must not report success"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_ptt_during_reconnect_does_not_send_controls_before_join() {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reconnect_controls_wait_for_membership(false),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn holding_ptt_across_reconnect_replays_it_after_the_snapshot() {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reconnect_controls_wait_for_membership(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn member(peer_id: u32, user_id: &str, mids: [u32; 3]) -> SnapshotMember {
+        SnapshotMember {
+            slot: None,
+            assignment_generation: 0,
+            peer_id,
+            user_id: user_id.to_owned(),
+            metadata: String::new(),
+            role: "speaker".to_owned(),
+            is_mute: false,
+            camera_active: false,
+            screen_requested: None,
+            screen_active: false,
+            mid_audio: mids[0],
+            mid_video: mids[1],
+            mid_screen: mids[2],
+            media_slots: None,
+        }
+    }
+
+    fn decoupled_membership() -> Membership {
+        Membership {
+            fixed_pool: true,
+            layout: MidLayout::Pools(PoolLayout {
+                audio: 6,
+                camera: 8,
+                screen: 4,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pool_assignment(
+        kind: RemoteKind,
+        slot: u32,
+        generation: u64,
+        mid: u32,
+    ) -> PoolSlotAssignment {
+        PoolSlotAssignment {
+            kind,
+            slot,
+            generation,
+            mid,
+            peer_id: 3,
+            user_id: "7".to_owned(),
+            active: false,
+        }
+    }
+
+    #[test]
+    fn the_access_token_is_appended_with_the_right_separator() {
+        assert_eq!(
+            build_ws_url("wss://sfu.example/ws", "a b"),
+            "wss://sfu.example/ws?access_token=a%20b"
+        );
+        assert_eq!(
+            build_ws_url("wss://sfu.example/ws?x=1", "t"),
+            "wss://sfu.example/ws?x=1&access_token=t"
+        );
+    }
+
+    #[test]
+    fn an_empty_base_url_yields_an_empty_url() {
+        assert!(build_ws_url("   ", "t").is_empty());
+    }
+
+    #[test]
+    fn jwt_dots_survive_encoding_as_escapes() {
+        let url = build_ws_url("wss://x/ws", "aa.bb.cc");
+        assert!(url.ends_with("access_token=aa%2Ebb%2Ecc"));
+    }
+
+    #[test]
+    fn membership_maps_every_non_zero_mid_to_its_peer() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        assert_eq!(membership.peer_by_mid.get("3"), Some(&3));
+        assert_eq!(membership.peer_by_mid.get("5"), Some(&3));
+        assert_eq!(
+            membership.user_by_mid.get("4").map(String::as_str),
+            Some("7")
+        );
+    }
+
+    #[test]
+    fn a_peer_update_without_metadata_keeps_the_name_it_joined_with() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "9", [3, 4, 5]));
+        assert_eq!(membership.peers()[0].metadata, "alice;https://cdn/a.png");
+    }
+
+    #[test]
+    fn a_reused_peer_id_does_not_inherit_another_users_metadata() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "11", [3, 4, 5]));
+        assert!(membership.peers()[0].metadata.is_empty());
+    }
+
+    #[test]
+    fn same_account_peers_have_a_deterministic_order() {
+        let mut membership = Membership::default();
+        for peer_id in [9, 3, 7] {
+            membership.apply(member(peer_id, "7", [0, 0, 0]));
+        }
+        assert_eq!(
+            membership
+                .peers()
+                .iter()
+                .map(|p| p.peer_id)
+                .collect::<Vec<_>>(),
+            vec![3, 7, 9]
+        );
+    }
+
+    #[test]
+    fn only_the_local_connection_is_excluded_for_a_shared_account() {
+        let mut membership = Membership {
+            self_peer_id: 3,
+            ..Default::default()
+        };
+        membership.apply(member(3, "7", [0, 0, 0]));
+        let mut other_device = member(9, "7", [3, 4, 5]);
+        other_device.screen_active = true;
+        membership.apply(other_device);
+        let peers = membership.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, 9);
+        assert_eq!(peers[0].screenshare, Some(remote_frame_key("5")));
+    }
+
+    #[test]
+    fn a_zero_mid_is_not_registered() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 0, 0]));
+        assert_eq!(membership.peer_by_mid.len(), 1);
+        assert!(!membership.peer_by_mid.contains_key("0"));
+    }
+
+    #[test]
+    fn leaving_releases_every_mid_the_peer_owned() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        let released = membership.remove_peer(3, [3, 4, 5]);
+        assert_eq!(
+            released,
+            vec!["3".to_owned(), "4".to_owned(), "5".to_owned()]
+        );
+        assert!(membership.peer_by_mid.is_empty());
+        assert!(membership.peers().is_empty());
+    }
+
+    #[test]
+    fn rejoining_on_the_same_mid_hands_ownership_to_the_new_peer() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        membership.remove_peer(3, [3, 4, 5]);
+        membership.apply(member(9, "8", [3, 4, 5]));
+        assert_eq!(membership.peer_by_mid.get("3"), Some(&9));
+        assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
+    }
+
+    #[test]
+    fn peers_expose_video_keys_only_while_the_source_is_active() {
+        let mut membership = Membership::default();
+        let mut m = member(3, "7", [3, 4, 5]);
+        m.camera_active = true;
+        membership.apply(m);
+        let peers = membership.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].camera, Some(remote_frame_key("4")));
+        assert_eq!(peers[0].screenshare, None);
+    }
+
+    #[test]
+    fn peers_without_a_user_id_are_withheld_until_one_arrives() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "", [3, 4, 5]));
+        assert!(membership.peers().is_empty());
+        membership.apply(member(3, "7", [3, 4, 5]));
+        assert_eq!(membership.peers().len(), 1);
+    }
+
+    #[test]
+    fn an_offer_msid_overrides_a_stale_membership_user_id() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:room-u999-mic t\r\n");
+        assert_eq!(
+            membership.user_by_mid.get("3").map(String::as_str),
+            Some("999")
+        );
+        assert_eq!(
+            membership.peer_by_mid.get("3"),
+            Some(&3),
+            "without a peer segment the owner is left as membership said"
+        );
+    }
+
+    #[test]
+    fn msids_fill_in_mids_membership_has_not_named_yet() {
+        let mut membership = Membership::default();
+        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:6\r\na=msid:room-u42-mic t\r\n");
+        assert_eq!(
+            membership.user_by_mid.get("6").map(String::as_str),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn an_offer_reoccupying_a_left_mid_clears_the_marker_and_names_the_peer() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        membership.remove_peer(3, [3, 4, 5]);
+        let mut joiner = member(9, "8", [0, 0, 0]);
+        joiner.role = "audience".to_owned();
+        membership.apply(joiner);
+        assert_eq!(membership.peers()[0].audio, None);
+
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+
+        assert_eq!(
+            membership.peer_by_mid.get("3"),
+            Some(&9),
+            "the offer is the only signal that a push-to-talk slot was assigned"
+        );
+        let peers = membership.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].audio, Some(remote_frame_key("3")));
+    }
+
+    #[test]
+    fn a_peer_update_after_the_offer_keeps_the_msid_learned_mid() {
+        let mut membership = Membership::default();
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+        membership.apply(member(9, "8", [0, 0, 0]));
+        assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
+    }
+
+    #[test]
+    fn a_late_leave_never_marks_a_mid_the_offer_gave_to_someone_else() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        membership.apply(member(9, "8", [0, 0, 0]));
+        membership
+            .absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:u8-p9 audio-u8-p9\r\n");
+        let released = membership.remove_peer(3, [3, 4, 5]);
+        assert_eq!(released, vec!["4".to_owned(), "5".to_owned()]);
+        assert_eq!(membership.peer_by_mid.get("3"), Some(&9));
+        assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
+    }
+
+    #[test]
+    fn an_msid_without_a_peer_segment_still_names_the_user() {
+        let mut membership = Membership::default();
+        membership.apply(member(3, "7", [3, 4, 5]));
+        membership.remove_peer(3, [3, 4, 5]);
+        membership.absorb_msids("m=audio 9 RTP/SAVPF 111\r\na=mid:3\r\na=msid:room-u42-mic t\r\n");
+        assert_eq!(
+            membership.user_by_mid.get("3").map(String::as_str),
+            Some("42")
+        );
+        assert!(!membership.peer_by_mid.contains_key("3"));
+    }
+
+    #[test]
+    fn remote_keys_differ_per_mid_and_are_stable() {
+        assert_eq!(remote_frame_key("4"), remote_frame_key("4"));
+        assert_ne!(remote_frame_key("4"), remote_frame_key("5"));
+    }
+
+    #[test]
+    fn a_speaker_gates_audio_on_mute_and_an_audience_on_the_ptt_grant() {
+        let mut local = LocalTracks::new(true);
+        local.muted = false;
+        assert!(local.microphone_open(SfuRole::Speaker));
+        assert!(!local.microphone_open(SfuRole::Audience));
+
+        local.ptt_active = true;
+        assert!(local.microphone_open(SfuRole::Audience));
+
+        local.muted = true;
+        assert!(!local.microphone_open(SfuRole::Speaker));
+        assert!(
+            local.microphone_open(SfuRole::Audience),
+            "the mute flag brackets a ptt request and must not close the grant"
+        );
+    }
+
+    #[test]
+    fn the_join_announcement_carries_the_mute_state_the_session_was_built_with() {
+        assert!(!LocalTracks::new(false).announced_mute(SfuRole::Speaker));
+        assert!(LocalTracks::new(true).announced_mute(SfuRole::Speaker));
+
+        let mut audience = LocalTracks::new(true);
+        audience.ptt_requested = true;
+        assert!(
+            !audience.announced_mute(SfuRole::Audience),
+            "a held turn still opens the announcement for an audience member"
+        );
+    }
+
+    #[test]
+    fn muting_closes_the_uplink_unless_screen_audio_is_shared() {
+        let mut local = LocalTracks::new(true);
+        local.muted = true;
+        assert!(!local.uplink_open(SfuRole::Speaker));
+
+        local.screen_audio = true;
+        assert!(!local.microphone_open(SfuRole::Speaker));
+        assert!(local.uplink_open(SfuRole::Speaker));
+
+        local.screen_audio = false;
+        local.muted = false;
+        assert!(local.uplink_open(SfuRole::Speaker));
+    }
+
+    #[test]
+    fn an_audience_uplink_follows_the_ptt_grant_not_the_mute_flag() {
+        let mut local = LocalTracks::new(true);
+        local.muted = false;
+        assert!(!local.uplink_open(SfuRole::Audience));
+
+        local.ptt_active = true;
+        assert!(local.uplink_open(SfuRole::Audience));
+    }
+
+    #[test]
+    fn a_held_turn_is_re_announced_on_the_next_session_but_the_grant_is_not_assumed() {
+        let mut local = LocalTracks::new(true);
+        assert!(!local.resumes_push_to_talk(SfuRole::Audience));
+
+        local.ptt_requested = true;
+        local.ptt_active = true;
+        assert!(local.resumes_push_to_talk(SfuRole::Audience));
+        assert!(!local.resumes_push_to_talk(SfuRole::Speaker));
+
+        local.ptt_active = false;
+        assert!(
+            !local.uplink_open(SfuRole::Audience),
+            "a dropped session voids the grant, so nothing may be sent until the sfu grants it again"
+        );
+        assert!(local.resumes_push_to_talk(SfuRole::Audience));
+
+        local.ptt_requested = false;
+        assert!(!local.resumes_push_to_talk(SfuRole::Audience));
+    }
+
+    #[test]
+    fn a_peer_update_without_mids_keeps_the_video_keys_alive() {
+        let mut membership = Membership::default();
+        let mut joined = member(3, "7", [3, 4, 5]);
+        joined.camera_active = true;
+        joined.screen_active = true;
+        membership.apply(joined);
+        assert_eq!(membership.peers()[0].camera, Some(remote_frame_key("4")));
+
+        let mut update = member(3, "7", [0, 0, 0]);
+        update.camera_active = true;
+        update.screen_active = true;
+        membership.apply(update);
+
+        let peers = membership.peers();
+        assert_eq!(
+            peers[0].camera,
+            Some(remote_frame_key("4")),
+            "a peer_updated must not orphan the remote camera tile"
+        );
+        assert_eq!(peers[0].screenshare, Some(remote_frame_key("5")));
+        assert_eq!(membership.peer_by_mid.get("4"), Some(&3));
+    }
+
+    #[test]
+    fn decoupled_slots_put_each_kind_in_its_own_block() {
+        let mut membership = decoupled_membership();
+        let mut joined = member(3, "7", [0, 0, 0]);
+        joined.camera_active = true;
+        membership.apply(joined);
+
+        let camera = pool_assignment(RemoteKind::Camera, 1, 1, 10);
+        assert!(membership.assign_pool_slot(camera, false));
+        assert_eq!(membership.peers()[0].camera, Some(remote_frame_key("10")));
+        assert!(membership.slot_active("10"));
+
+        let misplaced = pool_assignment(RemoteKind::Camera, 1, 2, 4);
+        assert!(!membership.assign_pool_slot(misplaced, false));
+
+        let mut audio = pool_assignment(RemoteKind::Audio, 0, 2, 3);
+        audio.active = true;
+        assert!(membership.assign_pool_slot(audio, false));
+        assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
+
+        assert!(membership.release_pool_slot(RemoteKind::Camera, 1, 1));
+        assert_eq!(membership.peers()[0].camera, None);
+        assert!(!membership.slot_active("10"));
+    }
+
+    #[test]
+    fn a_decoupled_member_brings_its_media_slots() {
+        let mut membership = decoupled_membership();
+        let mut joined = member(3, "7", [0, 0, 0]);
+        joined.screen_active = true;
+        joined.media_slots = Some(MediaSlots {
+            audio: Some(PoolSlot {
+                slot: 1,
+                generation: 1,
+                mid: 4,
+            }),
+            camera: None,
+            screen: Some(PoolSlot {
+                slot: 0,
+                generation: 1,
+                mid: 17,
+            }),
+        });
+        membership.apply(joined);
+
+        let peers = membership.peers();
+        assert_eq!(peers[0].audio, Some(remote_frame_key("4")));
+        assert_eq!(peers[0].screenshare, Some(remote_frame_key("17")));
+        assert_eq!(peers[0].camera, None);
+
+        membership.release_pool_slots_of(3);
+        assert_eq!(membership.peers()[0].screenshare, None);
+    }
+
+    #[test]
+    fn a_retina_capture_is_scaled_down_before_encoding() {
+        assert_eq!(screen_scale_down(3024), 3024.0 / 1920.0);
+        assert!(screen_scale_down(3840) > 1.9);
+    }
+
+    #[test]
+    fn a_display_already_narrow_enough_is_left_alone() {
+        assert_eq!(screen_scale_down(1920), 1.0);
+        assert_eq!(screen_scale_down(1280), 1.0);
+        assert_eq!(
+            screen_scale_down(0),
+            1.0,
+            "an unknown size must not divide by zero"
+        );
+    }
+
+    #[test]
+    fn a_close_without_a_frame_retries() {
+        assert_eq!(classify_close(None), CloseVerdict::Retry);
+    }
+
+    #[test]
+    fn only_transient_sfu_reasons_are_retried() {
+        for code in [1001, 1006, 1011, 4001, 4002, 4008, 4010, 4013, 4999] {
+            assert_eq!(
+                classify_close(Some(CloseCode::Library(code))),
+                CloseVerdict::Retry
+            );
+        }
+    }
+
+    #[test]
+    fn normal_closure_ends_the_call() {
+        for code in [1000] {
+            assert_eq!(
+                classify_close(Some(CloseCode::Library(code))),
+                CloseVerdict::Removed(RemovalCause::Disconnected),
+                "close code {code} should end the call"
+            );
+        }
+    }
+
+    #[test]
+    fn kick_alone_timeout_and_duplicate_session_have_distinct_causes() {
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4006))),
+            CloseVerdict::Removed(RemovalCause::Kicked)
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4011))),
+            CloseVerdict::Removed(RemovalCause::AloneTimeout)
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4012))),
+            CloseVerdict::Removed(RemovalCause::DuplicateSession)
+        );
+    }
+
+    fn jwt_with_exp(exp: i64, padded: bool) -> String {
+        use base64::Engine as _;
+        let claims = serde_json::json!({ "exp": exp, "sub": 7 }).to_string();
+        let payload = if padded {
+            base64::engine::general_purpose::URL_SAFE.encode(&claims)
+        } else {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&claims)
+        };
+        format!("eyJhbGciOiJIUzI1NiJ9.{payload}.c2ln")
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn a_token_reports_its_remaining_lifetime() {
+        let left = token_seconds_left(&jwt_with_exp(unix_now() + 3_600, false)).unwrap();
+        assert!((3_595..=3_600).contains(&left), "got {left}");
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() - 10, false)).unwrap() < 0);
+    }
+
+    #[test]
+    fn a_padded_or_malformed_token_is_handled() {
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() + 60, true)).is_some());
+        assert_eq!(token_seconds_left("not-a-jwt"), None);
+        assert_eq!(token_seconds_left("a.b.c"), None);
+        assert_eq!(token_seconds_left("a.e30.c"), None);
+    }
+
+    fn counting_refresher(mints_fresh_token: bool) -> (TokenRefresher, impl Fn() -> u32) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let minted = calls.clone();
+        let refresher = TokenRefresher::new(move || {
+            let call = minted.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { mints_fresh_token.then(|| format!("fresh-token-{call}")) }
+        });
+        (refresher, move || calls.load(Ordering::SeqCst))
+    }
+
+    fn config_with_refresher(token: &str, refresher: TokenRefresher) -> SfuConfig {
+        SfuConfig {
+            screen_views: Arc::default(),
+            ws_url: String::new(),
+            token: token.into(),
+            room: "test-room".into(),
+            role: SfuRole::Speaker,
+            muted: true,
+            fallback_ice_servers: Vec::new(),
+            refresh_token: Some(refresher),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_auth_close_forces_refresh_of_an_unexpired_token() {
+        let (refresher, calls) = counting_refresher(true);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 3_600, false), refresher);
+        assert!(ensure_fresh_token(&mut config, &mut 0, true).await);
+        assert_eq!(calls(), 1);
+        assert_eq!(config.token, "fresh-token-1");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_not_reused_after_refresh_failure() {
+        let (refresher, calls) = counting_refresher(false);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 3_600, false), refresher);
+        assert!(!ensure_fresh_token(&mut config, &mut 0, true).await);
+        assert_eq!(calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_before_a_reconnect_is_bounded() {
+        let (refresher, calls) = counting_refresher(false);
+        let mut config = config_with_refresher("not-a-jwt", refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
+            ensure_fresh_token(&mut config, &mut refreshes, false).await;
+        }
+        assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn refreshing_before_a_reconnect_caps_successful_mints() {
+        let (refresher, calls) = counting_refresher(true);
+        let mut config = config_with_refresher(&jwt_with_exp(unix_now() + 5, false), refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
+            ensure_fresh_token(&mut config, &mut refreshes, false).await;
+        }
+        assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+}

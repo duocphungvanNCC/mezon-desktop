@@ -59,6 +59,7 @@ impl ConfirmDeleteThreadModal {
                 return;
             };
             let result = task.await;
+            let owner = this.entity_id();
 
             cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| match &result {
@@ -67,7 +68,7 @@ impl ConfirmDeleteThreadModal {
                             mezon_i18n::t(&locale, "channelMenu.toastDeleteThread").to_string(),
                             cx,
                         );
-                        shell.close_modal(cx);
+                        shell.close_modal_if_current(owner, cx);
                     }
                     Err(err) => {
                         tracing::error!("delete_channel failed for {channel_id}: {err}");
@@ -120,13 +121,13 @@ impl Render for ConfirmDeleteThreadModal {
                         div()
                             .text_size(px(20.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.title.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(15.))
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.description.clone()),
                     ),
             )
@@ -136,7 +137,9 @@ impl Render for ConfirmDeleteThreadModal {
                     .items_center()
                     .gap_4()
                     .p(px(16.))
-                    .bg(theme.bg_secondary)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .bg(theme.tokens.bg_option_active)
                     .child(
                         Button::new("confirm-delete-thread-cancel")
                             .label(self.cancel_label.clone())

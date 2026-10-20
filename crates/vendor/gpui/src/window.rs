@@ -4753,6 +4753,11 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // mezon vendor edit: Linux (X11/Wayland) drag-and-drop emits only
+            // FileDrop events, not real mouse moves. Without this, a composer
+            // focused via keyboard keeps Keyboard modality and every
+            // hitbox.is_hovered() stays false through the drop MouseUp.
+            PlatformInput::FileDrop(_) => InputModality::Mouse,
             _ => self.last_input_modality,
         };
         if self.last_input_modality != old_modality {
@@ -4916,8 +4921,6 @@ impl Window {
                 // active drag can follow the mouse cursor.
                 self.refresh();
             } else if event.is::<MouseUpEvent>() {
-                // If this was a mouse up event, cancel the active drag and redraw
-                // the window.
                 cx.active_drag = None;
                 self.refresh();
             }
@@ -5409,19 +5412,34 @@ impl Window {
         self.platform_window.hide();
     }
 
+    /// mezon vendor edit: cancel in-progress IME composition at the platform
+    /// level (Linux DBus Reset / zwp_text_input disable-enable) so a picker or
+    /// field switch can drop an uncommitted preedit while App is already borrowed.
+    pub fn reset_ime(&self) {
+        self.platform_window.reset_ime();
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();
     }
 
     /// Updates the IME panel position suggestions for languages like japanese, chinese.
+    ///
+    /// mezon vendor edit: read surrounding while App is already borrowed (avoids
+    /// AsyncApp reentrancy on Linux IME sync), pass a one-shot hint into
+    /// `update_ime_position`, then always retract so blur / mid-composition /
+    /// DeleteSurrounding never see a stale snapshot.
     pub fn invalidate_character_coordinates(&self) {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 let bounds = input_handler.selected_bounds(window, cx);
+                let surrounding = input_handler.surrounding_text_in(window, cx);
                 window.platform_window.set_input_handler(input_handler);
                 if let Some(bounds) = bounds {
+                    window.platform_window.set_ime_surrounding_hint(surrounding);
                     window.platform_window.update_ime_position(bounds);
+                    window.platform_window.set_ime_surrounding_hint(None);
                 }
             }
         });

@@ -4,9 +4,9 @@ pub mod tokens;
 
 use std::sync::Arc;
 
-use gpui::{App, Background, Global, Hsla, Rgba};
+use gpui::{App, Global, Rgba};
 
-use crate::surface::ThemeSurfaces;
+use crate::surface::{ThemeSurface, ThemeSurfaces};
 use crate::tokens::ThemeTokens;
 
 struct GlobalTheme(Arc<Theme>);
@@ -59,6 +59,10 @@ pub fn init_theme_settings_provider(cx: &mut App) {
     );
 }
 
+pub fn ui_font_family(cx: &App) -> gpui::SharedString {
+    ::theme::theme_settings(cx).ui_font(cx).family.clone()
+}
+
 pub fn set_theme(theme: Theme, cx: &mut App) {
     apply_zed_palette(&theme, cx);
     cx.set_global(GlobalTheme(Arc::new(theme)));
@@ -72,7 +76,7 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
     let colors = &mut zed.styles.colors;
     colors.background = theme.bg_primary.into();
     colors.surface_background = theme.bg_secondary.into();
-    colors.elevated_surface_background = theme.bg_floating.into();
+    colors.elevated_surface_background = theme.tokens.bg_tooltip_app.into();
     colors.panel_background = theme.bg_secondary.into();
     colors.element_background = theme.bg_tertiary.into();
     colors.element_hover = theme.bg_hover.into();
@@ -105,18 +109,37 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
     ::theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(zed));
 }
 
-pub fn resolve_theme(theme_name: &str) -> Theme {
+fn canonical_theme_name(theme_name: &str) -> &'static str {
     match theme_name {
+        "dark" => "dark",
+        "light" => "light",
+        "purple" | "purple_haze" => "purple_haze",
+        "abyss" | "abyss_dark" => "abyss_dark",
+        "red_dark" | "redDark" => "redDark",
+        "sunrise" => "sunrise",
+        "sunset" => "sunset",
+        "cisher" => "cisher",
+        "berrynade" => "berrynade",
+        _ => "dark",
+    }
+}
+
+pub fn resolve_theme(theme_name: &str) -> Theme {
+    match canonical_theme_name(theme_name) {
         "light" => Theme::light(),
-        "purple" | "purple_haze" => Theme::purple(),
-        "abyss" | "abyss_dark" => Theme::abyss(),
-        "red_dark" | "redDark" => Theme::red_dark(),
+        "purple_haze" => Theme::purple(),
+        "abyss_dark" => Theme::abyss(),
+        "redDark" => Theme::red_dark(),
         "sunrise" => Theme::sunrise(),
         "sunset" => Theme::sunset(),
         "cisher" => Theme::cisher(),
         "berrynade" => Theme::berrynade(),
         _ => Theme::dark(),
     }
+}
+
+pub fn preview_surface(theme_name: &str) -> ThemeSurface {
+    surfaces::preview_surface(canonical_theme_name(theme_name))
 }
 
 /// Mezon dark theme color tokens — matching #313338 background (Discord-style dark)
@@ -279,38 +302,11 @@ impl Theme {
         }
     }
 
-    /// Resolves a flat base colour to the gradient surface the theme defines as
-    /// the same colour.
-    ///
-    /// `from_tokens` aliases every base background onto a token that also backs a
-    /// `ThemeSurface` (`bg_tertiary` == `--bg-primary`, and so on), so painting the
-    /// raw base value drops a flattened fill on top of the matching gradient. Flat
-    /// themes, where the two genuinely differ, keep the base colour.
-    pub fn surface_for(&self, base: Rgba) -> Background {
-        let surfaces = [
-            self.surfaces.primary,
-            self.surfaces.secondary,
-            self.surfaces.surface,
-            self.surfaces.direct_message,
-            self.surfaces.input_primary,
-            self.surfaces.active_friend_list,
-            self.surfaces.modal_search,
-            self.surfaces.outside_footer,
-            self.surfaces.footer,
-        ];
-        for surface in surfaces {
-            if surface.gradient.is_some() && surface.solid == base {
-                return surface.ramp();
-            }
-        }
-        Background::from(Hsla::from(base))
-    }
-
     fn from_tokens(mut base: Theme, t: ThemeTokens, name: &str) -> Theme {
         base.bg_primary = t.bg_secondary;
         base.bg_secondary = t.bg_theme_direct_message;
         base.bg_tertiary = t.bg_primary;
-        base.bg_floating = t.bg_tooltip_app;
+        base.bg_floating = t.bg_modal_theme;
         base.bg_hover = t.bg_item_hover;
         base.brand = t.button_theme_primary;
         base.brand_hover = t.bg_button_primary_hover;
@@ -360,6 +356,7 @@ mod tests {
         assert_eq!(theme.bg_primary, t.bg_secondary);
         assert_eq!(theme.bg_secondary, t.bg_theme_direct_message);
         assert_eq!(theme.bg_tertiary, t.bg_primary);
+        assert_eq!(theme.bg_floating, t.bg_modal_theme);
         assert_eq!(theme.border, t.border_primary);
         assert_eq!(theme.brand, t.button_theme_primary);
         assert_eq!(theme.title_bar_bg, t.bg_primary);
@@ -375,34 +372,30 @@ mod tests {
     }
 
     #[test]
-    fn surface_for_promotes_aliased_base_colors() {
-        for name in ["sunrise", "purple_haze", "redDark"] {
-            let theme = Theme::from_react(name);
-            // from_tokens aliases these onto tokens that also back a gradient surface.
-            for base in [theme.bg_tertiary, theme.bg_primary, theme.bg_secondary] {
-                assert!(
-                    theme.surface_for(base).as_solid().is_none(),
-                    "{name}: {base:?} should resolve to its gradient surface"
-                );
-            }
+    fn preview_aliases_match_their_canonical_theme() {
+        for (alias, canonical) in [
+            ("purple", "purple_haze"),
+            ("abyss", "abyss_dark"),
+            ("red_dark", "redDark"),
+        ] {
+            assert_eq!(preview_surface(alias), preview_surface(canonical));
         }
     }
 
     #[test]
-    fn surface_for_keeps_flat_theme_colors() {
-        for name in ["dark", "light"] {
-            let theme = if name == "dark" {
-                Theme::dark()
-            } else {
-                Theme::light()
-            };
-            // dark/light carry no gradients at all, so every base colour must come
-            // back untouched.
-            assert!(theme.surfaces.primary.gradient.is_none());
-            assert_eq!(
-                theme.surface_for(theme.bg_tertiary).as_solid(),
-                Some(Hsla::from(theme.bg_tertiary)),
-                "{name} must keep its own tertiary"
+    fn every_gradient_theme_has_a_gradient_preview() {
+        for name in [
+            "sunrise",
+            "purple_haze",
+            "redDark",
+            "abyss_dark",
+            "berrynade",
+            "cisher",
+            "sunset",
+        ] {
+            assert!(
+                preview_surface(name).gradient.is_some(),
+                "{name} should not silently fall back to the dark swatch"
             );
         }
     }

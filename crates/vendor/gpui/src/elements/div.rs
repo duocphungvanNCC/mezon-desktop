@@ -15,18 +15,17 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
-use crate::{OngoingScroll, PinchEvent};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
-    Display, Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
-    KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
-    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
-    size,
+    Display, Element, ElementId, Entity, EntityId, ExternalPaths, FocusHandle, Global,
+    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero,
+    KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId,
+    ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size,
 };
+use crate::{OngoingScroll, PinchEvent};
 use collections::HashMap;
 use gpui_util::ResultExt;
 use refineable::Refineable;
@@ -53,6 +52,16 @@ const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 const SCROLL_HOVER_RELEASE_DELAY: Duration = Duration::from_millis(300);
+
+fn drop_hitbox_accepts(hitbox: &Hitbox, window: &Window, _cx: &App, drag_type: TypeId) -> bool {
+    if hitbox.is_hovered(window) {
+        return true;
+    }
+    if drag_type != TypeId::of::<ExternalPaths>() {
+        return false;
+    }
+    hitbox.id.is_hovered_ignoring_last_input(window)
+}
 
 /// The styling information for a given group.
 pub struct GroupStyle {
@@ -1347,6 +1356,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Hold hover still under the pointer while a scroll gesture is running.
+    fn suppress_hover_while_scrolling(mut self) -> Self {
+        self.interactivity().suppress_hover_while_scrolling = true;
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn anchor_scroll(mut self, scroll_anchor: Option<ScrollAnchor>) -> Self {
         self.interactivity().scroll_anchor = scroll_anchor;
@@ -1614,6 +1629,33 @@ impl ParentElement for Div {
     }
 }
 
+fn autoscroll_delta(container: Bounds<Pixels>, target: Bounds<Pixels>) -> Point<Pixels> {
+    fn axis_delta(lo: Pixels, hi: Pixels, target_lo: Pixels, target_hi: Pixels) -> Pixels {
+        let mut delta = Pixels::ZERO;
+        if target_hi > hi {
+            delta = hi - target_hi;
+        }
+        if target_lo + delta < lo {
+            delta = lo - target_lo;
+        }
+        delta
+    }
+    point(
+        axis_delta(
+            container.left(),
+            container.right(),
+            target.left(),
+            target.right(),
+        ),
+        axis_delta(
+            container.top(),
+            container.bottom(),
+            target.top(),
+            target.bottom(),
+        ),
+    )
+}
+
 impl Element for Div {
     type RequestLayoutState = DivFrameState;
     type PrepaintState = Option<Hitbox>;
@@ -1730,6 +1772,7 @@ impl Element for Div {
             scroll_handle.scroll_to_active_item();
         }
 
+        let autoscroll_offset = self.interactivity.scroll_offset.clone();
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -1745,6 +1788,9 @@ impl Element for Div {
 
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
+                        let outer_autoscroll = autoscroll_offset
+                            .as_ref()
+                            .and_then(|_| window.take_autoscroll());
                         if let Some(order_fn) = &self.prepaint_order_fn {
                             let order = order_fn(window, cx);
                             for idx in order {
@@ -1755,6 +1801,19 @@ impl Element for Div {
                         } else {
                             for child in &mut self.children {
                                 child.prepaint(window, cx);
+                            }
+                        }
+                        if let Some(offset) = autoscroll_offset.as_ref() {
+                            if let Some(target) = window.take_autoscroll() {
+                                let delta = autoscroll_delta(bounds, target);
+                                if delta != Point::default() {
+                                    let mut offset = offset.borrow_mut();
+                                    offset.x += delta.x;
+                                    offset.y += delta.y;
+                                    window.request_animation_frame();
+                                }
+                            } else if let Some(outer) = outer_autoscroll {
+                                window.request_autoscroll(outer);
                             }
                         }
                     });
@@ -1924,8 +1983,7 @@ fn start_smooth_scroll_handle(
             let (_, velocity, _) = animation.sample(now);
             (animation.target - animation.applied, velocity)
         });
-        let target = (current + remaining + delta.as_f32())
-            .clamp(-state.max_offset.y.as_f32(), 0.);
+        let target = (current + remaining + delta.as_f32()).clamp(-state.max_offset.y.as_f32(), 0.);
         if (target - current).abs() <= f32::EPSILON {
             state.wheel_scroll_animation = None;
             return;
@@ -2157,12 +2215,7 @@ impl Interactivity {
             && let Some(handle) = self.tracked_scroll_handle.as_ref()
         {
             handle.0.borrow_mut().suppress_hover_while_scrolling = true;
-            ensure_scroll_handle_hover_release_task(
-                handle,
-                window.current_view(),
-                window,
-                cx,
-            );
+            ensure_scroll_handle_hover_release_task(handle, window.current_view(), window, cx);
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -2235,10 +2288,8 @@ impl Interactivity {
                                     handle.0.borrow().is_scroll_hover_active()
                                 })
                             {
-                                window.insert_hitbox(
-                                    bounds,
-                                    HitboxBehavior::BlockMouseExceptScroll,
-                                );
+                                window
+                                    .insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
                             }
                             (result, element_state)
                         },
@@ -2717,28 +2768,32 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             window.on_mouse_event({
                 move |_: &MouseUpEvent, phase, window, cx| {
-                    if let Some(drag) = &cx.active_drag
-                        && phase == DispatchPhase::Bubble
-                        && hitbox.is_hovered(window)
-                    {
-                        let drag_state_type = drag.value.as_ref().type_id();
-                        for (drop_state_type, listener) in &drop_listeners {
-                            if *drop_state_type == drag_state_type {
-                                let drag = cx
-                                    .active_drag
-                                    .take()
-                                    .expect("checked for type drag state type above");
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let Some(drag) = &cx.active_drag else {
+                        return;
+                    };
+                    if !drop_hitbox_accepts(&hitbox, window, cx, drag.value.as_ref().type_id()) {
+                        return;
+                    }
+                    let drag_state_type = drag.value.as_ref().type_id();
+                    for (drop_state_type, listener) in &drop_listeners {
+                        if *drop_state_type == drag_state_type {
+                            let drag = cx
+                                .active_drag
+                                .take()
+                                .expect("checked for type drag state type above");
 
-                                let mut can_drop = true;
-                                if let Some(predicate) = &can_drop_predicate {
-                                    can_drop = predicate(drag.value.as_ref(), window, cx);
-                                }
+                            let mut can_drop = true;
+                            if let Some(predicate) = &can_drop_predicate {
+                                can_drop = predicate(drag.value.as_ref(), window, cx);
+                            }
 
-                                if can_drop {
-                                    listener(drag.value.as_ref(), window, cx);
-                                    window.refresh();
-                                    cx.stop_propagation();
-                                }
+                            if can_drop {
+                                listener(drag.value.as_ref(), window, cx);
+                                window.refresh();
+                                cx.stop_propagation();
                             }
                         }
                     }
@@ -3127,7 +3182,9 @@ impl Interactivity {
                         && event.delta.precise()
                         && let Some(ongoing_scroll) = &ongoing_scroll
                     {
-                        ongoing_scroll.borrow_mut().filter(&mut delta, event.touch_phase);
+                        ongoing_scroll
+                            .borrow_mut()
+                            .filter(&mut delta, event.touch_phase);
                     }
 
                     let mut delta_x = Pixels::ZERO;

@@ -156,6 +156,17 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "search_users",
+        description: "\
+Search users the way the send-token recipient box and Ctrl+K do: the server matches
+username, display name and clan nickname (ILIKE, max 50) among friends and members of
+the caller's clans, bots included.
+
+Parameters:
+- query (required): search text",
+        write: false,
+    },
+    ToolSpec {
         name: "get_current_context",
         description: "\
 Return the UI route and parsed context for the active screen.
@@ -164,6 +175,38 @@ Includes route, auth state, user_id, clan_id, and channel_id when viewing chat. 
 
 Parameters: none.",
         write: false,
+    },
+    ToolSpec {
+        name: "tour_state",
+        description: "\
+Report the guided tour's current step.
+
+Always returns an object. `active` is false when no tour is running. While a tour runs it
+also carries `resolving` (true for the frame after start, before the first step resolves),
+`track`, `index`, `position`, `total`, `title_key`, `anchor`, `has_hole` and `hole`
+([x, y, w, h] in window points, null for a centered step). `has_hole` is false when the
+step's anchor was not recorded on screen this run and it fell back to a centered card.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "tour_start",
+        description: "\
+Start a guided tour track.
+
+Parameters:
+- track (optional): track id. Omitted starts the track matching the current route.",
+        write: true,
+    },
+    ToolSpec {
+        name: "tour_advance",
+        description: "\
+Move the running guided tour one step.
+
+Parameters:
+- forward (optional, default true): false steps back.",
+        write: true,
     },
     ToolSpec {
         name: "get_scroll_state",
@@ -302,7 +345,8 @@ Parameters: none.",
 Return the member-list context menu that is currently open, if any.
 
 Includes the target user, the resolved permission/relationship flags that decide which rows show
-(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread,
+show_remove_from_group), and the item list
 with the index to pass to member_menu_pick.
 
 Parameters: none.",
@@ -333,14 +377,14 @@ Parameters: none.",
         name: "member_menu_pick",
         description: "\
 Run one row of the open member context menu (Profile, Message, Add Friend, Unblock, Remove Friend,
-Ban, Unban, Kick, Remove from thread).
+Ban, Unban, Kick, Remove from thread, Remove from group).
 
 Call member_menu_open first and pick the index from its item list. Rows of kind \"submenu\" or
 \"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
 (seconds; 0 means until the ban is lifted).
 
-Destructive: Kick, Ban and Remove-from-thread hit the server immediately; Remove Friend and Kick
-open a confirmation modal instead.
+Destructive: Ban and Remove-from-thread hit the server immediately; Remove Friend, Kick and
+Remove-from-group open a confirmation modal instead.
 
 Parameters:
 - index (required): item index from member_menu_open/member_menu_state.
@@ -421,6 +465,35 @@ Useful for making a throwaway empty category to exercise the category context me
 Parameters:
 - clan_id (required): clan snowflake id.
 - name (required): category name (letters, digits, space, - or _; must not start with a separator).",
+        write: true,
+    },
+    ToolSpec {
+        name: "sidebar_channels",
+        description: "\
+List the channels the app currently holds for a clan — the store behind the sidebar, not a
+fresh API call (list_channels asks the server). Use it to see what realtime events did to
+the client.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+
+Returns [{ id, label, channel_type, private, category_id, category_name, voice_member_ids }].",
+        write: false,
+    },
+    ToolSpec {
+        name: "create_channel",
+        description: "\
+Create a channel in a clan through the same store path the Create Channel modal uses.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- category_id (required): category snowflake id from list_categories.
+- name (required): channel name (same rules as the modal).
+- channel_type (optional): \"text\" (default), \"voice\" or \"stream\".
+- private (optional, default false): create it private — text and voice only; the store
+  ignores it for any other type, exactly like the modal.
+
+Returns { ok, channel_id, channel_type }.",
         write: true,
     },
     ToolSpec {
@@ -609,8 +682,9 @@ Parameters: none.",
 Report what the open topic panel holds.
 
 Returns panel_open, topic_id, origin_message_id, loaded_count, has_more_top,
-loading_more and the panel list's item_count / first_visible_index / at_bottom.
-has_more_top drives topic paging the way get_scroll_state does for a channel.
+loading_more, the panel list's item_count / first_visible_index / at_bottom, and the
+topic composer's text / attachments. has_more_top drives topic paging the way
+get_scroll_state does for a channel.
 
 Parameters: none.",
         write: false,
@@ -866,6 +940,22 @@ Parameters: path (optional string) - absolute output path; defaults to a timesta
 Stop the running call recording and finalize the file.
 
 Parameters: none.",
+        write: true,
+    },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "simulate_participants",
+        description: "\
+Debug builds only. Fill the current call with synthetic participants so a crowded
+room can be driven on one machine. They are drawn from the connected clan's member
+list, so names and avatars resolve exactly like real participants; the first one is
+marked speaking and every third is muted. They persist across SFU participant updates
+until cleared.
+
+Parameters: count (integer) - how many to add; 0 clears them.
+Optional: screenshare (bool) - the first one also publishes a screen share;
+focus (bool) - focus that share; fullscreen (bool) - fullscreen it;
+member_strip (bool, default true) - the focus layout's participant strip.",
         write: true,
     },
     ToolSpec {

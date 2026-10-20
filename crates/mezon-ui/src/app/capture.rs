@@ -289,7 +289,7 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     cx.update_window(main_handle, |_, window, cx| {
         composer.update(cx, |composer, cx| match tab {
             Some(tab) => composer.show_panel(tab, window, cx),
-            None => composer.hide_panel(cx),
+            None => composer.hide_panel(window, cx),
         });
     })?;
     let open = composer.read(cx).active_panel(cx).map(|tab| match tab {
@@ -339,6 +339,8 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         // What the next submit will answer, if anything.
         "reply_target": reply_target,
         "popup_open": popup_open,
+        "searching": composer.probe_searching(),
+        "stale": composer.probe_holding_stale(),
         "selected": selected,
         "suggestions": suggestions,
         "panel": composer.active_panel(cx).map(|tab| match tab {
@@ -454,11 +456,20 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
                 .len()
         })
         .unwrap_or(0);
-    let (item_count, first_visible, at_bottom) = topic_panel(cx)
+    let panel = topic_panel(cx).ok();
+    let (item_count, first_visible, at_bottom) = panel
+        .as_ref()
         .map(|(_, timeline)| timeline.read(cx).viewport_state())
         .unwrap_or((0, 0, false));
-    let attachments = topic_panel(cx)
-        .map(|(composer, _)| composer.read(cx).probe_attachments())
+    let (text, attachments) = panel
+        .as_ref()
+        .map(|(composer, _)| {
+            let composer = composer.read(cx);
+            (
+                composer.probe_text(cx).to_string(),
+                composer.probe_attachments(),
+            )
+        })
         .unwrap_or_default();
     Ok(json!({
         // The store's flag and the mounted view are two different things: an
@@ -466,7 +477,7 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         // topic is open, and every write tool then fails with "no topic panel is
         // mounted". Report both so a caller can tell those apart.
         "panel_open": topics.is_panel_open(),
-        "panel_mounted": topic_panel(cx).is_ok(),
+        "panel_mounted": panel.is_some(),
         "topic_id": topic_id.map(|id| id.to_string()),
         "origin_message_id": topics.origin_message().map(|m| m.id.get().to_string()),
         "loaded_count": loaded,
@@ -479,6 +490,7 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         "at_bottom": at_bottom,
         // Same reason as composer_state: topic_drop_paths returns before the file
         // is read, so this is what says the next topic_submit will carry it.
+        "text": text,
         "attachments": attachments,
     }))
 }
@@ -666,8 +678,8 @@ pub fn composer_panel_send(
     width: i32,
     height: i32,
 ) -> anyhow::Result<Value> {
-    with_composer(cx, |composer, _window, cx| {
-        composer.probe_panel_send(kind, url, filename, width, height, cx)
+    with_composer(cx, |composer, window, cx| {
+        composer.probe_panel_send(kind, url, filename, width, height, window, cx)
     })??;
     Ok(json!({ "ok": true, "kind": kind }))
 }
@@ -727,7 +739,10 @@ pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Valu
 pub fn reply_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     store.update(cx, |store, cx| {
-        store.set_reply_to(mezon_store::MessageId::new(message_id), cx)
+        store.set_reply_to(
+            mezon_store::MessageRef::unbucketed(mezon_store::MessageId::new(message_id)),
+            cx,
+        )
     });
     let target = store.read(cx).reply_target().map(|draft| {
         json!({
@@ -973,6 +988,65 @@ pub fn create_category_task(
     })
 }
 
+pub fn sidebar_channels(cx: &App, clan_id: mezon_store::ClanId) -> anyhow::Result<Value> {
+    let channels = mezon_store::ChannelList::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("channel store unavailable"))?;
+    let channels = channels.read(cx);
+    let mut seen = std::collections::HashSet::new();
+    let items: Vec<Value> = channels
+        .categories_for_clan(clan_id)
+        .iter()
+        .flat_map(|category| category.channels.iter().map(move |ch| (category, ch)))
+        .filter(|(_, ch)| seen.insert(ch.id))
+        .map(|(category, ch)| {
+            json!({
+                "id": ch.id.to_string(),
+                "label": ch.name,
+                "channel_type": format!("{:?}", ch.channel_type),
+                "private": ch.private,
+                "category_id": category.id,
+                "category_name": category.name,
+                "voice_member_ids": ch.voice_members.iter().map(|m| m.user_id.to_string()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Value::Array(items))
+}
+
+pub fn create_channel_task(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    category_id: String,
+    name: String,
+    channel_type: &str,
+    private: bool,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let channel_type = match channel_type {
+        "text" => mezon_store::ChannelType::Text,
+        "voice" => mezon_store::ChannelType::Voice,
+        "stream" => mezon_store::ChannelType::Stream,
+        other => {
+            return gpui::Task::ready(Err(anyhow::anyhow!(
+                "unsupported channel_type {other:?}: expected text, voice or stream"
+            )));
+        }
+    };
+    let Some(channels) = mezon_store::ChannelList::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("channel store unavailable")));
+    };
+    let task = channels.update(cx, |list, cx| {
+        list.create_channel(clan_id, category_id, name, channel_type, private, cx)
+    });
+    cx.background_spawn(async move {
+        let (channel_id, created_type) = task.await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(json!({
+            "ok": true,
+            "channel_id": channel_id.to_string(),
+            "channel_type": format!("{created_type:?}"),
+        }))
+    })
+}
+
 pub fn channel_menu_state(cx: &App) -> anyhow::Result<Value> {
     crate::sidebar::channel_sidebar::channel_menu_state(cx)
 }
@@ -1164,7 +1238,7 @@ pub fn list_loaded_messages(cx: &App, limit: usize, topic: bool) -> anyhow::Resu
 pub fn jump_to_message(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     store.update(cx, |store, cx| {
-        store.jump_to_message(mezon_store::MessageId::new(message_id), cx)
+        store.jump_to_message(mezon_store::MessageId::new(message_id), None, cx)
     });
     Ok(json!({ "ok": true, "message_id": message_id.to_string() }))
 }
@@ -1326,6 +1400,25 @@ pub fn open_message_pdf_viewer(
     Ok(serde_json::json!({ "ok": true, "url": opened }))
 }
 
+#[cfg(debug_assertions)]
+pub fn simulate_participants(
+    count: usize,
+    options: mezon_store::SimulatedCall,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let added = voice.update(cx, |store, cx| store.simulate_call(count, &options, cx));
+    Ok(serde_json::json!({
+        "ok": true,
+        "simulated": added,
+        "screenshare": options.screenshare,
+        "focus": options.focus,
+        "fullscreen": options.fullscreen,
+        "member_strip": options.member_strip,
+    }))
+}
+
 pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result<Value> {
     let voice = mezon_store::VoiceStore::try_global(cx)
         .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
@@ -1350,6 +1443,7 @@ pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result
                     channel_id.to_string(),
                     clan_id.to_string(),
                     String::new(),
+                    mezon_store::SfuRole::Speaker,
                     input,
                     output,
                     camera,

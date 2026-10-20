@@ -7,10 +7,13 @@ use gpui::{
 };
 use mezon_store::{
     AudioDeviceInfo, AudioStore, CallPeer, CallPhase, CallStore, ChannelId, DirectMessageStore,
-    MediaFlags, Settings, VoiceRenderFrame,
+    MediaDevice, MediaFlags, Settings, VoiceRenderFrame,
 };
 
 use crate::app::shell::Shell;
+use crate::chat::media_permission_prompt::{
+    media_access_missing, media_permission_badge, observe_media_access,
+};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -18,6 +21,47 @@ use crate::theme::{ActiveTheme, Theme};
 const FRAME_FALLBACK: Duration = Duration::from_millis(200);
 const CALL_GREEN: u32 = 0x3ba55d;
 const CALL_RED: u32 = 0xda373c;
+const TILE_BG: u32 = 0x1e1f22;
+const PANEL_HEIGHT_AUDIO: f32 = 200.;
+const PANEL_HEIGHT_GRID: f32 = 380.;
+const PANEL_HEIGHT_ENLARGED: f32 = 480.;
+const GRID_TILE_HEIGHT: f32 = 270.;
+const GRID_TILE_MAX_WIDTH: f32 = 480.;
+const PIP_TILE_WIDTH: f32 = 200.;
+const PIP_TILE_HEIGHT: f32 = 112.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallTile {
+    Remote,
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileLayout {
+    Grid,
+    Main,
+    Pip,
+}
+
+fn tile_layout(enlarged: Option<CallTile>, tile: CallTile) -> TileLayout {
+    match enlarged {
+        None => TileLayout::Grid,
+        Some(active) if active == tile => TileLayout::Main,
+        Some(_) => TileLayout::Pip,
+    }
+}
+
+fn toggle_enlarged(current: Option<CallTile>, clicked: CallTile) -> Option<CallTile> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
+    }
+}
+
+fn two_tile_layout(store: &CallStore) -> bool {
+    store.local_flags().cam_on || store.remote_flags().cam_on
+}
 
 pub fn call_panel_active_for_dm(channel_id: i64, cx: &App) -> bool {
     let store = CallStore::global(cx).read(cx);
@@ -42,12 +86,6 @@ fn dm_message_type(channel_id: i64, cx: &App) -> String {
         .unwrap_or_else(|| "3".into())
 }
 
-#[derive(Clone, Copy)]
-enum PermissionKind {
-    Mic,
-    Camera,
-}
-
 pub struct CallOverlay {
     call: Entity<CallStore>,
     last_phase: CallPhase,
@@ -61,6 +99,14 @@ impl CallOverlay {
             let phase = call.read(cx).phase();
             let was = this.last_phase;
             this.last_phase = phase;
+            if call.update(cx, |store, _| store.take_mic_unavailable()) {
+                let locale = Settings::try_global(cx)
+                    .map(|s| s.read(cx).language.clone())
+                    .unwrap_or_else(|| "en".to_string());
+                let msg = mezon_i18n::t(&locale, "channelVoice.mediaPermission.micUnavailable")
+                    .to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
             if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
@@ -76,197 +122,6 @@ impl CallOverlay {
             .detach();
         Self { call, last_phase }
     }
-
-    fn render_permission_modal(
-        &self,
-        cx: &mut Context<Self>,
-        kind: PermissionKind,
-    ) -> gpui::AnyElement {
-        let (
-            card_bg,
-            border,
-            title_color,
-            body_color,
-            icon_bg,
-            icon_color,
-            later_bg,
-            later_hover,
-            open_bg,
-            open_hover,
-        ) = {
-            let theme = cx.theme();
-            (
-                theme.bg_floating,
-                theme.border,
-                theme.text_primary,
-                theme.text_muted,
-                theme.bg_hover,
-                theme.danger_text,
-                theme.bg_tertiary,
-                theme.bg_hover,
-                theme.brand,
-                theme.brand_hover,
-            )
-        };
-        let (icon, title_key, body_key) = match kind {
-            PermissionKind::Mic => (
-                IconName::VoiceMicDisabledIcon,
-                "channelVoice.micPermissionTitle",
-                "channelVoice.micPermissionBody",
-            ),
-            PermissionKind::Camera => (
-                IconName::VoiceCameraDisabledIcon,
-                "channelVoice.permission.cameraTitle",
-                "channelVoice.permission.cameraBody",
-            ),
-        };
-        let locale = Settings::try_global(cx)
-            .map(|s| s.read(cx).language.clone())
-            .unwrap_or_default();
-        let title = mezon_i18n::t(&locale, title_key).to_string();
-        let body = mezon_i18n::t(&locale, body_key).to_string();
-        let open_label = mezon_i18n::t(&locale, "channelVoice.openSettings").to_string();
-        let later_label = mezon_i18n::t(&locale, "channelVoice.later").to_string();
-        let call_later = self.call.clone();
-        let call_open = self.call.clone();
-
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000cc))
-            .occlude()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_4()
-                    .w(px(360.))
-                    .p_6()
-                    .rounded_xl()
-                    .bg(card_bg)
-                    .border_1()
-                    .border_color(border)
-                    .shadow_lg()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(56.))
-                            .h(px(56.))
-                            .rounded_full()
-                            .bg(icon_bg)
-                            .child(Icon::new(icon).size(px(26.)).text_color(icon_color)),
-                    )
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(title_color)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_center()
-                            .text_color(body_color)
-                            .child(body),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .w_full()
-                            .child(
-                                div()
-                                    .id("call-mic-perm-later")
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .py_2()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .bg(later_bg)
-                                    .text_color(title_color)
-                                    .hover(move |s| s.bg(later_hover))
-                                    .on_click(move |_, _, cx| {
-                                        call_later.update(cx, |store, cx| match kind {
-                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
-                                            PermissionKind::Camera => {
-                                                store.dismiss_camera_prompt(cx)
-                                            }
-                                        });
-                                    })
-                                    .child(later_label),
-                            )
-                            .child(
-                                div()
-                                    .id("call-mic-perm-open")
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .py_2()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .bg(open_bg)
-                                    .text_color(rgb(0xffffff))
-                                    .hover(move |s| s.bg(open_hover))
-                                    .on_click(move |_, _, cx| {
-                                        match kind {
-                                            PermissionKind::Mic => open_microphone_settings(),
-                                            PermissionKind::Camera => open_camera_settings(),
-                                        }
-                                        call_open.update(cx, |store, cx| match kind {
-                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
-                                            PermissionKind::Camera => {
-                                                store.dismiss_camera_prompt(cx)
-                                            }
-                                        });
-                                    })
-                                    .child(open_label),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-}
-
-fn open_microphone_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", "ms-settings:privacy-microphone"])
-            .spawn();
-    }
-}
-
-fn open_camera_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", "ms-settings:privacy-webcam"])
-            .spawn();
-    }
 }
 
 impl Render for CallOverlay {
@@ -275,12 +130,6 @@ impl Render for CallOverlay {
             let store = self.call.read(cx);
             (store.phase(), store.peer().cloned())
         };
-        if self.call.read(cx).mic_prompt() {
-            return self.render_permission_modal(cx, PermissionKind::Mic);
-        }
-        if self.call.read(cx).camera_prompt() {
-            return self.render_permission_modal(cx, PermissionKind::Camera);
-        }
         let Some(peer) = peer else {
             return div().into_any_element();
         };
@@ -366,6 +215,7 @@ pub struct CallPanelView {
     default_input: Option<String>,
     default_output: Option<String>,
     device_menu_open: bool,
+    enlarged: Option<CallTile>,
     _frame_pump: Option<gpui::Task<()>>,
     _audio_sub: Option<Subscription>,
 }
@@ -374,7 +224,13 @@ impl CallPanelView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let call = CallStore::global(cx);
         cx.observe(&call, |this, call, cx| {
-            let active = !matches!(call.read(cx).phase(), CallPhase::Idle);
+            let (active, two_tile) = {
+                let store = call.read(cx);
+                (!matches!(store.phase(), CallPhase::Idle), two_tile_layout(store))
+            };
+            if !active || !two_tile {
+                this.enlarged = None;
+            }
             if active {
                 if this._frame_pump.is_none() {
                     this.start_frame_pump(cx);
@@ -387,6 +243,9 @@ impl CallPanelView {
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
+        if let Some(media_access) = observe_media_access(cx) {
+            media_access.detach();
+        }
         let mut audio_sub = None;
         let (input_devices, output_devices, default_input, default_output) =
             if let Some(audio) = AudioStore::try_global(cx) {
@@ -416,6 +275,7 @@ impl CallPanelView {
             default_input,
             default_output,
             device_menu_open: false,
+            enlarged: None,
             _frame_pump: None,
             _audio_sub: audio_sub,
         };
@@ -474,8 +334,7 @@ impl CallPanelView {
                 store.self_avatar().to_string(),
             )
         };
-        let remote_active = remote.cam_on || self.call.read(cx).has_remote_video();
-        let two_tile = local.cam_on || remote_active;
+        let two_tile = local.cam_on || remote.cam_on;
 
         let (remote_frame, self_frame) = if two_tile {
             let remote_key = self.call.read(cx).remote_frame_key();
@@ -496,29 +355,46 @@ impl CallPanelView {
         };
 
         let self_avatar_opt = (!self_avatar.is_empty()).then_some(self_avatar.as_str());
+        let enlarged = if two_tile { self.enlarged } else { None };
 
         let content = if two_tile {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .gap_4()
-                .w_full()
-                .flex_1()
-                .min_h(px(0.))
-                .child(video_tile(
-                    remote_frame,
-                    &name,
-                    avatar.as_deref(),
-                    remote.mic_on,
-                ))
-                .child(video_tile(
-                    self_frame,
-                    &self_name,
-                    self_avatar_opt,
-                    local.mic_on,
-                ))
+            let locale = Settings::try_global(cx)
+                .map(|s| s.read(cx).language.clone())
+                .unwrap_or_default();
+            let you_label = mezon_i18n::t(&locale, "message.directMessage.you");
+            let remote_tile = video_tile(
+                cx.entity(),
+                CallTile::Remote,
+                remote_frame,
+                &name,
+                &name,
+                avatar.as_deref(),
+                remote.mic_on,
+                tile_layout(enlarged, CallTile::Remote),
+            );
+            let local_tile = video_tile(
+                cx.entity(),
+                CallTile::Local,
+                self_frame,
+                you_label,
+                &self_name,
+                self_avatar_opt,
+                local.mic_on,
+                tile_layout(enlarged, CallTile::Local),
+            );
+            let stage = div().w_full().flex_1().min_h(px(0.));
+            match enlarged {
+                None => stage
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(remote_tile)
+                    .child(local_tile),
+                Some(CallTile::Remote) => stage.relative().child(remote_tile).child(local_tile),
+                Some(CallTile::Local) => stage.relative().child(local_tile).child(remote_tile),
+            }
         } else {
             div()
                 .relative()
@@ -548,7 +424,7 @@ impl CallPanelView {
                 )
         };
 
-        let controls = self.render_controls(phase, local, cx);
+        let controls = self.render_controls(phase, local, surface, cx);
 
         div()
             .relative()
@@ -557,7 +433,13 @@ impl CallPanelView {
             .items_center()
             .w_full()
             .flex_none()
-            .h(if two_tile { px(320.) } else { px(200.) })
+            .h(px(if !two_tile {
+                PANEL_HEIGHT_AUDIO
+            } else if enlarged.is_some() {
+                PANEL_HEIGHT_ENLARGED
+            } else {
+                PANEL_HEIGHT_GRID
+            }))
             .p_3()
             .gap_3()
             .border_b_1()
@@ -572,6 +454,7 @@ impl CallPanelView {
         &self,
         phase: CallPhase,
         local: MediaFlags,
+        surface: gpui::Rgba,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let call = self.call.clone();
@@ -621,37 +504,47 @@ impl CallPanelView {
             ))
             .into_any_element()
         } else {
-            row.child(circle_button(
-                "call-panel-camera",
-                if local.cam_on {
-                    IconName::VoiceCameraIcon
-                } else {
-                    IconName::VoiceCameraDisabledIcon
-                },
-                if local.cam_on { CALL_GREEN } else { 0x4e5058 },
-                px(52.),
-                {
-                    let call = call.clone();
-                    move |cx: &mut App| {
-                        call.update(cx, |store, cx| store.toggle_camera(cx));
-                    }
-                },
+            row.child(with_permission_badge(
+                circle_button(
+                    "call-panel-camera",
+                    if local.cam_on {
+                        IconName::VoiceCameraIcon
+                    } else {
+                        IconName::VoiceCameraDisabledIcon
+                    },
+                    if local.cam_on { CALL_GREEN } else { 0x4e5058 },
+                    px(52.),
+                    {
+                        let call = call.clone();
+                        move |cx: &mut App| {
+                            call.update(cx, |store, cx| store.toggle_camera(cx));
+                        }
+                    },
+                ),
+                MediaDevice::Camera,
+                surface,
+                cx,
             ))
-            .child(circle_button(
-                "call-panel-mic",
-                if local.mic_on {
-                    IconName::VoiceMicIcon
-                } else {
-                    IconName::VoiceMicDisabledIcon
-                },
-                if local.mic_on { 0x4e5058 } else { CALL_RED },
-                px(52.),
-                {
-                    let call = call.clone();
-                    move |cx: &mut App| {
-                        call.update(cx, |store, cx| store.toggle_mic(cx));
-                    }
-                },
+            .child(with_permission_badge(
+                circle_button(
+                    "call-panel-mic",
+                    if local.mic_on {
+                        IconName::VoiceMicIcon
+                    } else {
+                        IconName::VoiceMicDisabledIcon
+                    },
+                    if local.mic_on { 0x4e5058 } else { CALL_RED },
+                    px(52.),
+                    {
+                        let call = call.clone();
+                        move |cx: &mut App| {
+                            call.update(cx, |store, cx| store.toggle_mic(cx));
+                        }
+                    },
+                ),
+                MediaDevice::Microphone,
+                surface,
+                cx,
             ))
             .child(self.render_settings_button(cx))
             .child(circle_button(
@@ -784,6 +677,8 @@ impl CallPanelView {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.))
+                    .whitespace_normal()
                     .text_sm()
                     .text_color(rgb(0xffffff))
                     .child(label),
@@ -797,13 +692,11 @@ impl CallPanelView {
             })
             .on_click(move |_, _, cx| {
                 let id = id.clone();
-                call.update(cx, |store, cx| {
-                    if is_input {
-                        store.set_input_device(id, cx);
-                    } else {
-                        store.set_output_device(id, cx);
-                    }
-                });
+                if is_input {
+                    call.update(cx, |store, cx| store.set_input_device(id, cx));
+                } else {
+                    mezon_store::set_output_device(id, cx);
+                }
                 view.update(cx, |this, cx| {
                     this.device_menu_open = false;
                     cx.notify();
@@ -964,50 +857,123 @@ fn frame_element(
     name: &str,
     avatar: Option<&str>,
     avatar_size: Pixels,
+    fit: ObjectFit,
 ) -> gpui::AnyElement {
     match frame {
         Some(VoiceRenderFrame::Image(image)) => img(image)
             .size_full()
-            .object_fit(ObjectFit::Cover)
+            .object_fit(fit)
             .into_any_element(),
         #[cfg(target_os = "macos")]
         Some(VoiceRenderFrame::Surface(surface)) => gpui::surface(surface.into_inner())
             .size_full()
-            .object_fit(ObjectFit::Cover)
+            .object_fit(fit)
             .into_any_element(),
         _ => avatar_element(name, avatar, avatar_size),
     }
 }
 
 fn video_tile(
+    view: Entity<CallPanelView>,
+    tile: CallTile,
     frame: Option<VoiceRenderFrame>,
-    name: &str,
+    label: &str,
+    avatar_name: &str,
     avatar: Option<&str>,
     mic_on: bool,
+    layout: TileLayout,
 ) -> gpui::AnyElement {
-    div()
-        .relative()
-        .w(px(320.))
-        .h(px(220.))
-        .rounded_lg()
-        .overflow_hidden()
-        .bg(rgb(0x000000))
+    let (id, group) = match tile {
+        CallTile::Remote => ("call-tile-remote", "call-tile-remote-group"),
+        CallTile::Local => ("call-tile-local", "call-tile-local-group"),
+    };
+    let (avatar_size, fit, label_max_width) = match layout {
+        TileLayout::Grid => (px(80.), ObjectFit::Cover, px(GRID_TILE_MAX_WIDTH - 32.)),
+        TileLayout::Main => (px(112.), ObjectFit::Contain, px(480.)),
+        TileLayout::Pip => (px(40.), ObjectFit::Cover, px(PIP_TILE_WIDTH - 32.)),
+    };
+    let hint_icon = if layout == TileLayout::Main {
+        IconName::ExitFullScreen
+    } else {
+        IconName::FullScreen
+    };
+    let tile_box = div()
+        .id(id)
+        .group(group)
         .flex()
         .items_center()
         .justify_center()
-        .child(frame_element(frame, name, avatar, px(56.)))
-        .when(!mic_on, |el| {
+        .rounded_xl()
+        .overflow_hidden()
+        .bg(rgb(TILE_BG))
+        .border_1()
+        .border_color(rgba(0xffffff1a))
+        .cursor_pointer()
+        .hover(|s| s.border_color(rgba(0xffffff66)))
+        .occlude()
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.enlarged = toggle_enlarged(this.enlarged, tile);
+                cx.notify();
+            });
+        });
+    let tile_box = match layout {
+        TileLayout::Grid => tile_box
+            .relative()
+            .flex_1()
+            .min_w(px(0.))
+            .max_w(px(GRID_TILE_MAX_WIDTH))
+            .h(px(GRID_TILE_HEIGHT)),
+        TileLayout::Main => tile_box.absolute().inset_0().size_full(),
+        TileLayout::Pip => tile_box
+            .absolute()
+            .top(px(12.))
+            .right(px(12.))
+            .w(px(PIP_TILE_WIDTH))
+            .h(px(PIP_TILE_HEIGHT))
+            .shadow_lg(),
+    };
+    tile_box
+        .child(frame_element(frame, avatar_name, avatar, avatar_size, fit))
+        .child(
+            div()
+                .absolute()
+                .bottom_2()
+                .left_2()
+                .flex()
+                .items_center()
+                .gap_1()
+                .max_w(label_max_width)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgba(0x00000099))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(0xffffff))
+                .when(!mic_on, |el| {
+                    el.child(
+                        Icon::new(IconName::VoiceMicDisabledIcon)
+                            .size(px(14.))
+                            .text_color(rgb(0xffffff)),
+                    )
+                })
+                .child(div().min_w_0().truncate().child(label.to_string())),
+        )
+        .when(layout != TileLayout::Pip, |el| {
             el.child(
                 div()
                     .absolute()
-                    .bottom_2()
-                    .left_0()
-                    .right_0()
-                    .flex()
-                    .justify_center()
+                    .top_2()
+                    .left_2()
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgba(0x00000099))
+                    .opacity(0.)
+                    .group_hover(group, |s| s.opacity(1.))
                     .child(
-                        Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(px(24.))
+                        Icon::new(hint_icon)
+                            .size(px(16.))
                             .text_color(rgb(0xffffff)),
                     ),
             )
@@ -1023,6 +989,20 @@ fn device_section_header(text: &'static str) -> gpui::AnyElement {
         .text_color(rgb(0x949ba4))
         .child(text)
         .into_any_element()
+}
+
+fn with_permission_badge(
+    button: Stateful<Div>,
+    device: MediaDevice,
+    ring: gpui::Rgba,
+    cx: &App,
+) -> Div {
+    let badge = media_access_missing(device, cx).then(|| {
+        media_permission_badge(cx.theme(), px(18.), ring)
+            .top(px(-2.))
+            .right(px(-2.))
+    });
+    div().relative().child(button).children(badge)
 }
 
 fn circle_button(
@@ -1046,4 +1026,30 @@ fn circle_button(
         .occlude()
         .child(Icon::new(icon).size(px(22.)).text_color(rgb(0xffffff)))
         .on_click(move |_, _, cx| on_click(cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicking_a_tile_enlarges_it_and_clicking_again_restores_the_grid() {
+        assert_eq!(toggle_enlarged(None, CallTile::Remote), Some(CallTile::Remote));
+        assert_eq!(toggle_enlarged(Some(CallTile::Remote), CallTile::Remote), None);
+    }
+
+    #[test]
+    fn clicking_the_pip_tile_swaps_which_tile_is_enlarged() {
+        assert_eq!(
+            toggle_enlarged(Some(CallTile::Remote), CallTile::Local),
+            Some(CallTile::Local)
+        );
+    }
+
+    #[test]
+    fn tile_layout_follows_the_enlarged_tile() {
+        assert_eq!(tile_layout(None, CallTile::Local), TileLayout::Grid);
+        assert_eq!(tile_layout(Some(CallTile::Local), CallTile::Local), TileLayout::Main);
+        assert_eq!(tile_layout(Some(CallTile::Local), CallTile::Remote), TileLayout::Pip);
+    }
 }

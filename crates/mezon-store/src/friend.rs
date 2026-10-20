@@ -22,6 +22,23 @@ pub enum FriendState {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddFriendAction {
+    Send,
+    AlreadySent,
+    Accept,
+    Ignore,
+}
+
+fn add_friend_action(state: Option<FriendState>) -> AddFriendAction {
+    match state {
+        Some(FriendState::InviteSent) => AddFriendAction::AlreadySent,
+        Some(FriendState::InviteReceived) => AddFriendAction::Accept,
+        Some(FriendState::Friend) => AddFriendAction::Ignore,
+        Some(FriendState::Blocked) | None => AddFriendAction::Send,
+    }
+}
+
 impl FriendState {
     pub fn from_i32(value: i32) -> Self {
         match value {
@@ -60,6 +77,7 @@ impl Friend {
 pub enum FriendEvent {
     Changed,
     AddSucceeded,
+    AddAlreadySent,
     AcceptSucceeded,
     /// A friend request could not be sent (server rejected the username or the RPC failed).
     AddFailed,
@@ -290,6 +308,12 @@ impl FriendStore {
         self.fetch(cx);
     }
 
+    /// Whether `ListFriends` has landed at least once. Callers that refuse an action for a
+    /// non-friend have to tell "not a friend" apart from "the list is not here yet".
+    pub fn has_loaded(&self) -> bool {
+        self.freshness.was_fetched()
+    }
+
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.loading && !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);
@@ -443,14 +467,24 @@ impl FriendStore {
         avatar_url: String,
         cx: &mut Context<Self>,
     ) {
-        if username.is_empty() || self.adding {
-            return;
-        }
-        if self
+        let state = self
             .friends
             .iter()
-            .any(|f| f.id == user_id && f.state != FriendState::Blocked)
-        {
+            .find(|friend| friend.id == user_id)
+            .map(|friend| friend.state);
+        match add_friend_action(state) {
+            AddFriendAction::AlreadySent => {
+                cx.emit(FriendEvent::AddAlreadySent);
+                return;
+            }
+            AddFriendAction::Accept => {
+                self.accept_friend(user_id, cx);
+                return;
+            }
+            AddFriendAction::Ignore => return,
+            AddFriendAction::Send => {}
+        }
+        if username.is_empty() || self.adding {
             return;
         }
         self.adding = true;
@@ -666,6 +700,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
+            create_time_seconds: 0,
         }
     }
 
@@ -676,6 +711,27 @@ mod tests {
         assert_eq!(FriendState::from_i32(2), FriendState::InviteReceived);
         assert_eq!(FriendState::from_i32(3), FriendState::Blocked);
         assert_eq!(FriendState::from_i32(99), FriendState::Friend);
+    }
+
+    #[test]
+    fn repeated_add_friend_action_matches_relationship_state() {
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteSent)),
+            AddFriendAction::AlreadySent
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteReceived)),
+            AddFriendAction::Accept
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Friend)),
+            AddFriendAction::Ignore
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Blocked)),
+            AddFriendAction::Send
+        );
+        assert_eq!(add_friend_action(None), AddFriendAction::Send);
     }
 
     #[test]

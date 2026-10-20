@@ -64,6 +64,9 @@ pub enum McpCommand {
         value: Value,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    SetMcpEnabled {
+        enabled: bool,
+    },
     SetCliEnabled {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
@@ -74,6 +77,15 @@ pub enum McpCommand {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     LeaveVoice {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    SimulateParticipants {
+        count: usize,
+        screenshare: bool,
+        focus: bool,
+        fullscreen: bool,
+        member_strip: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     GetRecordingState {
@@ -87,6 +99,17 @@ pub enum McpCommand {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     GetScrollState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourStart {
+        track: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourAdvance {
+        forward: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     SetPanel {
@@ -284,6 +307,18 @@ pub enum McpCommand {
     CreateCategory {
         clan_id: i64,
         name: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SidebarChannels {
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateChannel {
+        clan_id: i64,
+        category_id: i64,
+        name: String,
+        channel_type: String,
+        private: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     ChannelMenuState {

@@ -2,6 +2,7 @@ use gpui::{AnyElement, App, MouseButton, MouseDownEvent, div, prelude::*, px, rg
 use mezon_store::{Message, MessageCode, TopicsStore};
 
 use super::call_log_card::render_call_log_card;
+use super::command_row::render_command_card;
 use super::content::{
     SelectableTextContext, memoized_selectable_message_layout, render_message_content,
 };
@@ -21,7 +22,7 @@ use crate::components::primitives::{Icon, IconName};
 
 const GROUP_MARGIN_TOP: f32 = 10.;
 const MESSAGE_ROW_MIN_HEIGHT: f32 = 30.;
-const EPHEMERAL_BORDER: u32 = 0xa7_8b_fa;
+pub(super) const EPHEMERAL_BORDER: u32 = 0xa7_8b_fa;
 const JUMP_HIGHLIGHT_RGBA: u32 = 0xea_b3_08_33;
 const REPLY_HIGHLIGHT_RGBA: u32 = 0x94_9c_f7_14;
 const TOPIC_CARD_MAX_WIDTH: f32 = 592.0;
@@ -43,9 +44,10 @@ pub fn render_user_message(
     let has_reply = !msg.references.is_empty();
     let show_head = mezon_store::should_show_message_head(msg, combined);
     let row_key = msg.row_anchor_id.0;
+    let command = msg.command.as_deref();
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
-    let is_me = ctx.current_user_id == msg.sender_id.as_str();
+    let is_me = msg.is_sent_by(ctx.current_user_id);
     let needs_composite_selection = msg.call_log.is_some()
         || msg.code == MessageCode::SendToken
         || msg.poll.is_some()
@@ -108,6 +110,8 @@ pub fn render_user_message(
 
     let content_element = if let Some(input) = editing_input {
         render_edit_box(msg.id, input, ctx)
+    } else if let Some(command) = command {
+        render_command_card(msg, command, ctx)
     } else if let (Some(call_log), Some(selection_context)) =
         (msg.call_log.as_ref(), selection_context.as_ref())
     {
@@ -138,8 +142,8 @@ pub fn render_user_message(
 
     let shows_text_content =
         !editing && msg.call_log.is_none() && msg.code != MessageCode::SendToken;
-    if ephemeral && shows_text_content {
-        body_column = body_column.child(render_ephemeral_notice(ctx));
+    if ephemeral && shows_text_content && command.is_none() {
+        body_column = body_column.child(render_ephemeral_notice(msg, ctx));
     }
 
     if msg.ogp.is_some()
@@ -249,7 +253,7 @@ pub fn render_user_message(
     let interactive = !ephemeral && !sending;
     div()
         .id(("msg-row", row_key as usize))
-        .when(interactive, |d| {
+        .when(interactive && ctx.context_menu_enabled, |d| {
             d.on_mouse_down(
                 MouseButton::Right,
                 move |event: &MouseDownEvent, _window, cx| {
@@ -281,7 +285,7 @@ pub fn render_user_message(
                 .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_tertiary)
         })
-        .when(ephemeral, |d| {
+        .when(ephemeral && command.is_none(), |d| {
             d.bg(theme.tokens.bg_item_theme_hover)
                 .border_l_4()
                 .border_color(rgb(EPHEMERAL_BORDER))
@@ -309,7 +313,7 @@ pub fn render_user_message(
             )
         })
         .when(has_reply && !ephemeral, |d| {
-            d.child(render_reply(&msg.references[0], ctx))
+            d.child(render_reply(msg, &msg.references[0], ctx))
         })
         .child(body)
         .when(interactive && hover_actions_visible(msg, ctx), |d| {
@@ -322,7 +326,8 @@ pub fn render_user_message(
         .into_any_element()
 }
 
-fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
+fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
+    let target = msg.message_ref();
     div()
         .flex()
         .items_center()
@@ -339,6 +344,20 @@ fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
                 .text_color(ctx.theme.tokens.text_theme_primary),
         )
         .child(mezon_i18n::t(ctx.locale, "message.onlyVisibleToRecipient"))
+        .child("·")
+        .child(
+            div()
+                .id(("ephemeral-dismiss", msg.row_anchor_id.0 as usize))
+                .cursor_pointer()
+                .not_italic()
+                .text_color(rgb(super::context::REPLY_USERNAME_COLOR))
+                .hover(|s| s.underline())
+                .child(mezon_i18n::t(ctx.locale, "message.dismissMessage"))
+                .on_click(move |_, _, cx| {
+                    mezon_store::MessagesStore::global(cx)
+                        .update(cx, |store, cx| store.dismiss_local_message(target, cx));
+                }),
+        )
         .into_any_element()
 }
 

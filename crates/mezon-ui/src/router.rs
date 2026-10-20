@@ -55,6 +55,7 @@ pub enum Route {
     SettingsNotifications,
     SettingsLanguage,
     SettingsVoice,
+    SettingsServer,
     SettingsAdvanced,
     ClanSettings {
         clan_id: ClanId,
@@ -71,7 +72,7 @@ pub enum Route {
 }
 
 impl Route {
-    pub fn targets_clan(&self, clan: ClanId) -> bool {
+    pub fn clan_id(&self) -> Option<ClanId> {
         match self {
             Route::ClanMembers { clan_id }
             | Route::ClanChannels { clan_id }
@@ -81,9 +82,17 @@ impl Route {
             | Route::Canvas { clan_id, .. }
             | Route::SettingsClanProfile { clan_id }
             | Route::ClanSettings { clan_id, .. }
-            | Route::ChannelSettings { clan_id, .. } => *clan_id == clan,
-            _ => false,
+            | Route::ChannelSettings { clan_id, .. } => Some(*clan_id),
+            _ => None,
         }
+    }
+
+    pub fn is_clan_space(&self) -> bool {
+        matches!(self, Route::Chat) || self.clan_id().is_some()
+    }
+
+    pub fn targets_clan(&self, clan: ClanId) -> bool {
+        self.clan_id() == Some(clan)
     }
 
     pub fn to_path(&self) -> String {
@@ -128,6 +137,7 @@ impl Route {
             Route::SettingsNotifications => "/settings/notifications".to_string(),
             Route::SettingsLanguage => "/settings/language".to_string(),
             Route::SettingsVoice => "/settings/voice".to_string(),
+            Route::SettingsServer => "/settings/server".to_string(),
             Route::SettingsAdvanced => "/settings/advanced".to_string(),
             Route::ClanSettings { clan_id, page } => {
                 format!("/chat/clans/{}/settings/{}", clan_id.get(), page.slug())
@@ -235,6 +245,7 @@ impl Route {
             ["settings", "notifications"] => Route::SettingsNotifications,
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
+            ["settings", "server"] => Route::SettingsServer,
             ["settings", "advanced"] => Route::SettingsAdvanced,
             ["chat", "clans", clan_id, "settings"] => Route::ClanSettings {
                 clan_id: clan_id.parse().ok()?,
@@ -297,6 +308,10 @@ impl Router {
         self.current.clone()
     }
 
+    pub fn route_ref(&self) -> &Route {
+        &self.current
+    }
+
     pub fn conversation_channel_id(&self) -> Option<ChannelId> {
         match &self.current {
             Route::Channel { channel_id, .. }
@@ -305,6 +320,27 @@ impl Router {
                 direct_id: channel_id,
                 ..
             } => Some(*channel_id),
+            _ => None,
+        }
+    }
+
+    pub fn conversation_context(&self) -> Option<(ClanId, ChannelId)> {
+        match &self.current {
+            Route::Channel {
+                clan_id,
+                channel_id,
+            }
+            | Route::Thread {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } if !clan_id.is_zero() => Some((*clan_id, *channel_id)),
+            Route::DirectMessage { direct_id, .. } => Some((ClanId(0), *direct_id)),
             _ => None,
         }
     }
@@ -338,6 +374,14 @@ impl Router {
         self.forward.retain(|route| !route.targets_clan(clan_id));
     }
 
+    /// Drop a conversation the store no longer has, so Back cannot walk into a channel
+    /// with no sidebar row and no header.
+    pub fn forget_conversation(&mut self, channel_id: ChannelId) {
+        let targets = |route: &Route| matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id);
+        self.backward.retain(|route| !targets(route));
+        self.forward.retain(|route| !targets(route));
+    }
+
     pub fn go_back(&mut self) {
         if let Some(prev) = self.backward.pop_back() {
             self.forward
@@ -356,6 +400,10 @@ impl Router {
                 self.backward.pop_front();
             }
         }
+    }
+
+    pub fn recently_visited(&self) -> impl DoubleEndedIterator<Item = &Route> {
+        self.backward.iter().rev()
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -409,6 +457,9 @@ pub fn replace(cx: &mut App, route: Route) {
 
 pub fn go_back(cx: &mut App) {
     Router::global(cx).update(cx, |router, cx| {
+        if !router.can_go_back() {
+            return;
+        }
         router.go_back();
         cx.notify();
     });
@@ -416,6 +467,9 @@ pub fn go_back(cx: &mut App) {
 
 pub fn go_forward(cx: &mut App) {
     Router::global(cx).update(cx, |router, cx| {
+        if !router.can_go_forward() {
+            return;
+        }
         router.go_forward();
         cx.notify();
     });
@@ -484,11 +538,40 @@ mod tests {
     }
 
     #[test]
+    fn clan_space_covers_clan_settings_and_chat_landing() {
+        assert!(Route::Chat.is_clan_space());
+        assert!(Route::SettingsClanProfile { clan_id: ClanId(1) }.is_clan_space());
+        assert!(
+            Route::ClanSettings {
+                clan_id: ClanId(1),
+                page: ClanSettingsPage::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(
+            Route::ChannelSettings {
+                clan_id: ClanId(1),
+                channel_id: ChannelId(2),
+                tab: ChannelSettingsTab::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(!Route::Direct.is_clan_space());
+        assert!(!Route::Friends.is_clan_space());
+    }
+
+    #[test]
     fn from_path_settings_profile() {
         assert_eq!(
             Route::from_path("/settings/profile"),
             Route::SettingsProfile
         );
+    }
+
+    #[test]
+    fn settings_server_round_trips_through_its_path() {
+        assert_eq!(Route::from_path("/settings/server"), Route::SettingsServer);
+        assert_eq!(Route::SettingsServer.to_path(), "/settings/server");
     }
 
     #[test]
@@ -807,6 +890,38 @@ mod tests {
         });
         router.go_back();
         assert_eq!(router.route(), dm);
+    }
+
+    #[test]
+    fn conversation_context_maps_clan_and_direct_routes() {
+        let mut router = Router::new();
+        router.navigate(Route::Channel {
+            clan_id: ClanId(7),
+            channel_id: ChannelId(11),
+        });
+        assert_eq!(
+            router.conversation_context(),
+            Some((ClanId(7), ChannelId(11)))
+        );
+
+        router.navigate(Route::DirectMessage {
+            direct_id: ChannelId(13),
+            message_type: "3".into(),
+        });
+        assert_eq!(
+            router.conversation_context(),
+            Some((ClanId(0), ChannelId(13)))
+        );
+    }
+
+    #[test]
+    fn conversation_context_rejects_zero_clan_channel_routes() {
+        let mut router = Router::new();
+        router.navigate(Route::Channel {
+            clan_id: ClanId(0),
+            channel_id: ChannelId(11),
+        });
+        assert_eq!(router.conversation_context(), None);
     }
 
     #[test]

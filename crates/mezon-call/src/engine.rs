@@ -17,17 +17,20 @@ use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
 use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
-use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
-use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
+use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, VideoBuffer};
+use libwebrtc::rtp_parameters::DegradationPreference;
+use libwebrtc::rtp_sender::RtpSender;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_frame::VideoRotation;
 use libwebrtc::video_source::VideoResolution;
 use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use mezon_voice::{
-    AudioFormat, AudioIo, CameraController, IceServerConfig, PlaybackMixer, RecordTaps,
-    VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
+    AudioFormat, AudioIo, CameraController, IceServerConfig, MicResampler, PlaybackMixer,
+    RecordTaps, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+    start_camera_into,
 };
 use parking_lot::Mutex;
 
@@ -155,6 +158,14 @@ impl Drop for CallEngine {
     }
 }
 
+fn prefer_camera_framerate(sender: &RtpSender) {
+    let mut parameters = sender.parameters();
+    parameters.set_degradation_preference(DegradationPreference::MaintainFramerate);
+    if let Err(e) = sender.set_parameters(parameters) {
+        tracing::warn!("call: camera degradation preference rejected: {e}");
+    }
+}
+
 async fn run_engine(
     mut config: CallConfig,
     frame_store: Arc<VideoFrameStore>,
@@ -216,7 +227,7 @@ async fn run_engine(
     })));
 
     pc.on_ice_gathering_state_change(Some(Box::new(|state| {
-        tracing::debug!("call: ice gathering state = {state:?}");
+        tracing::info!("call: ice gathering state = {state:?}");
     })));
 
     let pump_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -295,9 +306,6 @@ async fn run_engine(
         *input_fmt.lock()
     );
 
-    let video_transceiver = pc
-        .add_transceiver_for_media(MediaType::Video, sendrecv_init())
-        .context("add video transceiver failed")?;
     let video_source = NativeVideoSource::new(
         VideoResolution {
             width: VIDEO_SOURCE_WIDTH,
@@ -306,10 +314,13 @@ async fn run_engine(
         false,
     );
     let video_track = factory.create_video_track("call-camera", video_source.clone());
-    video_transceiver
-        .sender()
-        .set_track(Some(MediaStreamTrack::from(video_track.clone())))
-        .context("attach video track failed")?;
+    let video_sender = pc
+        .add_track(
+            MediaStreamTrack::from(video_track.clone()),
+            &[CALL_STREAM_ID.to_string()],
+        )
+        .context("add video track failed")?;
+    prefer_camera_framerate(&video_sender);
 
     let mic_enabled = Arc::new(AtomicBool::new(true));
     let mic_task = handle.spawn(mic_capture(
@@ -386,30 +397,22 @@ async fn run_engine(
                             tracing::warn!("ignoring remote offer during local negotiation (glare)");
                             continue;
                         }
-                        let offer = SessionDescription::parse(&sdp, SdpType::Offer)
-                            .map_err(|e| anyhow!("offer parse: {} {}", e.line, e.description))?;
-                        pc.set_remote_description(offer)
-                            .await
-                            .context("set remote (offer) failed")?;
-                        remote_set = true;
-                        drain_ice(&pc, &mut pending_ice).await;
-                        let answer = pc
-                            .create_answer(AnswerOptions::default())
-                            .await
-                            .context("create answer failed")?;
-                        pc.set_local_description(answer.clone())
-                            .await
-                            .context("set local (answer) failed")?;
-                        let _ = event_tx.send(EngineEvent::LocalAnswer(answer.to_string()));
+                        match answer_remote_offer(&pc, &sdp, &mut pending_ice, &event_tx).await {
+                            Ok(()) => remote_set = true,
+                            Err(e) if remote_set => {
+                                tracing::warn!("call: renegotiation offer failed: {e:#}");
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     EngineCommand::ApplyRemoteAnswer(sdp) => {
-                        let answer = SessionDescription::parse(&sdp, SdpType::Answer)
-                            .map_err(|e| anyhow!("answer parse: {} {}", e.line, e.description))?;
-                        pc.set_remote_description(answer)
-                            .await
-                            .context("set remote (answer) failed")?;
-                        remote_set = true;
-                        drain_ice(&pc, &mut pending_ice).await;
+                        match apply_remote_answer(&pc, &sdp, &mut pending_ice).await {
+                            Ok(()) => remote_set = true,
+                            Err(e) if remote_set => {
+                                tracing::warn!("call: remote answer ignored: {e:#}");
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     EngineCommand::AddRemoteIce(ice) => {
                         if remote_set {
@@ -456,23 +459,15 @@ async fn run_engine(
     }
     pc.close();
     drop(audio_sender);
-    drop(video_transceiver);
+    drop(video_sender);
     drop(pc);
     drop(video_track);
     drop(video_source);
     Ok(())
 }
 
-fn sendrecv_init() -> RtpTransceiverInit {
-    RtpTransceiverInit {
-        direction: RtpTransceiverDirection::SendRecv,
-        stream_ids: vec![CALL_STREAM_ID.to_string()],
-        send_encodings: vec![],
-    }
-}
-
 fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
-    let mut ice_servers: Vec<IceServer> = servers
+    let ice_servers: Vec<IceServer> = servers
         .iter()
         .filter(|server| !server.urls.is_empty())
         .map(|server| IceServer {
@@ -481,13 +476,6 @@ fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
             password: server.credential.clone(),
         })
         .collect();
-    if ice_servers.is_empty() {
-        ice_servers.push(IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".into()],
-            username: String::new(),
-            password: String::new(),
-        });
-    }
     RtcConfiguration {
         ice_servers,
         continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
@@ -501,6 +489,55 @@ async fn drain_ice(pc: &PeerConnection, pending: &mut Vec<IcePayload>) {
     }
 }
 
+async fn answer_remote_offer(
+    pc: &PeerConnection,
+    sdp: &str,
+    pending_ice: &mut Vec<IcePayload>,
+    event_tx: &Sender<EngineEvent>,
+) -> Result<()> {
+    tracing::info!(
+        sdp_bytes = sdp.len(),
+        embedded_candidates = sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .count(),
+        "call: applying remote offer"
+    );
+    let offer = SessionDescription::parse(sdp, SdpType::Offer)
+        .map_err(|e| anyhow!("offer parse: {} {}", e.line, e.description))?;
+    pc.set_remote_description(offer)
+        .await
+        .context("set remote (offer) failed")?;
+    tracing::info!(pending_ice = pending_ice.len(), "call: remote offer applied");
+    drain_ice(pc, pending_ice).await;
+    let answer = pc
+        .create_answer(AnswerOptions::default())
+        .await
+        .context("create answer failed")?;
+    tracing::info!("call: local answer created");
+    pc.set_local_description(answer.clone())
+        .await
+        .context("set local (answer) failed")?;
+    tracing::info!("call: local answer applied -> signaling");
+    let _ = event_tx.send(EngineEvent::LocalAnswer(answer.to_string()));
+    Ok(())
+}
+
+async fn apply_remote_answer(
+    pc: &PeerConnection,
+    sdp: &str,
+    pending_ice: &mut Vec<IcePayload>,
+) -> Result<()> {
+    let answer = SessionDescription::parse(sdp, SdpType::Answer)
+        .map_err(|e| anyhow!("answer parse: {} {}", e.line, e.description))?;
+    pc.set_remote_description(answer)
+        .await
+        .context("set remote (answer) failed")?;
+    tracing::info!(pending_ice = pending_ice.len(), "call: remote answer applied");
+    drain_ice(pc, pending_ice).await;
+    Ok(())
+}
+
 async fn log_media_stats(pc: &PeerConnection) {
     let Ok(stats) = pc.get_stats().await else {
         return;
@@ -512,8 +549,26 @@ async fn log_media_stats(pc: &PeerConnection) {
     let mut remote_level = 0.0f64;
     let mut mic_level = 0.0f64;
     let mut mic_samples = 0u64;
+    let local_candidates = stats
+        .iter()
+        .filter(|stat| matches!(stat, RtcStats::LocalCandidate(_)))
+        .count();
+    let remote_candidates = stats
+        .iter()
+        .filter(|stat| matches!(stat, RtcStats::RemoteCandidate(_)))
+        .count();
     for stat in &stats {
         match stat {
+            RtcStats::Transport(transport) => tracing::info!(
+                dtls = ?transport.transport.dtls_state,
+                ice = ?transport.transport.ice_state,
+                ice_role = ?transport.transport.ice_role,
+                dtls_role = ?transport.transport.dtls_role,
+                selected_pair = !transport.transport.selected_candidate_pair_id.is_empty(),
+                local_candidates,
+                remote_candidates,
+                "call: transport stats"
+            ),
             RtcStats::OutboundRtp(sent) if sent.stream.kind == "audio" => {
                 packets_sent += sent.sent.packets_sent;
                 bytes_sent += sent.sent.bytes_sent;
@@ -614,7 +669,7 @@ async fn mic_capture(
     input_fmt: InputFmt,
     mic_enabled: Arc<AtomicBool>,
 ) {
-    let mut resampler = MicResampler::new();
+    let mut resampler = MicResampler::new(CALL_AUDIO_RATE);
     let mut out: Vec<i16> = Vec::new();
     let mut meter = LevelMeter::new("mic level");
     while let Ok(samples) = mic_rx.recv_async().await {
@@ -641,97 +696,6 @@ async fn mic_capture(
             tracing::warn!("mic capture_frame failed: {e}");
         }
     }
-}
-
-struct MicResampler {
-    in_rate: u32,
-    step: f64,
-    out_pos: f64,
-    consumed: u64,
-    prev: f32,
-    have_prev: bool,
-    started: bool,
-}
-
-impl MicResampler {
-    fn new() -> Self {
-        Self {
-            in_rate: 0,
-            step: 1.0,
-            out_pos: 0.0,
-            consumed: 0,
-            prev: 0.0,
-            have_prev: false,
-            started: false,
-        }
-    }
-
-    fn reset(&mut self, in_rate: u32) {
-        self.in_rate = in_rate;
-        self.step = in_rate as f64 / CALL_AUDIO_RATE as f64;
-        self.out_pos = 0.0;
-        self.consumed = 0;
-        self.prev = 0.0;
-        self.have_prev = false;
-        self.started = false;
-    }
-
-    fn process(&mut self, samples: &[i16], in_rate: u32, in_channels: u32, out: &mut Vec<i16>) {
-        if in_rate != self.in_rate {
-            self.reset(in_rate);
-        }
-        let channels = in_channels.max(1) as usize;
-        let mono: Vec<f32> = if channels == 1 {
-            samples.iter().map(|&s| s as f32).collect()
-        } else {
-            samples
-                .chunks_exact(channels)
-                .map(|c| c.iter().map(|&s| s as f32).sum::<f32>() / channels as f32)
-                .collect()
-        };
-        let Some(&last) = mono.last() else {
-            return;
-        };
-        if (self.step - 1.0).abs() < f64::EPSILON {
-            out.extend(mono.iter().map(|&v| clamp_i16(v)));
-            self.prev = last;
-            self.have_prev = true;
-            self.consumed += mono.len() as u64;
-            return;
-        }
-        if !self.started {
-            self.out_pos = self.consumed as f64;
-            self.started = true;
-        }
-        let base = self.consumed;
-        let n = mono.len() as u64;
-        let last_abs = (base + n - 1) as f64;
-        while self.out_pos < last_abs {
-            let left = self.out_pos.floor();
-            let frac = (self.out_pos - left) as f32;
-            let li = left as i64;
-            let sl = self.sample_at(li, base, &mono);
-            let sr = self.sample_at(li + 1, base, &mono);
-            out.push(clamp_i16(sl + (sr - sl) * frac));
-            self.out_pos += self.step;
-        }
-        self.prev = last;
-        self.have_prev = true;
-        self.consumed += n;
-    }
-
-    fn sample_at(&self, abs: i64, base: u64, mono: &[f32]) -> f32 {
-        if abs < base as i64 {
-            if self.have_prev { self.prev } else { mono[0] }
-        } else {
-            let idx = (abs - base as i64) as usize;
-            mono.get(idx).copied().unwrap_or(self.prev)
-        }
-    }
-}
-
-fn clamp_i16(v: f32) -> i16 {
-    v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 fn set_camera(
@@ -771,6 +735,7 @@ fn set_camera(
 
 async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore>) {
     let mut bgra: Vec<u8> = Vec::new();
+    let mut unrotated: Vec<u8> = Vec::new();
     let mut stream = NativeVideoStream::new(video_track);
     let mut logged_first = false;
     while let Some(frame) = stream.next().await {
@@ -781,12 +746,14 @@ async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore
             logged_first = true;
             tracing::info!("call: remote video first frame {width}x{height}");
         }
+        let upright = frame.rotation == VideoRotation::VideoRotation0;
         let (stride_y, stride_u, stride_v) = buffer.strides();
         let (y, u, v) = buffer.data();
-        bgra.clear();
-        bgra.resize(width as usize * height as usize * 4, 0);
+        let converted = if upright { &mut bgra } else { &mut unrotated };
+        converted.clear();
+        converted.resize(width as usize * height as usize * 4, 0);
         i420_to_bgra_into(
-            &mut bgra,
+            converted,
             y,
             u,
             v,
@@ -796,6 +763,11 @@ async fn pump_video(video_track: RtcVideoTrack, frame_store: Arc<VideoFrameStore
             width as usize,
             height as usize,
         );
+        let (width, height) = if upright {
+            (width, height)
+        } else {
+            rotate_bgra_into(&mut bgra, &unrotated, width, height, frame.rotation)
+        };
         if let Some(recycled) =
             frame_store.publish(REMOTE_FRAME_KEY, width, height, std::mem::take(&mut bgra))
         {

@@ -34,6 +34,7 @@ pub enum WelcomeContext {
         name: SharedString,
         private: bool,
         is_stream: bool,
+        age_restricted: i32,
     },
     Thread {
         name: SharedString,
@@ -61,6 +62,7 @@ pub struct RowCtx<'a> {
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
     pub is_topic_box: bool,
+    pub context_menu_enabled: bool,
     pub scroll_active: bool,
     /// Message whose hover toolbar should show, after the React-style hover-intent
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
@@ -73,6 +75,7 @@ pub struct RowCtx<'a> {
     pub ogp_cache: Entity<LruImageCache>,
     pub social_cache: Entity<LruImageCache>,
     pub sprite_cache: Entity<LruImageCache>,
+    pub attachment_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -98,6 +101,9 @@ pub struct RowCtx<'a> {
     pub can_manage_thread: bool,
     /// `send-message` on the open channel, resolved once per render pass.
     pub can_send_message: bool,
+    /// The open conversation is a DM or group DM, where the clan permission
+    /// above never applies.
+    pub is_dm: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
     pub edit_input: Option<Entity<MentionInput>>,
@@ -137,6 +143,7 @@ pub struct RowMemo {
     /// store the way message spans are, so without this the imgproxy url for
     /// every pill of every visible message is rebuilt on every frame.
     pub reaction_srcs: HashMap<SharedString, SharedString>,
+    pub reaction_srcs_generation: u64,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:

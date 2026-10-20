@@ -4,21 +4,32 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, GlobalElementId, HighlightStyle,
-    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
-    MouseUpEvent, Pixels, SharedString, StyledText, TextLayout, TransformationMatrix, Window,
-    point, px, size,
+    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, FontWeight,
+    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseDownEvent, MouseUpEvent, Pixels, SharedString, StyledText, TextLayout,
+    TransformationMatrix, Window, point, px, size,
 };
 
 use super::selection::{SharedSelection, merge_selection_background};
 use crate::components::primitives::IconName;
 
 const INLINE_ICON_SIZE: Pixels = px(16.);
+/// Icon height as a fraction of the em box. Matches the 11px the icon has always been
+/// drawn at in a 16px body, which is what the reserve happened to give on macOS before
+/// the placeholder was made deterministic.
+const INLINE_ICON_EM_RATIO: f32 = 0.6875;
 
 pub struct StyledRun {
     pub range: Range<usize>,
     pub color: Option<Hsla>,
     pub background: Option<Hsla>,
+    /// Pins the run to one weight. The icon placeholder needs it: its advance is
+    /// the box the icon is painted into, and gg sans widens `‰` from 1.004em at
+    /// Normal to 1.092em at ExtraBold, which would resize the icon with the text.
+    pub font_weight: Option<FontWeight>,
+    /// Fades the run out, 1.0 being invisible. A transparent `color` cannot do this:
+    /// `HighlightStyle` blends its color over the base one, so alpha 0 is a no-op.
+    pub fade_out: Option<f32>,
 }
 
 pub struct IconOverlay {
@@ -26,6 +37,13 @@ pub struct IconOverlay {
     pub end_index: usize,
     pub icon: IconName,
     pub color: Hsla,
+}
+
+pub struct ImageOverlay {
+    pub byte_index: usize,
+    pub size: Pixels,
+    pub element: AnyElement,
+    pub prepainted: bool,
 }
 
 pub struct ClickRegion {
@@ -42,8 +60,10 @@ pub struct InlineContent {
     element_id: ElementId,
     styled: StyledText,
     icons: Vec<IconOverlay>,
+    images: Vec<ImageOverlay>,
     clicks: Vec<ClickRegion>,
     selection_state: SharedSelection,
+    cursor_style: CursorStyle,
 }
 
 impl InlineContent {
@@ -66,9 +86,21 @@ impl InlineContent {
             element_id: id.into(),
             styled,
             icons,
+            images: Vec::new(),
             clicks,
             selection_state,
+            cursor_style: CursorStyle::IBeam,
         }
+    }
+
+    pub fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor_style = cursor_style;
+        self
+    }
+
+    pub fn image_overlays(mut self, images: Vec<ImageOverlay>) -> Self {
+        self.images = images;
+        self
     }
 
     pub fn text_layout(&self) -> TextLayout {
@@ -100,6 +132,8 @@ fn build_highlights(
             HighlightStyle {
                 color: run.color.or(Some(body_color)),
                 background_color: run.background,
+                font_weight: run.font_weight,
+                fade_out: run.fade_out,
                 ..Default::default()
             },
         ));
@@ -144,6 +178,30 @@ impl Element for InlineContent {
     ) -> Hitbox {
         self.styled
             .prepaint(None, inspector_id, bounds, state, window, cx);
+        let text_layout = self.styled.layout().clone();
+        let line_height = text_layout.line_height();
+        for overlay in &mut self.images {
+            overlay.prepainted = false;
+            let Some(position) = text_layout.position_for_index(overlay.byte_index) else {
+                continue;
+            };
+            let line = text_layout.line_layout_for_index(overlay.byte_index);
+            let image_size = overlay.size.min(line_height);
+            let baseline = line
+                .map(|line| {
+                    let ascent = line.unwrapped_layout.ascent;
+                    let descent = line.unwrapped_layout.descent;
+                    (line_height - ascent - descent) / 2. + ascent
+                })
+                .unwrap_or(line_height);
+            overlay.element.prepaint_as_root(
+                point(position.x, position.y + baseline - image_size),
+                size(image_size, image_size).into(),
+                window,
+                cx,
+            );
+            overlay.prepainted = true;
+        }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
@@ -163,7 +221,7 @@ impl Element for InlineContent {
             let state = state.unwrap_or_default();
 
             let mouse_position = window.mouse_position();
-            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+            window.set_cursor_style(self.cursor_style, hitbox);
             if let Some(Ok(ix)) = text_layout.try_index_for_position(mouse_position)
                 && self.clicks.iter().any(|region| region.range.contains(&ix))
             {
@@ -242,14 +300,35 @@ impl Element for InlineContent {
                         }
                         _ => (start.x, start.y, INLINE_ICON_SIZE),
                     };
-                let icon_size = if reserved < line_height {
-                    reserved
-                } else {
-                    line_height
-                };
-                let vertical_offset = (line_height - icon_size) * 0.5;
+                // The placeholder reserves one em; the icon is drawn smaller inside it and
+                // centred, so the slack reads as padding between the icon and the label.
+                let line = text_layout.line_layout_for_index(overlay.byte_index);
+                let em = line
+                    .as_ref()
+                    .map(|line| line.unwrapped_layout.font_size)
+                    .unwrap_or(reserved);
+                // `reserved` is the placeholder's advance on the common path, but the wrapped
+                // arm above hands back the whole distance from the row's left edge, which must
+                // not be treated as the icon's slot: centring in it would push the icon halfway
+                // across the line.
+                let slot = reserved.min(em);
+                let icon_size = (em * INLINE_ICON_EM_RATIO).min(slot).min(line_height);
+                // Sit the icon on the text baseline rather than centred in the line box: a line
+                // is only as tall as its tallest run, so centring drifts whenever a chip shares
+                // the line with something bigger. This is the baseline gpui itself draws to
+                // (`text_system::line::paint`).
+                let baseline = line
+                    .map(|line| {
+                        let ascent = line.unwrapped_layout.ascent;
+                        let descent = line.unwrapped_layout.descent;
+                        (line_height - ascent - descent) / 2. + ascent
+                    })
+                    .unwrap_or((line_height + icon_size) / 2.);
                 let icon_bounds = Bounds {
-                    origin: point(icon_x, icon_y + vertical_offset),
+                    origin: point(
+                        icon_x + (slot - icon_size) / 2.,
+                        icon_y + baseline - icon_size,
+                    ),
                     size: size(icon_size, icon_size),
                 };
                 let _ = window.paint_svg(
@@ -260,6 +339,11 @@ impl Element for InlineContent {
                     overlay.color,
                     cx,
                 );
+            }
+            for overlay in &mut self.images {
+                if overlay.prepainted {
+                    overlay.element.paint(window, cx);
+                }
             }
 
             ((), state)

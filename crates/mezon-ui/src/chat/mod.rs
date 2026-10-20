@@ -1,3 +1,4 @@
+pub mod add_members_to_group_modal;
 pub mod age_restricted;
 pub mod area;
 pub use mezon_canvas::{CanvasPopoverPanel, CanvasView, canvas_popover_on_open};
@@ -27,6 +28,7 @@ pub mod inbox;
 pub mod input_bar;
 pub mod layout;
 pub mod media_channel;
+pub mod media_permission_prompt;
 pub mod member_list;
 pub mod member_row_element;
 pub mod mention_input;

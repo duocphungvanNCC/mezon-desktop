@@ -1,9 +1,17 @@
-use gpui::{AnyElement, ElementId, Pixels, SharedString, div, prelude::*, px};
-use mezon_store::{DirectKind, DmAvatarPresence};
+use gpui::{
+    AnyElement, App, ElementId, FontWeight, Pixels, SharedString, Window, div, prelude::*, px,
+};
+use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::compositions::channel_row_element::{BUZZ_COLOR, BUZZ_LABEL};
+use crate::components::primitives::{Avatar, Icon};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
+use crate::util::user_status::{
+    VoiceActivityBadge, in_voice_icon_color, in_voice_status_label_color,
+};
+
+pub type CloseHandler = fn(ChannelId, &mut Window, &mut App);
 
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
@@ -15,6 +23,7 @@ pub struct DmRow {
     kind: DirectKind,
     selected: bool,
     unread: bool,
+    buzz: bool,
     presence_badge: DmAvatarPresence,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -22,8 +31,9 @@ pub struct DmRow {
     group_name: SharedString,
     close_id: SharedString,
     suppress_hover: bool,
-    in_voice_label: Option<SharedString>,
+    voice_badge: Option<(VoiceActivityBadge, SharedString)>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
+    on_close: Option<(ChannelId, CloseHandler)>,
 }
 
 impl DmRow {
@@ -54,6 +64,7 @@ impl DmRow {
             kind,
             selected: false,
             unread: false,
+            buzz: false,
             presence_badge: DmAvatarPresence::None,
             avatar_src: SharedString::from(""),
             avatar_raw: SharedString::from(""),
@@ -61,8 +72,9 @@ impl DmRow {
             group_name,
             close_id,
             suppress_hover: false,
-            in_voice_label: None,
+            voice_badge: None,
             image_cache: None,
+            on_close: None,
         }
     }
 
@@ -86,6 +98,11 @@ impl DmRow {
         self
     }
 
+    pub fn buzz(mut self, buzz: bool) -> Self {
+        self.buzz = buzz;
+        self
+    }
+
     pub fn presence_badge(mut self, badge: DmAvatarPresence) -> Self {
         self.presence_badge = badge;
         self
@@ -101,8 +118,13 @@ impl DmRow {
         self
     }
 
-    pub fn in_voice_label(mut self, label: SharedString) -> Self {
-        self.in_voice_label = Some(label);
+    pub fn voice_badge(mut self, badge: VoiceActivityBadge, label: SharedString) -> Self {
+        self.voice_badge = Some((badge, label));
+        self
+    }
+
+    pub fn on_close(mut self, channel_id: ChannelId, handler: CloseHandler) -> Self {
+        self.on_close = Some((channel_id, handler));
         self
     }
 
@@ -121,7 +143,10 @@ impl DmRow {
 
         let avatar_slot = self.render_avatar(theme);
         let suppress_hover = self.suppress_hover;
+        let on_close = self.on_close;
 
+        // Always mounted: dropping it while the list scrolls would take its 20px box and the
+        // row's gap out of the flex line, reflowing every label on each wheel tick.
         let close_btn = div()
             .id(self.close_id.clone())
             .flex()
@@ -136,7 +161,17 @@ impl DmRow {
                 this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
                     .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
             })
-            .on_click(|_, _window, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                // While hover is suppressed the × is invisible; swallow the click as before
+                // rather than closing a conversation the user cannot see they are aiming at.
+                if suppress_hover {
+                    return;
+                }
+                if let Some((channel_id, handler)) = on_close {
+                    handler(channel_id, window, cx);
+                }
+            })
             .child("×");
 
         div()
@@ -171,38 +206,62 @@ impl DmRow {
                     .text_color(name_color)
                     .truncate()
                     .child(self.label.clone());
-                match self.in_voice_label.clone() {
-                    Some(label) => div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .gap(px(2.))
-                        .child(name_el.line_height(px(16.)))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(2.))
-                                .h(px(16.))
-                                .opacity(0.6)
-                                .child(
-                                    Icon::new(IconName::Speaker)
-                                        .size(px(10.))
-                                        .text_color(gpui::rgb(0x22c55e)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.tokens.text_theme_primary)
-                                        .child(label),
-                                ),
-                        )
-                        .into_any_element(),
+                match self.voice_badge.clone() {
+                    Some((badge, label)) => {
+                        let voice_icon_color = in_voice_icon_color(theme);
+                        let voice_label_color = in_voice_status_label_color(theme);
+                        let icon = Icon::new(badge.icon())
+                            .size(px(10.))
+                            .text_color(voice_icon_color)
+                            .into_any_element();
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .gap(px(2.))
+                            .child(name_el.line_height(px(16.)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .gap(px(2.))
+                                    .h(px(16.))
+                                    .child(icon)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(voice_label_color)
+                                            .child(label),
+                                    ),
+                            )
+                            .into_any_element()
+                    }
                     None => name_el.flex_1().min_w_0().into_any_element(),
                 }
+            })
+            .when(self.buzz, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(16.))
+                        .px(px(4.))
+                        .rounded(px(4.))
+                        .bg(gpui::rgb(BUZZ_COLOR))
+                        .text_color(gpui::white())
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .child(BUZZ_LABEL),
+                )
             })
             .child(close_btn)
     }

@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
-    rgba,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, img, prelude::*,
+    px, rgba,
 };
 use mezon_store::{DirectMessageStore, Embed, FriendState, FriendStore, PresenceStore, UserId};
 
@@ -8,7 +8,7 @@ use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
 use crate::chat::call_actions::{CallTarget, call_user};
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, IconName};
 use crate::router::{Route, navigate};
 
 const CARD_WIDTH: f32 = 280.0;
@@ -66,31 +66,24 @@ pub fn render_share_contact_card(
     let mut avatar_view = Avatar::new()
         .name(name.to_string())
         .size_px(px(AVATAR_SIZE))
+        .border_color(rgba(AVATAR_BORDER))
         .image_cache(ctx.avatar_cache.clone());
     if !avatar.is_empty() {
         let proxied = crate::util::imgproxy::avatar_url(ctx.app, &avatar);
         avatar_view = avatar_view.src(proxied).fallback_src(avatar.to_string());
     }
 
-    let avatar_block = div()
-        .relative()
-        .flex_shrink_0()
-        .size(px(AVATAR_SIZE))
-        .rounded_full()
-        .border_2()
-        .border_color(rgba(AVATAR_BORDER))
-        .child(avatar_view)
-        .child(
-            div()
-                .absolute()
-                .bottom_0()
-                .right(px(-4.))
-                .size(px(STATUS_DOT_SIZE))
-                .rounded_full()
-                .border_2()
-                .border_color(theme.tokens.bg_primary)
-                .bg(dot_color),
-        );
+    let avatar_block = div().relative().flex_shrink_0().child(avatar_view).child(
+        div()
+            .absolute()
+            .bottom_0()
+            .right(px(-4.))
+            .size(px(STATUS_DOT_SIZE))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.tokens.bg_primary)
+            .bg(dot_color),
+    );
 
     let header = div().bg(theme.surfaces.primary).p_4().child(
         div()
@@ -233,7 +226,7 @@ fn contact_action_button(
             .border_color(theme.tokens.border_primary);
     }
     button
-        .child(Icon::new(icon).size_4())
+        .child(img(icon.path()).size_4().flex_none())
         .child(label.into())
         .into_any_element()
 }

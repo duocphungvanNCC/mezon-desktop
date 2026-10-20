@@ -4,23 +4,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
-    SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
+    Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px,
+    radians, rems, rgba,
 };
 use mezon_store::{
-    AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelType, ClanId,
-    ClanList, ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
+    AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
+    ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
+    MessageCode, MessageId, MessageRef, MessageReference, MessageSpan, MessagesStore,
+    ProfileContext, Reaction, STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId,
     UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
+    preview_seek_track,
 };
-use super::content::{SELECTION_BG, SelectableTextContext, profile_popover_trigger};
+use super::content::{
+    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip,
+    profile_popover_trigger, render_emoji_span,
+};
 use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RecentEmojiCell, RowCtx};
 use super::gif_video::GifVideoView;
+use super::inline_content::{IconOverlay, ImageOverlay, InlineContent, StyledRun};
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
@@ -31,6 +38,9 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
+const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
+const REPLY_TEXT_SIZE: f32 = 14.;
+const LINE_HEIGHT_STRUT: &str = "\u{200B}";
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -52,7 +62,7 @@ pub fn resolve_pin_sender_label_with_message(
         && !config.anonymous_user_id.is_empty()
         && sender_id == config.anonymous_user_id
     {
-        return SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME);
+        return anonymous_sender_label(fallback_name);
     }
 
     let clan_id = effective_clan_id(clan_id, cx);
@@ -241,7 +251,23 @@ pub fn resolve_message_role_style(
     resolved
 }
 
+fn anonymous_sender_label(name: &str) -> SharedString {
+    if name.trim().is_empty() {
+        SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME)
+    } else {
+        SharedString::from(name.to_string())
+    }
+}
+
+fn anonymous_display_name(msg: &Message, cx: &App) -> Option<SharedString> {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+        .then(|| anonymous_sender_label(&msg.sender_name))
+}
+
 pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
+    if let Some(name) = anonymous_display_name(msg, cx) {
+        return name;
+    }
     let user_id = message_sender_user_id(msg);
     let clan_id = role_scope(ctx.profile_context);
     if let Some(user_id) = user_id {
@@ -249,17 +275,29 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
         if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
             return cached.clone();
         }
-        let resolved = if let Some(clan_id) = clan_id {
-            ClanMembersStore::global(cx)
+        // A DM used to stop here and take whatever name the message arrived with. That is fine
+        // for an ordinary message, which mezon-api enriches with clan_nick and display_name on
+        // its way out, and wrong for an ephemeral one: mezon-proto-server answers
+        // EphemeralMessageSend by building the ChannelMessage itself and echoing it straight to
+        // the recipient, and the connection only carries `username` — so the row read
+        // `cuson108` where every other message from the same person said `Sony`. Ask the same
+        // ladder the avatar already walks: group member, DM peer, own account.
+        //
+        // The clan branch is left exactly as it was. The member store is the whole answer
+        // there, and routing it through `resolve_user_profile` would buy a presence lookup
+        // whose result this function throws away, on the path most messages take.
+        let resolved = match ctx.profile_context {
+            Some(ProfileContext::Clan(clan_id)) => ClanMembersStore::global(cx)
                 .read(cx)
                 .member(clan_id, user_id)
-                .map(|member| member.name())
-                .filter(|name| !name.is_empty())
-                .map(SharedString::from)
-                .unwrap_or_else(|| msg.sender_name.clone())
-        } else {
-            msg.sender_name.clone()
-        };
+                .map(|member| member.name().to_string()),
+            Some(context) => mezon_store::resolve_user_profile(user_id, context, cx)
+                .map(|profile| profile.display_name),
+            None => None,
+        }
+        .filter(|name| !name.is_empty())
+        .map(SharedString::from)
+        .unwrap_or_else(|| msg.sender_name.clone());
         let mut memo = ctx.row_memo.borrow_mut();
         if memo.display_names.len() >= ROW_MEMO_CAPACITY {
             memo.display_names.clear();
@@ -292,6 +330,16 @@ fn reference_avatar(
     resolved.map(|(_, proxied)| proxied)
 }
 
+fn system_sender_avatar(cx: &App) -> SharedString {
+    static AVATAR: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+    AVATAR
+        .get_or_init(|| {
+            let logo = crate::util::imgproxy::cdn_asset_url(cx, SYSTEM_AVATAR_PATH);
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &logo))
+        })
+        .clone()
+}
+
 fn resolve_reference_identity(
     reference: &MessageReference,
     is_anonymous: bool,
@@ -302,9 +350,12 @@ fn resolve_reference_identity(
     let baked_avatar = || SharedString::from(reference.sender_avatar.clone());
     if is_anonymous {
         return (
-            SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME),
-            SharedString::default(),
+            anonymous_sender_label(&reference.sender_name),
+            SharedString::from(reference.sender_avatar.clone()),
         );
+    }
+    if reference.sender_id.is_zero() && reference.sender_avatar.is_empty() {
+        return (baked_name(), system_sender_avatar(cx));
     }
     let clan_id = role_scope(ctx.profile_context).filter(|_| !reference.sender_id.is_zero());
     let Some(clan_id) = clan_id else {
@@ -334,17 +385,20 @@ fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
 }
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
-    let is_anonymous = mezon_store::is_anonymous_sender_id(&msg.sender_id, cx);
-    let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(display_name)
         .with_size(Size::Small)
-        .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
-    if is_anonymous {
-        return avatar.into_any_element();
-    }
+    let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
+        avatar = avatar.skeleton(true);
+        if msg.avatar_url.is_empty() {
+            return avatar.anonymous(!msg.is_sending()).into_any_element();
+        }
+        anonymous_message_avatar_urls(msg)
+    } else {
+        resolve_message_avatar_urls(msg, ctx, cx)
+    };
     if let Some(proxied) = proxied {
         avatar = avatar.src(proxied);
         if !raw_url.is_empty() {
@@ -354,6 +408,11 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         avatar = avatar.src(raw_url);
     }
     avatar.into_any_element()
+}
+
+fn anonymous_message_avatar_urls(msg: &Message) -> (SharedString, Option<SharedString>) {
+    let proxied = (!msg.avatar_proxied.is_empty()).then(|| msg.avatar_proxied.clone());
+    (msg.avatar_url.clone(), proxied)
 }
 
 fn resolve_message_avatar_urls(
@@ -417,18 +476,40 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
             }
         }
     };
-    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let mut name = div()
         .max_w_full()
         .min_w_0()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(username_color)
-        .child(display_name);
-    if let Some(icon) = role_icon.filter(|icon| !icon.is_empty()) {
+        .text_color(username_color);
+    name = if awaits_anonymous_persona(msg, ctx.app) {
+        name.flex()
+            .flex_row()
+            .items_center()
+            .child(
+                div()
+                    .h(px(16.))
+                    .w(px(96.))
+                    .rounded(px(4.))
+                    .bg(theme.bg_hover),
+            )
+            .child(LINE_HEIGHT_STRUT)
+    } else {
+        name.child(resolve_message_display_name(msg, ctx, ctx.app))
+    };
+    if shows_anonymous_hat(msg, ctx.app) {
+        name = name.flex().flex_row().items_center().child(
+            Icon::new(IconName::HatIcon)
+                .size(px(16.))
+                .ml(px(4.))
+                .flex_none()
+                .text_color(theme.tokens.text_theme_primary),
+        );
+    } else if let Some(icon) = role_icon.filter(|icon| !icon.is_empty()) {
         name = name.flex().flex_row().items_center().child(
             img(crate::util::imgproxy::role_icon_url(ctx.app, &icon))
                 .size(px(20.))
+                .aspect_square()
                 .ml(px(4.))
                 .flex_none()
                 .image_cache(&ctx.icon_cache),
@@ -453,6 +534,16 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
+fn awaits_anonymous_persona(msg: &Message, cx: &App) -> bool {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+        && msg.is_sending()
+        && msg.avatar_url.is_empty()
+}
+
+fn shows_anonymous_hat(msg: &Message, cx: &App) -> bool {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) && !awaits_anonymous_persona(msg, cx)
+}
+
 fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElement {
     let (Some(profile_ctx), Some(user_id)) = (ctx.profile_context, msg.sender_user_id) else {
         return name.into_any_element();
@@ -473,7 +564,7 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
     .into_any_element()
 }
 
-pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
+pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     if reference.message_ref_id.is_zero() {
         return div()
@@ -484,7 +575,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             .h(px(24.))
             .pl(px(super::context::REPLY_INSET))
             .pr(px(super::context::CONTENT_RIGHT_PAD))
-            .text_size(px(14.))
+            .text_size(px(REPLY_TEXT_SIZE))
             .child(
                 Icon::new(IconName::ReplyCorner)
                     .size_4()
@@ -519,7 +610,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let is_anonymous = mezon_store::is_anonymous_user_id(reference.sender_id, ctx.app);
     let (sender_name, sender_avatar) =
         resolve_reference_identity(reference, is_anonymous, ctx, ctx.app);
-    let avatar = if is_anonymous {
+    let avatar = if is_anonymous && sender_avatar.is_empty() {
         Avatar::new()
             .name(sender_name.clone())
             .size_px(px(20.))
@@ -539,6 +630,11 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     };
 
     let jump_target = reference.message_ref_id;
+    let topic_bucket = ctx
+        .is_topic_box
+        .then(|| TopicsStore::global(ctx.app).read(ctx.app).active_topic_id())
+        .flatten()
+        .filter(|topic_id| msg.channel_id == ChannelId(*topic_id));
     div()
         .id(("reply", reference.message_ref_id.0 as usize))
         .flex()
@@ -548,12 +644,14 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         .h(px(24.))
         .pl(px(super::context::REPLY_INSET))
         .pr(px(super::context::CONTENT_RIGHT_PAD))
-        .text_size(px(14.))
+        .text_size(px(REPLY_TEXT_SIZE))
         .cursor_pointer()
         .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.jump_to_message(jump_target, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| match topic_bucket {
+                    Some(topic_id) => store.request_topic_jump(topic_id, jump_target, cx),
+                    None => store.jump_to_message(jump_target, None, cx),
+                });
             })
         })
         .child(
@@ -605,6 +703,8 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .child("📊")
                 .child(mezon_i18n::t(ctx.locale, "message.poll.pollLabel"))
                 .into_any_element()
+        } else if !is_deleted && !reference.preview_spans.is_empty() {
+            render_reply_preview_spans(reference, &reference.preview_spans, ctx)
         } else {
             div()
                 .flex_1()
@@ -615,6 +715,123 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .child(reference.content_preview.clone())
                 .into_any_element()
         })
+        .into_any_element()
+}
+
+fn render_reply_preview_spans(
+    reference: &MessageReference,
+    spans: &[MessageSpan],
+    ctx: &RowCtx,
+) -> AnyElement {
+    render_reply_text_spans(reference, spans, ctx)
+}
+
+fn render_reply_text_spans(
+    reference: &MessageReference,
+    spans: &[MessageSpan],
+    ctx: &RowCtx,
+) -> AnyElement {
+    let theme = ctx.theme;
+    let mention_color: Hsla = theme.tokens.mention_color.into();
+    let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let body: Hsla = theme.tokens.text_theme_message.into();
+    let mut text = String::new();
+    let mut runs: Vec<StyledRun> = Vec::new();
+    let mut icons: Vec<IconOverlay> = Vec::new();
+    let mut images: Vec<ImageOverlay> = Vec::new();
+    for span in spans {
+        match span {
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+                meta,
+            } => {
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
+                let icon_index = text.len();
+                text.push(INLINE_ICON_RESERVE);
+                let label_index = text.len();
+                text.push_str(&chip.label);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: icon_index..label_index,
+                    color: None,
+                    background: Some(mention_bg),
+                    font_weight: Some(FontWeight::NORMAL),
+                    fade_out: Some(1.),
+                });
+                runs.push(StyledRun {
+                    range: label_index..end,
+                    color: Some(mention_color),
+                    background: Some(mention_bg),
+                    font_weight: None,
+                    fade_out: None,
+                });
+                icons.push(IconOverlay {
+                    byte_index: icon_index,
+                    end_index: label_index,
+                    icon: chip.icon,
+                    color: mention_color,
+                });
+            }
+            MessageSpan::Text(chunk) => text.push_str(chunk),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => {
+                let byte_index = text.len();
+                text.push(INLINE_ICON_RESERVE);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: byte_index..end,
+                    color: None,
+                    background: None,
+                    font_weight: Some(FontWeight::NORMAL),
+                    fade_out: Some(1.),
+                });
+                images.push(ImageOverlay {
+                    byte_index,
+                    size: px(REPLY_TEXT_SIZE),
+                    prepainted: false,
+                    element: render_emoji_span(
+                        name,
+                        emoji_id,
+                        src,
+                        ctx.theme.tokens.text_theme_message,
+                        ctx,
+                        px(REPLY_TEXT_SIZE),
+                        None,
+                    )
+                    .into_any_element(),
+                });
+            }
+            _ => {}
+        }
+    }
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .child(
+            InlineContent::new(
+                ("reply-preview", reference.message_ref_id.0 as usize),
+                text.into(),
+                runs,
+                icons,
+                Vec::new(),
+                body,
+                None,
+                ctx.selection.clone(),
+            )
+            .image_overlays(images)
+            .cursor_style(CursorStyle::PointingHand),
+        )
         .into_any_element()
 }
 
@@ -665,15 +882,18 @@ pub fn render_attachments(
         return None;
     }
     let theme = ctx.theme;
-    let mut videos: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut videos: SmallVec<[(usize, &MessageAttachment); 2]> = SmallVec::new();
     let mut audios: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
     let mut images: SmallVec<[(usize, &MessageAttachment); 4]> = SmallVec::new();
     let mut documents: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut private_source_hidden = false;
     for (idx, att) in msg.attachments.iter().enumerate() {
-        if att.is_unsupported_media() {
+        if att.source_denied {
+            private_source_hidden = true;
+        } else if att.is_unsupported_media() {
             documents.push(att);
         } else if att.is_video() {
-            videos.push(att);
+            videos.push((idx, att));
         } else if att.is_audio() {
             audios.push(att);
         } else if att.is_image() {
@@ -699,8 +919,11 @@ pub fn render_attachments(
         .gap_2()
         .mt_1()
         .w_full();
-    for (i, att) in videos.iter().enumerate() {
-        col = col.child(render_video(msg.id, i, att, ctx, att.uploading));
+    if private_source_hidden {
+        col = col.child(render_private_source_placeholder(ctx));
+    }
+    for &(att_index, att) in videos.iter() {
+        col = col.child(render_video(msg.id, att_index, att, ctx, att.uploading));
     }
     for (i, att) in audios.iter().enumerate() {
         col = col.child(render_audio(msg.id, i, att, ctx, att.uploading));
@@ -753,6 +976,82 @@ pub fn render_attachments(
     )
 }
 
+fn note_context_image(
+    ctx: &RowCtx,
+    message_id: MessageId,
+    url: &str,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let host = ctx.video_host.clone();
+    let url = url.to_string();
+    move |_, _, cx| {
+        let _ = host.update(cx, |this, _| {
+            this.note_context_image(message_id, url.clone());
+        });
+    }
+}
+
+pub(crate) fn observe_cdn_access<T: 'static>(
+    cx: &mut gpui::Context<T>,
+) -> Option<gpui::Subscription> {
+    mezon_store::CdnAccess::try_global(cx).map(|access| cx.observe(&access, |_, _, cx| cx.notify()))
+}
+
+pub(crate) fn render_private_media_tile(theme: &Theme, width: f32, height: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(width))
+        .h(px(height))
+        .max_w_full()
+        .rounded_md()
+        .bg(theme.tokens.bg_secondary)
+        .child(
+            Icon::new(IconName::LockIcon)
+                .size(px((width.min(height) * 0.3).clamp(12., 24.)))
+                .text_color(theme.tokens.text_secondary),
+        )
+        .into_any_element()
+}
+
+fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
+    let theme = ctx.theme;
+    div()
+        .w_full()
+        .py_1()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .w(px(280.))
+                .max_w_full()
+                .h(px(160.))
+                .rounded_md()
+                .bg(theme.tokens.bg_secondary)
+                .child(
+                    Icon::new(IconName::LockIcon)
+                        .size(px(24.))
+                        .text_color(theme.tokens.text_secondary),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .text_size(px(14.))
+                        .text_center()
+                        .text_color(theme.tokens.text_secondary)
+                        .child(mezon_i18n::t(
+                            ctx.locale,
+                            "message.attachment.fromPrivateChannel",
+                        )),
+                ),
+        )
+        .into_any_element()
+}
+
 #[allow(dead_code)]
 struct Uploader {
     name: SharedString,
@@ -800,28 +1099,67 @@ fn attachment_sending_overlay(
         )
 }
 
-fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_failed_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
+    let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
+    let icon = Icon::new(IconName::TriangleAlert)
+        .size(px(16.))
+        .text_color(theme.danger_text);
+    let badge = if fits_label {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_3()
+            .py_1p5()
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::white())
+                    .child(mezon_i18n::t(locale, "message.attachment.uploadFailed")),
+            )
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(32.))
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+    };
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(40.))
-                .rounded_full()
-                .bg(theme.bg_floating)
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(24.))
-                        .text_color(theme.danger_text),
-                ),
-        )
+        .bg(MEDIA_FAILED_SCRIM)
+        .child(badge)
 }
+
+const MEDIA_FAILED_SCRIM: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.45,
+};
+
+const MEDIA_BADGE_BG: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.65,
+};
 
 fn render_audio(
     msg_id: MessageId,
@@ -830,7 +1168,7 @@ fn render_audio(
     ctx: &RowCtx,
     sending: bool,
 ) -> AnyElement {
-    let duration = att.duration.max(0) as f64;
+    let duration = super::audio_meta::display_audio_duration(att, ctx.app);
     // `uploading` only ever covers OUR OWN outgoing message. A recipient sees
     // the message the moment it is posted, with `presign_pending` set until the
     // sender's upload lands — play it then and the player fetches an object the
@@ -859,11 +1197,41 @@ fn render_audio(
     let activate_download_name = download_name.clone();
     let activate_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
+    let seek_host = host.clone();
+    let seek_url = url.clone();
+    let seek_download_url = download_url.clone();
+    let seek_download_name = download_name.clone();
+    let seek_selection = ctx.selection.clone();
+    let seek = preview_seek_track(
+        ("audio-seek", index),
+        (msg_id.get(), index),
+        move |fraction, _, cx| {
+            if seek_selection.borrow().has_selection() {
+                return;
+            }
+            let start_secs = if duration > 0.0 {
+                f64::from(fraction) * duration
+            } else {
+                0.0
+            };
+            let activation = AudioActivation {
+                url: seek_url.clone(),
+                duration,
+                start_secs,
+                download_url: seek_download_url.clone(),
+                download_name: seek_download_name.clone(),
+            };
+            let _ = seek_host.update(cx, |this, cx| {
+                this.activate_audio((msg_id, index), activation, cx);
+            });
+        },
+    );
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
         IconName::AudioPlay,
         audio_time_label(0.0, duration),
+        seek,
         move |_, _, cx| {
             if activate_selection.borrow().has_selection() {
                 return;
@@ -871,6 +1239,7 @@ fn render_audio(
             let activation = AudioActivation {
                 url: url.clone(),
                 duration,
+                start_secs: 0.0,
                 download_url: activate_download_url.clone(),
                 download_name: activate_download_name.clone(),
             };
@@ -918,6 +1287,10 @@ fn render_album(
         let uploader_id = viewer_uploader_id(msg);
         let mut tile_element = div()
             .id(("msg-album", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .absolute()
             .left(px(tile.x))
             .top(px(tile.y))
@@ -995,7 +1368,12 @@ fn render_album(
                 });
         }
         if att.upload_failed {
-            tile_element = tile_element.child(attachment_failed_overlay(theme));
+            tile_element = tile_element.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         } else if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(
                 theme,
@@ -1066,7 +1444,17 @@ fn presign_child(
     // A recipient never sees `uploading` — only `presign_pending` — so without
     // this the whole upload window is a bare spinner on their side while the
     // sender gets a labelled one.
-    if att.thumbnail.is_empty() {
+    if att.upload_failed {
+        if att.thumbnail.is_empty() {
+            parent
+        } else {
+            parent.child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        }
+    } else if att.thumbnail.is_empty() {
         parent.child(attachment_sending_overlay(
             theme, locale, box_width, box_height,
         ))
@@ -1096,6 +1484,10 @@ fn render_photo(
     if let Some(player) = gif_player {
         return div()
             .id(("msg-gif", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .w(px(att.display_width))
             .h(px(att.display_height))
             .max_w_full()
@@ -1114,6 +1506,10 @@ fn render_photo(
         let selection = ctx.selection.clone();
         let mut el = div()
             .id(("msg-img", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
@@ -1159,7 +1555,12 @@ fn render_photo(
                 }),
         );
         if att.upload_failed {
-            el = el.child(attachment_failed_overlay(theme));
+            el = el.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             el = el.child(attachment_sending_overlay(
                 theme,
@@ -1191,7 +1592,12 @@ fn render_photo(
             att.display_height,
         );
         if att.upload_failed {
-            placeholder = placeholder.child(attachment_failed_overlay(theme));
+            placeholder = placeholder.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             placeholder = placeholder.child(attachment_sending_overlay(
                 theme,
@@ -1206,14 +1612,19 @@ fn render_photo(
     if src.is_empty() {
         return attachment_box(att.filename.clone(), theme);
     }
-    let object_fit = if is_gif(&att.url) {
+    let is_sticker = att.filetype == STICKER_FILETYPE && att.tenor_mp4.is_none();
+    let (box_w, box_h) = if is_sticker {
+        sticker_layout_size(att, ctx)
+    } else {
+        (att.display_width, att.display_height)
+    };
+    let object_fit = if is_sticker || is_gif(&att.url) {
         ObjectFit::Contain
     } else {
         ObjectFit::Cover
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
-    let is_sticker = att.filetype == "sticker";
     let settings = ctx.settings.clone();
     let viewer_att = AttachmentSeedInput::from_message(att);
     let message_id = msg.id;
@@ -1222,9 +1633,13 @@ fn render_photo(
     let selection = ctx.selection.clone();
     let mut el = div()
         .id(("msg-img", index))
+        .on_mouse_down(
+            MouseButton::Right,
+            note_context_image(ctx, msg.id, &att.url),
+        )
         .relative()
-        .w(px(att.display_width))
-        .h(px(att.display_height))
+        .w(px(box_w))
+        .h(px(box_h))
         .rounded_md()
         .overflow_hidden();
     // `render_album` already refuses to open a tile that is still uploading;
@@ -1267,7 +1682,12 @@ fn render_photo(
             }),
     );
     if att.upload_failed {
-        el = el.child(attachment_failed_overlay(theme));
+        el = el.child(attachment_failed_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        ));
     } else if sending {
         el = el.child(attachment_sending_overlay(
             theme,
@@ -1308,7 +1728,7 @@ fn render_video_poster(
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
     let thumbnail = if att.presign_pending {
-        SharedString::default()
+        SharedString::from(att.thumbnail.clone())
     } else {
         att.thumbnail_proxied.clone()
     };
@@ -1338,10 +1758,15 @@ fn render_video_poster(
         });
     if att.upload_failed {
         return container
-            .child(attachment_failed_overlay(theme))
+            .child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ))
             .into_any_element();
     }
-    if sending {
+    if sending || att.presign_pending {
         return container
             .child(attachment_sending_overlay(
                 theme,
@@ -1350,17 +1775,6 @@ fn render_video_poster(
                 att.display_height,
             ))
             .into_any_element();
-    }
-    if att.presign_pending {
-        return presign_child(
-            container,
-            att,
-            theme,
-            ctx.locale,
-            att.display_width,
-            att.display_height,
-        )
-        .into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1467,9 +1881,8 @@ fn render_file_box(
     // only `presign_pending`, and every button in this box (download, open PDF)
     // hits the object URL directly. React filters pending documents out of the
     // list; the spinner state already disables all of them.
-    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
-    let is_owner = ctx.current_user_id == msg.sender_id.as_str();
+    let sending = !failed && (att.uploading || att.presign_pending);
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
@@ -1480,7 +1893,9 @@ fn render_file_box(
     // While the object is not on the CDN yet the size we have is the sender's
     // claim about a file nobody can fetch, so say what is actually happening
     // instead — the spinner alone reads as a stuck row.
-    let size_line = if sending {
+    let size_line = if failed {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploadFailed"))
+    } else if sending {
         SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
     } else {
         SharedString::from(format!("size: {}", att.size_label))
@@ -1497,7 +1912,6 @@ fn render_file_box(
     let body_settings = ctx.settings.clone();
     let body_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
-    let remove_selection = ctx.selection.clone();
     let pdf_selection = ctx.selection.clone();
 
     div()
@@ -1593,7 +2007,11 @@ fn render_file_box(
                 .child(
                     div()
                         .text_size(px(14.))
-                        .text_color(theme.tokens.text_theme_primary)
+                        .text_color(if failed {
+                            theme.danger_text
+                        } else {
+                            theme.tokens.text_theme_primary
+                        })
                         .child(size_line),
                 ),
         )
@@ -1624,22 +2042,6 @@ fn render_file_box(
                             )
                         },
                     ))
-                    .when(is_owner, |d| {
-                        let remove_msg_id = msg.id;
-                        d.child(file_box_action(
-                            ("file-rm", index),
-                            IconName::TrashIcon,
-                            theme,
-                            move |_, _, cx| {
-                                if remove_selection.borrow().has_selection() {
-                                    return;
-                                }
-                                mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
-                                    store.remove_attachment(remove_msg_id, index, cx);
-                                });
-                            },
-                        ))
-                    })
                     .when(is_pdf, |d| {
                         d.child(file_box_action(
                             ("file-pdf", index),
@@ -1664,6 +2066,17 @@ fn render_file_box(
             )
         })
         .into_any_element()
+}
+
+fn sticker_layout_size(att: &MessageAttachment, ctx: &RowCtx) -> (f32, f32) {
+    if att.width > 0 && att.height > 0 {
+        return (att.display_width, att.display_height);
+    }
+    ctx.attachment_cache
+        .read(ctx.app)
+        .cached_bitmap_size(att.proxied_src.as_ref())
+        .map(|(width, height)| mezon_store::sticker_display_dimensions(width, height))
+        .unwrap_or((att.display_width, att.display_height))
 }
 
 fn is_gif(url: &str) -> bool {
@@ -1697,14 +2110,15 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     }
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for reaction in msg.reactions.iter() {
-        row = row.child(reaction_pill(reaction, msg.id, ctx));
+        row = row.child(reaction_pill(reaction, msg.message_ref(), ctx));
     }
     row = row.child(add_reaction_button(msg.id, ctx));
     Some(row.into_any_element())
 }
 
 fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
-    let visible = !ctx.suppress_hover
+    let visible = ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(message_id)
         && ctx.hovered_row == Some(message_id);
     let bg = ctx.theme.bg_tertiary;
@@ -1766,6 +2180,11 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
         return SharedString::default();
     }
     let mut memo = ctx.row_memo.borrow_mut();
+    let generation = mezon_store::emoji_sources_generation();
+    if memo.reaction_srcs_generation != generation {
+        memo.reaction_srcs.clear();
+        memo.reaction_srcs_generation = generation;
+    }
     if let Some(src) = memo.reaction_srcs.get(&reaction.emoji_id) {
         return src.clone();
     }
@@ -1783,7 +2202,7 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
     src
 }
 
-fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
+fn reaction_pill(reaction: &Reaction, target: MessageRef, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
@@ -1817,18 +2236,13 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.add_reaction(
-                        message_id,
-                        add_emoji_id.to_string(),
-                        add_emoji.to_string(),
-                        cx,
-                    );
+                    store.add_reaction(target, add_emoji_id.to_string(), add_emoji.to_string(), cx);
                 });
             })
             .hoverable_tooltip(move |_window, cx| {
                 cx.new(|cx| {
                     UserReactionPanel::new(
-                        message_id,
+                        target,
                         panel_emoji_id.clone(),
                         panel_emoji.clone(),
                         avatar_cache.clone(),
@@ -1868,6 +2282,7 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
                 img(src)
                     .id("reaction-emoji-frames")
                     .size(px(REACTION_EMOJI_PX))
+                    .aspect_square()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(emoji_error_fallback(
                         px(REACTION_EMOJI_PX),
@@ -1881,7 +2296,8 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
 }
 
 pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
-    !ctx.suppress_hover
+    ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(msg.id)
         && ctx.hovered_row == Some(msg.id)
 }
@@ -1914,14 +2330,14 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         0.
     };
 
-    let reply_id = msg.id;
+    let reply_target = msg.message_ref();
     let react_id = msg.id;
     let react_host = ctx.video_host.clone();
 
     let is_topic_msg = msg.code == MessageCode::Topic;
     let is_poll_msg = msg.code == MessageCode::Poll;
     let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
-    let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
+    let is_own_message = msg.is_sent_by(ctx.current_user_id);
 
     let show_topic = !ctx.is_topic_box
         && ctx.can_send_message
@@ -1944,6 +2360,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
     let show_coffee = !is_own_message && sender_is_real;
 
     let msg_id = msg.id;
+    let target = msg.message_ref();
     let edit_host = ctx.video_host.clone();
     let option_host = ctx.video_host.clone();
 
@@ -1963,13 +2380,14 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 .hover(move |s| s.bg(bg_hover))
                 .on_click(move |_, _, cx| {
                     MessagesStore::global(cx).update(cx, |store, cx| {
-                        store.add_reaction(msg_id, emoji_id.to_string(), shortname.to_string(), cx);
+                        store.add_reaction(target, emoji_id.to_string(), shortname.to_string(), cx);
                     });
                 });
             if !emoji.src.is_empty() {
                 cell = cell.child(
                     img(emoji.src.clone())
                         .size(px(RECENT_EMOJI_PX))
+                        .aspect_square()
                         .object_fit(ObjectFit::ScaleDown)
                         .image_cache(&ctx.icon_cache)
                         .id("recent-emoji-frames")
@@ -2042,10 +2460,10 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
                     if is_topic {
                         TopicsStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     } else {
                         MessagesStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     }
                 }),
             )
@@ -2067,25 +2485,27 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
             )
         })
         .when(show_coffee, |d| {
-            let message_id = msg.id;
+            let target = msg.message_ref();
             d.child(
                 action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
                     move |_, _, cx| {
                         MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.give_coffee_reaction(message_id, cx);
+                            store.give_coffee_reaction(target, cx);
                         });
                     },
                 ),
             )
         })
-        .child(
-            action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
-                let position = window.mouse_position();
-                let _ = option_host.update(cx, |this, cx| {
-                    this.open_context_menu(msg_id, position, cx);
-                });
-            }),
-        )
+        .when(ctx.context_menu_enabled, |row| {
+            row.child(
+                action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                    let position = window.mouse_position();
+                    let _ = option_host.update(cx, |this, cx| {
+                        this.open_context_menu(msg_id, position, cx);
+                    });
+                }),
+            )
+        })
         .into_any_element()
 }
 
@@ -2099,8 +2519,8 @@ pub(crate) fn open_viewer_from_message(
     cx: &mut gpui::App,
 ) {
     use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
-    use crate::router::{Route, Router};
-    use mezon_store::{AppConfig, ChannelAttachment, ClanId};
+    use crate::router::Router;
+    use mezon_store::{AppConfig, ChannelAttachment};
 
     if att.url.is_empty() {
         return;
@@ -2109,23 +2529,8 @@ pub(crate) fn open_viewer_from_message(
         return;
     }
 
-    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
-        Route::Channel {
-            clan_id,
-            channel_id,
-        }
-        | Route::Thread {
-            clan_id,
-            channel_id,
-            ..
-        }
-        | Route::Canvas {
-            clan_id,
-            channel_id,
-            ..
-        } => (clan_id, channel_id),
-        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
-        _ => return,
+    let Some((clan_id, channel_id)) = Router::global(cx).read(cx).conversation_context() else {
+        return;
     };
 
     let seed = ChannelAttachment::seed_from_message(
@@ -2212,4 +2617,112 @@ pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod anonymous_persona_tests {
+    use std::sync::Arc;
+
+    use gpui::{App, SharedString, TestAppContext};
+    use mezon_store::{AppConfig, Message, MessageId};
+
+    use super::{
+        anonymous_display_name, anonymous_message_avatar_urls,
+        resolve_pin_sender_label_with_message, shows_anonymous_hat,
+    };
+
+    const ANONYMOUS_ID: &str = "9876";
+
+    fn install_config(cx: &mut App) {
+        AppConfig::init_global(
+            Arc::new(AppConfig {
+                anonymous_user_id: ANONYMOUS_ID.into(),
+                ..Default::default()
+            }),
+            cx,
+        );
+    }
+
+    fn message(id: i64, sender_id: &str, sender_name: &str) -> Message {
+        Message::new(MessageId(id), "hi", sender_id, sender_name, 0)
+    }
+
+    #[gpui::test]
+    fn each_anonymous_row_keeps_its_own_persona_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                anonymous_display_name(&message(1, ANONYMOUS_ID, "money"), cx),
+                Some(SharedString::from("money"))
+            );
+            assert_eq!(
+                anonymous_display_name(&message(2, ANONYMOUS_ID, "saumui"), cx),
+                Some(SharedString::from("saumui"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_anonymous_row_without_a_persona_reads_anonymous(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                anonymous_display_name(&message(1, ANONYMOUS_ID, ""), cx),
+                Some(SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_named_sender_is_left_to_the_member_lookup(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(anonymous_display_name(&message(1, "42", "alice"), cx), None);
+        });
+    }
+
+    #[test]
+    fn an_anonymous_avatar_comes_from_the_message_itself() {
+        let bare =
+            message(1, ANONYMOUS_ID, "money").with_avatar("https://cdn.mezon.ai/stickers/1.webp");
+        assert_eq!(
+            anonymous_message_avatar_urls(&bare),
+            (
+                SharedString::from("https://cdn.mezon.ai/stickers/1.webp"),
+                None
+            )
+        );
+
+        let proxied = bare.with_avatar_proxied("https://imgproxy/1.webp");
+        assert_eq!(
+            anonymous_message_avatar_urls(&proxied).1,
+            Some(SharedString::from("https://imgproxy/1.webp"))
+        );
+    }
+
+    #[gpui::test]
+    fn a_sent_anonymous_row_wears_the_hat_next_to_its_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert!(shows_anonymous_hat(&message(1, ANONYMOUS_ID, "money"), cx));
+            assert!(!shows_anonymous_hat(&message(1, "42", "alice"), cx));
+            let sending = Message::new(MessageId::next_optimistic(), "hi", ANONYMOUS_ID, "", 0);
+            assert!(!shows_anonymous_hat(&sending, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn an_anonymous_pin_shows_the_persona_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert_eq!(
+                resolve_pin_sender_label_with_message(ANONYMOUS_ID, "money", None, None, None, cx),
+                SharedString::from("money")
+            );
+            assert_eq!(
+                resolve_pin_sender_label_with_message(ANONYMOUS_ID, "", None, None, None, cx),
+                SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME)
+            );
+        });
+    }
 }

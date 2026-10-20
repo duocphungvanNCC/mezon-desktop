@@ -513,15 +513,12 @@ impl IntegrationsTab {
             ),
         });
         cx.spawn(async move |this, cx| {
-            let paths = match rx.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.avatar_uploading = false;
-                        cx.notify();
-                    });
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    this.avatar_uploading = false;
+                    cx.notify();
+                });
+                return;
             };
             let Some(path) = paths.into_iter().next() else {
                 let _ = this.update(cx, |this, cx| {
@@ -619,7 +616,7 @@ impl IntegrationsTab {
             .font_weight(FontWeight::SEMIBOLD)
             .gap_1()
             .bg(theme.brand)
-            .text_color(theme.text_primary)
+            .text_color(gpui::white())
             .when(creating, |el| el.opacity(0.6))
             .when(!creating, |el| {
                 el.cursor_pointer()

@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
-const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -43,14 +44,45 @@ pub struct ApiStatusError {
 }
 
 impl ApiStatusError {
+    pub const INVALID_ARGUMENT: u32 = 3;
+    pub const NOT_FOUND: u32 = 5;
+    pub const ALREADY_EXISTS: u32 = 6;
+    pub const PERMISSION_DENIED: u32 = 7;
+    pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
+    pub const INTERNAL: u32 = 13;
+    pub const UNAUTHENTICATED: u32 = 16;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
     }
 
+    pub fn is_invalid_argument(self) -> bool {
+        self.code == Self::INVALID_ARGUMENT
+    }
+
+    pub fn is_already_exists(self) -> bool {
+        self.code == Self::ALREADY_EXISTS
+    }
+
+    pub fn is_permission_denied(self) -> bool {
+        self.code == Self::PERMISSION_DENIED
+    }
+
     pub fn is_create_channel_limit_exceeded(self) -> bool {
         self.is_out_of_range()
+    }
+}
+
+fn grpc_code_from_envelope_status(http_like_code: i32) -> u32 {
+    match http_like_code {
+        400 => ApiStatusError::INVALID_ARGUMENT,
+        401 => ApiStatusError::UNAUTHENTICATED,
+        403 => ApiStatusError::PERMISSION_DENIED,
+        404 => ApiStatusError::NOT_FOUND,
+        429 => ApiStatusError::RESOURCE_EXHAUSTED,
+        500 => ApiStatusError::INTERNAL,
+        _ => 2,
     }
 }
 
@@ -70,10 +102,70 @@ pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
 
-const API_CODE_ALREADY_EXISTS: u32 = 6;
-
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
+}
+
+#[derive(Debug)]
+struct EnvelopeStatus {
+    api_name: String,
+    message: String,
+    code: i32,
+}
+
+impl std::fmt::Display for EnvelopeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} failed: {} (code={})",
+            self.api_name, self.message, self.code
+        )
+    }
+}
+
+const ENVELOPE_NOT_FOUND: i32 = 404;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpFallbackStatus {
+    status: u16,
+}
+
+impl std::fmt::Display for HttpFallbackStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP fallback failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpFallbackStatus {}
+
+fn is_http_conflict(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpFallbackStatus>()
+        .is_some_and(|failure| failure.status == http::StatusCode::CONFLICT.as_u16())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
+    anyhow::Error::new(ApiStatusError {
+        code: ApiStatusError::NOT_FOUND,
+    })
+    .context(EnvelopeStatus {
+        api_name: api_name.to_string(),
+        message: "Not found.".to_string(),
+        code: ENVELOPE_NOT_FOUND,
+    })
+}
+
+pub fn is_unknown_api_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<EnvelopeStatus>()
+        .is_some_and(|status| status.code == ENVELOPE_NOT_FOUND)
+}
+
+pub const MENTION_SEARCH_MIN_CHARS: usize = 2;
+pub const MENTION_SEARCH_MAX_CHARS: usize = 64;
+
+pub fn mention_search_text_accepted(text: &str) -> bool {
+    let chars = text.trim().chars().filter(|c| !c.is_control()).count();
+    (MENTION_SEARCH_MIN_CHARS..=MENTION_SEARCH_MAX_CHARS).contains(&chars)
 }
 
 /// Promise executor for matching responses to requests.
@@ -192,6 +284,7 @@ pub enum RealtimeEvent {
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
     ScreenShare(realtime::ScreenShareEvent),
+    AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -254,6 +347,7 @@ impl RealtimeEvent {
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
             Self::ScreenShare(_) => "ScreenShare",
+            Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -318,6 +412,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
+            realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -416,7 +511,7 @@ fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
 }
 
 /// `TypeMessage.Ephemeral` — the message code carried by an ephemeral send.
-const EPHEMERAL_MESSAGE_CODE: i32 = 12;
+pub const EPHEMERAL_MESSAGE_CODE: i32 = 12;
 pub const MESSAGE_BUZZ_CODE: i32 = 8;
 pub const SHARE_CONTACT_CODE: i32 = 16;
 pub const SHARE_CONTACT_KEY: &str = "share_contact";
@@ -436,6 +531,7 @@ pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
     })
     .to_string()
 }
+
 pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
 const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
@@ -444,6 +540,25 @@ const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
 pub struct OutgoingMessageFlags {
     pub anonymous_message: bool,
     pub message_code: i32,
+}
+
+fn varint_encoded_len(mut value: u64) -> usize {
+    let mut n = 1usize;
+    while value > 0x7f {
+        n += 1;
+        value >>= 7;
+    }
+    n
+}
+
+pub fn encoded_envelope_cid_last_len(envelope: &realtime::Envelope) -> usize {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encoded_len();
+    }
+    let mut zero_cid = envelope.clone();
+    zero_cid.cid = 0;
+    zero_cid.encoded_len() + 1 + varint_encoded_len(cid as u64)
 }
 
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
@@ -491,6 +606,32 @@ pub struct RenewedTokens {
     pub refresh_token: String,
     pub id_token: String,
 }
+
+/// A `SessionRefresh` the server answered and refused, carrying the status so the reconnect ladder
+/// can tell a throttle apart from a real failure. 429 and 503 are the throttle answers: this route
+/// sits behind an nginx `limit_req` zone, and it is the one API call the client sends with no
+/// per-user credential — `Authorization` is the shared server key and the refresh token travels in
+/// the protobuf body — so the limiter cannot bucket it per user. Retrying it on the reconnect
+/// ladder keeps that bucket saturated for every client at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRefreshRejected {
+    pub status: u16,
+}
+
+impl SessionRefreshRejected {
+    /// Whether the server is asking for fewer calls rather than reporting a dead session.
+    pub fn is_throttled(self) -> bool {
+        self.status == 429 || self.status == 503
+    }
+}
+
+impl std::fmt::Display for SessionRefreshRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SessionRefresh failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for SessionRefreshRejected {}
 
 impl HttpFallbackSession {
     fn token_expired(&self) -> bool {
@@ -725,6 +866,17 @@ impl MezonTransport {
         Ok(result)
     }
 
+    async fn send_realtime_control(
+        &self,
+        cid: u16,
+        action: &'static str,
+        envelope: realtime::Envelope,
+    ) -> Result<Vec<u8>> {
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        complete_realtime_control_request(action, code, &response)?;
+        Ok(response)
+    }
+
     /// Check if the adapter is connected.
     pub async fn is_open(&self) -> bool {
         self.adapter.is_open()
@@ -799,6 +951,9 @@ pub struct ApiAccount {
     pub user_status: String,
     #[serde(default)]
     pub dob_seconds: u32,
+    /// When the account was created, in epoch seconds. Drives the "new here" onboarding prompt.
+    #[serde(default)]
+    pub create_time_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -928,6 +1083,7 @@ pub struct ApiDirectChannel {
     pub count_mess_unread: i32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
+    pub create_time_seconds: u32,
     #[serde(default)]
     pub creator_id: i64,
 }
@@ -978,7 +1134,7 @@ pub struct ApiClanDesc {
     pub short_url: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiAttachment {
     pub url: String,
     pub filename: String,
@@ -1025,7 +1181,7 @@ impl ApiChannelAttachment {
     }
 }
 
-fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
+pub fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
@@ -1755,21 +1911,8 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
-    if content.is_empty() {
-        return (0, 0);
-    }
-    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
-        && let Ok(fcm) = api::DirectFcmProto::decode(content)
-    {
-        return (fcm.message_id, i64::from(fcm.create_time_seconds));
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
-        return (0, 0);
-    };
-    (
-        json_field_i64(&value, "message_id"),
-        json_field_i64(&value, "create_time_seconds"),
-    )
+    let (message_id, create_time, _) = crate::inbox::notification_ids_from_content(content);
+    (message_id, create_time)
 }
 
 pub fn is_mention_or_reply(
@@ -1796,6 +1939,72 @@ pub fn is_mention_or_reply(
     parse_message_references(references)
         .iter()
         .any(|reference| reference.message_sender_id == user_id)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageTargetClassification {
+    pub has_here: bool,
+    pub direct_user: bool,
+    pub matching_role: bool,
+    pub reply_to_user: bool,
+}
+
+impl MessageTargetClassification {
+    pub fn is_badge_mention(self) -> bool {
+        self.has_here || self.is_inbox_mention()
+    }
+
+    pub fn is_inbox_mention(self) -> bool {
+        self.direct_user || self.matching_role || self.reply_to_user
+    }
+
+    pub fn is_here_only(self) -> bool {
+        self.has_here && !self.is_inbox_mention()
+    }
+}
+
+pub fn classify_message_targets(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> MessageTargetClassification {
+    let mut classification = MessageTargetClassification::default();
+    for mention in parse_message_mentions(mention_bytes) {
+        classification.has_here |= is_here_user_id(&mention.user_id.to_string());
+        classification.direct_user |= mention.user_id != 0 && mention.user_id == user_id;
+        classification.matching_role |= mention.role_id != 0 && role_ids.contains(&mention.role_id);
+    }
+    if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content) {
+        for token in parsed.mentions {
+            if let Some(id) = token.user_id.as_deref() {
+                classification.has_here |= is_here_user_id(id);
+                classification.direct_user |=
+                    !is_here_user_id(id) && id.parse::<i64>() == Ok(user_id);
+            }
+            classification.matching_role |= token
+                .role_id
+                .as_deref()
+                .and_then(|id| id.parse::<i64>().ok())
+                .is_some_and(|id| role_ids.contains(&id));
+        }
+    }
+    classification.reply_to_user = parse_message_references(references)
+        .iter()
+        .any(|reference| reference.message_sender_id == user_id);
+    classification
+}
+
+pub fn is_inbox_mention_or_reply(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> bool {
+    classify_message_targets(content, references, mention_bytes, user_id, role_ids)
+        .is_inbox_mention()
 }
 
 fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
@@ -1890,6 +2099,34 @@ pub struct ContentToken {
         deserialize_with = "string_or_number::deserialize"
     )]
     pub clan_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelLabel",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub channel_label: Option<String>,
+    #[serde(
+        default,
+        rename = "parentId",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub parent_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelType",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_type: Option<i64>,
+    #[serde(
+        default,
+        rename = "channelPrivate",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_private: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2773,7 +3010,7 @@ mod string_or_number {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingMention {
     pub user_id: String,
     pub role_id: String,
@@ -2856,6 +3093,101 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
+fn url_is_inline_data(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
+}
+
+fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
+    api::MessageAttachment {
+        url: a.url.clone(),
+        filename: a.filename.clone(),
+        filetype: a.filetype.clone(),
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail.clone(),
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_forward_channel_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content_raw: &str,
+    text: &str,
+    is_public: bool,
+    mode: i32,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> realtime::ChannelMessageSend {
+    let content_json = forward_content_json(content_raw, text);
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: content_json,
+        mentions: proto_mentions,
+        attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        mode,
+        is_public,
+        mention_everyone,
+        ..Default::default()
+    }
+}
+
+pub fn channel_message_send_realtime_proto_len(
+    message: &realtime::ChannelMessageSend,
+    cid: i32,
+) -> usize {
+    let envelope = realtime::Envelope {
+        cid,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(
+            message.clone(),
+        )),
+    };
+    encoded_envelope_cid_last_len(&envelope)
+}
+
+pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
+    if message
+        .attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    let proto_len = channel_message_send_realtime_proto_len(message, 1);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
+}
+
+pub fn forward_blocked_for_realtime(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> bool {
+    let message = build_forward_channel_message_send(
+        1,
+        1,
+        content_raw,
+        text,
+        false,
+        2,
+        attachments,
+        mentions,
+    );
+    forward_blocked_for_realtime_message(&message)
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -2863,7 +3195,7 @@ pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingHashtag {
     pub channel_id: String,
     pub s: i32,
@@ -2881,6 +3213,84 @@ impl OutgoingHashtag {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChannelLinkMeta {
+    pub channel_id: String,
+    pub channel_label: String,
+    pub clan_id: String,
+    pub parent_id: Option<String>,
+    pub channel_type: u32,
+    #[serde(default)]
+    pub private: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OutgoingHashtags {
+    pub tokens: Vec<OutgoingHashtag>,
+    pub channels: Vec<ChannelLinkMeta>,
+}
+
+impl OutgoingHashtags {
+    pub fn new(tokens: Vec<OutgoingHashtag>, channels: Vec<ChannelLinkMeta>) -> Self {
+        Self { tokens, channels }
+    }
+
+    fn channel(&self, channel_id: &str) -> Option<&ChannelLinkMeta> {
+        self.channels
+            .iter()
+            .find(|channel| channel.channel_id == channel_id)
+    }
+}
+
+impl From<Vec<OutgoingHashtag>> for OutgoingHashtags {
+    fn from(tokens: Vec<OutgoingHashtag>) -> Self {
+        Self {
+            tokens,
+            channels: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for OutgoingHashtags {
+    type Target = [OutgoingHashtag];
+
+    fn deref(&self) -> &Self::Target {
+        &self.tokens
+    }
+}
+
+pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+    let marker = "/chat/clans/";
+    let rest = &url[url.find(marker)? + marker.len()..];
+    let mut parts = rest.split('/');
+    let clan_id = parts.next()?;
+    if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let channel_id = parts.next()?;
+    let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
+    (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
+}
+
+fn insert_channel_link_meta(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    meta: &ChannelLinkMeta,
+) {
+    object.insert("clanId".into(), meta.clan_id.clone().into());
+    object.insert("channelLabel".into(), meta.channel_label.clone().into());
+    object.insert("channelId".into(), meta.channel_id.clone().into());
+    object.insert("channelType".into(), meta.channel_type.into());
+    if let Some(parent_id) = &meta.parent_id {
+        object.insert("parentId".into(), parent_id.clone().into());
+    }
+    if meta.private {
+        object.insert("channelPrivate".into(), 1.into());
+    }
+}
+
 pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken> {
     hashtags
         .iter()
@@ -2888,7 +3298,7 @@ pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingEmoji {
     pub emoji_id: String,
     pub s: i32,
@@ -3216,12 +3626,65 @@ pub struct SendContent {
     pub markdowns: Vec<OutgoingMarkdown>,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn ephemeral_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content: &str,
+    is_public: bool,
+    mode: i32,
+    mentions: Vec<OutgoingMention>,
+    hashtags: OutgoingHashtags,
+    emojis: Vec<OutgoingEmoji>,
+    attachments: Vec<api::MessageAttachment>,
+    reply: Option<OutgoingReply>,
+    topic_id: i64,
+) -> realtime::ChannelMessageSend {
+    let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+    let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = sent
+        .mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    let references = reply
+        .map(|reply| api::MessageRef {
+            message_ref_id: reply.message_ref_id,
+            content: reply.content,
+            has_attachment: reply.has_attachment,
+            ref_type: 0,
+            message_sender_id: reply.message_sender_id,
+            message_sender_username: reply.message_sender_username,
+            message_sender_avatar: reply.message_sender_avatar,
+            message_sender_clan_nick: reply.message_sender_clan_nick,
+            message_sender_display_name: reply.message_sender_display_name,
+            ..Default::default()
+        })
+        .into_iter()
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: sent.json,
+        mentions: proto_mentions,
+        attachments,
+        references,
+        mode,
+        is_public,
+        mention_everyone,
+        code: EPHEMERAL_MESSAGE_CODE,
+        topic_id,
+        ..Default::default()
+    }
+}
+
 pub fn build_send_content(
     text: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
 ) -> SendContent {
+    let channels = hashtags;
     let stripped = strip_markdown(text);
     let mentions: Vec<OutgoingMention> = mentions
         .iter()
@@ -3253,6 +3716,7 @@ pub fn build_send_content(
         &hashtags,
         &emojis,
         &stripped.markdowns,
+        channels,
     );
     let cvtt = canvas_titles_for_text(&stripped.text);
     let json = if cvtt.is_empty() {
@@ -3270,10 +3734,41 @@ pub fn build_send_content(
     }
 }
 
+pub fn build_send_content_with_code(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &OutgoingHashtags,
+    emojis: &[OutgoingEmoji],
+    message_code: i32,
+) -> SendContent {
+    if message_code != MESSAGE_BUZZ_CODE {
+        return build_send_content(text, mentions, hashtags, emojis);
+    }
+    let markdowns: Vec<OutgoingMarkdown> = detect_markdown(text)
+        .into_iter()
+        .filter(|token| is_link_markdown_kind(&token.kind))
+        .collect();
+    let json = build_message_content_json(text, mentions, hashtags, emojis, &markdowns, hashtags);
+    let cvtt = canvas_titles_for_text(text);
+    let json = if cvtt.is_empty() {
+        json
+    } else {
+        with_cvtt(json, &cvtt)
+    };
+    SendContent {
+        json,
+        text: text.to_string(),
+        mentions: mentions.to_vec(),
+        hashtags: hashtags.to_vec(),
+        emojis: emojis.to_vec(),
+        markdowns,
+    }
+}
+
 fn build_presign_finish_content(
     content: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
     presign_finish: &[String],
     create_time_seconds: u32,
@@ -3301,7 +3796,7 @@ fn with_presign_finish(content_json: String, keys: &[String]) -> String {
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
-fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+pub fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return content_json;
     }
@@ -3473,6 +3968,7 @@ fn build_message_content_json(
     hashtags: &[OutgoingHashtag],
     emojis: &[OutgoingEmoji],
     markdowns: &[OutgoingMarkdown],
+    channels: &OutgoingHashtags,
 ) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("t".into(), text.into());
@@ -3506,6 +4002,9 @@ fn build_message_content_json(
                 if !h.channel_id.is_empty() {
                     o.insert("channelId".into(), h.channel_id.clone().into());
                 }
+                if let Some(meta) = channels.channel(&h.channel_id) {
+                    insert_channel_link_meta(&mut o, meta);
+                }
                 o.insert("s".into(), h.s.into());
                 o.insert("e".into(), h.e.into());
                 serde_json::Value::Object(o)
@@ -3529,12 +4028,29 @@ fn build_message_content_json(
         obj.insert("ej".into(), arr.into());
     }
     if !markdowns.is_empty() {
+        let utf16: Vec<u16> = if channels.channels.is_empty() {
+            Vec::new()
+        } else {
+            text.encode_utf16().collect()
+        };
         let arr: Vec<serde_json::Value> = markdowns
             .iter()
             .map(|m| {
                 let mut o = serde_json::Map::new();
                 if !m.kind.is_empty() {
                     o.insert("type".into(), m.kind.clone().into());
+                }
+                let linked = usize::try_from(m.s)
+                    .ok()
+                    .zip(usize::try_from(m.e).ok())
+                    .and_then(|(s, e)| utf16.get(s..e))
+                    .map(String::from_utf16_lossy);
+                if let Some(meta) = linked
+                    .as_deref()
+                    .and_then(channel_id_in_channel_url)
+                    .and_then(|channel_id| channels.channel(channel_id))
+                {
+                    insert_channel_link_meta(&mut o, meta);
                 }
                 o.insert("s".into(), m.s.into());
                 o.insert("e".into(), m.e.into());
@@ -3578,6 +4094,7 @@ pub struct ApiMessage {
     pub references: Vec<ApiMessageRef>,
     pub reactions: Vec<ApiMessageReaction>,
     pub entity_mentions: Vec<ApiEntityMention>,
+    pub topic_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3715,8 +4232,7 @@ impl MezonTransport {
         let (code, response) = self
             .send(cid, self.build_api_request(cid, api_name, body)?)
             .await?;
-        self.log_api_ok(api_name, cid, code, response.len(), args, started);
-        Ok((code, response))
+        self.complete_api_request(api_name, cid, code, response, args, started)
     }
 
     async fn send_api_request_with_timeout(
@@ -3732,6 +4248,32 @@ impl MezonTransport {
         let (code, response) = self
             .send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
             .await?;
+        self.complete_api_request(api_name, cid, code, response, args, started)
+    }
+
+    fn complete_api_request(
+        &self,
+        api_name: &str,
+        cid: u16,
+        code: u32,
+        response: Vec<u8>,
+        args: u32,
+        started: Instant,
+    ) -> Result<(u32, Vec<u8>)> {
+        if let Some(error) = realtime_error_from_body(&response) {
+            tracing::error!(
+                target: "socket",
+                "api_err: action={api_name} cid={cid} envelope_code={} {}",
+                error.code,
+                error.message.trim()
+            );
+            let grpc_code = grpc_code_from_envelope_status(error.code);
+            return Err(api_status_error(grpc_code)).context(EnvelopeStatus {
+                api_name: api_name.to_string(),
+                message: error.message.trim().to_string(),
+                code: error.code,
+            });
+        }
         self.log_api_ok(api_name, cid, code, response.len(), args, started);
         Ok((code, response))
     }
@@ -3813,7 +4355,10 @@ impl MezonTransport {
             .await
             .context("failed to read the SessionRefresh response")?;
         if !status.is_success() {
-            anyhow::bail!("SessionRefresh failed with status {}", status.as_u16());
+            return Err(SessionRefreshRejected {
+                status: status.as_u16(),
+            }
+            .into());
         }
 
         let session = api::Session::decode(bytes.as_slice())?;
@@ -3917,7 +4462,10 @@ impl MezonTransport {
                     status.as_u16()
                 );
             }
-            anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
+            return Err(HttpFallbackStatus {
+                status: status.as_u16(),
+            }
+            .into());
         }
         if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
             anyhow::bail!(
@@ -3981,6 +4529,7 @@ impl MezonTransport {
             status: user.status,
             user_status: user.user_status,
             dob_seconds: user.dob_seconds,
+            create_time_seconds: user.create_time_seconds,
         }
     }
 
@@ -3988,9 +4537,7 @@ impl MezonTransport {
         match api::ChannelDescList::decode(response) {
             Ok(list) => Ok(list),
             Err(decode_err) => {
-                if let Ok(error) = realtime::Error::decode(response)
-                    && (error.code != 0 || !error.message.is_empty())
-                {
+                if let Some(error) = realtime_error_from_body(response) {
                     return Err(anyhow::anyhow!(
                         "API error: code={} {}",
                         error.code,
@@ -4076,6 +4623,7 @@ impl MezonTransport {
             count_mess_unread: channel.count_mess_unread,
             last_sent_timestamp,
             last_seen_timestamp,
+            create_time_seconds: channel.create_time_seconds,
             creator_id: channel.creator_id,
         }
     }
@@ -4143,6 +4691,7 @@ impl MezonTransport {
             references,
             reactions,
             entity_mentions,
+            topic_id: message.topic_id,
         }
     }
 
@@ -4177,10 +4726,14 @@ impl MezonTransport {
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
         let content = pin.content;
-        let content_text = serde_json::from_str::<serde_json::Value>(&content)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| content.clone());
+        let content_text = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(serde_json::Value::Object(fields)) => match fields.get("t") {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(_) => content.clone(),
+                None => String::new(),
+            },
+            _ => content.clone(),
+        };
         let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
@@ -4411,6 +4964,10 @@ impl MezonTransport {
             "DeletePinMessage" => 207,
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
+            "SearchCtrlK" => 210,
+            "SearchMentionUsers" => 211,
+            "GenerateCDNSignature" => 212,
+            "LinkCDNFile" => 214,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -4659,9 +5216,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -4716,9 +5271,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -4754,11 +5307,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
@@ -4775,11 +5326,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_voice_reaction error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_voice_reaction", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn forward_webrtc_signaling(
@@ -4804,11 +5353,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("forward_webrtc_signaling error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "forward_webrtc_signaling", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_interactive_event(
@@ -4847,16 +5394,14 @@ impl MezonTransport {
             event_type,
             "sending VoiceInteractiveEvent"
         );
-        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        let response = self
+            .send_realtime_control(cid, "write_voice_interactive_event", envelope)
+            .await?;
         tracing::info!(
             target: "socket",
             cid = i32::from(cid),
-            code,
             "received VoiceInteractiveEvent CID response"
         );
-        if code != 0 {
-            anyhow::bail!("write_voice_interactive_event error: code={code}");
-        }
         decode_voice_interactive_response(&response)
     }
 
@@ -4880,11 +5425,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("make_call_push error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "make_call_push", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
@@ -4916,11 +5459,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_seen_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_seen_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4967,11 +5508,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_pin_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_pin_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
@@ -4984,11 +5523,9 @@ impl MezonTransport {
                 is_last_field: false,
             })),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_clan_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_clan_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5001,7 +5538,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
@@ -5053,7 +5590,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5078,7 +5615,7 @@ impl MezonTransport {
         mode: i32,
         topic_id: i64,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         reply: Option<OutgoingReply>,
         flags: OutgoingMessageFlags,
@@ -5129,7 +5666,7 @@ impl MezonTransport {
         topic_id: i64,
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<OutgoingReply>,
@@ -5181,7 +5718,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         flags: OutgoingMessageFlags,
@@ -5232,7 +5769,7 @@ impl MezonTransport {
         mode: i32,
         reply: OutgoingReply,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5288,7 +5825,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5308,7 +5845,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5344,7 +5881,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         references: Vec<api::MessageRef>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         content_is_json: bool,
@@ -5352,20 +5889,8 @@ impl MezonTransport {
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
-        let cid = self.generate_cid();
-
-        let api_name = "SendChannelMessage";
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
-        tracing::debug!(
-            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
-            cid,
-            parsed_clan_id,
-            parsed_channel_id,
-            is_public,
-            content.len(),
-            attachments.len()
-        );
         let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let mentions = if flags.anonymous_message {
             Vec::new()
@@ -5381,12 +5906,12 @@ impl MezonTransport {
                 json: content.to_string(),
                 text,
                 mentions,
-                hashtags,
+                hashtags: hashtags.tokens,
                 emojis,
                 markdowns: Vec::new(),
             }
         } else {
-            build_send_content(content, &mentions, &hashtags, &emojis)
+            build_send_content_with_code(content, &mentions, &hashtags, &emojis, flags.message_code)
         };
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
@@ -5404,7 +5929,7 @@ impl MezonTransport {
             .collect();
         // No client `id`: the server generates the message Snowflake (mezon-js omits it).
         // Sending a client-side id made the server reject with code 13 (INTERNAL).
-        let body = realtime::ChannelMessageSend {
+        let message = realtime::ChannelMessageSend {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
             content: content_json.clone(),
@@ -5418,27 +5943,9 @@ impl MezonTransport {
             anonymous_message: flags.anonymous_message,
             code: flags.message_code,
             ..Default::default()
-        }
-        .encode_to_vec();
+        };
 
-        let (code, response) = self
-            .send_api_request_with_http_fallback(cid, api_name, body)
-            .await?;
-
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-
-        let ack = realtime::ChannelMessageAck::decode(response.as_slice())?;
-        tracing::debug!(
-            "send_channel_message ack: message_id={} channel_id={} code={}",
-            ack.message_id,
-            ack.channel_id,
-            ack.code
-        );
-        if ack.message_id == 0 {
-            return Err(anyhow::anyhow!("send returned no message id"));
-        }
+        let ack = self.write_or_http_channel_message(message).await?;
         let mut content_tokens = if content_is_json {
             serde_json::from_str(&content_json).unwrap_or_default()
         } else {
@@ -5473,7 +5980,7 @@ impl MezonTransport {
             content: sent.text.clone(),
             content_raw: String::new(),
             content_tokens,
-            code: 0,
+            code: flags.message_code,
             sender_id: 0,
             sender_name: ack.username,
             avatar: String::new(),
@@ -5484,6 +5991,7 @@ impl MezonTransport {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id,
         })
     }
 
@@ -5704,23 +6212,6 @@ impl MezonTransport {
             .channeldesc
             .into_iter()
             .map(Self::thread_desc_from_proto)
-            .collect())
-    }
-
-    /// List channels by user ID.
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
-        let cid = self.generate_cid();
-        let (code, response) = self
-            .send_api_request(cid, "ListChannelByUserId", Vec::new())
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        let channel_list = api::ChannelDescList::decode(response.as_slice())?;
-        Ok(channel_list
-            .channeldesc
-            .into_iter()
-            .map(Self::channel_desc_from_proto)
             .collect())
     }
 
@@ -6351,75 +6842,30 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let cid = self.generate_cid();
-        let content_json = forward_content_json(content_raw, text);
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
+        let api_attachments: Vec<ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+                size: a.size,
+            })
             .collect();
-        let body = realtime::ChannelMessageSend {
+        let message = build_forward_channel_message_send(
             clan_id,
             channel_id,
-            content: content_json,
-            mentions: proto_mentions,
-            attachments,
-            mode,
+            content_raw,
+            text,
             is_public,
-            mention_everyone,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _response) = self
-            .send_api_request_with_http_fallback(cid, "SendChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_attachments(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content: &str,
-        attachments: Vec<api::MessageAttachment>,
-        mode: i32,
-        is_public: bool,
-        topic_id: i64,
-        is_update_msg_topic: bool,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let mut content_json = build_send_content(content, &[], &[], &[]).json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            attachments,
             mode,
-            is_public,
-            hide_editted: true,
-            create_time_seconds,
-            topic_id,
-            is_update_msg_topic,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
+            &api_attachments,
+            &mentions,
+        );
+        let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
 
@@ -6431,7 +6877,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
@@ -6837,6 +7283,104 @@ impl MezonTransport {
         Ok(api::SearchMessageResponse::decode(response.as_slice())?)
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<api::SearchCtrlKResponse> {
+        let text = text.trim();
+        if text.is_empty() {
+            anyhow::bail!("SearchCtrlK text must not be empty");
+        }
+        if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
+            anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchCtrlKRequest {
+            text: text.to_string(),
+            r#type: search_type,
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "SearchCtrlK", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<api::SearchMentionUsersResponse> {
+        let text = text.trim();
+        if !mention_search_text_accepted(text) {
+            anyhow::bail!(
+                "SearchMentionUsers text must be {MENTION_SEARCH_MIN_CHARS} to {MENTION_SEARCH_MAX_CHARS} characters"
+            );
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchMentionUsersRequest {
+            clan_id,
+            channel_id,
+            text: text.to_string(),
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "SearchMentionUsers", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchMentionUsersResponse::decode(
+            response.as_slice(),
+        )?)
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        if channel_id == 0 {
+            anyhow::bail!("GenerateCDNSignature needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GenerateCdnSignatureRequest { channel_id }.encode_to_vec();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "GenerateCDNSignature", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::LinkCdnFileRequest {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        }
+        .encode_to_vec();
+        let has_http_session = self.http_fallback.read().is_some();
+        let sent = match self
+            .send_api_request_with_http_fallback(cid, "LinkCDNFile", body.clone())
+            .await
+        {
+            Err(error) if has_http_session && is_unknown_api_error(&error) => self
+                .send_api_request_over_http("LinkCDNFile", body)
+                .await
+                .map(|response| (0, response)),
+            sent => sent,
+        };
+        match sent {
+            Ok((0, _)) => Ok(()),
+            Ok((code, _)) => Err(api_status_error(code)),
+            Err(error) if is_http_conflict(&error) => {
+                Err(api_status_error(ApiStatusError::ALREADY_EXISTS))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Search threads by label within a parent channel.
     pub async fn search_thread(
         &self,
@@ -7163,7 +7707,7 @@ impl MezonTransport {
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddChannelUsers", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7183,7 +7727,7 @@ impl MezonTransport {
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7295,7 +7839,7 @@ impl MezonTransport {
         let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7512,14 +8056,14 @@ impl MezonTransport {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id,
-            nick_name: Some(nick_name.to_string()),
-            avatar: avatar_url.map(|s| s.to_string()),
+            nick_name: nick_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -7532,10 +8076,9 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
             ));
         }
         Ok(())
@@ -7866,6 +8409,7 @@ impl MezonTransport {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
@@ -7875,6 +8419,8 @@ impl MezonTransport {
             width,
             height,
             part_count: 0,
+            channel_id,
+            transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8026,6 +8572,109 @@ impl MezonTransport {
         Ok(())
     }
 
+    /// Decode the socket's reply to `ChannelMessageSend`.
+    ///
+    /// A rejection arrives here as `Envelope::Error`, not as a non-zero frame code: the server
+    /// builds an error envelope (`send_error_to_conn`) and hands it to the same `send_to_conn`
+    /// every other envelope goes through, and that path writes no response code. So this function
+    /// speaks for the whole reply — it is where a socket-side refusal (no permission to post, a
+    /// blocked DM) becomes an `Err` — and the caller has no code left worth checking.
+    fn channel_message_ack_from_write_response(
+        response: &[u8],
+    ) -> Result<realtime::ChannelMessageAck> {
+        let envelope = realtime::Envelope::decode(response)
+            .context("failed to decode channel_message_ack envelope")?;
+        match envelope.message {
+            Some(realtime::envelope::Message::ChannelMessageAck(ack)) => {
+                if ack.message_id == 0 {
+                    return Err(anyhow::anyhow!("send returned no message id"));
+                }
+                Ok(ack)
+            }
+            Some(realtime::envelope::Message::Error(error)) => Err(anyhow::anyhow!(
+                "API error: code={} {}",
+                error.code,
+                error.message.trim()
+            )),
+            _ => Err(anyhow::anyhow!(
+                "unexpected writeChatMessage reply (missing channel_message_ack)"
+            )),
+        }
+    }
+
+    /// Decode the HTTP reply to the same send — deliberately not the same shape as above.
+    ///
+    /// The envelope is the socket's framing, not the message's: `/mezon.api.Mezon/<Method>`
+    /// answers with the bare response type, so unwrapping an `Envelope` here would fail on a
+    /// perfectly good ack. Errors need no branch either — `send_api_request_over_http` has already
+    /// turned a non-2xx into an `Err` before this is reached, leaving only the empty-id check the
+    /// two decoders do share.
+    fn channel_message_ack_from_http_response(
+        response: &[u8],
+    ) -> Result<realtime::ChannelMessageAck> {
+        let ack = realtime::ChannelMessageAck::decode(response)
+            .context("decode ChannelMessageAck from HTTP")?;
+        if ack.message_id == 0 {
+            return Err(anyhow::anyhow!("send returned no message id"));
+        }
+        Ok(ack)
+    }
+
+    async fn write_chat_message(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=ChannelMessageSend cid={} clan_id={} channel_id={}",
+            cid,
+            message.clan_id,
+            message.channel_id
+        );
+        let started = Instant::now();
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        let (_code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        let ack = Self::channel_message_ack_from_write_response(&response)?;
+        tracing::debug!(
+            target: "socket",
+            "realtime_ok: action=ChannelMessageSend cid={} message_id={} channel_id={} took={}ms",
+            cid,
+            ack.message_id,
+            ack.channel_id,
+            started.elapsed().as_millis()
+        );
+        Ok(ack)
+    }
+
+    async fn send_channel_message_http(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let response = self
+            .send_api_request_over_http("SendChannelMessage", message.encode_to_vec())
+            .await
+            .context("SendChannelMessage HTTP")?;
+        Self::channel_message_ack_from_http_response(&response)
+    }
+
+    async fn write_or_http_channel_message(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        if self.http_fallback.read().is_some() && !self.is_open().await {
+            tracing::warn!(
+                target: "socket",
+                "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
+            );
+            return self.send_channel_message_http(message).await;
+        }
+        self.write_chat_message(message).await
+    }
+
     /// Send an ephemeral message (visible only to `receiver_id`). Sent as the
     /// `EphemeralMessageSend` envelope oneof (not an `ApiRequestEvent`), mirroring
     /// mezon-js `writeEphemeralMessage`. The nested message carries `code = 12`
@@ -8040,47 +8689,26 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = sent
-            .mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
-            .collect();
-        let references = reply
-            .map(|reply| api::MessageRef {
-                message_ref_id: reply.message_ref_id,
-                content: reply.content,
-                has_attachment: reply.has_attachment,
-                ref_type: 0,
-                message_sender_id: reply.message_sender_id,
-                message_sender_username: reply.message_sender_username,
-                message_sender_avatar: reply.message_sender_avatar,
-                message_sender_clan_nick: reply.message_sender_clan_nick,
-                message_sender_display_name: reply.message_sender_display_name,
-                ..Default::default()
-            })
-            .into_iter()
-            .collect();
-        let message = realtime::ChannelMessageSend {
+        let message = ephemeral_message_send(
             clan_id,
             channel_id,
-            content: sent.json,
-            mentions: proto_mentions,
-            attachments,
-            references,
-            mode,
+            content,
             is_public,
-            mention_everyone,
-            code: EPHEMERAL_MESSAGE_CODE,
-            ..Default::default()
-        };
+            mode,
+            mentions,
+            hashtags,
+            emojis,
+            attachments,
+            reply,
+            topic_id,
+        );
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::EphemeralMessageSend(
@@ -8090,11 +8718,48 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        self.send_realtime_control(cid, "write_ephemeral_message", envelope)
+            .await
+            .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_ephemeral_message_to_bot(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<OutgoingMention>,
+        hashtags: OutgoingHashtags,
+        emojis: Vec<OutgoingEmoji>,
+        attachments: Vec<api::MessageAttachment>,
+        reply: Option<OutgoingReply>,
+        topic_id: i64,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let message = ephemeral_message_send(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            mentions,
+            hashtags,
+            emojis,
+            attachments,
+            reply,
+            topic_id,
+        );
+        let body = realtime::EphemeralMessageSend {
+            message: Some(message),
+            receiver_ids: Vec::new(),
         }
-        Ok(())
+        .encode_to_vec();
+        let response = self
+            .send_api_request_over_http("SendEphemeralMessageToBot", body)
+            .await?;
+        Ok(realtime::ChannelMessageAck::decode(response.as_slice())?)
     }
 
     pub async fn write_message_typing(
@@ -8121,11 +8786,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_message_typing", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8177,11 +8840,9 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::QuickMenuEvent(event)),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_quick_menu_event", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Dropdown box selected.
@@ -8322,7 +8983,7 @@ impl MezonTransport {
             .send_api_request(cid, "CreateMessage2Inbox", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -8472,14 +9133,9 @@ impl MezonTransport {
     }
 
     /// Delete event.
-    pub async fn delete_event(&self, event_id: i64, clan_id: i64) -> Result<()> {
+    pub async fn delete_event(&self, request: api::DeleteEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::DeleteEventRequest {
-            event_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8488,15 +9144,9 @@ impl MezonTransport {
     }
 
     /// Update event.
-    pub async fn update_event(&self, event_id: i64, clan_id: i64, title: &str) -> Result<()> {
+    pub async fn update_event(&self, request: api::UpdateEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateEventRequest {
-            event_id,
-            clan_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -9134,70 +9784,78 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         room_name: &str,
+        metadata: &str,
     ) -> Result<api::GenerateMeetTokenResponse> {
         let cid = self.generate_cid();
         let body = api::GenerateMeetTokenRequest {
             channel_id,
             room_name: room_name.to_string(),
+            metadata: metadata.to_string(),
         }
         .encode_to_vec();
-        let (code, response) = self
-            .send_api_request(cid, "GenerateMeetToken", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(api::GenerateMeetTokenResponse::decode(response.as_slice())?)
+        let has_http_session = self.http_fallback.read().is_some();
+        let (code, response) = match self
+            .send_api_request_with_http_fallback(cid, "GenerateMeetToken", body.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if has_http_session => {
+                tracing::warn!(target: "socket", "GenerateMeetToken socket request failed; using HTTP fallback: {error:#}");
+                let response = self
+                    .send_api_request_over_http("GenerateMeetToken", body)
+                    .await?;
+                (0, response)
+            }
+            Err(error) => return Err(error),
+        };
+        meet_token_from_raw_body(code, &response)
     }
 
-    /// Remove participant Mezon meet.
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
-        username: &str,
-    ) -> Result<()> {
+        user_id: i64,
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            user_id,
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "RemoveParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response).ok_or_else(|| {
+            anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token")
+        })
     }
 
-    /// Mute participant Mezon meet.
     pub async fn mute_participant_mezon_meet(
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
-        username: &str,
-    ) -> Result<()> {
+        user_id: i64,
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            user_id,
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "MuteParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response)
+            .ok_or_else(|| anyhow::anyhow!("MuteParticipantMezonMeet returned no SFU action token"))
     }
 
     /// Create room channel apps.
@@ -9334,7 +9992,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         mode: i32,
         is_public: bool,
@@ -9343,13 +10001,39 @@ impl MezonTransport {
         hide_editted: bool,
         create_time_seconds: u32,
     ) -> Result<()> {
-        let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let mut content_json = sent.json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let mentions = sent.mentions;
+        self.update_channel_message_content(
+            clan_id,
+            channel_id,
+            message_id,
+            with_create_time_seconds(sent.json, create_time_seconds),
+            &sent.mentions,
+            mode,
+            is_public,
+            topic_id,
+            is_update_msg_topic,
+            hide_editted,
+            create_time_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mentions: &[OutgoingMention],
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -9374,40 +10058,6 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            mode,
-            is_public: false,
-            hide_editted: true,
-            create_time_seconds,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!(
-                "update_channel_message_structured error: code={}",
-                code
-            ));
         }
         Ok(())
     }
@@ -9809,7 +10459,7 @@ impl MezonTransport {
             .send_api_request(cid, "LinkSMS", body)
             .await
             .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
-        if code == API_CODE_ALREADY_EXISTS {
+        if code == ApiStatusError::ALREADY_EXISTS {
             return Err(LinkPhoneError::AlreadyLinked);
         }
         if code != 0 {
@@ -9920,6 +10570,112 @@ impl MezonTransport {
         }
         Ok(())
     }
+}
+
+fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
+    let envelope = realtime::Envelope::decode(body).ok()?;
+    match envelope.message {
+        Some(realtime::envelope::Message::Error(error))
+            if error.code != 0 || !error.message.is_empty() =>
+        {
+            Some(error)
+        }
+        _ => None,
+    }
+}
+
+fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
+    if let Some(error) = realtime_error_from_body(response) {
+        anyhow::bail!(
+            "{action} error: code={} {}",
+            error.code,
+            error.message.trim()
+        );
+    }
+    if code != 0 {
+        anyhow::bail!("{action} error: code={code}");
+    }
+    Ok(())
+}
+
+fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
+    if code != 0 {
+        tracing::error!(target: "socket", "{api_name} failed: code={code}");
+        return Err(api_status_error(code)).context(format!("{api_name} failed (code={code})"));
+    }
+    Ok(())
+}
+
+const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
+
+fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<api::GenerateMeetTokenResponse> {
+    if code != 0 {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
+        return Err(api_status_error(code))
+            .context(format!("GenerateMeetToken failed (code={code})"));
+    }
+    let Some(&first_byte) = body.first() else {
+        anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
+    };
+    let response = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+        api::GenerateMeetTokenResponse::decode(body)
+            .ok()
+            .filter(|response| !response.token.is_empty())
+    } else {
+        bare_jwt(body).map(|token| api::GenerateMeetTokenResponse {
+            token,
+            ..Default::default()
+        })
+    };
+    let mut response = response.ok_or_else(|| {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+        anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
+    })?;
+    let sfu_url = normalized_sfu_ws_url(&response.url);
+    if sfu_url.is_none() && !response.url.trim().is_empty() {
+        tracing::warn!(
+            "GenerateMeetToken returned an unusable SFU url={:?}; the configured SFU stays in use",
+            response.url
+        );
+    }
+    response.url = sfu_url.unwrap_or_default();
+    Ok(response)
+}
+
+fn normalized_sfu_ws_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("wss://{raw}")
+    };
+    let mut url = url::Url::parse(&with_scheme).ok()?;
+    let websocket_scheme = match url.scheme() {
+        "ws" | "wss" => None,
+        "http" => Some("ws"),
+        "https" => Some("wss"),
+        _ => return None,
+    };
+    if let Some(scheme) = websocket_scheme {
+        url.set_scheme(scheme).ok()?;
+    }
+    if !url.has_host() {
+        return None;
+    }
+    if url.path() == "/" {
+        url.set_path("/ws");
+    }
+    Some(url.into())
+}
+
+fn bare_jwt(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?.trim().trim_matches('"');
+    let looks_like_jwt =
+        text.starts_with("eyJ") && text.matches('.').count() == 2 && !text.ends_with('.');
+    looks_like_jwt.then(|| text.to_owned())
 }
 
 #[cfg(test)]
@@ -10258,13 +11014,67 @@ mod tests {
             legacy.to_content_token().user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
-        let sent = build_send_content("@here", std::slice::from_ref(&legacy), &[], &[]);
+        let sent = build_send_content(
+            "@here",
+            std::slice::from_ref(&legacy),
+            &OutgoingHashtags::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(
             parsed.mentions[0].user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
+    }
+
+    #[test]
+    fn buzz_content_keeps_markdown_markers_as_plain_text() {
+        let sent = build_send_content_with_code(
+            "```jb```",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+            MESSAGE_BUZZ_CODE,
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "```jb```");
+        assert_eq!(parsed.t, "```jb```");
+        assert!(parsed.mk.is_empty());
+    }
+
+    #[test]
+    fn buzz_content_keeps_links_and_canvas_titles() {
+        let text = "```jb``` https://mezon.ai/chat/clans/1/channels/2/canvas/abc";
+        let sent = build_send_content_with_code(
+            text,
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+            MESSAGE_BUZZ_CODE,
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.t, text);
+        assert_eq!(parsed.mk.len(), 1);
+        assert!(
+            parsed.mk[0]
+                .kind
+                .as_deref()
+                .is_some_and(is_link_markdown_kind)
+        );
+        assert_eq!(parsed.cvtt.get("abc").map(String::as_str), Some("Untitled"));
+    }
+
+    #[test]
+    fn regular_content_still_parses_markdown() {
+        let sent =
+            build_send_content_with_code("```jb```", &[], &OutgoingHashtags::default(), &[], 0);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "jb");
+        assert!(!parsed.mk.is_empty());
     }
 
     #[test]
@@ -10482,6 +11292,78 @@ mod tests {
     }
 
     #[test]
+    fn forward_blocked_for_inline_attachment_data_uri() {
+        let attachments = vec![ApiAttachment {
+            url: "data:image/png;base64,abcd".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_realtime_ok_for_small_https_attachment() {
+        let attachments = vec![ApiAttachment {
+            url: "https://cdn.example/a.png".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(!forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_blocked_when_wire_exceeds_proto_server_cap() {
+        let pad = "x".repeat(4200);
+        let attachments = vec![ApiAttachment {
+            url: format!("https://cdn.example/{pad}.png"),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn encoded_envelope_cid_last_len_matches_encode() {
+        let message =
+            build_forward_channel_message_send(1, 2, r#"{"t":"hi"}"#, "hi", false, 2, &[], &[]);
+        let envelope = realtime::Envelope {
+            cid: 9,
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        assert_eq!(
+            encoded_envelope_cid_last_len(&envelope),
+            encode_envelope_cid_last(envelope).len()
+        );
+    }
+
+    #[test]
     fn message_from_proto_presign_finish_absent_is_none() {
         let msg = api::ChannelMessage {
             message_id: 1,
@@ -10494,14 +11376,21 @@ mod tests {
 
     #[test]
     fn content_json_plain_has_no_mentions_key() {
-        let json = build_message_content_json("hello", &[], &[], &[], &[]);
+        let json =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert_eq!(json, r#"{"t":"hello"}"#);
     }
 
     #[test]
     fn content_json_includes_mentions_with_utf16_offsets() {
-        let json =
-            build_message_content_json("@bob hi", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@bob hi",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "@bob hi");
         assert_eq!(parsed.mentions.len(), 1);
@@ -10559,7 +11448,14 @@ mod tests {
 
     #[test]
     fn content_json_keeps_here_mention_for_receive_colouring() {
-        let json = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mentions.len(), 1);
         assert_eq!(
@@ -10585,7 +11481,14 @@ mod tests {
             s: 0,
             e: 8,
         }];
-        let json = build_message_content_json("#general hi", &[], &hashtags, &[], &[]);
+        let json = build_message_content_json(
+            "#general hi",
+            &[],
+            &hashtags,
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert!(parsed.mentions.is_empty());
         assert_eq!(parsed.hg.len(), 1);
@@ -10601,12 +11504,143 @@ mod tests {
             s: 0,
             e: 7,
         }];
-        let json = build_message_content_json(":smile:", &[], &[], &emojis, &[]);
+        let json = build_message_content_json(
+            ":smile:",
+            &[],
+            &[],
+            &emojis,
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ej.len(), 1);
         assert_eq!(parsed.ej[0].emojiid.as_deref(), Some("55"));
         assert_eq!(parsed.ej[0].s, Some(0));
         assert_eq!(parsed.ej[0].e, Some(7));
+    }
+
+    fn voice_link_meta() -> ChannelLinkMeta {
+        ChannelLinkMeta {
+            channel_id: "900".into(),
+            channel_label: "voice elsewhere".into(),
+            clan_id: "5".into(),
+            parent_id: None,
+            channel_type: 10,
+            private: false,
+        }
+    }
+
+    #[test]
+    fn channel_id_in_channel_url_reads_the_channel_segment() {
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900?code=1"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),
+            None
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
+            None
+        );
+    }
+
+    #[test]
+    fn content_json_marks_private_channel_meta_only() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé {url}");
+        let hashtag = OutgoingHashtag {
+            channel_id: "900".into(),
+            s: 0,
+            e: 3,
+        };
+        let public = OutgoingHashtags::new(vec![hashtag.clone()], vec![voice_link_meta()]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &public, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, None);
+        let private = OutgoingHashtags::new(
+            vec![hashtag],
+            vec![ChannelLinkMeta {
+                private: true,
+                ..voice_link_meta()
+            }],
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &private, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, Some(1));
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        let channel_link = parsed
+            .mk
+            .iter()
+            .find(|token| token.channel_id.as_deref() == Some("900"))
+            .expect("channel link");
+        assert_eq!(channel_link.channel_private, Some(1));
+    }
+
+    #[test]
+    fn content_json_carries_channel_meta_on_hashtags_and_channel_links() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé 👋 {url} https://example.com/a");
+        let hashtags = OutgoingHashtags::new(
+            vec![OutgoingHashtag {
+                channel_id: "900".into(),
+                s: 0,
+                e: 3,
+            }],
+            vec![voice_link_meta()],
+        );
+        let sent = build_send_content(&text, &[], &hashtags, &[]);
+        let parsed: ApiMessageContent = serde_json::from_str(&sent.json).unwrap();
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(parsed.hg[0].clan_id.as_deref(), Some("5"));
+        assert_eq!(parsed.hg[0].channel_type, Some(10));
+        let utf16: Vec<u16> = parsed.t.encode_utf16().collect();
+        let slice = |token: &ContentToken| {
+            String::from_utf16_lossy(&utf16[token.s.unwrap() as usize..token.e.unwrap() as usize])
+        };
+        let links: Vec<&ContentToken> = parsed
+            .mk
+            .iter()
+            .filter(|token| token.kind.as_deref() == Some("lk"))
+            .collect();
+        assert_eq!(links.len(), 2);
+        let channel_link = links
+            .iter()
+            .find(|token| slice(token) == url)
+            .expect("channel link");
+        assert_eq!(
+            channel_link.channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(channel_link.channel_id.as_deref(), Some("900"));
+        let other_link = links
+            .iter()
+            .find(|token| slice(token) != url)
+            .expect("other link");
+        assert!(other_link.channel_label.is_none());
+        assert!(!sent.json.contains("parentId"));
+    }
+
+    #[test]
+    fn content_json_without_channel_meta_adds_no_channel_fields() {
+        let sent = build_send_content(
+            "https://mezon.ai/chat/clans/5/channels/900",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert!(!sent.json.contains("channelLabel"));
     }
 
     fn md(kind: &str, s: i32, e: i32) -> OutgoingMarkdown {
@@ -10677,7 +11711,7 @@ mod tests {
                 e: 8,
                 ..Default::default()
             }],
-            &[],
+            &OutgoingHashtags::default(),
             &[],
         );
         let value: serde_json::Value = serde_json::from_str(&sent.json).unwrap();
@@ -10784,7 +11818,14 @@ mod tests {
 
     #[test]
     fn content_json_includes_markdown_mk() {
-        let json = build_message_content_json("**hey**", &[], &[], &[], &[md("b", 0, 7)]);
+        let json = build_message_content_json(
+            "**hey**",
+            &[],
+            &[],
+            &[],
+            &[md("b", 0, 7)],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hey**");
         assert_eq!(parsed.mk.len(), 1);
@@ -10801,6 +11842,7 @@ mod tests {
             &[],
             &[],
             &[md("b", 0, 6)],
+            &OutgoingHashtags::default(),
         );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hi** @bob");
@@ -10822,28 +11864,54 @@ mod tests {
 
     #[test]
     fn mention_or_reply_plain_message_is_false() {
-        let content = build_message_content_json("hello world", &[], &[], &[], &[]);
+        let content = build_message_content_json(
+            "hello world",
+            &[],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_here() {
-        let content = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_current_user_only() {
-        let content =
-            build_message_content_json("@bob", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@bob",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &[], 7, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_matching_role_only() {
-        let content =
-            build_message_content_json("@mods", &[role_mention("99", 0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@mods",
+            &[role_mention("99", 0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[100]));
     }
@@ -10851,7 +11919,8 @@ mod tests {
     #[test]
     fn mention_or_reply_detects_reply_to_user() {
         let refs = reply_reference_bytes(42);
-        let content = build_message_content_json("re", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("re", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &refs, &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &refs, &[], 7, &[]));
     }
@@ -10873,7 +11942,8 @@ mod tests {
             }],
         };
         let bytes = list.encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 7, &[]));
     }
@@ -10890,7 +11960,8 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 42, &[100]));
     }
@@ -10908,13 +11979,57 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("@here", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("@here", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+        assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn target_classification_keeps_direct_mentions_mixed_with_here() {
+        let here_user_id = MENTION_HERE_USER_ID.parse::<i64>().unwrap();
+        let bytes = api::MessageMentionList {
+            mentions: vec![
+                api::MessageMention {
+                    user_id: here_user_id,
+                    username: "@here".into(),
+                    ..Default::default()
+                },
+                api::MessageMention {
+                    user_id: 7,
+                    username: "@alice".into(),
+                    ..Default::default()
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        let targets = classify_message_targets("", &[], &bytes, 7, &[]);
+        assert!(targets.has_here);
+        assert!(targets.direct_user);
+        assert!(targets.is_inbox_mention());
+        assert!(!targets.is_here_only());
+    }
+
+    #[test]
+    fn inbox_mention_or_reply_keeps_replies() {
+        let refs = api::MessageRefList {
+            refs: vec![api::MessageRef {
+                message_sender_id: 42,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content =
+            build_message_content_json("reply", &[], &[], &[], &[], &OutgoingHashtags::default());
+
+        assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_malformed_proto_mentions_is_false() {
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(!is_mention_or_reply(
             &content,
             &[],
@@ -11048,11 +12163,36 @@ mod tests {
                 let counters = counters.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 8192];
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, len);
+                        }
                     };
-                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    while buf.len() < head_end + body_len {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     *counters.lock().entry(path.clone()).or_insert(0) += 1;
 
@@ -11063,11 +12203,33 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("GenerateCDNSignature") {
+                        let request =
+                            api::GenerateCdnSignatureRequest::decode(&buf[head_end..]).unwrap();
+                        api::GenerateCdnSignatureResponse {
+                            signature: format!("1700000000-{}", request.channel_id),
+                        }
+                        .encode_to_vec()
+                    } else if path.ends_with("SendChannelMessage") {
+                        realtime::ChannelMessageAck {
+                            message_id: 42,
+                            channel_id: 2,
+                            ..Default::default()
+                        }
+                        .encode_to_vec()
                     } else {
                         Vec::new()
                     };
+                    let linked_twice = path.ends_with("LinkCDNFile")
+                        && api::LinkCdnFileRequest::decode(&buf[head_end..])
+                            .is_ok_and(|request| request.dst == LINKED_DST);
+                    let status = if linked_twice {
+                        "409 Conflict"
+                    } else {
+                        "200 OK"
+                    };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -11077,6 +12239,133 @@ mod tests {
             }
         });
         (port, hits)
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_asks_for_the_given_channel_and_returns_the_signature() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fallback));
+
+        let signature = t
+            .generate_cdn_signature(2087764882924507136)
+            .await
+            .expect("the signature request should succeed");
+        assert_eq!(signature, "1700000000-2087764882924507136");
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/GenerateCDNSignature"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .generate_cdn_signature(0)
+            .await
+            .expect_err("channel 0 has no signature");
+        assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    const LINK_SRC: &str = "1cf93b197d401000/2090000000000000001_photo.png";
+    const LINK_DST: &str = "1d0000000000abcd/2090000000000000001_photo.png";
+    const LINKED_DST: &str = "1d0000000000abcd/2090000000000000002_linked.png";
+
+    fn live_fallback(port: u16) -> HttpFallbackSession {
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        fallback
+    }
+
+    fn open_transport(port: u16) -> MezonTransport {
+        let mut t = transport(true);
+        t.connect_gate = Duration::from_millis(50);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(live_fallback(port)));
+        t
+    }
+
+    fn answer_next_socket_request(
+        t: &MezonTransport,
+        code: u32,
+        body: Vec<u8>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = answered.clone();
+        let pending = t.pending_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let executor = {
+                    let mut pending = pending.lock();
+                    let cid = pending.keys().next().copied();
+                    cid.and_then(|cid| pending.remove(&cid))
+                };
+                if let Some(executor) = executor {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = executor.sender.send((code, body));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        answered
+    }
+
+    fn unknown_api_envelope() -> Vec<u8> {
+        realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 404,
+                message: "Not found.".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_goes_over_http_when_the_socket_does_not_know_it() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        let answered = answer_next_socket_request(&t, 0, unknown_api_envelope());
+
+        t.link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect("the link should go through over HTTP");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_already_linked_over_the_socket_is_not_sent_again() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        answer_next_socket_request(&t, ApiStatusError::ALREADY_EXISTS, Vec::new());
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), None);
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_conflict_over_http_reads_as_already_linked() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(live_fallback(port)));
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINKED_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -11098,6 +12387,39 @@ mod tests {
         }
     }
 
+    /// The connection store arms this on every confirmed handshake, from whatever session it holds
+    /// — it no longer rotates the token first unless the refresh token is near expiry. That is only
+    /// safe because an older token cannot displace a newer one here; without this guard, a
+    /// handshake landing after a send had already minted a fresher token would put the stale one
+    /// back and cost the next send a needless `SessionRefresh`.
+    #[tokio::test]
+    async fn arming_the_fallback_with_an_older_token_does_not_displace_a_newer_one() {
+        let (port, _hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+
+        let mut fresh = expired_fallback(port);
+        fresh.token = fake_jwt_expiring_in(600);
+        fresh.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fresh.clone()));
+
+        t.set_http_fallback(Some(expired_fallback(port)));
+        assert_eq!(
+            t.http_fallback.read().as_ref().map(|f| f.token.clone()),
+            Some(fresh.token.clone()),
+            "a stale token displaced a live one"
+        );
+
+        // A newer one still replaces it, or the session could never move forward.
+        let mut newer = expired_fallback(port);
+        newer.token = fake_jwt_expiring_in(1200);
+        newer.expires_at = crate::server_clock::now_secs() + 1200;
+        t.set_http_fallback(Some(newer.clone()));
+        assert_eq!(
+            t.http_fallback.read().as_ref().map(|f| f.token.clone()),
+            Some(newer.token)
+        );
+    }
+
     /// With the socket down, a send must go out over HTTP rather than block on the connect gate.
     #[tokio::test]
     async fn a_send_falls_back_to_http_while_the_socket_is_down() {
@@ -11116,6 +12438,127 @@ mod tests {
             Some(&1),
             "an expired token must be renewed before the send"
         );
+    }
+
+    #[tokio::test]
+    async fn write_falls_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let ack = t
+            .write_or_http_channel_message(realtime::ChannelMessageSend {
+                clan_id: 1,
+                channel_id: 2,
+                content: r#"{"t":"hi"}"#.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("closed socket must use HTTP for ChannelMessageSend");
+
+        assert_eq!(ack.message_id, 42);
+        assert_eq!(ack.channel_id, 2);
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/SendChannelMessage"), Some(&1));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn write_does_not_http_retry_after_a_socket_send_error() {
+        let (port, hits) = fake_api().await;
+        let t = transport(false);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let err = t
+            .write_or_http_channel_message(realtime::ChannelMessageSend {
+                clan_id: 1,
+                channel_id: 2,
+                content: r#"{"t":"hi"}"#.into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("open socket send failure must not fall back");
+
+        assert!(
+            err.to_string().contains("mock send failed"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            hits.lock().is_empty(),
+            "retrying after the frame left the client would duplicate the message"
+        );
+    }
+
+    #[test]
+    fn write_ack_with_zero_message_id_is_an_error() {
+        let envelope = realtime::Envelope {
+            message: Some(realtime::envelope::Message::ChannelMessageAck(
+                realtime::ChannelMessageAck {
+                    message_id: 0,
+                    channel_id: 2,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let err =
+            MezonTransport::channel_message_ack_from_write_response(&envelope.encode_to_vec())
+                .expect_err("message_id 0 is a failed write");
+        assert!(err.to_string().contains("no message id"));
+    }
+
+    #[test]
+    fn http_ack_with_zero_message_id_is_an_error() {
+        let ack = realtime::ChannelMessageAck {
+            message_id: 0,
+            channel_id: 2,
+            ..Default::default()
+        };
+        let err = MezonTransport::channel_message_ack_from_http_response(&ack.encode_to_vec())
+            .expect_err("message_id 0 is a failed send");
+        assert!(err.to_string().contains("no message id"));
+    }
+
+    /// The socket reports a refusal inside the envelope, never as a frame code, so this branch is
+    /// the only thing standing between "you may not post here" and a send that looks successful.
+    #[test]
+    fn a_socket_refusal_arrives_as_an_error_envelope() {
+        let envelope = realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "User does not have permission to send message".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let err =
+            MezonTransport::channel_message_ack_from_write_response(&envelope.encode_to_vec())
+                .expect_err("a refusal must not read as a successful send");
+        let err = err.to_string();
+        assert!(err.contains("403"), "unexpected error: {err}");
+        assert!(err.contains("permission"), "unexpected error: {err}");
+    }
+
+    /// The two decoders are asymmetric on purpose — envelope on the socket, bare message over
+    /// HTTP — and the asymmetry is a guess about the server that only stays honest if a swap
+    /// fails loudly. Feed each decoder the other transport's bytes: neither may return an ack.
+    #[test]
+    fn the_two_replies_are_not_interchangeable() {
+        let ack = realtime::ChannelMessageAck {
+            message_id: 42,
+            channel_id: 2,
+            ..Default::default()
+        };
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::ChannelMessageAck(ack.clone())),
+        };
+
+        MezonTransport::channel_message_ack_from_write_response(&ack.encode_to_vec())
+            .expect_err("a bare ack is not what the socket sends");
+        MezonTransport::channel_message_ack_from_http_response(&envelope.encode_to_vec())
+            .expect_err("an envelope is not what HTTP returns");
     }
 
     #[tokio::test]
@@ -11244,6 +12687,42 @@ mod tests {
     }
 
     #[test]
+    fn only_a_socket_404_marks_an_api_the_server_does_not_know() {
+        let unknown: anyhow::Error = Err::<(), _>(api_status_error(ApiStatusError::NOT_FOUND))
+            .context(EnvelopeStatus {
+                api_name: "SearchMentionUsers".to_string(),
+                message: "Not found.".to_string(),
+                code: 404,
+            })
+            .unwrap_err();
+        assert!(is_unknown_api_error(&unknown));
+        assert!(is_unknown_api_error(&unknown_api_error(
+            "SearchMentionUsers"
+        )));
+        assert_eq!(
+            unknown.to_string(),
+            "SearchMentionUsers failed: Not found. (code=404)"
+        );
+        assert_eq!(
+            api_status_from_error(&unknown).map(|status| status.code),
+            Some(ApiStatusError::NOT_FOUND)
+        );
+        let handler_not_found = api_status_error(ApiStatusError::NOT_FOUND);
+        assert!(!is_unknown_api_error(&handler_not_found));
+    }
+
+    #[test]
+    fn mention_search_text_matches_server_rune_bounds() {
+        assert!(!mention_search_text_accepted(""));
+        assert!(!mention_search_text_accepted("a"));
+        assert!(!mention_search_text_accepted("  a  "));
+        assert!(mention_search_text_accepted("ab"));
+        assert!(mention_search_text_accepted("đă"));
+        assert!(mention_search_text_accepted(&"ư".repeat(64)));
+        assert!(!mention_search_text_accepted(&"a".repeat(65)));
+    }
+
+    #[test]
     fn api_index_pins_known_names_and_rejects_unknown() {
         let t = transport(true);
         assert_eq!(t.get_api_index("ListChannelDescs"), Some(0));
@@ -11251,6 +12730,10 @@ mod tests {
         assert_eq!(t.get_api_index("ListClanDescs"), Some(2));
         assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
+        assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
+        assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
+        assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
+        assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -11557,7 +13040,7 @@ mod tests {
         let (json, _) = build_presign_finish_content(
             "hi :joy: #gen @bob",
             &mentions,
-            &hashtags,
+            &OutgoingHashtags::from(hashtags),
             &emojis,
             &["key-1".to_string()],
             1700,
@@ -11580,5 +13063,246 @@ mod tests {
         assert!(is_channel_limit_api_error(&err));
         let err: anyhow::Error = ApiStatusError { code: 13 }.into();
         assert!(!is_channel_limit_api_error(&err));
+    }
+
+    #[test]
+    fn a_bare_jwt_body_is_recovered_as_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        assert_eq!(bare_jwt(jwt.as_bytes()).as_deref(), Some(jwt));
+    }
+
+    #[test]
+    fn a_json_quoted_jwt_is_unwrapped() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let quoted = format!("\"{jwt}\"\n");
+        assert_eq!(bare_jwt(quoted.as_bytes()).as_deref(), Some(jwt));
+    }
+
+    #[test]
+    fn a_protobuf_body_is_decoded_by_its_leading_tag() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let encoded = api::GenerateMeetTokenResponse {
+            token: jwt.to_owned(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap().token, jwt);
+    }
+
+    #[test]
+    fn a_protobuf_body_with_an_sfu_url_still_yields_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let url = "wss://sfu.mezon.vn/ws";
+        let mut encoded = vec![MEET_TOKEN_PROTOBUF_TAG, jwt.len() as u8];
+        encoded.extend_from_slice(jwt.as_bytes());
+        encoded.extend_from_slice(&[0x12, url.len() as u8]);
+        encoded.extend_from_slice(url.as_bytes());
+        let response = meet_token_from_raw_body(0, &encoded).unwrap();
+        assert_eq!(response.token, jwt);
+        assert_eq!(response.url, url);
+    }
+
+    #[test]
+    fn a_malformed_protobuf_body_is_rejected() {
+        let truncated = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x05, b'e']);
+        assert!(
+            truncated
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
+        let empty_token = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x00]);
+        assert!(
+            empty_token
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
+    }
+
+    #[test]
+    fn a_varint_field_one_body_is_rejected_without_protobuf_decode() {
+        let err = meet_token_from_raw_body(0, &[0x08, 0x07]).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("response is not a JWT"));
+        assert!(!message.contains("failed to decode Protobuf"));
+        assert!(!message.contains("Varint"));
+    }
+
+    #[test]
+    fn meet_token_api_error_is_typed_and_carries_the_raw_code() {
+        let err = meet_token_from_raw_body(7, &[]).unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        assert!(err.to_string().contains("code=7"));
+
+        let invalid = meet_token_from_raw_body(3, &[]).unwrap_err();
+        assert!(api_status_from_error(&invalid).is_some_and(|s| s.is_invalid_argument()));
+        assert!(invalid.to_string().contains("code=3"));
+    }
+
+    #[test]
+    fn meet_token_empty_success_body_is_rejected() {
+        let err = meet_token_from_raw_body(0, &[]).unwrap_err();
+        assert!(err.to_string().contains("empty body"));
+    }
+
+    #[test]
+    fn meet_token_raw_jwt_is_accepted() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        assert_eq!(
+            meet_token_from_raw_body(0, jwt.as_bytes()).unwrap().token,
+            jwt
+        );
+    }
+
+    #[test]
+    fn realtime_control_accepts_a_successful_ack() {
+        complete_realtime_control_request("join_clan_chat", 0, &[]).unwrap();
+    }
+
+    #[test]
+    fn realtime_control_rejects_a_nonzero_frame_code() {
+        let err = complete_realtime_control_request("join_clan_chat", 13, &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=13"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn realtime_control_rejects_an_error_envelope_when_frame_code_is_zero() {
+        let body = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Not allowed".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let err = complete_realtime_control_request("join_clan_chat", 0, &body).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=403 Not allowed"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn envelope_error_body_is_extracted_with_its_http_like_code() {
+        let body = realtime::Envelope {
+            cid: 100,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Permission denied.".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+        assert_eq!(grpc_code_from_envelope_status(error.code), 7);
+    }
+
+    #[test]
+    fn envelope_error_survives_a_cid_field_before_it_lobbyby_bytes() {
+        let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
+        body.extend_from_slice(b"Permission denied.");
+        assert_eq!(body.len(), 27);
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+    }
+
+    #[test]
+    fn complete_api_request_rejects_a_realtime_error_envelope_with_a_typed_status() {
+        let t = transport(true);
+        let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
+        body.extend_from_slice(b"Permission denied.");
+        let err = t
+            .complete_api_request("ListChannelMessages", 1, 0, body, 0, Instant::now())
+            .unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        let message = err.to_string();
+        assert!(message.contains("ListChannelMessages failed: Permission denied"));
+        assert!(message.contains("code=403"));
+    }
+
+    #[test]
+    fn complete_api_request_passes_through_a_clean_success_body() {
+        let t = transport(true);
+        let (code, response) = t
+            .complete_api_request(
+                "ListChannelMessages",
+                1,
+                0,
+                b"ok".to_vec(),
+                0,
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(response, b"ok");
+    }
+
+    #[test]
+    fn api_response_or_realtime_error_maps_a_nonzero_frame_code() {
+        let err = api_response_or_realtime_error(7, "ListTopicMessages").unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+    }
+
+    #[test]
+    fn text_that_is_not_a_three_part_jwt_is_rejected() {
+        assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ"), None);
+        assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ."), None);
+        assert_eq!(bare_jwt(b"not a token"), None);
+        assert_eq!(bare_jwt(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    #[test]
+    fn pin_message_from_proto_hides_attachment_metadata_without_text() {
+        for content in [
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620}"#,
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620,"fwd":true}"#,
+        ] {
+            let pin = api::PinMessage {
+                content: content.into(),
+                ..Default::default()
+            };
+            let parsed = MezonTransport::pin_message_from_proto(pin);
+            assert!(parsed.content_text.is_empty());
+            assert_eq!(parsed.content, content);
+        }
+    }
+
+    #[test]
+    fn pin_message_from_proto_preserves_visible_text_behavior() {
+        let json_pin = api::PinMessage {
+            content: r#"{"t":"caption","presign_finish":["photo"]}"#.into(),
+            ..Default::default()
+        };
+        let plain_pin = api::PinMessage {
+            content: "legacy plain text".into(),
+            ..Default::default()
+        };
+        let invalid_text_pin = api::PinMessage {
+            content: r#"{"t":123}"#.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(json_pin).content_text,
+            "caption"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(plain_pin).content_text,
+            "legacy plain text"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
+            r#"{"t":123}"#
+        );
     }
 }

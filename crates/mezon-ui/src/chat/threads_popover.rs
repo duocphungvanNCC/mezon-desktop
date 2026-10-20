@@ -156,7 +156,7 @@ impl Render for ThreadsScrollBody {
             return div()
                 .w_full()
                 .h(px(LIST_BODY_HEIGHT))
-                .flex_shrink_0()
+                .min_h_0()
                 .overflow_hidden()
                 .flex()
                 .flex_col()
@@ -406,6 +406,7 @@ fn render_header(
 
     h_flex()
         .w_full()
+        .flex_shrink_0()
         .items_center()
         .justify_between()
         .px_4()
@@ -777,7 +778,14 @@ fn thread_card(
         )
         .on_click(move |_: &ClickEvent, _window, cx| {
             layout.update(cx, |layout, cx| {
-                layout.navigate_to_thread(&channel_id, &clan_id, &parent_id, &thread_label, cx);
+                layout.navigate_to_thread(
+                    &channel_id,
+                    &clan_id,
+                    &parent_id,
+                    &thread_label,
+                    None,
+                    cx,
+                );
             });
         })
         .into_any_element()

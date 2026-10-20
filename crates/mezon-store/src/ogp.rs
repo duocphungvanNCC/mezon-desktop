@@ -83,6 +83,44 @@ pub fn trusted_invite_id(url: &str, internal_domain: Option<&str>) -> Option<i64
         .filter(|id| *id != 0)
 }
 
+/// Whether `url` is a clan invite link — exactly our own host plus a numeric invite id — and
+/// so gets the join card rather than an OGP embed. Mirrors mezon-react's `checkInviteLinkValid`
+/// (`NX_DOMAIN_URL/invite/` prefix + all-digit id): a `/invite/<code>` path on any other host,
+/// a subdomain included (say a third-party app's own invite page), is an ordinary link whose
+/// OGP metadata is shown as-is.
+pub fn is_clan_invite_url(url: &str, internal_domain: Option<&str>) -> bool {
+    let (Some(host), Some(internal)) = (host_of(url), normalized_internal_domain(internal_domain))
+    else {
+        return false;
+    };
+    host == internal
+        && invite_id_from_url(url).is_some_and(|id| {
+            id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0')
+        })
+}
+
+pub fn internal_meeting_code(url: &str, internal_domain: Option<&str>) -> Option<String> {
+    let (Some(host), Some(internal)) = (host_of(url), normalized_internal_domain(internal_domain))
+    else {
+        return None;
+    };
+    if host.trim_start_matches("www.") != internal {
+        return None;
+    }
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let mut segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty());
+    let (Some("meeting"), Some(code), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return None;
+    };
+    mezon_client::meeting_room_id(code).map(|_| code.to_string())
+}
+
 fn normalized_internal_domain(internal_domain: Option<&str>) -> Option<String> {
     let internal = internal_domain?
         .trim()
@@ -133,6 +171,45 @@ fn host_matches(host: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MEETING_CODE: &str = "MTc2MDQzMjcxOTAwMDAwMDAwMDoxOTc3NTY0MTg3MzY0ODk2NzY4.c2ln";
+
+    #[test]
+    fn a_meeting_link_on_our_own_host_yields_its_code() {
+        for url in [
+            format!("https://mezon.ai/meeting/{MEETING_CODE}"),
+            format!("https://www.mezon.ai/meeting/{MEETING_CODE}/"),
+            format!("http://MEZON.ai/meeting/{MEETING_CODE}?from=chat"),
+        ] {
+            assert_eq!(
+                internal_meeting_code(&url, Some("https://mezon.ai")).as_deref(),
+                Some(MEETING_CODE),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_meeting_path_anywhere_else_is_an_ordinary_link() {
+        for url in [
+            format!("https://evil.example/meeting/{MEETING_CODE}"),
+            format!("https://app.mezon.ai/meeting/{MEETING_CODE}"),
+            format!("https://mezon.ai/chat/meeting/{MEETING_CODE}"),
+            format!("https://mezon.ai/meeting/{MEETING_CODE}/extra"),
+            "https://mezon.ai/meeting/not-a-code".to_string(),
+            "https://mezon.ai/meeting/".to_string(),
+        ] {
+            assert_eq!(
+                internal_meeting_code(&url, Some("https://mezon.ai")),
+                None,
+                "{url}"
+            );
+        }
+        assert_eq!(
+            internal_meeting_code(&format!("https://mezon.ai/meeting/{MEETING_CODE}"), None),
+            None
+        );
+    }
 
     #[test]
     fn picks_first_plain_url() {
@@ -242,6 +319,37 @@ mod tests {
             internal_invite_id("https://mezon.ai/invite/123", Some("")),
             None
         );
+    }
+
+    #[test]
+    fn only_a_numeric_invite_on_our_domain_is_a_clan_invite() {
+        assert!(is_clan_invite_url(
+            "https://mezon.ai/invite/1840670747886882816",
+            Some("https://mezon.ai")
+        ));
+        // A third-party app's invite page: OGP embed, not a join card.
+        assert!(!is_clan_invite_url(
+            "https://meknow.mezon.vn/invite/MZ-3TKK-2D4DZS5N",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/MZ-3TKK-2D4DZS5N",
+            Some("https://mezon.ai")
+        ));
+        // Only the exact host: React matches the `NX_DOMAIN_URL/invite/` prefix, so a
+        // subdomain's invite page is not a clan invite either.
+        assert!(!is_clan_invite_url(
+            "https://app.mezon.ai/invite/1840670747886882816",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/0",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/1840670747886882816",
+            None
+        ));
     }
 
     #[test]

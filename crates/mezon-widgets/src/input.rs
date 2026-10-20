@@ -24,10 +24,12 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
+    HistoryEntry, SelectGranularity, ceil_char_boundary, clip_insert_to_byte_limit,
+    clipped_edit_is_rejected, extend_range_for_granularity, floor_char_boundary,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    push_undo_entry, range_for_granularity, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -48,6 +50,7 @@ pub struct InputState {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     discard_ime_commit: Option<String>,
+    focused_at_prepaint: bool,
     last_layout: Option<ShapedLine>,
     last_lines: Vec<InputDocLine>,
     last_bounds: Option<Bounds<Pixels>>,
@@ -60,6 +63,7 @@ pub struct InputState {
     multi_line: bool,
     embedded: bool,
     validate: Option<ValidateFn>,
+    max_bytes: Option<usize>,
     height: Option<Pixels>,
     radius: Option<Pixels>,
     bg_override: Option<Hsla>,
@@ -77,7 +81,6 @@ pub struct InputState {
     token_bg_color: Option<Hsla>,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    last_edit_kind: Option<EditKind>,
     pub(crate) caret_blink: CaretBlink,
 }
 
@@ -100,6 +103,7 @@ impl InputState {
             selection_reversed: false,
             marked_range: None,
             discard_ime_commit: None,
+            focused_at_prepaint: false,
             last_layout: None,
             last_lines: Vec::new(),
             last_bounds: None,
@@ -112,6 +116,7 @@ impl InputState {
             multi_line: false,
             embedded: false,
             validate: None,
+            max_bytes: None,
             height: None,
             radius: None,
             bg_override: None,
@@ -129,7 +134,6 @@ impl InputState {
             token_bg_color: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_edit_kind: None,
             caret_blink: CaretBlink::new(),
         };
 
@@ -139,6 +143,7 @@ impl InputState {
         .detach();
 
         cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.discard_ime_commit = None;
             this.caret_blink.sync_blurred(cx);
         })
         .detach();
@@ -156,7 +161,11 @@ impl InputState {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.placeholder = placeholder.into();
+        let placeholder = placeholder.into();
+        if self.placeholder == placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
         cx.notify();
     }
 
@@ -230,6 +239,11 @@ impl InputState {
         self
     }
 
+    pub fn max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
     }
@@ -238,13 +252,35 @@ impl InputState {
         self.marked_range.is_some()
     }
 
+    pub fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
+            return;
+        };
+        self.discard_ime_commit = Some(discarded);
+        self.content = next.into();
+        self.selected_range = caret..caret;
+        self.refresh_filter_token_chips(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
+    }
+
     pub fn set_value(
         &mut self,
         value: impl Into<SharedString>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.content = value.into();
+        let value = value.into();
+        self.content = match self.max_bytes {
+            Some(max_bytes) if value.len() > max_bytes => value
+                [..floor_char_boundary(&value, max_bytes)]
+                .to_string()
+                .into(),
+            _ => value,
+        };
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
@@ -272,6 +308,37 @@ impl InputState {
         self.token_bg_ranges.clear();
         self.token_bg_color = None;
         cx.notify();
+    }
+
+    fn clip_abandoned_preedit(
+        &mut self,
+        marked: Range<usize>,
+        max_bytes: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.len() <= max_bytes {
+            return;
+        }
+        let start = floor_char_boundary(&self.content, marked.start);
+        let end = ceil_char_boundary(&self.content, marked.end).max(start);
+        let (next, caret) = {
+            let kept = clip_insert_to_byte_limit(
+                self.content.len(),
+                end - start,
+                &self.content[start..end],
+                max_bytes,
+            );
+            (
+                format!("{}{kept}{}", &self.content[..start], &self.content[end..]),
+                start + kept.len(),
+            )
+        };
+        self.content = next.into();
+        self.selected_range = caret..caret;
+        self.refresh_filter_token_chips(cx);
+        self.pause_caret_blink(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
     }
 
     fn refresh_filter_token_chips(&mut self, cx: &mut Context<Self>) {
@@ -409,6 +476,10 @@ impl InputState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all_content(cx);
+    }
+
+    pub fn select_all_content(&mut self, cx: &mut Context<Self>) {
         self.marked_range = None;
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
@@ -589,17 +660,12 @@ impl InputState {
         }
     }
 
-    fn record_history(&mut self, kind: EditKind) {
-        let coalesce = should_coalesce(self.last_edit_kind, kind);
-        self.redo_stack.clear();
-        if !coalesce {
-            self.undo_stack.push(self.history_snapshot());
-            if self.undo_stack.len() > MAX_UNDO_HISTORY {
-                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
-                self.undo_stack.drain(..overflow);
-            }
+    fn record_history(&mut self, before: HistoryEntry) {
+        if before.content == self.content {
+            return;
         }
-        self.last_edit_kind = Some(kind);
+        self.redo_stack.clear();
+        push_undo_entry(&mut self.undo_stack, before);
     }
 
     fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
@@ -607,7 +673,6 @@ impl InputState {
         self.selected_range = entry.selected_range;
         self.selection_reversed = entry.selection_reversed;
         self.marked_range = None;
-        self.last_edit_kind = None;
         self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
         cx.notify();
@@ -617,7 +682,6 @@ impl InputState {
     fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -685,7 +749,6 @@ impl InputState {
         self.select_anchor = range.clone();
         self.selection_reversed = false;
         self.selected_range = range;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify();
     }
@@ -725,7 +788,6 @@ impl InputState {
         }
         self.selected_range = range;
         self.selection_reversed = reversed;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify();
     }
@@ -740,14 +802,16 @@ impl InputState {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let sanitized = if self.multi_line {
-                text
-            } else {
-                text.replace('\n', " ")
-            };
-            self.replace_text_in_range(None, &sanitized, window, cx);
-        }
+        crate::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            if let Some(text) = item.text() {
+                let sanitized = if this.multi_line {
+                    text
+                } else {
+                    text.replace('\n', " ")
+                };
+                this.replace_text_in_range(None, &sanitized, window, cx);
+            }
+        });
     }
 
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -775,7 +839,6 @@ impl InputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -889,7 +952,6 @@ impl InputState {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.last_edit_kind = None;
         self.extend_selection(offset, cx);
     }
 
@@ -992,14 +1054,17 @@ impl EntityInputHandler for InputState {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "linux")]
         if let Some(marked) = self.marked_range.clone() {
             let start = marked.start.min(self.content.len());
             let end = marked.end.min(self.content.len()).max(start);
             self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
         }
-        self.marked_range = None;
+        let marked = self.marked_range.take();
+        if let (Some(marked), Some(max_bytes)) = (marked, self.max_bytes) {
+            self.clip_abandoned_preedit(marked, max_bytes, cx);
+        }
     }
 
     fn replace_text_in_range(
@@ -1024,6 +1089,17 @@ impl EntityInputHandler for InputState {
         };
         let prior_marked = self.marked_range.clone();
 
+        let requested = new_text;
+        let new_text = match self.max_bytes {
+            Some(max_bytes) => {
+                clip_insert_to_byte_limit(self.content.len(), range.len(), new_text, max_bytes)
+            }
+            None => new_text,
+        };
+        if clipped_edit_is_rejected(requested, new_text, self.marked_range.is_some()) {
+            return;
+        }
+
         let candidate =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
 
@@ -1035,16 +1111,9 @@ impl EntityInputHandler for InputState {
             return;
         }
 
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
-            EditKind::Insert
-        } else {
-            EditKind::Other
-        };
-        self.record_history(kind);
-
+        let before = self.history_snapshot();
         self.content = candidate.into();
+        self.record_history(before);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         if new_text.is_empty() {
             self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
@@ -1082,13 +1151,19 @@ impl EntityInputHandler for InputState {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
-        if self.marked_range.is_none() {
-            self.record_history(EditKind::Insert);
+        let candidate =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        let valid = match &self.validate {
+            Some(validate) => validate(&candidate, cx),
+            None => true,
+        };
+        if !valid {
+            return;
         }
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        let before = self.history_snapshot();
+        self.content = candidate.into();
+        self.record_history(before);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -1475,6 +1550,23 @@ impl IntoElement for TextElement {
     }
 }
 
+fn reveal_on_focus(
+    input: &Entity<InputState>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let state = input.read(cx);
+    let focused = state.focus_handle.is_focused(window);
+    if focused == state.focused_at_prepaint {
+        return;
+    }
+    input.update(cx, |input, _| input.focused_at_prepaint = focused);
+    if focused {
+        window.request_autoscroll(bounds);
+    }
+}
+
 impl Element for TextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1513,6 +1605,7 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        reveal_on_focus(&self.input, bounds, window, cx);
         let placeholder_color: Hsla = cx.theme().text_muted.into();
         let cursor_color: Hsla = cx.theme().brand.into();
         let selection_color: Hsla = cx.theme().brand.into();
@@ -1957,8 +2050,189 @@ impl RenderOnce for Input {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_draw_offset, to_single_line_display};
-    use gpui::{SharedString, px};
+    use super::{Backspace, InputState, Redo, Undo, compute_draw_offset, to_single_line_display};
+    use gpui::{Entity, EntityInputHandler, SharedString, TestAppContext, VisualTestContext, px};
+
+    fn input_with_limit(
+        cx: &mut TestAppContext,
+        max_bytes: Option<usize>,
+    ) -> (Entity<InputState>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            crate::text_actions::init(cx);
+        });
+        cx.add_window_view(|window, cx| {
+            let input = InputState::new(window, cx);
+            match max_bytes {
+                Some(max_bytes) => input.max_bytes(max_bytes),
+                None => input,
+            }
+        })
+    }
+
+    fn set(input: &Entity<InputState>, cx: &mut VisualTestContext, value: &str) {
+        let value = value.to_string();
+        input.update_in(cx, |state, window, cx| state.set_value(value, window, cx));
+    }
+
+    fn insert(input: &Entity<InputState>, cx: &mut VisualTestContext, text: &str) {
+        input.update_in(cx, |state, window, cx| {
+            state.replace_text_in_range(None, text, window, cx)
+        });
+    }
+
+    fn compose(input: &Entity<InputState>, cx: &mut VisualTestContext, preedit: &str) {
+        input.update_in(cx, |state, window, cx| {
+            state.replace_and_mark_text_in_range(None, preedit, None, window, cx)
+        });
+    }
+
+    fn value(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update(cx, |state, _| state.value().to_string())
+    }
+
+    fn composing(input: &Entity<InputState>, cx: &mut VisualTestContext) -> bool {
+        input.update(cx, |state, _| state.is_composing())
+    }
+
+    fn undo(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update_in(cx, |state, window, cx| state.undo(&Undo, window, cx));
+        value(input, cx)
+    }
+
+    fn redo(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update_in(cx, |state, window, cx| state.redo(&Redo, window, cx));
+        value(input, cx)
+    }
+
+    fn backspace(input: &Entity<InputState>, cx: &mut VisualTestContext) {
+        input.update_in(cx, |state, window, cx| {
+            state.backspace(&Backspace, window, cx)
+        });
+    }
+
+    #[gpui::test]
+    fn every_typed_character_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        for ch in ["h", "i", " ", "y", "o"] {
+            insert(&input, cx, ch);
+        }
+        assert_eq!(undo(&input, cx), "hi y");
+        assert_eq!(undo(&input, cx), "hi ");
+        assert_eq!(undo(&input, cx), "hi");
+        assert_eq!(undo(&input, cx), "h");
+        assert_eq!(undo(&input, cx), "");
+        assert_eq!(undo(&input, cx), "");
+        assert_eq!(redo(&input, cx), "h");
+        assert_eq!(redo(&input, cx), "hi");
+    }
+
+    #[gpui::test]
+    fn every_backspace_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        set(&input, cx, "abc");
+        backspace(&input, cx);
+        backspace(&input, cx);
+        assert_eq!(value(&input, cx), "a");
+        assert_eq!(undo(&input, cx), "ab");
+        assert_eq!(undo(&input, cx), "abc");
+        assert_eq!(undo(&input, cx), "abc");
+    }
+
+    #[gpui::test]
+    fn every_preedit_change_is_a_step_but_an_unchanged_commit_is_not(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        compose(&input, cx, "e");
+        compose(&input, cx, "ê");
+        insert(&input, cx, "ê");
+        assert!(!composing(&input, cx));
+        assert_eq!(undo(&input, cx), "e");
+        assert_eq!(undo(&input, cx), "");
+    }
+
+    #[gpui::test]
+    fn an_edit_after_undo_drops_the_redo_steps(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        insert(&input, cx, "a");
+        insert(&input, cx, "b");
+        assert_eq!(undo(&input, cx), "a");
+        insert(&input, cx, "c");
+        assert_eq!(redo(&input, cx), "ac");
+        assert_eq!(undo(&input, cx), "a");
+    }
+
+    #[gpui::test]
+    fn typing_and_pasting_stop_at_the_byte_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(505));
+        insert(&input, cx, &"b".repeat(10));
+        assert_eq!(value(&input, cx), "a".repeat(505) + &"b".repeat(7));
+        insert(&input, cx, "c");
+        assert_eq!(value(&input, cx).len(), 512);
+    }
+
+    #[gpui::test]
+    fn a_long_paste_is_cut_on_a_char_boundary(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        insert(&input, cx, &"ệ".repeat(200));
+        assert_eq!(value(&input, cx), "ệ".repeat(170));
+    }
+
+    #[gpui::test]
+    fn replacing_committed_text_that_would_not_fit_keeps_the_original(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        let original = "a".repeat(511) + "e";
+        set(&input, cx, &original);
+        input.update_in(cx, |state, window, cx| {
+            state.replace_text_in_range(Some(511..512), "ệ", window, cx)
+        });
+        assert_eq!(value(&input, cx), original);
+    }
+
+    #[gpui::test]
+    fn a_preedit_may_overflow_until_it_commits(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(511));
+        compose(&input, cx, "e");
+        compose(&input, cx, "ê");
+        assert_eq!(value(&input, cx).len(), 513);
+        assert!(composing(&input, cx));
+        insert(&input, cx, "ê");
+        assert_eq!(value(&input, cx), "a".repeat(511));
+        assert!(!composing(&input, cx));
+        compose(&input, cx, "b");
+        insert(&input, cx, "b");
+        assert_eq!(value(&input, cx), "a".repeat(511) + "b");
+    }
+
+    #[gpui::test]
+    fn an_abandoned_preedit_is_cut_to_the_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(510));
+        compose(&input, cx, "xyz");
+        input.update_in(cx, |state, window, cx| state.unmark_text(window, cx));
+        assert_eq!(value(&input, cx), "a".repeat(510) + "xy");
+        assert!(!composing(&input, cx));
+    }
+
+    #[gpui::test]
+    fn set_value_is_cut_to_the_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(4));
+        set(&input, cx, "abệ");
+        assert_eq!(value(&input, cx), "ab");
+    }
+
+    #[gpui::test]
+    fn an_input_without_a_limit_is_unchanged(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        let long = "ệ".repeat(300);
+        set(&input, cx, &long);
+        insert(&input, cx, &long);
+        assert_eq!(value(&input, cx).len(), long.len() * 2);
+        compose(&input, cx, "e");
+        input.update_in(cx, |state, window, cx| state.unmark_text(window, cx));
+        assert_eq!(value(&input, cx).len(), long.len() * 2 + 1);
+    }
 
     #[test]
     fn single_line_display_collapses_newlines_preserving_byte_len() {

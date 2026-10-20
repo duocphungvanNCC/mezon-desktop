@@ -74,6 +74,7 @@ pub struct ContextMenu {
     on_submenu_close: Option<MenuHandler>,
     on_dismiss: Option<DismissHandler>,
     anchor: Point<Pixels>,
+    min_width: Pixels,
 }
 
 const SUBMENU_WIDTH: f32 = 240.;
@@ -83,7 +84,15 @@ const QUICK_REACTION_EMOJI_SOURCE_PX: u32 = 48;
 
 impl ContextMenu {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            min_width: px(220.),
+            ..Self::default()
+        }
+    }
+
+    pub fn min_width(mut self, width: Pixels) -> Self {
+        self.min_width = width;
+        self
     }
 
     pub fn item(
@@ -373,6 +382,10 @@ pub struct ContextMenuProbeItem {
 }
 
 impl ContextMenu {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.quick_reactions.is_empty()
+    }
+
     pub fn probe_items(&self) -> Vec<ContextMenuProbeItem> {
         self.items
             .iter()
@@ -539,7 +552,7 @@ impl RenderOnce for ContextMenu {
             > window.viewport_size().width;
 
         let mut panel = v_flex()
-            .min_w(px(220.))
+            .min_w(self.min_width)
             .p(px(6.))
             .rounded_md()
             .border_1()
@@ -584,6 +597,7 @@ impl RenderOnce for ContextMenu {
                         img(SharedString::from(src))
                             .id("quick-reaction-emoji-frames")
                             .size(px(QUICK_REACTION_EMOJI_PX))
+                            .aspect_square()
                             .with_fallback(move || {
                                 div()
                                     .size(px(QUICK_REACTION_EMOJI_PX))
@@ -941,6 +955,7 @@ impl RenderOnce for ContextMenu {
                                     img(SharedString::from(src))
                                         .id("reaction-sub-emoji-frames")
                                         .size(px(QUICK_REACTION_EMOJI_PX))
+                                        .aspect_square()
                                         .flex_none()
                                         .with_fallback(move || {
                                             div()

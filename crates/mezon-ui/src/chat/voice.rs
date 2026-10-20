@@ -1,25 +1,28 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    CursorStyle, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
     FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred,
-    div, img, point, prelude::*, px, relative, rems,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription,
+    Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
-    AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
-    DeviceMenuKind, DisplayedFlower, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
-    PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
-    VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore,
-    flower_menu_blocked,
+    AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
+    DisplayedReaction, MediaDevice, NoiseSuppressionStatus, PERMISSION_MANAGE_CHANNEL,
+    PermissionStore, RecordingState, ScreenShareMode, Settings, SfuRole, UserId, VoiceCallStatus,
+    VoiceConnection, VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame,
+    VoiceStore, WalletStore, flower_menu_blocked,
 };
 
 use crate::ChatLayout;
 use crate::Shell;
 use crate::chat::flower_celebration::FlowerCelebrationElement;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::media_permission_prompt::{
+    media_access_missing, media_access_needed_label, media_permission_badge,
+};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
@@ -49,6 +52,125 @@ fn speaking_border_color(cell: &VideoCell) -> Hsla {
     } else {
         gpui::transparent_black()
     }
+}
+
+struct VoiceRoom<'a> {
+    clan_id: ClanId,
+    name: &'a str,
+    voice_members: &'a [VoiceMember],
+    external: bool,
+}
+
+impl<'a> VoiceRoom<'a> {
+    fn channel(channel: &'a Channel) -> Self {
+        Self {
+            clan_id: channel.clan_id,
+            name: &channel.name,
+            voice_members: &channel.voice_members,
+            external: false,
+        }
+    }
+
+    fn external_meeting(name: &'a str) -> Self {
+        Self {
+            clan_id: ClanId(0),
+            name,
+            voice_members: &[],
+            external: true,
+        }
+    }
+
+    fn cell_identity(&self, cx: &App, p: &VoiceParticipant) -> (String, String, String) {
+        if !self.external || p.is_local {
+            return resolve_cell_identity(cx, self.clan_id, self.voice_members, p);
+        }
+        (
+            p.metadata_name.clone(),
+            guest_avatar_url(cx, &p.metadata_avatar, 320),
+            String::new(),
+        )
+    }
+}
+
+pub(crate) fn guest_avatar_url(cx: &App, avatar: &str, size: u32) -> String {
+    let avatar = avatar.trim();
+    match AppConfig::try_global(cx) {
+        Some(config)
+            if !avatar.is_empty() && config.is_own_media_origin(&config.read_media_url(avatar)) =>
+        {
+            config.imgproxy_url(avatar, size, size, "fit")
+        }
+        _ => String::new(),
+    }
+}
+
+pub(crate) trait CallLayoutHost: Sized + 'static {
+    fn record_voice_grid_size(&mut self, size: gpui::Size<Pixels>, cx: &mut Context<Self>);
+    fn scroll_voice_grid_page(&mut self, delta: f32, total_pages: usize, cx: &mut Context<Self>);
+    fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>);
+    fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>);
+    fn toggle_voice_chat(&mut self, cx: &mut Context<Self>);
+}
+
+pub(crate) fn next_voice_grid_page(
+    page: usize,
+    wheel_accum: &mut f32,
+    delta: f32,
+    total_pages: usize,
+) -> usize {
+    const STEP: f32 = 100.;
+    let last_page = total_pages.saturating_sub(1);
+    *wheel_accum += delta;
+    let mut page = page.min(last_page);
+    while *wheel_accum <= -STEP {
+        *wheel_accum += STEP;
+        page = (page + 1).min(last_page);
+    }
+    while *wheel_accum >= STEP {
+        *wheel_accum -= STEP;
+        page = page.saturating_sub(1);
+    }
+    page
+}
+
+pub(crate) fn spawn_voice_frame_pump<V: 'static>(cx: &mut Context<V>) -> gpui::Task<()> {
+    const VOICE_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
+    cx.spawn(async move |this, cx| {
+        let mut last_seq = 0u64;
+        loop {
+            let store = match this.update(cx, |_, cx| VoiceStore::global(cx).read(cx).frame_store())
+            {
+                Ok(store) => store,
+                Err(_) => break,
+            };
+            let Some(store) = store else {
+                cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
+                continue;
+            };
+            let mut rx = store.frame_watch();
+            loop {
+                let seq = store.publish_seq();
+                if seq != last_seq {
+                    last_seq = seq;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
+                    }
+                }
+                let frame_published = {
+                    let changed = std::pin::pin!(rx.changed());
+                    let fallback =
+                        std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
+                    matches!(
+                        futures::future::select(changed, fallback).await,
+                        futures::future::Either::Left((Ok(()), _))
+                    )
+                };
+                if !frame_published {
+                    break;
+                }
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,17 +207,19 @@ pub fn render_voice_channel(
         let chat = cx.entity();
         return render_in_call(
             locale,
-            channel,
+            &VoiceRoom::channel(channel),
             voice,
             settings,
             connecting,
             &chat,
+            Some(&chat),
             strip_scroll,
             strip_width,
             grid_page,
             grid_size,
             show_members,
             show_chat,
+            0,
             inbox_handle,
             visual,
             window,
@@ -126,6 +250,218 @@ pub fn render_voice_channel(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn render_external_meeting<H: CallLayoutHost>(
+    locale: &str,
+    code: &str,
+    voice: &Entity<VoiceStore>,
+    settings: &Entity<Settings>,
+    input_device_id: Option<String>,
+    output_device_id: Option<String>,
+    camera_device_id: Option<String>,
+    host: &Entity<H>,
+    strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
+    grid_page: usize,
+    grid_size: gpui::Size<Pixels>,
+    show_members: bool,
+    show_chat: bool,
+    chat_unread: usize,
+    visual: &mut VoiceVisualState,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let label = mezon_i18n::t(locale, "eventCreator.eventDetail.privateRoom");
+    let room_id = mezon_store::meeting_room_id(code).unwrap_or_default();
+    let (joined, connecting, error) = {
+        let store = voice.read(cx);
+        let joined = store
+            .external_meeting()
+            .is_some_and(|meeting| meeting.room_id == room_id)
+            && store.is_active_in(&room_id);
+        let connecting = matches!(
+            store.connection(),
+            VoiceConnection::Connecting { channel_id, .. } if *channel_id == room_id
+        );
+        let error = match store.connection() {
+            VoiceConnection::Failed {
+                channel_id,
+                message,
+            } if *channel_id == room_id => Some(message.clone()),
+            _ => None,
+        };
+        (joined, connecting, error)
+    };
+
+    if joined {
+        return render_in_call(
+            locale,
+            &VoiceRoom::external_meeting(label),
+            voice,
+            settings,
+            connecting,
+            host,
+            None,
+            strip_scroll,
+            strip_width,
+            grid_page,
+            grid_size,
+            show_members,
+            show_chat,
+            chat_unread,
+            PopoverMenuHandle::default(),
+            visual,
+            window,
+            cx,
+        );
+    }
+
+    render_meeting_pre_join(
+        cx.theme(),
+        locale,
+        code,
+        label,
+        voice,
+        input_device_id,
+        output_device_id,
+        camera_device_id,
+        error,
+        cx,
+    )
+}
+
+fn local_voice_identity(cx: &App) -> (String, String, String) {
+    let fallback = mezon_store::AccountStore::try_global(cx)
+        .and_then(|account| {
+            account.read(cx).account.as_ref().map(|me| {
+                if me.display_name.is_empty() {
+                    me.username.clone()
+                } else {
+                    me.display_name.clone()
+                }
+            })
+        })
+        .unwrap_or_default();
+    match mezon_store::BadgeService::global(cx)
+        .read(cx)
+        .current_user_id(cx)
+    {
+        Some(uid) => resolve_voice_identity(cx, ClanId(0), &[], &uid.to_string(), &fallback),
+        None => (fallback, String::new(), String::new()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_meeting_pre_join(
+    theme: &Theme,
+    locale: &str,
+    code: &str,
+    label: &'static str,
+    voice: &Entity<VoiceStore>,
+    input_device_id: Option<String>,
+    output_device_id: Option<String>,
+    camera_device_id: Option<String>,
+    error: Option<String>,
+    cx: &App,
+) -> AnyElement {
+    let (name, avatar_url, avatar_raw) = local_voice_identity(cx);
+    let mut avatar = Avatar::new().name(name.clone()).size_px(px(80.));
+    if !avatar_url.is_empty() {
+        avatar = avatar.src(avatar_url);
+    }
+    if !avatar_raw.is_empty() {
+        avatar = avatar.fallback_src(avatar_raw);
+    }
+
+    let join_action = {
+        let voice = voice.clone();
+        let code = code.to_string();
+        let role = voice.read(cx).pending_join_role();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            voice.update(cx, |store, cx| {
+                store.join_external_meeting(
+                    code.clone(),
+                    label.to_string(),
+                    role,
+                    input_device_id.clone(),
+                    output_device_id.clone(),
+                    camera_device_id.clone(),
+                    window,
+                    cx,
+                );
+            });
+        }
+    };
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .bg(theme.bg_tertiary)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(avatar)
+                .child(div().text_color(theme.text_secondary).text_sm().child(name)),
+        )
+        .child(
+            div()
+                .text_color(theme.text_primary)
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .child(label),
+        )
+        .child(
+            div()
+                .max_w(px(360.))
+                .px_4()
+                .text_center()
+                .text_color(theme.text_secondary)
+                .text_sm()
+                .child(mezon_i18n::t(locale, "meeting.preJoinHint")),
+        )
+        .when_some(error, |this, message| {
+            this.child(
+                div()
+                    .max_w(px(360.))
+                    .px_4()
+                    .text_center()
+                    .text_color(theme.danger_text)
+                    .text_sm()
+                    .child(message),
+            )
+        })
+        .child(join_role_button(theme, locale, voice, join_action, cx));
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(voice_header::<ChatLayout>(
+            theme,
+            locale,
+            label,
+            None,
+            false,
+            0,
+            PopoverMenuHandle::default(),
+            ClanId(0),
+            false,
+            None,
+            cx,
+        ))
+        .child(body)
+        .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn render_mini_bar(
     theme: &Theme,
     locale: &str,
@@ -133,33 +469,52 @@ pub fn render_mini_bar(
     clan_name: &str,
     channel_id: &str,
     clan_id: &str,
+    meeting_code: Option<&str>,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
+    connecting: bool,
     mic_enabled: bool,
     camera_enabled: bool,
     screen_enabled: bool,
+    is_audience: bool,
+    ptt_active: bool,
     link_copied: bool,
+    mic_access_missing: bool,
+    camera_access_missing: bool,
+    noise_status: Option<NoiseSuppressionStatus>,
     noise_control: AnyElement,
 ) -> AnyElement {
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
 
-    let header_key = if camera_enabled {
+    let header_key = if connecting {
+        "channelVoice.connecting"
+    } else if camera_enabled {
         "channelVoice.videoConnected"
     } else {
         "channelVoice.voiceConnected"
     };
+    let header_color = if connecting {
+        theme.status_idle
+    } else {
+        theme.status_online
+    };
 
-    let address = format!("{channel_label} / {clan_name}");
+    let address = if meeting_code.is_some() {
+        channel_label.to_string()
+    } else {
+        format!("{channel_label} / {clan_name}")
+    };
     let address = if address.chars().count() > 30 {
         format!("{}...", address.chars().take(30).collect::<String>())
     } else {
         address
     };
 
-    let subtitle = {
+    let address_subtitle = {
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
+        let meeting_code = meeting_code.map(str::to_string);
         let hover_color = theme.text_primary;
         div()
             .id("voice-panel-jump")
@@ -169,6 +524,10 @@ pub fn render_mini_bar(
             .hover(move |s| s.text_color(hover_color))
             .child(address)
             .on_click(move |_, _, cx| {
+                if let Some(code) = meeting_code.clone() {
+                    crate::meeting::open_meeting_window(code, cx);
+                    return;
+                }
                 let (Ok(cid), Ok(clan)) =
                     (channel_id.parse::<ChannelId>(), clan_id.parse::<ClanId>())
                 else {
@@ -182,11 +541,28 @@ pub fn render_mini_bar(
                     },
                 );
             })
+            .into_any_element()
+    };
+    let subtitle = if let Some(status) = noise_status {
+        let (label, color) = match status {
+            NoiseSuppressionStatus::Applying => ("Applying noise filter…", theme.text_secondary),
+            NoiseSuppressionStatus::Applied => ("Noise filter applied", theme.status_online),
+            NoiseSuppressionStatus::Disabled => ("Noise filter off", theme.text_secondary),
+            NoiseSuppressionStatus::Error => ("Noise filter failed", theme.danger_text),
+        };
+        div()
+            .text_xs()
+            .text_color(color)
+            .child(label)
+            .into_any_element()
+    } else {
+        address_subtitle
     };
 
     let copy_button = {
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
+        let meeting_code = meeting_code.map(str::to_string);
         let voice = voice.clone();
         div()
             .id("voice-panel-copy")
@@ -213,7 +589,10 @@ pub fn render_mini_bar(
             )
             .on_click(move |_, _, cx| {
                 let link = AppConfig::try_global(cx)
-                    .map(|cfg| cfg.voice_link(&clan_id, &channel_id))
+                    .map(|cfg| match &meeting_code {
+                        Some(code) => cfg.meeting_link(code),
+                        None => cfg.voice_link(&clan_id, &channel_id),
+                    })
                     .unwrap_or_default();
                 if !link.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
@@ -240,13 +619,13 @@ pub fn render_mini_bar(
                         .child(
                             Icon::new(IconName::Speaker)
                                 .size(px(16.))
-                                .text_color(theme.status_online),
+                                .text_color(header_color),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.status_online)
+                                .text_color(header_color)
                                 .child(mezon_i18n::t(locale, header_key).to_string()),
                         ),
                 )
@@ -275,14 +654,20 @@ pub fn render_mini_bar(
             neutral_hover,
             theme.text_primary,
         )
-        .tooltip(Tooltip::text(mezon_i18n::t(
-            locale,
-            if mic_enabled {
-                "channelVoice.turnOffMicrophone"
-            } else {
-                "channelVoice.turnOnMicrophone"
-            },
-        )))
+        .relative()
+        .tooltip(Tooltip::text(if mic_access_missing {
+            media_access_needed_label(MediaDevice::Microphone, locale)
+        } else {
+            mezon_i18n::t(
+                locale,
+                if mic_enabled {
+                    "channelVoice.turnOffMicrophone"
+                } else {
+                    "channelVoice.turnOnMicrophone"
+                },
+            )
+        }))
+        .children(mic_access_missing.then(|| mini_bar_permission_badge(theme)))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
     };
 
@@ -299,14 +684,20 @@ pub fn render_mini_bar(
             neutral_hover,
             theme.text_primary,
         )
-        .tooltip(Tooltip::text(mezon_i18n::t(
-            locale,
-            if camera_enabled {
-                "channelVoice.turnOffCamera"
-            } else {
-                "channelVoice.turnOnCamera"
-            },
-        )))
+        .relative()
+        .tooltip(Tooltip::text(if camera_access_missing {
+            media_access_needed_label(MediaDevice::Camera, locale)
+        } else {
+            mezon_i18n::t(
+                locale,
+                if camera_enabled {
+                    "channelVoice.turnOffCamera"
+                } else {
+                    "channelVoice.turnOnCamera"
+                },
+            )
+        }))
+        .children(camera_access_missing.then(|| mini_bar_permission_badge(theme)))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
     };
 
@@ -355,6 +746,28 @@ pub fn render_mini_bar(
         })
     };
 
+    let ptt_button = is_audience.then(|| {
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if ptt_active {
+            (
+                theme.status_online.into(),
+                darken(theme.status_online, 0.12),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        push_to_talk_press(
+            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color)
+                .relative()
+                .tooltip(Tooltip::text(mezon_i18n::t(
+                    locale,
+                    "channelVoice.pushToTalk.hold",
+                )))
+                .children(mic_access_missing.then(|| mini_bar_permission_badge(theme))),
+            voice,
+        )
+    });
+
     let leave_button = {
         let voice = voice.clone();
         panel_control_button(
@@ -386,12 +799,38 @@ pub fn render_mini_bar(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(mic_button)
-                .child(camera_button)
-                .child(screen_button)
+                .children(ptt_button)
+                .children((!is_audience).then_some(mic_button))
+                .children((!is_audience).then_some(camera_button))
+                .children((!is_audience).then_some(screen_button))
                 .child(leave_button),
         )
         .into_any_element()
+}
+
+fn push_to_talk_press(
+    button: gpui::Stateful<gpui::Div>,
+    voice: &Entity<VoiceStore>,
+) -> gpui::Stateful<gpui::Div> {
+    let press = voice.clone();
+    let release = voice.clone();
+    let release_outside = voice.clone();
+    button
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            press.update(cx, |store, cx| store.set_push_to_talk(true, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            release.update(cx, |store, cx| store.set_push_to_talk(false, cx));
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+            release_outside.update(cx, |store, cx| store.set_push_to_talk(false, cx));
+        })
+}
+
+fn mini_bar_permission_badge(theme: &Theme) -> gpui::Div {
+    media_permission_badge(theme, px(16.), theme.surfaces.surface.solid)
+        .top(px(-6.))
+        .right(px(-6.))
 }
 
 fn panel_control_button(
@@ -457,18 +896,21 @@ fn voice_header_icon_shell(
         .hover(move |s| s.bg(bg_hover))
 }
 
-fn voice_header(
+#[allow(clippy::too_many_arguments)]
+fn voice_header<H: CallLayoutHost>(
     theme: &Theme,
     locale: &str,
     name: &str,
     voice: Option<&Entity<VoiceStore>>,
     show_chat: bool,
+    chat_unread: usize,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     clan_id: ClanId,
-    chat: Option<&Entity<ChatLayout>>,
+    show_inbox: bool,
+    host: Option<&Entity<H>>,
     cx: &App,
 ) -> AnyElement {
-    let right = voice.zip(chat).map(|(voice, chat)| {
+    let right = voice.map(|voice| {
         let is_focused = voice.read(cx).focused_tile().is_some();
         let layout_icon = if is_focused {
             IconName::VoiceGridIcon
@@ -476,7 +918,6 @@ fn voice_header(
             IconName::VoiceFocusIcon
         };
         let voice = voice.clone();
-        let chat_toggle = chat.clone();
         let chat_tooltip = if show_chat {
             mezon_i18n::t(locale, "channelTopbar.tooltips.hideChat")
         } else {
@@ -487,13 +928,15 @@ fn voice_header(
             .flex_row()
             .items_center()
             .gap_4()
-            .child(voice_inbox_button(
-                theme,
-                locale,
-                inbox_handle,
-                clan_id.to_string(),
-                cx,
-            ))
+            .when(show_inbox, |row| {
+                row.child(voice_inbox_button(
+                    theme,
+                    locale,
+                    inbox_handle,
+                    clan_id.to_string(),
+                    cx,
+                ))
+            })
             .child(
                 voice_header_icon_shell("voice-layout-toggle", theme, false)
                     .tooltip(Tooltip::text(mezon_i18n::t(
@@ -509,21 +952,35 @@ fn voice_header(
                         voice.update(cx, |store, cx| store.toggle_layout_view(cx));
                     }),
             )
-            .child(
-                voice_header_icon_shell("voice-chat-toggle", theme, show_chat)
-                    .tooltip(Tooltip::text(chat_tooltip))
-                    .child(chat_toggle_icon(
-                        if show_chat {
-                            theme.tokens.bg_icon_theme_active
-                        } else {
-                            theme.tokens.bg_icon_theme
-                        },
-                        px(18.),
-                    ))
-                    .on_click(move |_, _, cx| {
-                        chat_toggle.update(cx, |layout, cx| layout.toggle_voice_chat(cx));
-                    }),
-            )
+            .when_some(host.cloned(), |row, chat_toggle| {
+                row.child(
+                    voice_header_icon_shell("voice-chat-toggle", theme, show_chat)
+                        .relative()
+                        .tooltip(Tooltip::text(chat_tooltip))
+                        .child(chat_toggle_icon(
+                            if show_chat {
+                                theme.tokens.bg_icon_theme_active
+                            } else {
+                                theme.tokens.bg_icon_theme
+                            },
+                            px(18.),
+                        ))
+                        .when(!show_chat && chat_unread > 0, |shell| {
+                            shell.child(
+                                div()
+                                    .absolute()
+                                    .top(px(4.))
+                                    .right(px(4.))
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(theme.danger_text),
+                            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            chat_toggle.update(cx, |layout, cx| layout.toggle_voice_chat(cx));
+                        }),
+                )
+            })
     });
 
     div()
@@ -748,10 +1205,13 @@ fn render_pre_join(
             .justify_center()
             .gap_2()
             .children(members.iter().take(max_members).map(|m| {
-                let (name, avatar_url) = resolve_voice_member(cx, channel.clan_id, m);
+                let (name, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
                 let mut avatar = Avatar::new().name(name).size_px(px(56.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
+                }
+                if !avatar_raw.is_empty() {
+                    avatar = avatar.fallback_src(avatar_raw);
                 }
                 avatar
             }))
@@ -771,8 +1231,6 @@ fn render_pre_join(
             })
     });
 
-    // A single shared closure builds a join action so both the primary "Join"
-    // button and the error-state "Retry" button trigger the same (re)join.
     let make_join_action = {
         let voice = voice.clone();
         let channel_id = channel.id.to_string();
@@ -781,7 +1239,7 @@ fn render_pre_join(
         let input_device_id = input_device_id.clone();
         let output_device_id = output_device_id.clone();
         let camera_device_id = camera_device_id.clone();
-        move || {
+        move |role: SfuRole| {
             let voice = voice.clone();
             let channel_id = channel_id.clone();
             let clan_id = clan_id.clone();
@@ -795,6 +1253,7 @@ fn render_pre_join(
                         channel_id.clone(),
                         clan_id.clone(),
                         channel_label.clone(),
+                        role,
                         input_device_id.clone(),
                         output_device_id.clone(),
                         camera_device_id.clone(),
@@ -806,26 +1265,13 @@ fn render_pre_join(
         }
     };
 
-    let join = {
-        let green = theme.status_online;
-        let green_hover = darken(theme.status_online, 0.12);
-        div()
-            .id("voice-join-btn")
-            .flex()
-            .items_center()
-            .justify_center()
-            .px_5()
-            .py(px(10.))
-            .rounded_full()
-            .bg(green)
-            .cursor_pointer()
-            .hover(move |s| s.bg(green_hover))
-            .text_color(gpui::rgb(0xffffff))
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .child(mezon_i18n::t(locale, "channelVoice.joinChannelVoiceBS.joinVoice").to_string())
-            .on_click(make_join_action())
-    };
+    let join = join_role_button(
+        theme,
+        locale,
+        voice,
+        make_join_action(voice.read(cx).pending_join_role()),
+        cx,
+    );
 
     let body = div()
         .flex()
@@ -851,7 +1297,15 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            this.child(div().text_color(theme.danger_text).text_sm().child(message))
+            this.child(
+                div()
+                    .max_w(px(360.))
+                    .px_4()
+                    .text_center()
+                    .text_color(theme.danger_text)
+                    .text_sm()
+                    .child(message),
+            )
         })
         .child(join);
 
@@ -860,14 +1314,16 @@ fn render_pre_join(
         .flex_col()
         .flex_1()
         .min_h_0()
-        .child(voice_header(
+        .child(voice_header::<ChatLayout>(
             theme,
             locale,
             &channel.name,
             None,
             false,
+            0,
             PopoverMenuHandle::default(),
             channel.clan_id,
+            false,
             None,
             cx,
         ))
@@ -875,62 +1331,194 @@ fn render_pre_join(
         .into_any_element()
 }
 
+fn join_role_button(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    on_join: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let green = theme.status_online;
+    let green_hover = darken(theme.status_online, 0.12);
+    let divider = darken(theme.status_online, 0.3);
+    let store = voice.read(cx);
+    let selected = store.pending_join_role();
+    let menu_open = store.join_role_menu_open();
+
+    let role_label = |role: SfuRole| {
+        let key = if role.is_audience() {
+            "channelVoice.joinChannelVoiceBS.joinAsAudience"
+        } else {
+            "channelVoice.joinChannelVoiceBS.joinAsSpeaker"
+        };
+        mezon_i18n::t(locale, key).to_string()
+    };
+
+    let role_row = |id: &'static str, role: SfuRole| {
+        let voice = voice.clone();
+        div()
+            .id(id)
+            .w_full()
+            .px_4()
+            .py_2()
+            .text_sm()
+            .text_color(theme.text_primary)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_tertiary))
+            .child(role_label(role))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| store.set_pending_join_role(role, cx));
+            })
+    };
+
+    let menu = menu_open.then(|| {
+        deferred(
+            div()
+                .id("voice-join-role-menu")
+                .absolute()
+                .top_full()
+                .left_0()
+                .w_full()
+                .mt_1()
+                .py_1()
+                .rounded_lg()
+                .bg(theme.bg_secondary)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out({
+                    let voice = voice.clone();
+                    move |_, _, cx| {
+                        voice.update(cx, |store, cx| store.close_join_role_menu(cx));
+                    }
+                })
+                .child(role_row("voice-join-role-speaker", SfuRole::Speaker))
+                .child(role_row("voice-join-role-audience", SfuRole::Audience)),
+        )
+    });
+
+    div()
+        .relative()
+        .w(px(256.))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .h(px(40.))
+                .child(
+                    div()
+                        .id("voice-join-btn")
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h_full()
+                        .rounded_l(px(20.))
+                        .bg(green)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(green_hover))
+                        .text_color(gpui::rgb(0xffffff))
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(role_label(selected))
+                        .on_click(on_join),
+                )
+                .child(
+                    div()
+                        .id("voice-join-role-toggle")
+                        .w(px(40.))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_r(px(20.))
+                        .bg(green)
+                        .border_l(px(1.))
+                        .border_color(divider)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(green_hover))
+                        .text_color(gpui::rgb(0xffffff))
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(px(12.))
+                                .text_color(gpui::rgb(0xffffff)),
+                        )
+                        .on_click({
+                            let voice = voice.clone();
+                            move |_, _, cx| {
+                                voice.update(cx, |store, cx| store.toggle_join_role_menu(cx));
+                            }
+                        }),
+                ),
+        )
+        .children(menu)
+}
+
 struct VideoCell {
     id: String,
+    session_id: String,
     identity: String,
     name: String,
     avatar_url: String,
+    avatar_raw: String,
     key: Option<u64>,
     is_screen: bool,
     is_local: bool,
+    is_audience: bool,
     speaking: bool,
     muted: bool,
-    quality: NetworkQuality,
 }
 
 impl VideoCell {
-    fn camera(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
+    fn camera(p: &VoiceParticipant, name: String, avatar_url: String, avatar_raw: String) -> Self {
         Self {
-            id: mezon_store::camera_tile_id(&p.identity),
+            id: mezon_store::camera_tile_id(&p.session_id),
+            session_id: p.session_id.clone(),
             identity: p.identity.clone(),
             name,
             avatar_url,
+            avatar_raw,
             key: p.camera,
             is_screen: false,
             is_local: p.is_local,
+            is_audience: p.is_audience,
             speaking: p.speaking,
             muted: p.muted,
-            quality: p.quality,
         }
     }
 
-    fn screen(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
+    fn screen(p: &VoiceParticipant, name: String, avatar_url: String, avatar_raw: String) -> Self {
         Self {
-            id: mezon_store::screen_tile_id(&p.identity),
+            id: mezon_store::screen_tile_id(&p.session_id),
+            session_id: p.session_id.clone(),
             identity: p.identity.clone(),
             name,
             avatar_url,
+            avatar_raw,
             key: p.screenshare,
             is_screen: true,
             is_local: p.is_local,
+            is_audience: p.is_audience,
             speaking: p.speaking,
             muted: p.muted,
-            quality: p.quality,
         }
     }
 
-    fn placeholder(identity: String, name: String, avatar_url: String) -> Self {
+    fn placeholder(identity: String, name: String, avatar_url: String, avatar_raw: String) -> Self {
         Self {
             id: mezon_store::camera_tile_id(&identity),
+            session_id: identity.clone(),
             identity,
             name,
             avatar_url,
+            avatar_raw,
             key: None,
             is_screen: false,
             is_local: false,
+            is_audience: false,
             speaking: false,
             muted: false,
-            quality: NetworkQuality::Unknown,
         }
     }
 }
@@ -962,15 +1550,18 @@ fn target_visual_order(
         cell_category(ca)
             .cmp(&cell_category(cb))
             .then_with(|| match cell_category(ca) {
-                1 | 2 => join_rank(&ca.identity).cmp(&join_rank(&cb.identity)),
+                1 | 2 => join_rank(&ca.session_id).cmp(&join_rank(&cb.session_id)),
                 3 => cb
                     .speaking
                     .cmp(&ca.speaking)
-                    .then_with(|| last_spoke_rank(&cb.identity).cmp(&last_spoke_rank(&ca.identity)))
+                    .then_with(|| {
+                        last_spoke_rank(&cb.session_id).cmp(&last_spoke_rank(&ca.session_id))
+                    })
                     .then_with(|| cb.key.is_some().cmp(&ca.key.is_some()))
-                    .then_with(|| join_rank(&ca.identity).cmp(&join_rank(&cb.identity))),
+                    .then_with(|| join_rank(&ca.session_id).cmp(&join_rank(&cb.session_id))),
                 _ => std::cmp::Ordering::Equal,
             })
+            .then_with(|| ca.id.cmp(&cb.id))
     });
     idx.into_iter().map(|i| cells[i].id.clone()).collect()
 }
@@ -1049,52 +1640,157 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     updated
 }
 
-const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
-
-fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
-    let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
+fn resolve_cell_identity(
+    cx: &App,
+    clan_id: ClanId,
+    voice_members: &[VoiceMember],
+    p: &VoiceParticipant,
+) -> (String, String, String) {
+    let (name, avatar_url, avatar_raw) =
+        resolve_voice_identity(cx, clan_id, voice_members, &p.identity, &p.name);
     if p.is_agent {
+        let avatar = crate::util::voice_member::VOICE_AGENT_AVATAR_URL;
         (
             name,
-            crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL),
+            crate::util::imgproxy::avatar_url(cx, avatar),
+            avatar.to_string(),
         )
     } else {
-        (name, avatar_url)
+        (name, avatar_url, avatar_raw)
     }
+}
+
+static TILE_AVATAR_SEEN: LazyLock<Mutex<HashMap<UserId, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn log_tile_avatar(uid: UserId, members: usize, row: bool, seed: bool, resolved: bool) {
+    let Ok(mut seen) = TILE_AVATAR_SEEN.lock() else {
+        return;
+    };
+    if seen.insert(uid, resolved) == Some(resolved) {
+        return;
+    }
+    tracing::info!(
+        user = uid.get(),
+        members,
+        row,
+        seed,
+        resolved,
+        "voice tile avatar"
+    );
 }
 
 fn resolve_voice_identity(
     cx: &App,
     clan_id: ClanId,
+    voice_members: &[VoiceMember],
     identity: &str,
     fallback_name: &str,
-) -> (String, String) {
-    if let Ok(uid) = identity.parse::<UserId>()
-        && let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, uid)
-    {
-        let name = if member.name().is_empty() {
-            fallback_name.to_string()
-        } else {
-            member.name().to_string()
-        };
-        let avatar = member.avatar();
-        let avatar_url = if avatar.is_empty() {
-            String::new()
-        } else {
-            crate::util::imgproxy::proxied(cx, avatar, 320, 320, "fit")
-        };
-        return (name, avatar_url);
-    }
-    (fallback_name.to_string(), String::new())
+) -> (String, String, String) {
+    let Ok(uid) = identity.parse::<UserId>() else {
+        return (fallback_name.to_string(), String::new(), String::new());
+    };
+    let member = voice_members.iter().find(|m| m.user_id == uid);
+    let seed_name = member.map_or(fallback_name, |m| m.display_name.as_str());
+    let seed_avatar = member.map_or("", |m| m.avatar_url.as_str());
+    let resolved = crate::util::voice_member::resolve_user_display(
+        cx,
+        Some(clan_id),
+        uid,
+        seed_name,
+        seed_avatar,
+    );
+    log_tile_avatar(
+        uid,
+        voice_members.len(),
+        member.is_some(),
+        !seed_avatar.is_empty(),
+        !resolved.avatar_raw.is_empty(),
+    );
+    let name = if resolved.name.is_empty() {
+        fallback_name.to_string()
+    } else {
+        resolved.name
+    };
+    let avatar_url = if resolved.avatar_raw.is_empty() {
+        String::new()
+    } else {
+        crate::util::imgproxy::proxied(cx, &resolved.avatar_raw, 320, 320, "fit")
+    };
+    (name, avatar_url, resolved.avatar_raw)
 }
 
-fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
+fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String, String) {
     let resolved = crate::util::voice_member::resolve_display(cx, Some(clan_id), m);
-    (resolved.name, resolved.avatar_src)
+    (resolved.name, resolved.avatar_src, resolved.avatar_raw)
 }
 
-fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
+fn recording_indicator(
+    cx: &App,
+    theme: &Theme,
+    locale: &str,
+    clan_id: ClanId,
+    voice_members: &[VoiceMember],
+    store: &VoiceStore,
+) -> Option<AnyElement> {
+    let (first, others) = store.recording_users().split_first()?;
+    let fallback = store
+        .participants()
+        .iter()
+        .find(|p| &p.identity == first)
+        .map(|p| p.name.as_str())
+        .unwrap_or_default();
+    let (name, _, _) = resolve_voice_identity(cx, clan_id, voice_members, first, fallback);
+    let label = if others.is_empty() {
+        mezon_i18n::t(locale, "channelVoice.recordingBy").replace("{{name}}", &name)
+    } else {
+        mezon_i18n::t(locale, "channelVoice.recordingByMany")
+            .replace("{{name}}", &name)
+            .replace("{{count}}", &others.len().to_string())
+    };
+    Some(
+        div()
+            .absolute()
+            .top(px(60.))
+            .left(px(12.))
+            .max_w(px(360.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py(px(6.))
+            .rounded_full()
+            .bg(theme.bg_floating)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(gpui::rgb(LEAVE_RED)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary)
+                    .child(label),
+            )
+            .into_any_element(),
+    )
+}
+
+fn raised_hands_overlay(
+    cx: &App,
+    clan_id: ClanId,
+    voice_members: &[VoiceMember],
+    store: &VoiceStore,
+) -> Option<AnyElement> {
     let hands = store.raised_hands();
     if hands.is_empty() {
         return None;
@@ -1104,17 +1800,22 @@ fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option
             .absolute()
             .top(px(68.))
             .right(px(8.))
-            .w(px(320.))
+            .min_w(px(100.))
+            .max_w(px(360.))
             .flex()
             .flex_col()
             .gap_1()
             .items_end()
             .children(hands.iter().map(|user_id| {
-                let (name, avatar_url) = resolve_voice_identity(cx, clan_id, user_id, "");
+                let (name, avatar_url, avatar_raw) =
+                    resolve_voice_identity(cx, clan_id, voice_members, user_id, "");
                 let name = SharedString::from(name);
                 let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
+                }
+                if !avatar_raw.is_empty() {
+                    avatar = avatar.fallback_src(avatar_raw);
                 }
                 div()
                     .flex()
@@ -1181,6 +1882,7 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
                     img(r.emoji_src.clone())
                         .id(("voice-reaction-frames", seq))
                         .size(px(40.))
+                        .aspect_square()
                         .object_fit(ObjectFit::Contain)
                         .with_animation(
                             ("voice-reaction-scale", seq),
@@ -1276,19 +1978,21 @@ enum InCallBodyLayout {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_in_call(
+fn render_in_call<H: CallLayoutHost>(
     locale: &str,
-    channel: &Channel,
+    room: &VoiceRoom,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     connecting: bool,
-    chat: &Entity<ChatLayout>,
+    host: &Entity<H>,
+    chat: Option<&Entity<ChatLayout>>,
     strip_scroll: &ScrollHandle,
     strip_width: Pixels,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
     show_chat: bool,
+    chat_unread: usize,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     visual: &mut VoiceVisualState,
     window: &mut Window,
@@ -1304,13 +2008,13 @@ fn render_in_call(
         let mut cells: Vec<VideoCell> = Vec::new();
         for p in participants {
             if p.screenshare.is_some() {
-                let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
-                cells.push(VideoCell::screen(p, name, avatar));
+                let (name, avatar, raw) = room.cell_identity(cx, p);
+                cells.push(VideoCell::screen(p, name, avatar, raw));
             }
         }
         for p in participants {
-            let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
-            cells.push(VideoCell::camera(p, name, avatar));
+            let (name, avatar, raw) = room.cell_identity(cx, p);
+            cells.push(VideoCell::camera(p, name, avatar, raw));
         }
 
         let focused_id = focused
@@ -1377,7 +2081,7 @@ fn render_in_call(
             voice,
             &cells,
             focused_idx,
-            chat,
+            host,
             show_members,
             strip_scroll,
             strip_width,
@@ -1389,10 +2093,10 @@ fn render_in_call(
             locale,
             voice,
             &cells,
-            &channel.voice_members,
+            room.voice_members,
             connecting,
-            channel.clan_id,
-            chat,
+            room.clan_id,
+            host,
             grid_page,
             grid_size,
             cx,
@@ -1416,12 +2120,7 @@ fn render_in_call(
                 theme.status_idle.into(),
                 true,
             )),
-            VoiceCallStatus::WeakNetwork => Some((
-                SharedString::from(mezon_i18n::t(locale, "channelVoice.weakNetwork").to_string()),
-                theme.status_idle.into(),
-                false,
-            )),
-            VoiceCallStatus::Stable => None,
+            VoiceCallStatus::WeakNetwork | VoiceCallStatus::Stable => None,
         }
     };
 
@@ -1461,11 +2160,6 @@ fn render_in_call(
             .into_any_element()
     });
 
-    let mic_modal = voice
-        .read(cx)
-        .mic_permission_denied()
-        .then(|| mic_permission_modal(theme, locale, voice));
-
     let participant_menu = voice
         .read(cx)
         .participant_menu()
@@ -1475,13 +2169,18 @@ fn render_in_call(
                 .participants()
                 .iter()
                 .find(|p| p.identity == identity)?;
-            let (name, _) =
-                resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+            let (name, _, _) = resolve_voice_identity(
+                cx,
+                room.clan_id,
+                room.voice_members,
+                identity,
+                &participant.name,
+            );
             let can_moderate = !participant.is_local
                 && PermissionStore::try_global(cx).is_some_and(|store| {
                     store
                         .read(cx)
-                        .check_permission(channel.clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+                        .check_permission(room.clan_id, PERMISSION_MANAGE_CHANNEL, cx)
                 });
             let menu = build_participant_menu(
                 voice,
@@ -1510,12 +2209,14 @@ fn render_in_call(
         .child(voice_header(
             theme,
             locale,
-            &channel.name,
+            room.name,
             Some(voice),
             show_chat,
+            chat_unread,
             inbox_handle,
-            channel.clan_id,
-            Some(chat),
+            room.clan_id,
+            chat.is_some(),
+            Some(host),
             cx,
         ))
         .children(body)
@@ -1531,10 +2232,22 @@ fn render_in_call(
             ))
         })
         .children(connection_toast)
+        .children(recording_indicator(
+            cx,
+            theme,
+            locale,
+            room.clan_id,
+            room.voice_members,
+            voice.read(cx),
+        ))
         .children(reactions)
         .children(flowers)
-        .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
-        .children(mic_modal)
+        .children(raised_hands_overlay(
+            cx,
+            room.clan_id,
+            room.voice_members,
+            voice.read(cx),
+        ))
         .children(participant_menu)
         .children(kick_modal)
         .into_any_element()
@@ -1546,7 +2259,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
-    chat: &Entity<ChatLayout>,
+    chat: Option<&Entity<ChatLayout>>,
     cx: &App,
 ) -> Option<AnyElement> {
     let key = store.fullscreen_screen()?;
@@ -1620,124 +2333,6 @@ pub(crate) fn render_screen_fullscreen_overlay(
             )
             .into_any_element(),
     )
-}
-
-fn open_microphone_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            .spawn();
-    }
-}
-
-fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
-    let title =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.micPermissionTitle").to_string());
-    let body =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.micPermissionBody").to_string());
-    let open_label =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.openSettings").to_string());
-    let later_label = SharedString::from(mezon_i18n::t(locale, "channelVoice.later").to_string());
-
-    let later_hover = darken(theme.bg_tertiary, 0.03);
-    let primary_hover = theme.brand_hover;
-    let voice_later = voice.clone();
-
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui::rgba(0x000000b3))
-        .occlude()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_4()
-                .w(px(380.))
-                .p_6()
-                .rounded_xl()
-                .bg(theme.bg_floating)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_lg()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(56.))
-                        .h(px(56.))
-                        .rounded_full()
-                        .bg(theme.bg_hover)
-                        .child(
-                            Icon::new(IconName::VoiceMicDisabledIcon)
-                                .size(px(26.))
-                                .text_color(theme.danger_text),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_primary)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme.text_muted)
-                        .child(body),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .w_full()
-                        .child(
-                            div()
-                                .id("mic-perm-later")
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.bg_tertiary)
-                                .text_color(theme.text_primary)
-                                .hover(move |s| s.bg(later_hover))
-                                .on_click(move |_, _, cx| {
-                                    voice_later.update(cx, |store, cx| {
-                                        store.dismiss_mic_permission_prompt(cx)
-                                    })
-                                })
-                                .child(later_label),
-                        )
-                        .child(
-                            div()
-                                .id("mic-perm-open")
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.brand)
-                                .text_color(gpui::rgb(0xffffff))
-                                .hover(move |s| s.bg(primary_hover))
-                                .on_click(|_, _, _| open_microphone_settings())
-                                .child(open_label),
-                        ),
-                ),
-        )
-        .into_any_element()
 }
 
 fn kick_confirm_modal(
@@ -1877,25 +2472,29 @@ fn in_call_placeholder_cells(
             })
             .unwrap_or_default();
         let identity = uid.to_string();
-        let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &identity, &fallback);
-        cells.push(VideoCell::placeholder(identity, name, avatar_url));
+        let (name, avatar_url, avatar_raw) =
+            resolve_voice_identity(cx, clan_id, room_members, &identity, &fallback);
+        cells.push(VideoCell::placeholder(
+            identity, name, avatar_url, avatar_raw,
+        ));
     }
     for member in room_members {
         if Some(member.user_id) == local_id {
             continue;
         }
-        let (name, avatar_url) = resolve_voice_member(cx, clan_id, member);
+        let (name, avatar_url, avatar_raw) = resolve_voice_member(cx, clan_id, member);
         cells.push(VideoCell::placeholder(
             member.user_id.to_string(),
             name,
             avatar_url,
+            avatar_raw,
         ));
     }
     cells
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_grid(
+fn render_grid<H: CallLayoutHost>(
     theme: &Theme,
     locale: &str,
     voice: &Entity<VoiceStore>,
@@ -1903,7 +2502,7 @@ fn render_grid(
     room_members: &[VoiceMember],
     connecting: bool,
     clan_id: ClanId,
-    chat: &Entity<ChatLayout>,
+    host: &Entity<H>,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     cx: &App,
@@ -2000,10 +2599,10 @@ fn render_grid(
     }
 
     grid = grid.child({
-        let chat = chat.clone();
+        let host = host.clone();
         canvas(
             move |bounds, _, cx| {
-                chat.update(cx, |layout, cx| {
+                host.update(cx, |layout, cx| {
                     layout.record_voice_grid_size(bounds.size, cx)
                 })
             },
@@ -2014,11 +2613,11 @@ fn render_grid(
     });
 
     if paginated {
-        let chat = chat.clone();
+        let host = host.clone();
         grid = grid
             .on_scroll_wheel(move |event, window, cx| {
                 let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
-                chat.update(cx, |layout, cx| {
+                host.update(cx, |layout, cx| {
                     layout.scroll_voice_grid_page(delta, total_pages, cx)
                 });
             })
@@ -2193,12 +2792,12 @@ fn carousel_visible_range(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_focus_layout(
+fn render_focus_layout<H: CallLayoutHost>(
     locale: &str,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     focused_idx: usize,
-    chat: &Entity<ChatLayout>,
+    host: &Entity<H>,
     show_members: bool,
     strip_scroll: &ScrollHandle,
     strip_width: Pixels,
@@ -2226,7 +2825,7 @@ fn render_focus_layout(
 
     let member_count = cells.iter().filter(|c| !c.is_screen).count();
     let toggle_pill = {
-        let chat = chat.clone();
+        let host = host.clone();
         div()
             .id("voice-member-strip-toggle")
             .flex()
@@ -2240,7 +2839,7 @@ fn render_focus_layout(
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
-                chat.update(cx, |layout, cx| layout.toggle_voice_member_strip(cx))
+                host.update(cx, |layout, cx| layout.toggle_voice_member_strip(cx))
             })
             .child(
                 Icon::new(if show_members {
@@ -2368,7 +2967,7 @@ fn render_focus_layout(
             .children(strip_tiles)
             .children(trail_spacer);
 
-        let measure_chat = chat.clone();
+        let measure_host = host.clone();
         let carousel = div()
             .flex_1()
             .min_h_0()
@@ -2390,7 +2989,7 @@ fn render_focus_layout(
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        measure_chat.update(cx, |layout, cx| {
+                        measure_host.update(cx, |layout, cx| {
                             layout.record_voice_strip_width(bounds.size.width, cx)
                         })
                     },
@@ -2577,6 +3176,7 @@ fn focus_main_tile(
         .cursor_pointer()
         .child(inner)
         .child(tile_metadata(locale, cell))
+        .children(tile_audience_badge(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
@@ -2619,6 +3219,7 @@ fn strip_tile(
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
+        .children(tile_audience_badge(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
@@ -2658,6 +3259,7 @@ fn video_tile(
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
+        .children(tile_audience_badge(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
@@ -2697,6 +3299,9 @@ fn tile_inner(
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
+    if !cell.avatar_raw.is_empty() {
+        avatar = avatar.fallback_src(cell.avatar_raw.clone());
+    }
     avatar.into_any_element()
 }
 
@@ -2716,13 +3321,6 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
         mezon_i18n::t(locale, "channelVoice.usernameScreen").replace("{{username}}", &cell.name)
     } else {
         cell.name.clone()
-    };
-
-    let quality_icon = match cell.quality {
-        NetworkQuality::Excellent => IconName::SvgQualityExcellentIcon,
-        NetworkQuality::Good => IconName::SvgQualityGoodIcon,
-        NetworkQuality::Poor => IconName::SvgQualityPoorIcon,
-        NetworkQuality::Unknown => IconName::SvgQualityUnknownIcon,
     };
 
     div()
@@ -2780,23 +3378,27 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         ),
                 ),
         )
-        .child(div().flex_1())
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(5.))
-                .rounded_md()
-                .bg(gpui::rgba(0x00000080))
-                .child(
-                    Icon::new(quality_icon)
-                        .size(px(16.))
-                        .text_color(gpui::rgb(0xffffff)),
-                ),
-        )
         .into_any_element()
+}
+
+fn tile_audience_badge(locale: &str, cell: &VideoCell) -> Option<AnyElement> {
+    if !cell.is_audience || cell.is_screen {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .p(px(5.))
+            .rounded_md()
+            .bg(gpui::rgba(0x00000080))
+            .text_xs()
+            .line_height(px(16.))
+            .text_color(gpui::rgb(0xffffff))
+            .child(mezon_i18n::t(locale, "channelVoice.audience"))
+            .into_any_element(),
+    )
 }
 
 fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement> {
@@ -2840,7 +3442,7 @@ fn control_bar(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
-    chat: &Entity<ChatLayout>,
+    chat: Option<&Entity<ChatLayout>>,
     cx: &App,
 ) -> AnyElement {
     let mic_enabled = store.mic_enabled();
@@ -2848,25 +3450,36 @@ fn control_bar(
     let screen_enabled = store.screen_share_enabled();
     let recording = store.recording_state();
     let can_record = store.can_record();
+    let is_audience = store.is_audience();
+    let ptt_active = store.push_to_talk_active();
+    let network_weak = matches!(store.call_status(), VoiceCallStatus::WeakNetwork);
+    let show_network_warning = network_weak && !store.network_warning_dismissed();
+    let has_active_interactive_apps =
+        store.has_active_interactive_apps() || store.has_opened_interactive_apps();
+    let channel_tools = chat.is_some();
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
 
-    let mic_tooltip = mezon_i18n::t(
-        locale,
+    let mic_tooltip = media_button_tooltip(
+        MediaDevice::Microphone,
         if mic_enabled {
             "channelVoice.turnOffMicrophone"
         } else {
             "channelVoice.turnOnMicrophone"
         },
-    );
-    let camera_tooltip = mezon_i18n::t(
         locale,
+        cx,
+    );
+    let camera_tooltip = media_button_tooltip(
+        MediaDevice::Camera,
         if camera_enabled {
             "channelVoice.turnOffCamera"
         } else {
             "channelVoice.turnOnCamera"
         },
+        locale,
+        cx,
     );
     let screen_tooltip = mezon_i18n::t(
         locale,
@@ -2922,6 +3535,12 @@ fn control_bar(
         DeviceMenuKind::Microphone,
         cx,
     );
+    let mic_button = div()
+        .relative()
+        .child(mic_button)
+        .children(network_weak_dot(theme, network_weak, cx))
+        .children(show_network_warning.then(|| render_network_warning_callout(locale, voice)))
+        .into_any_element();
     let camera_button = device_control(
         camera_button.into_any_element(),
         theme,
@@ -2971,11 +3590,72 @@ fn control_bar(
         })
     };
 
-    let interactive_app_button = {
+    let screen_button = device_control(
+        screen_button.into_any_element(),
+        theme,
+        locale,
+        voice,
+        settings,
+        store,
+        DeviceMenuKind::ScreenShare,
+        cx,
+    );
+
+    let ptt_hint_visible = is_audience
+        && !store.ptt_hint_dismissed()
+        && store.device_menu() != Some(DeviceMenuKind::Microphone);
+    let ptt_button = is_audience.then(|| {
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if ptt_active {
+            (
+                theme.status_online.into(),
+                darken(theme.status_online, 0.12),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        let button = push_to_talk_press(
+            circle_button("voice-ptt-btn", bg, hover, IconName::InPttCall, color).tooltip(
+                Tooltip::text(mezon_i18n::t(locale, "channelVoice.pushToTalk.hold")),
+            ),
+            voice,
+        );
+        let button = device_control(
+            button.into_any_element(),
+            theme,
+            locale,
+            voice,
+            settings,
+            store,
+            DeviceMenuKind::Microphone,
+            cx,
+        );
+        let callout = if show_network_warning {
+            Some(render_network_warning_callout(locale, voice))
+        } else {
+            ptt_hint_visible.then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice))
+        };
+        div()
+            .relative()
+            .child(button)
+            .children(network_weak_dot(theme, network_weak, cx))
+            .children(callout)
+    });
+
+    let interactive_app_button = Some({
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if has_active_interactive_apps {
+            (
+                with_alpha(theme.status_online, 0.18),
+                with_alpha(theme.status_online, 0.28),
+                theme.status_online.into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_muted.into())
+        };
         let button = InteractiveAppTrigger::new(
-            neutral_bg.into(),
-            neutral_hover,
-            theme.text_muted.into(),
+            bg,
+            hover,
+            color,
             mezon_i18n::t(locale, "channelVoice.openInteractiveApp"),
         );
         let voice = voice.clone();
@@ -2990,7 +3670,7 @@ fn control_bar(
                 }))
             })
             .trigger(button)
-    };
+    });
 
     let record_button = can_record.then(|| {
         let voice = voice.clone();
@@ -3089,8 +3769,15 @@ fn control_bar(
                 .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
         })
     });
+    let agent_hint_visible = can_manage_agent
+        && !agent_active
+        && !settings.read(cx).agent_hint_dismissed
+        && !ptt_hint_visible
+        && !show_network_warning
+        && store.device_menu().is_none();
     let agent_button = can_manage_agent.then(|| {
         let voice = voice.clone();
+        let hint_settings = settings.clone();
         let (bg, hover, color): (Hsla, Hsla, Hsla) = if agent_active {
             (
                 gpui::rgb(ACCENT_BLUE).into(),
@@ -3108,7 +3795,7 @@ fn control_bar(
                 "channelVoice.addAgent"
             },
         );
-        circle_button(
+        let button = circle_button(
             "voice-agent-btn",
             bg,
             hover,
@@ -3116,16 +3803,18 @@ fn control_bar(
             color,
         )
         .tooltip(Tooltip::text(agent_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)))
+        .on_click(move |_, _, cx| {
+            if !agent_active {
+                dismiss_agent_hint(&hint_settings, cx);
+            }
+            voice.update(cx, |store, cx| store.toggle_agent(cx));
+        });
+        div().relative().child(button).children(
+            agent_hint_visible.then(|| render_agent_hint_callout(theme, locale, settings)),
+        )
     });
 
-    let mut right = div()
-        .flex()
-        .flex_row()
-        .flex_1()
-        .items_center()
-        .justify_end()
-        .gap_1();
+    let mut tail = div().flex().flex_row().items_center().gap_1();
     if let Some(key) = store.primary_screen_key() {
         let pip_active = store.pip_key() == Some(key);
         let is_fullscreen = store.fullscreen_screen() == Some(key);
@@ -3173,11 +3862,18 @@ fn control_bar(
             })
         };
 
-        right = right.child(pip_button).child(fs_button);
+        tail = tail.child(pip_button).child(fs_button);
     }
 
-    let emoji_button = {
-        let chat = chat.clone();
+    let right = div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .items_center()
+        .justify_end()
+        .child(tail);
+
+    let emoji_button = chat.cloned().map(|chat| {
         circle_button(
             "voice-emoji-btn",
             neutral_bg,
@@ -3194,10 +3890,9 @@ fn control_bar(
                 layout.toggle_voice_emoji_picker(window, cx)
             });
         })
-    };
+    });
 
-    let sound_button = {
-        let chat = chat.clone();
+    let sound_button = chat.cloned().map(|chat| {
         circle_button(
             "voice-sound-btn",
             neutral_bg,
@@ -3210,7 +3905,7 @@ fn control_bar(
                 layout.toggle_voice_sound_picker(window, cx)
             });
         })
-    };
+    });
 
     let record_badge = matches!(recording, RecordingState::Recording).then(|| {
         let elapsed = store.recording_elapsed().as_secs();
@@ -3269,11 +3964,13 @@ fn control_bar(
         .flex_1()
         .items_center()
         .gap_3()
-        .child(emoji_button)
-        .child(sound_button)
-        .child(interactive_app_button)
-        .children(record_button)
-        .children(record_badge);
+        .children(emoji_button)
+        .children(sound_button)
+        .when(channel_tools, |left| {
+            left.children(interactive_app_button)
+                .children(record_button)
+                .children(record_badge)
+        });
 
     let center = div()
         .flex()
@@ -3281,14 +3978,17 @@ fn control_bar(
         .items_center()
         .justify_center()
         .gap_3()
-        .child(mic_button)
-        .child(camera_button)
-        .child(screen_button)
+        .children(ptt_button)
+        .children((!is_audience).then_some(mic_button))
+        .children((!is_audience).then_some(camera_button))
+        .children((!is_audience).then_some(screen_button))
         .children(agent_button)
-        .child(raise_hand_button)
+        .when(channel_tools, |center| center.child(raise_hand_button))
         .child(leave_button);
 
     div()
+        .relative()
+        .children(crate::tour::probe(crate::tour::TourAnchor::VoiceControls))
         .flex()
         .flex_row()
         .items_center()
@@ -3301,6 +4001,255 @@ fn control_bar(
         .child(center)
         .child(right)
         .into_any_element()
+}
+
+const PTT_HINT_WIDTH_PX: f32 = 320.;
+const PTT_HINT_CARET_PX: f32 = 12.;
+const NETWORK_WARNING_BG: u32 = 0xfde8d7;
+const NETWORK_WARNING_TEXT: u32 = 0x202124;
+
+fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
+    let card_bg: Hsla = gpui::rgb(NETWORK_WARNING_BG).into();
+    let text_color: Hsla = gpui::rgb(NETWORK_WARNING_TEXT).into();
+    let message = mezon_i18n::t(locale, "channelVoice.networkWarning");
+    let dismiss = voice.clone();
+    div()
+        .id("voice-network-warning")
+        .occlude()
+        .absolute()
+        .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
+        .left(px(-16.))
+        .w(px(PTT_HINT_WIDTH_PX))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .w_full()
+                .rounded(px(16.))
+                .bg(card_bg)
+                .shadow_lg()
+                .p_4()
+                .pl_2()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_left()
+                        .text_color(text_color)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .id("voice-network-warning-close")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgba(0x0000000d)))
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(px(16.))
+                                .text_color(with_alpha(text_color, 0.7)),
+                        )
+                        .on_click(move |_, _, cx| {
+                            dismiss.update(cx, |store, cx| store.dismiss_network_warning(cx));
+                        }),
+                ),
+        )
+        .child(
+            svg()
+                .ml(px(16. + 22. - PTT_HINT_CARET_PX / 2.))
+                .w(px(PTT_HINT_CARET_PX))
+                .h(px(PTT_HINT_CARET_PX / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(card_bg),
+        )
+        .into_any_element()
+}
+
+fn network_weak_dot(theme: &Theme, network_weak: bool, cx: &App) -> Option<gpui::Div> {
+    (network_weak && !media_access_missing(MediaDevice::Microphone, cx)).then(|| {
+        div()
+            .absolute()
+            .top(px(-2.))
+            .right(px(-2.))
+            .size(px(14.))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.bg_tertiary)
+            .bg(theme.status_idle)
+    })
+}
+
+fn render_ptt_hint_callout(
+    theme: &Theme,
+    locale: &str,
+    ptt_active: bool,
+    voice: &Entity<VoiceStore>,
+) -> AnyElement {
+    let accent: Hsla = if ptt_active {
+        theme.status_online.into()
+    } else {
+        gpui::rgb(RAISE_HAND_GOLD).into()
+    };
+    let title = mezon_i18n::t(
+        locale,
+        if ptt_active {
+            "channelVoice.pushToTalk.holdingSpace"
+        } else {
+            "channelVoice.pushToTalk.holdSpace"
+        },
+    );
+    let body = mezon_i18n::t(locale, "channelVoice.pushToTalk.hintBody");
+    let dismiss = voice.clone();
+    render_control_hint_callout(
+        ("voice-ptt-hint", "voice-ptt-hint-close"),
+        theme,
+        (IconName::InPttCall, accent),
+        title,
+        body,
+        move |cx| dismiss.update(cx, |store, cx| store.dismiss_ptt_hint(cx)),
+    )
+}
+
+fn render_agent_hint_callout(
+    theme: &Theme,
+    locale: &str,
+    settings: &Entity<Settings>,
+) -> AnyElement {
+    let title = mezon_i18n::t(locale, "channelVoice.agentHint.title");
+    let body = mezon_i18n::t(locale, "channelVoice.agentHint.body");
+    let settings = settings.clone();
+    render_control_hint_callout(
+        ("voice-agent-hint", "voice-agent-hint-close"),
+        theme,
+        (IconName::VoiceAgentIcon, gpui::rgb(ACCENT_BLUE).into()),
+        title,
+        body,
+        move |cx| dismiss_agent_hint(&settings, cx),
+    )
+}
+
+fn dismiss_agent_hint(settings: &Entity<Settings>, cx: &mut App) {
+    if settings.read(cx).agent_hint_dismissed {
+        return;
+    }
+    settings.update(cx, |settings, cx| {
+        settings.agent_hint_dismissed = true;
+        cx.notify();
+    });
+    mezon_store::schedule_settings_save(settings, cx);
+}
+
+fn render_control_hint_callout(
+    (id, close_id): (&'static str, &'static str),
+    theme: &Theme,
+    (icon, accent): (IconName, Hsla),
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    on_dismiss: impl Fn(&mut App) + 'static,
+) -> AnyElement {
+    let card_bg = theme.bg_secondary;
+    let callout = div()
+        .id(id)
+        .occlude()
+        .absolute()
+        .bottom(px(44.))
+        .left(px(-16.))
+        .w(px(PTT_HINT_WIDTH_PX))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .w_full()
+                .rounded(px(8.))
+                .bg(card_bg)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(icon).size(px(18.)).text_color(accent))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.tokens.text_theme_primary)
+                                .child(title.into()),
+                        )
+                        .child(
+                            div()
+                                .id(close_id)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(24.))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(gpui::rgba(0xffffff1a)))
+                                .child(
+                                    Icon::new(IconName::Close)
+                                        .size(px(16.))
+                                        .text_color(theme.tokens.text_theme_primary),
+                                )
+                                .on_click(move |_, _, cx| on_dismiss(cx)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.tokens.text_secondary)
+                        .child(body.into()),
+                ),
+        )
+        .child(hint_caret(card_bg, theme.border.into()));
+    deferred(callout).into_any_element()
+}
+
+fn hint_caret(fill: impl Into<Hsla>, outline: Hsla) -> gpui::Div {
+    let outer = PTT_HINT_CARET_PX + 2.;
+    div()
+        .relative()
+        .ml(px(16. + 22. - outer / 2.))
+        .w(px(outer))
+        .h(px(outer / 2.))
+        .child(
+            svg()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(outer))
+                .h(px(outer / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(outline),
+        )
+        .child(
+            svg()
+                .absolute()
+                .top(px(-1.))
+                .left(px(1.))
+                .w(px(PTT_HINT_CARET_PX))
+                .h(px(PTT_HINT_CARET_PX / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(fill.into()),
+        )
 }
 
 fn circle_button(
@@ -3386,6 +4335,7 @@ struct InteractiveAppPopoverPanel {
     voice: Entity<VoiceStore>,
     locale: String,
     focus_handle: FocusHandle,
+    _voice_subscription: Subscription,
 }
 
 impl InteractiveAppPopoverPanel {
@@ -3398,10 +4348,12 @@ impl InteractiveAppPopoverPanel {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
+        let voice_subscription = cx.observe(&voice, |_, _, cx| cx.notify());
         Self {
             voice,
             locale,
             focus_handle,
+            _voice_subscription: voice_subscription,
         }
     }
 }
@@ -3425,7 +4377,7 @@ impl Render for InteractiveAppPopoverPanel {
             .occlude()
             .flex()
             .flex_col()
-            .w(px(240.))
+            .w(px(190.))
             .p(px(6.))
             .rounded_md()
             .border_1()
@@ -3446,23 +4398,126 @@ impl Render for InteractiveAppPopoverPanel {
                 VoiceInteractiveApp::Interactive,
             ),
         ] {
+            let store = self.voice.read(cx);
+            let active = store.is_interactive_app_active(app);
+            let opened = store.is_interactive_app_opened(app);
             let voice = self.voice.clone();
-            menu = menu.child(
-                div()
-                    .id(key)
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded(px(4.))
-                    .text_sm()
-                    .text_color(tokens.text_theme_message)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(tokens.bg_item_hover))
-                    .child(mezon_i18n::t(&self.locale, key).to_string())
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        voice.update(cx, |store, cx| store.request_interactive_app(app, cx));
-                        cx.emit(DismissEvent);
-                    })),
-            );
+            let row = div()
+                .id(key)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(px(4.))
+                .border_1()
+                .text_sm();
+            if opened {
+                let green = cx.theme().status_online;
+                menu = menu.child(
+                    row.border_color(green)
+                        .bg(with_alpha(green, 0.08))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_color(green)
+                                .child(
+                                    Icon::new(IconName::Joystick)
+                                        .size(px(16.))
+                                        .text_color(green),
+                                )
+                                .child(mezon_i18n::t(&self.locale, key).to_string()),
+                        )
+                        .child(
+                            div().text_color(tokens.text_theme_message).child(
+                                mezon_i18n::t(&self.locale, "channelVoice.interactiveApp.opened")
+                                    .to_string(),
+                            ),
+                        ),
+                );
+            } else if active {
+                let green = cx.theme().status_online;
+                menu = menu.child(
+                    row.border_color(green)
+                        .bg(with_alpha(green, 0.08))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_color(green)
+                                .child(
+                                    Icon::new(IconName::Joystick)
+                                        .size(px(16.))
+                                        .text_color(green),
+                                )
+                                .child(mezon_i18n::t(&self.locale, key).to_string()),
+                        )
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div()
+                                    .id(("join-interactive-app", app as u32))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(with_alpha(green, 0.25))
+                                    .text_color(green)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(with_alpha(green, 0.35)))
+                                    .child(
+                                        mezon_i18n::t(
+                                            &self.locale,
+                                            "channelVoice.interactiveApp.join",
+                                        )
+                                        .to_string(),
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        voice.update(cx, |store, cx| {
+                                            store.join_interactive_app(app, cx)
+                                        });
+                                        cx.emit(DismissEvent);
+                                    })),
+                            ),
+                        ),
+                );
+            } else {
+                let group = SharedString::from(format!("launch-interactive-app-{}", app as u32));
+                menu = menu.child(
+                    row.border_color(gpui::transparent_black())
+                        .group(group.clone())
+                        .text_color(tokens.text_theme_message)
+                        .hover(|style| style.bg(tokens.bg_item_hover))
+                        .child(mezon_i18n::t(&self.locale, key).to_string())
+                        .child(
+                            div()
+                                .id(("launch-interactive-app", app as u32))
+                                .px_2()
+                                .py_1()
+                                .rounded_full()
+                                .bg(darken(tokens.bg_item_hover, 0.05))
+                                .text_color(tokens.text_theme_message)
+                                .opacity(0.)
+                                .group_hover(group, |style| style.opacity(1.))
+                                .cursor_pointer()
+                                .child(
+                                    mezon_i18n::t(
+                                        &self.locale,
+                                        "channelVoice.interactiveApp.launch",
+                                    )
+                                    .to_string(),
+                                )
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    voice.update(cx, |store, cx| {
+                                        store.request_interactive_app(app, cx)
+                                    });
+                                    cx.emit(DismissEvent);
+                                })),
+                        ),
+                );
+            }
         }
         menu
     }
@@ -3471,6 +4526,12 @@ impl Render for InteractiveAppPopoverPanel {
 fn darken(color: impl Into<Hsla>, amount: f32) -> Hsla {
     let mut hsla = color.into();
     hsla.l = (hsla.l - amount).max(0.0);
+    hsla
+}
+
+fn with_alpha(color: impl Into<Hsla>, alpha: f32) -> Hsla {
+    let mut hsla = color.into();
+    hsla.a = alpha;
     hsla
 }
 
@@ -3491,6 +4552,7 @@ fn device_control(
     let arrow_id = match menu_kind {
         DeviceMenuKind::Microphone => "voice-mic-devices-btn",
         DeviceMenuKind::Camera => "voice-camera-devices-btn",
+        DeviceMenuKind::ScreenShare => "voice-screen-mode-btn",
     };
     let arrow_hover = theme.bg_hover;
     let arrow = {
@@ -3526,12 +4588,45 @@ fn device_control(
     };
     let flyout =
         is_open.then(|| device_flyout(theme, locale, voice, settings, store, menu_kind, cx));
+    let permission_device = match menu_kind {
+        DeviceMenuKind::Microphone => Some(MediaDevice::Microphone),
+        DeviceMenuKind::Camera => Some(MediaDevice::Camera),
+        DeviceMenuKind::ScreenShare => None,
+    };
     div()
         .relative()
         .child(button)
         .child(arrow)
+        .children(control_bar_permission_badge(theme, permission_device, cx))
         .children(flyout)
         .into_any_element()
+}
+
+fn control_bar_permission_badge(
+    theme: &Theme,
+    device: Option<MediaDevice>,
+    cx: &App,
+) -> Option<gpui::Div> {
+    device
+        .filter(|device| media_access_missing(*device, cx))
+        .map(|_| {
+            media_permission_badge(theme, px(18.), theme.bg_tertiary)
+                .top(px(-4.))
+                .right(px(-4.))
+        })
+}
+
+fn media_button_tooltip(
+    device: MediaDevice,
+    toggle_key: &'static str,
+    locale: &str,
+    cx: &App,
+) -> &'static str {
+    if media_access_missing(device, cx) {
+        media_access_needed_label(device, locale)
+    } else {
+        mezon_i18n::t(locale, toggle_key)
+    }
 }
 
 fn device_flyout(
@@ -3543,9 +4638,13 @@ fn device_flyout(
     menu_kind: DeviceMenuKind,
     cx: &App,
 ) -> AnyElement {
+    if menu_kind == DeviceMenuKind::ScreenShare {
+        return screen_mode_flyout(theme, locale, voice, store);
+    }
     let kinds: &[DeviceKind] = match menu_kind {
         DeviceMenuKind::Microphone => &[DeviceKind::AudioInput, DeviceKind::AudioOutput],
         DeviceMenuKind::Camera => &[DeviceKind::VideoInput],
+        DeviceMenuKind::ScreenShare => &[],
     };
     let settings = settings.read(cx);
     let input_id = settings.input_device_id.clone();
@@ -3576,7 +4675,7 @@ fn device_flyout(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .w(px(220.))
+        .w(px(280.))
         .p_2()
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
@@ -3620,6 +4719,141 @@ fn device_flyout(
             .children(list_panel),
     )
     .into_any_element()
+}
+
+fn screen_mode_flyout(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    store: &VoiceStore,
+) -> AnyElement {
+    let active = store.screen_share_mode();
+    let rows = [
+        (
+            ScreenShareMode::Text,
+            "voice-screen-mode-text",
+            "screenShare.modeText",
+            "screenShare.modeTextDescription",
+        ),
+        (
+            ScreenShareMode::Video,
+            "voice-screen-mode-video",
+            "screenShare.modeVideo",
+            "screenShare.modeVideoDescription",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, row_id, title_key, description_key)| {
+        screen_mode_row(
+            theme,
+            voice,
+            mode,
+            mode == active,
+            row_id,
+            mezon_i18n::t(locale, title_key),
+            mezon_i18n::t(locale, description_key),
+        )
+    });
+
+    deferred(
+        div()
+            .id("voice-screen-mode-flyout")
+            .absolute()
+            .bottom(px(56.))
+            .left(px(-6.))
+            .occlude()
+            .on_mouse_down_out({
+                let voice = voice.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    voice.update(cx, |store, cx| store.close_device_menu(cx));
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .w(px(260.))
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.tokens.bg_theme_contexify)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .children(rows),
+            ),
+    )
+    .into_any_element()
+}
+
+fn screen_mode_row(
+    theme: &Theme,
+    voice: &Entity<VoiceStore>,
+    mode: ScreenShareMode,
+    selected: bool,
+    row_id: &'static str,
+    title: &'static str,
+    description: &'static str,
+) -> AnyElement {
+    let voice = voice.clone();
+    let hover_bg = theme.bg_hover;
+    let base_bg = if selected {
+        theme.bg_hover
+    } else {
+        theme.bg_secondary
+    };
+    let accent: Hsla = gpui::rgb(ACCENT_BLUE).into();
+    let muted: Hsla = theme.text_muted.into();
+    let radio = div()
+        .mt(px(3.))
+        .flex_none()
+        .size(px(16.))
+        .rounded_full()
+        .border_2()
+        .border_color(if selected { accent } else { muted })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |radio| {
+            radio.child(div().size(px(8.)).rounded_full().bg(accent))
+        });
+    div()
+        .id(row_id)
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(6.))
+        .bg(base_bg)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .child(radio)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(2.))
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(description),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            voice.update(cx, |store, cx| store.set_screen_share_mode(mode, cx));
+        })
+        .into_any_element()
 }
 
 fn device_row(
@@ -3666,8 +4900,8 @@ fn device_row(
                     div()
                         .mt(px(2.))
                         .text_xs()
-                        .text_color(theme.text_muted)
                         .truncate()
+                        .text_color(theme.text_muted)
                         .child(active_name),
                 ),
         )
@@ -3694,10 +4928,7 @@ fn device_list_panel(
     let voice = voice.clone();
     let hover_bg = theme.bg_hover;
     let text_color = theme.text_primary;
-    let active_present = entries
-        .iter()
-        .any(|(id, _)| id.as_deref() == active_id.as_deref());
-    let effective_active = if active_present { active_id } else { None };
+    let effective_active = selected_device_id(&entries, active_id.as_deref());
     div()
         .id(SharedString::from(format!(
             "voice-device-list-{}",
@@ -3706,7 +4937,7 @@ fn device_list_panel(
         .flex()
         .flex_col()
         .gap(px(2.))
-        .min_w(px(240.))
+        .min_w(px(280.))
         .max_h(px(320.))
         .overflow_y_scroll()
         .p_1()
@@ -3716,51 +4947,81 @@ fn device_list_panel(
         .border_color(theme.border)
         .shadow_lg()
         .children(entries.into_iter().map(move |(id, name)| {
-            let selected = id.as_deref() == effective_active.as_deref();
-            let slug = id.as_deref().unwrap_or("default").to_string();
-            let radio = device_radio(theme, selected);
+            let selected = id == effective_active;
+            let row_id = SharedString::from(format!(
+                "dev-{}-{}",
+                kind_slug(kind),
+                id.as_deref().unwrap_or("default")
+            ));
             let voice = voice.clone();
-            div()
-                .id(SharedString::from(format!(
-                    "dev-{}-{}",
-                    kind_slug(kind),
-                    slug
-                )))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_sm()
-                        .text_color(text_color)
-                        .child(name),
-                )
-                .child(radio)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let id = id.clone();
-                    voice.update(cx, |store, cx| match kind {
-                        DeviceKind::AudioInput => store.set_input_device(id, cx),
-                        DeviceKind::AudioOutput => store.set_output_device(id, cx),
-                        DeviceKind::VideoInput => store.set_camera_device(id, cx),
-                    });
-                })
+            device_option_row(
+                row_id,
+                name,
+                device_radio(theme.tokens.text_secondary, selected),
+                text_color,
+                hover_bg,
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let id = id.clone();
+                match kind {
+                    DeviceKind::AudioOutput => mezon_store::set_output_device(id, cx),
+                    DeviceKind::AudioInput => {
+                        voice.update(cx, |store, cx| store.set_input_device(id, cx))
+                    }
+                    DeviceKind::VideoInput => {
+                        voice.update(cx, |store, cx| store.set_camera_device(id, cx))
+                    }
+                }
+            })
         }))
         .into_any_element()
 }
 
-fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
+pub(crate) fn selected_device_id(
+    entries: &[(Option<String>, String)],
+    active_id: Option<&str>,
+) -> Option<String> {
+    entries
+        .iter()
+        .find(|(id, _)| id.as_deref() == active_id)
+        .and_then(|(id, _)| id.clone())
+}
+
+pub(crate) fn device_option_row(
+    id: SharedString,
+    name: String,
+    radio: AnyElement,
+    text_color: impl Into<Hsla>,
+    hover_bg: impl Into<Hsla>,
+) -> Stateful<Div> {
+    let hover_bg = hover_bg.into();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_sm()
+                .text_color(text_color.into())
+                .child(name),
+        )
+        .child(radio)
+}
+
+pub(crate) fn device_radio(ring: impl Into<Hsla>, selected: bool) -> AnyElement {
     if selected {
         div()
             .flex_shrink_0()
@@ -3778,7 +5039,7 @@ fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
             .size(px(16.))
             .rounded_full()
             .border_2()
-            .border_color(theme.text_muted)
+            .border_color(ring.into())
             .into_any_element()
     }
 }
@@ -3789,38 +5050,47 @@ fn device_entries(
     locale: &str,
     cx: &App,
 ) -> Vec<(Option<String>, String)> {
-    let system_default = || mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string();
     match kind {
-        DeviceKind::AudioInput | DeviceKind::AudioOutput => {
-            let mut entries = Vec::new();
-            if let Some(audio) = AudioStore::try_global(cx) {
-                let audio = audio.read(cx);
-                let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
-                    (&audio.input_devices, &audio.default_input_name)
-                } else {
-                    (&audio.output_devices, &audio.default_output_name)
-                };
-                let default_label = match default_name {
-                    Some(name) => format!("Default - {name}"),
-                    None => system_default(),
-                };
-                entries.push((None, default_label));
-                for device in devices {
-                    entries.push((Some(device.id.clone()), device.name.clone()));
-                }
-            } else {
-                entries.push((None, system_default()));
-            }
-            entries
-        }
+        DeviceKind::AudioInput | DeviceKind::AudioOutput => audio_device_entries(kind, locale, cx),
         DeviceKind::VideoInput => {
-            let mut entries = vec![(None, system_default())];
+            let mut entries = vec![(None, system_default_label(locale))];
             for device in store.camera_devices() {
                 entries.push((Some(device.id.clone()), device.name.clone()));
             }
             entries
         }
     }
+}
+
+pub(crate) fn audio_device_entries(
+    kind: DeviceKind,
+    locale: &str,
+    cx: &App,
+) -> Vec<(Option<String>, String)> {
+    let mut entries = Vec::new();
+    if let Some(audio) = AudioStore::try_global(cx) {
+        let audio = audio.read(cx);
+        let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
+            (&audio.input_devices, &audio.default_input_name)
+        } else {
+            (&audio.output_devices, &audio.default_output_name)
+        };
+        let default_label = match default_name {
+            Some(name) => format!("Default - {name}"),
+            None => system_default_label(locale),
+        };
+        entries.push((None, default_label));
+        for device in devices {
+            entries.push((Some(device.id.clone()), device.name.clone()));
+        }
+    } else {
+        entries.push((None, system_default_label(locale)));
+    }
+    entries
+}
+
+fn system_default_label(locale: &str) -> String {
+    mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string()
 }
 
 fn device_kind_label(kind: DeviceKind, locale: &str) -> String {
@@ -3887,7 +5157,7 @@ mod carousel_tests {
 
 #[cfg(test)]
 mod device_menu_tests {
-    use super::active_device_name;
+    use super::{active_device_name, selected_device_id};
 
     fn entries() -> Vec<(Option<String>, String)> {
         vec![
@@ -3915,6 +5185,119 @@ mod device_menu_tests {
         assert_eq!(
             active_device_name(&entries(), &Some("gone".to_string())),
             "System default"
+        );
+    }
+
+    #[test]
+    fn selects_the_chosen_device() {
+        assert_eq!(
+            selected_device_id(&entries(), Some("b")),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn selects_default_when_nothing_was_chosen() {
+        assert_eq!(selected_device_id(&entries(), None), None);
+    }
+
+    #[test]
+    fn selects_default_when_the_chosen_device_is_gone() {
+        assert_eq!(selected_device_id(&entries(), Some("gone")), None);
+    }
+}
+
+#[cfg(test)]
+mod visual_order_tests {
+    use super::{
+        VideoCell, VoiceParticipant, VoiceVisualState, stable_visual_order, target_visual_order,
+    };
+
+    fn device(session_id: &str, is_local: bool, screen: Option<u64>) -> VoiceParticipant {
+        VoiceParticipant {
+            session_id: session_id.into(),
+            identity: "same-account".into(),
+            name: "Same user".into(),
+            metadata_name: String::new(),
+            metadata_avatar: String::new(),
+            is_local,
+            is_agent: false,
+            is_audience: screen.is_none() && !is_local,
+            speaking: false,
+            muted: true,
+            camera: None,
+            screenshare: screen,
+            quality: mezon_store::NetworkQuality::Unknown,
+        }
+    }
+
+    fn cells_for(people: &[VoiceParticipant]) -> Vec<VideoCell> {
+        let mut cells = Vec::new();
+        for p in people {
+            cells.push(VideoCell::camera(
+                p,
+                p.name.clone(),
+                String::new(),
+                String::new(),
+            ));
+            if p.screenshare.is_some() {
+                cells.push(VideoCell::screen(
+                    p,
+                    p.name.clone(),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn same_account_audience_does_not_destabilize_multiple_screen_shares() {
+        let mut people = vec![
+            device("local", true, Some(1)),
+            device("peer-1", false, Some(2)),
+            device("peer-2", false, Some(3)),
+        ];
+        let mut state = VoiceVisualState::default();
+        let rank = |id: &str| match id {
+            "local" => 0,
+            "peer-1" => 1,
+            "peer-2" => 2,
+            _ => 3,
+        };
+        let initial = target_visual_order(&cells_for(&people), &rank, &|_| 0);
+        stable_visual_order(&mut state, &initial, 3);
+        people.push(device("audience", false, None));
+        let mut cells = cells_for(&people);
+        let target = target_visual_order(&cells, &rank, &|_| 0);
+        assert_eq!(
+            target
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            7
+        );
+        let expected = stable_visual_order(&mut state, &target, 3);
+        for _ in 0..20 {
+            cells.rotate_left(1);
+            let next = target_visual_order(&cells, &rank, &|_| 0);
+            assert_eq!(next, target);
+            assert_eq!(stable_visual_order(&mut state, &next, 3), expected);
+        }
+    }
+
+    #[test]
+    fn unranked_sessions_have_a_stable_tie_breaker() {
+        let mut cells = cells_for(&[
+            device("peer-2", false, Some(2)),
+            device("peer-1", false, Some(1)),
+        ]);
+        let expected = target_visual_order(&cells, &|_| usize::MAX, &|_| 0);
+        cells.reverse();
+        assert_eq!(
+            target_visual_order(&cells, &|_| usize::MAX, &|_| 0),
+            expected
         );
     }
 }

@@ -22,10 +22,10 @@ use crate::components::primitives::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::util::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    HistoryEntry, SelectGranularity, extend_range_for_granularity, granularity_for_click,
+    home_target, ime_replace_range, line_end, line_start, marked_caret_range,
+    marked_range_after_delete, next_word_boundary, previous_word_boundary, push_undo_entry,
+    range_for_granularity, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const DEFAULT_MAX_VISIBLE_LINES: usize = 8;
@@ -103,6 +103,7 @@ pub struct TextArea {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     discard_ime_commit: Option<String>,
+    focused_at_prepaint: bool,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -126,7 +127,6 @@ pub struct TextArea {
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    last_edit_kind: Option<EditKind>,
 }
 
 impl EventEmitter<TextAreaEvent> for TextArea {}
@@ -155,6 +155,7 @@ impl TextArea {
             selection_reversed: false,
             marked_range: None,
             discard_ime_commit: None,
+            focused_at_prepaint: false,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
@@ -178,7 +179,6 @@ impl TextArea {
             caret_blink: CaretBlink::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_edit_kind: None,
         };
 
         cx.on_focus(&focus_handle, window, |this, _window, cx| {
@@ -186,6 +186,7 @@ impl TextArea {
         })
         .detach();
         cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.discard_ime_commit = None;
             this.caret_blink.sync_blurred(cx);
         })
         .detach();
@@ -257,6 +258,47 @@ impl TextArea {
         self.content.as_ref()
     }
 
+    pub fn set_placeholder_text(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    pub fn set_single_line(&mut self, single_line: bool, cx: &mut Context<Self>) {
+        self.single_line = single_line;
+        if single_line {
+            self.max_visible_lines = 1;
+        }
+        cx.notify();
+    }
+
+    pub fn set_numeric(&mut self, numeric: bool, cx: &mut Context<Self>) {
+        self.numeric = numeric;
+        cx.notify();
+    }
+
+    pub fn set_min_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        self.min_height = height;
+        cx.notify();
+    }
+
+    /// Replace the content the way a fresh field would start, *without* emitting
+    /// `Change`. For an owner that re-points an existing field at a new question
+    /// (a bot wizard stepping through one message) and writes the new value into
+    /// its own store itself — reusing the entity instead of dropping it keeps the
+    /// element mounted, so the row does not blink through a placeholder frame.
+    pub fn reset_content(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_content(value);
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.marked_range = None;
+        self.clear_history();
+        cx.notify();
+    }
+
     pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.set_content(value);
         let end = self.content.len();
@@ -312,14 +354,12 @@ impl TextArea {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.last_edit_kind = None;
         self.extend_selection(offset, cx);
     }
 
@@ -650,17 +690,12 @@ impl TextArea {
         }
     }
 
-    fn record_history(&mut self, kind: EditKind) {
-        let coalesce = should_coalesce(self.last_edit_kind, kind);
-        self.redo_stack.clear();
-        if !coalesce {
-            self.undo_stack.push(self.history_snapshot());
-            if self.undo_stack.len() > MAX_UNDO_HISTORY {
-                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
-                self.undo_stack.drain(..overflow);
-            }
+    fn record_history(&mut self, before: HistoryEntry) {
+        if before.content == self.content {
+            return;
         }
-        self.last_edit_kind = Some(kind);
+        self.redo_stack.clear();
+        push_undo_entry(&mut self.undo_stack, before);
     }
 
     fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
@@ -669,7 +704,6 @@ impl TextArea {
         self.selected_range = entry.selected_range;
         self.selection_reversed = entry.selection_reversed;
         self.marked_range = None;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -679,7 +713,6 @@ impl TextArea {
     fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -718,16 +751,18 @@ impl TextArea {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let normalized = normalize_pasted(&text);
-        let sanitized = if self.single_line {
-            normalized.replace('\n', " ")
-        } else {
-            normalized
-        };
-        self.replace_text_in_range(None, &sanitized, window, cx);
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            let Some(text) = item.text() else {
+                return;
+            };
+            let normalized = normalize_pasted(&text);
+            let sanitized = if this.single_line {
+                normalized.replace('\n', " ")
+            } else {
+                normalized
+            };
+            this.replace_text_in_range(None, &sanitized, window, cx);
+        });
     }
 
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -793,7 +828,6 @@ impl TextArea {
         self.select_anchor = range.clone();
         self.selection_reversed = false;
         self.selected_range = range;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -824,7 +858,6 @@ impl TextArea {
         }
         self.selected_range = range;
         self.selection_reversed = reversed;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -932,16 +965,10 @@ impl EntityInputHandler for TextArea {
         } else {
             new_text
         };
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
-            EditKind::Insert
-        } else {
-            EditKind::Other
-        };
-        self.record_history(kind);
+        let before = self.history_snapshot();
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         let cursor = self.clamp_offset((range.start + new_text.len()).min(self.content.len()));
         self.selected_range = cursor..cursor;
         if new_text.is_empty() {
@@ -979,11 +1006,10 @@ impl EntityInputHandler for TextArea {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
-        if self.marked_range.is_none() {
-            self.record_history(EditKind::Insert);
-        }
+        let before = self.history_snapshot();
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         if new_text.is_empty() {
             self.marked_range = None;
         } else {
@@ -1190,6 +1216,23 @@ impl IntoElement for TextAreaElement {
     }
 }
 
+fn reveal_on_focus(
+    input: &Entity<TextArea>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let state = input.read(cx);
+    let focused = state.focus_handle.is_focused(window);
+    if focused == state.focused_at_prepaint {
+        return;
+    }
+    input.update(cx, |input, _| input.focused_at_prepaint = focused);
+    if focused {
+        window.request_autoscroll(bounds);
+    }
+}
+
 impl Element for TextAreaElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1226,6 +1269,7 @@ impl Element for TextAreaElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        reveal_on_focus(&self.input, bounds, window, cx);
         let placeholder_color: Hsla = cx.theme().text_muted.into();
         let cursor_color: Hsla = cx.theme().brand.into();
         let selection_color: Hsla = cx.theme().brand.into();

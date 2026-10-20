@@ -1,57 +1,71 @@
 mod audio;
 mod camera;
 pub mod compose;
+mod input_switch;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
+mod noise;
+mod permission;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod pipewire_init;
+mod playback_health;
+mod reconnect;
 mod record;
+pub use reconnect::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 mod runtime;
 mod screen;
 mod screen_audio;
+mod screen_mode;
 mod screen_picker;
 mod screen_previews;
+pub mod screen_recovery;
 mod screen_targets;
+mod sfu;
 mod stream_playback;
 mod video;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::StreamExt;
-use livekit::options::{DegradationPreference, TrackPublishOptions, VideoEncoding};
-use livekit::participant::ParticipantKind;
-use livekit::prelude::*;
-use livekit::track::{
-    LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteVideoTrack, TrackKind, TrackSource,
-};
-use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::peer_connection_factory::IceServer;
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
-use livekit::webrtc::stats::RtcStats;
-use livekit::webrtc::video_frame::I420Buffer;
-use livekit::webrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::audio_source::native::NativeAudioSource;
+use libwebrtc::audio_stream::native::NativeAudioStream;
+use libwebrtc::audio_track::RtcAudioTrack;
+use libwebrtc::peer_connection_factory::PeerConnectionFactory;
+use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
+use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, VideoBuffer};
+use libwebrtc::video_frame::I420Buffer;
+use libwebrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::video_track::{ContentHint, RtcVideoTrack};
 use parking_lot::{Condvar, Mutex};
 
-pub use audio::{AudioFormat, AudioIo, DeviceResetKind, PlaybackMixer};
+use sfu::{SfuConfig, SfuEngine, SfuEvent, SfuPeer};
+
+pub use audio::{
+    AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
+};
 pub use camera::{
-    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
-    start_camera_into,
+    CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
+pub use permission::{
+    MediaDevice, MediaPermission, media_permission, media_permission_changes,
+    media_privacy_settings_url, request_media_permission, running_packaged,
+};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::sdp::stabilize_inactive_video_sections;
+pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
-    audio::microphone_denied()
+    media_permission(MediaDevice::Microphone) == MediaPermission::Denied
 }
 
 pub fn record_supported() -> bool {
@@ -62,28 +76,27 @@ pub fn record_file_extension() -> &'static str {
     mezon_record::file_extension()
 }
 
+pub use screen_mode::ScreenShareMode;
 pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,
-    peek_screen_share_options,
+    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
-pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key};
+pub use video::{
+    VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+};
 
 use crate::screen::ScreenStopper;
-use crate::video::{local_screen_key, track_frame_key};
+use crate::video::local_screen_key;
 
+const FRAME_PATH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
 const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
-const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-const MIC_EGRESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const MIC_EGRESS_PUBLISH_GRACE: Duration = Duration::from_secs(3);
-const MIC_EGRESS_STALL_LIMIT: u32 = 3;
-const MIC_CAPTURE_SILENT_LIMIT: u32 = 3;
 const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
 const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
@@ -92,6 +105,35 @@ pub struct IceServerConfig {
     pub urls: Vec<String>,
     pub username: String,
     pub credential: String,
+}
+
+pub const MEET_TOKEN_RETRY_LIMIT: u32 = 3;
+
+#[derive(Clone)]
+pub struct TokenRefresher(
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, Option<String>> + Send + Sync>,
+);
+
+impl TokenRefresher {
+    pub fn new<F, Fut>(mint: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Option<String>> + Send + 'static,
+    {
+        Self(Arc::new(move || {
+            Box::pin(mint()) as futures::future::BoxFuture<'static, Option<String>>
+        }))
+    }
+
+    pub(crate) async fn mint(&self) -> Option<String> {
+        (self.0)().await
+    }
+}
+
+impl std::fmt::Debug for TokenRefresher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenRefresher(..)")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -105,10 +147,14 @@ pub enum NetworkQuality {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceParticipant {
+    pub session_id: String,
     pub identity: String,
     pub name: String,
+    pub metadata_name: String,
+    pub metadata_avatar: String,
     pub is_local: bool,
     pub is_agent: bool,
+    pub is_audience: bool,
     pub speaking: bool,
     pub muted: bool,
     pub camera: Option<u64>,
@@ -118,26 +164,56 @@ pub struct VoiceParticipant {
 
 #[derive(Clone, Debug)]
 pub enum VoiceEvent {
-    Connected { room_name: String },
+    Connected {
+        room_name: String,
+    },
+    RoomSnapshot,
     Reconnecting,
     Reconnected,
     NetworkWeak,
     NetworkRecovered,
-    DeviceResetToDefault { input: bool },
-    Disconnected { reason: String },
+    DeviceResetToDefault {
+        input: bool,
+    },
+    InputDeviceChangeFailed {
+        requested: Option<String>,
+        retained: Option<String>,
+        error: String,
+    },
+    Disconnected {
+        reason: String,
+    },
     Participants(Vec<VoiceParticipant>),
+    PushToTalkActive(bool),
+    RemovedFromChannel {
+        cause: RemovalCause,
+        reason: String,
+    },
+    MutedByModerator,
+    MediaRefused(MediaRefusal),
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
+    NoiseSuppressionReady {
+        generation: u64,
+        result: std::result::Result<(), String>,
+    },
     Error(String),
 }
 
 enum Command {
     SetMicEnabled(bool),
+    SetNoiseSuppression { enabled: bool, generation: u64 },
     SetCameraEnabled(bool),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetCameraDevice(Option<String>),
-    SetNoiseSuppression(bool, u8),
-    StartScreenShare(PickedScreen, bool),
+    StartScreenShare(PickedScreen, bool, ScreenShareMode),
+    SetScreenShareMode(ScreenShareMode),
     StopScreenShare,
+    PushToTalk(bool),
+    ParticipantAction(String),
+    SendRoomMessage(String),
     Disconnect,
 }
 
@@ -151,15 +227,37 @@ pub struct VoiceSession {
     record: Arc<parking_lot::RwLock<Option<record::RecordSession>>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct VoiceConnectOptions {
+    pub url: String,
+    pub token: String,
+    pub room: String,
+    pub role: SfuRole,
+    pub local_user_id: String,
+    pub mic_enabled: bool,
+    pub input_device_id: Option<String>,
+    pub output_device_id: Option<String>,
+    pub camera_device_id: Option<String>,
+    pub ice_servers: Vec<IceServerConfig>,
+    pub refresh_token: Option<TokenRefresher>,
+}
+
 impl VoiceSession {
-    pub fn connect(
-        url: String,
-        token: String,
-        input_device_id: Option<String>,
-        output_device_id: Option<String>,
-        camera_device_id: Option<String>,
-        ice_servers: Vec<IceServerConfig>,
-    ) -> Self {
+    pub fn connect(options: VoiceConnectOptions) -> Self {
+        let VoiceConnectOptions {
+            url,
+            token,
+            room,
+            role,
+            local_user_id,
+            mic_enabled,
+            input_device_id,
+            output_device_id,
+            camera_device_id,
+            ice_servers,
+            refresh_token,
+        } = options;
+        let start_unmuted = mic_enabled && !role.is_audience();
         let (cmd_tx, cmd_rx) = flume::unbounded();
         let (evt_tx, evt_rx) = flume::unbounded();
         let frame_store = Arc::new(VideoFrameStore::default());
@@ -172,12 +270,21 @@ impl VoiceSession {
         let record_taps_task = record_taps.clone();
         runtime::runtime().spawn(async move {
             if let Err(e) = session_main(
-                url,
-                token,
+                SfuConfig {
+                    screen_views: store.screen_views.clone(),
+                    ws_url: url,
+                    token,
+                    room,
+                    role,
+                    muted: !start_unmuted,
+                    fallback_ice_servers: ice_servers,
+                    refresh_token,
+                },
+                local_user_id,
+                start_unmuted,
                 input_device_id,
                 output_device_id,
                 camera_device_id,
-                ice_servers,
                 cmd_rx,
                 &evt_tx,
                 store,
@@ -251,6 +358,13 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetMicEnabled(enabled));
     }
 
+    pub fn set_noise_suppression(&self, enabled: bool, generation: u64) {
+        let _ = self.cmd_tx.send(Command::SetNoiseSuppression {
+            enabled,
+            generation,
+        });
+    }
+
     pub fn set_camera_enabled(&self, enabled: bool) {
         let _ = self.cmd_tx.send(Command::SetCameraEnabled(enabled));
     }
@@ -267,20 +381,30 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
-    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
+    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool, mode: ScreenShareMode) {
         let _ = self
             .cmd_tx
-            .send(Command::SetNoiseSuppression(enabled, level));
+            .send(Command::StartScreenShare(pick, share_audio, mode));
     }
 
-    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool) {
-        let _ = self
-            .cmd_tx
-            .send(Command::StartScreenShare(pick, share_audio));
+    pub fn set_screen_share_mode(&self, mode: ScreenShareMode) {
+        let _ = self.cmd_tx.send(Command::SetScreenShareMode(mode));
     }
 
     pub fn stop_screen_share(&self) {
         let _ = self.cmd_tx.send(Command::StopScreenShare);
+    }
+
+    pub fn set_push_to_talk(&self, active: bool) {
+        let _ = self.cmd_tx.send(Command::PushToTalk(active));
+    }
+
+    pub fn participant_action(&self, token: String) {
+        let _ = self.cmd_tx.send(Command::ParticipantAction(token));
+    }
+
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(Command::SendRoomMessage(message));
     }
 
     pub fn set_screen_full_res(&self, full_res: bool) {
@@ -295,327 +419,146 @@ impl Drop for VoiceSession {
 }
 
 struct CameraSession {
-    track: LocalVideoTrack,
+    track: RtcVideoTrack,
     controller: CameraController,
 }
 
 struct ScreenSession {
-    track: LocalVideoTrack,
+    track: sfu::ScreenTrack,
     stopper: ScreenStopper,
     audio: Option<ScreenAudioSession>,
 }
 
 struct ScreenAudioSession {
-    track: LocalAudioTrack,
     _capture: screen_audio::ScreenAudioCapture,
     pump: tokio::task::JoinHandle<()>,
 }
 
 impl ScreenSession {
-    async fn stop(self, room: &Room) {
+    fn stop(self) {
         self.stopper.stop();
-        let _ = room
-            .local_participant()
-            .unpublish_track(&self.track.sid())
-            .await;
         if let Some(audio) = self.audio {
             audio.pump.abort();
-            let _ = room
-                .local_participant()
-                .unpublish_track(&audio.track.sid())
-                .await;
         }
     }
 }
 
-fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
-    let ice_servers: Vec<IceServer> = ice_servers
-        .into_iter()
-        .filter(|s| !s.urls.is_empty())
-        .map(|s| IceServer {
-            urls: s.urls,
-            username: s.username,
-            password: s.credential,
-        })
-        .collect();
+const UPLINK_SAMPLE_RATE: u32 = 48_000;
+const UPLINK_CHANNELS: u32 = 1;
 
-    let mut options = RoomOptions::default();
-    options.adaptive_stream = true;
-    options.dynacast = true;
-    options.rtc_config.ice_servers = ice_servers;
-    options
-}
+const SCREEN_AUDIO_BACKLOG_LIMIT: usize = UPLINK_SAMPLE_RATE as usize;
+const SCREEN_AUDIO_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const UPLINK_TICK: Duration = Duration::from_millis(10);
+const UPLINK_TICK_SAMPLES: usize = (UPLINK_SAMPLE_RATE / 100) as usize;
+const MICROPHONE_SILENCE_GRACE: Duration = Duration::from_millis(30);
+
+type ScreenAudioBus = Arc<Mutex<std::collections::VecDeque<i16>>>;
+
+const LOCAL_AUDIO_KEY: u64 = 0x10_CA1A_0D10;
+const SPEAKING_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 #[allow(clippy::too_many_arguments)]
 async fn session_main(
-    url: String,
-    token: String,
+    sfu_config: SfuConfig,
+    local_user_id: String,
+    start_unmuted: bool,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
-    ice_servers: Vec<IceServerConfig>,
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
     screen_full_res: Arc<AtomicBool>,
     session_record_taps: record::RecordTaps,
 ) -> Result<()> {
-    let options = room_options(ice_servers);
-    let (room, mut room_events) = Room::connect(&url, &token, options).await?;
-    let room = Arc::new(room);
-    tracing::info!("voice connected to room: {}", room.name());
-    let local_identity = room.local_participant().identity().as_str().to_string();
-    let _ = evt_tx.send(VoiceEvent::Connected {
-        room_name: room.name(),
-    });
+    let role = sfu_config.role;
+    let factory = PeerConnectionFactory::default();
 
-    let mic_enabled = Arc::new(AtomicBool::new(false));
-    let mic_publication: Arc<Mutex<Option<LocalTrackPublication>>> = Arc::new(Mutex::new(None));
-    let mut audio_mixer = None;
+    let (sfu_tx, sfu_rx) = flume::unbounded::<SfuEvent>();
+    let (engine, engine_task) = SfuEngine::spawn(sfu_config, factory.clone(), sfu_tx);
+
+    let mic_enabled = Arc::new(AtomicBool::new(start_unmuted));
+    let noise = noise::NoiseProcessor::start(evt_tx.clone());
+    let speaking = Arc::new(audio::SpeakingLevels::default());
+    let screen_audio_bus: ScreenAudioBus = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let mut audio_mixer: Option<Arc<audio::PlaybackMixer>> = None;
     let mut record_taps: Option<record::RecordTaps> = None;
-    let mut out_fmt = None;
+    let mut out_fmt: Option<AudioFormat> = None;
     let mut audio_io: Option<audio::AudioIo> = None;
     let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
     let mut device_reset_rx: Option<flume::Receiver<audio::DeviceResetKind>> = None;
     let mut microphone_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut uplink_source_control: Option<NativeAudioSource> = None;
 
-    let audio = tokio::task::spawn_blocking(move || {
-        audio::AudioIo::start(input_device_id, output_device_id, session_record_taps)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("audio init task failed: {e}"))?;
+    let opening_input_device = input_device_id.clone();
+    let opening_output_device = output_device_id.clone();
+    let mut wanted_input_device = opening_input_device.clone();
+    let mut wanted_output_device = opening_output_device.clone();
 
-    match audio {
-        Ok(audio) => {
-            audio_mixer = Some(audio.mixer.clone());
-            out_fmt = Some(audio.output_format);
-            out_change_rx = Some(audio.output_format_rx.clone());
-            device_reset_rx = Some(audio.device_reset_rx.clone());
-
-            record_taps = Some(audio.mixer.record_taps());
-
-            let mic_enabled = mic_enabled.clone();
-            let mic_publication_task = mic_publication.clone();
-            let mic_record_taps = audio.mixer.record_taps();
-            let mic_rx = audio.mic_rx.clone();
-            let input_format_rx = audio.input_format_rx.clone();
-            let room_for_mic = room.clone();
-            microphone_task = Some(runtime::runtime().spawn(async move {
-                let mut source: Option<NativeAudioSource> = None;
-                let mut channels: u32 = 1;
-                let mut sample_rate: u32 = 48_000;
-                let mut current_in_fmt: Option<AudioFormat> = None;
-                let mut last_publish_attempt: Option<Instant> = None;
-                let mut egress_timer = tokio::time::interval(MIC_EGRESS_POLL_INTERVAL);
-                egress_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let mut last_egress_packets: u64 = 0;
-                let mut egress_stall_polls: u32 = 0;
-                let mut frames_since_poll: u64 = 0;
-                let mut egress_recovering = false;
-                let mut egress_grace_until: Option<Instant> = None;
-                let mut silent_capture_polls: u32 = 0;
-                loop {
-                    tokio::select! {
-                        biased;
-                        reconfigure = input_format_rx.recv_async() => {
-                            let Ok(in_fmt) = reconfigure else { break };
-                            current_in_fmt = Some(in_fmt);
-                            last_publish_attempt = Some(Instant::now());
-                            match publish_microphone_track(
-                                &room_for_mic,
-                                &mic_publication_task,
-                                &mic_enabled,
-                                in_fmt,
-                            )
-                            .await
-                            {
-                                Ok(new_source) => {
-                                    channels = new_source.channels;
-                                    sample_rate = new_source.sample_rate;
-                                    source = Some(new_source.source);
-                                    last_egress_packets = 0;
-                                    egress_stall_polls = 0;
-                                    egress_grace_until =
-                                        Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                                }
-                                Err(e) => {
-                                    tracing::warn!("failed to publish mic track: {e:#}");
-                                    source = None;
-                                }
-                            }
-                        }
-                        captured = mic_rx.recv_async() => {
-                            let Ok(samples) = captured else { break };
-                            if !mic_enabled.load(Ordering::Relaxed) {
-                                continue;
-                            }
-                            if let Some(in_fmt) = current_in_fmt {
-                                mic_record_taps.push(
-                                    mezon_record::AudioSource::Mic,
-                                    &samples,
-                                    in_fmt.sample_rate,
-                                    in_fmt.channels,
-                                );
-                            }
-                            if source.is_none()
-                                && last_publish_attempt
-                                    .is_none_or(|at| at.elapsed() >= MIC_PUBLISH_RETRY_INTERVAL)
-                                && let Some(in_fmt) = current_in_fmt
-                            {
-                                last_publish_attempt = Some(Instant::now());
-                                match publish_microphone_track(
-                                    &room_for_mic,
-                                    &mic_publication_task,
-                                    &mic_enabled,
-                                    in_fmt,
-                                )
-                                .await
-                                {
-                                    Ok(new_source) => {
-                                        channels = new_source.channels;
-                                        sample_rate = new_source.sample_rate;
-                                        source = Some(new_source.source);
-                                        last_egress_packets = 0;
-                                        egress_stall_polls = 0;
-                                        egress_grace_until =
-                                            Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("failed to retry mic track publish: {e:#}");
-                                    }
-                                }
-                            }
-                            let Some(mic_source) = source.as_ref() else {
-                                continue;
-                            };
-                            let samples_per_channel = samples.len() as u32 / channels;
-                            if samples_per_channel == 0 {
-                                continue;
-                            }
-                            let frame = AudioFrame {
-                                data: samples.into(),
-                                num_channels: channels,
-                                sample_rate,
-                                samples_per_channel,
-                            };
-                            if let Err(e) = mic_source.capture_frame(&frame).await {
-                                tracing::warn!("failed to capture mic frame: {e}");
-                                source = None;
-                            } else {
-                                frames_since_poll += 1;
-                            }
-                        }
-                        _ = egress_timer.tick() => {
-                            let fed = std::mem::take(&mut frames_since_poll);
-                            if !mic_enabled.load(Ordering::Relaxed) || source.is_none() {
-                                egress_stall_polls = 0;
-                                silent_capture_polls = 0;
-                                continue;
-                            }
-                            if egress_grace_until.is_some_and(|until| Instant::now() < until) {
-                                continue;
-                            }
-                            if fed == 0 {
-                                egress_stall_polls = 0;
-                                silent_capture_polls += 1;
-                                if silent_capture_polls == MIC_CAPTURE_SILENT_LIMIT {
-                                    tracing::warn!(
-                                        "voice mic is unmuted but no captured audio is reaching the encoder"
-                                    );
-                                }
-                                continue;
-                            }
-                            silent_capture_polls = 0;
-                            let track = mic_publication_task
-                                .lock()
-                                .as_ref()
-                                .and_then(|publication| publication.track());
-                            let Some(LocalTrack::Audio(track)) = track else {
-                                continue;
-                            };
-                            let packets = match tokio::time::timeout(
-                                Duration::from_millis(500),
-                                track.get_stats(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(stats)) => outbound_audio_packets_sent(&stats),
-                                _ => continue,
-                            };
-                            if packets > last_egress_packets {
-                                last_egress_packets = packets;
-                                egress_stall_polls = 0;
-                                if egress_recovering {
-                                    tracing::info!("voice mic egress recovered after republish");
-                                    egress_recovering = false;
-                                }
-                                continue;
-                            }
-                            egress_stall_polls += 1;
-                            if egress_stall_polls < MIC_EGRESS_STALL_LIMIT {
-                                continue;
-                            }
-                            tracing::warn!(
-                                packets_sent = packets,
-                                "voice mic published but no RTP egress while unmuted; republishing track"
-                            );
-                            source = None;
-                            last_publish_attempt = None;
-                            egress_stall_polls = 0;
-                            egress_recovering = true;
-                            egress_grace_until = Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                        }
-                    }
-                }
-            }));
-
-            audio_io = Some(audio);
+    let (audio_ready_tx, audio_ready_rx) = flume::bounded::<Result<audio::AudioIo>>(1);
+    let mut audio_ready_rx = Some(audio_ready_rx);
+    let noise_requested = noise.requested();
+    let noise_ready = noise.ready();
+    runtime::runtime().spawn(async move {
+        let started = tokio::task::spawn_blocking(move || {
+            audio::AudioIo::start_with_noise(
+                input_device_id,
+                output_device_id,
+                session_record_taps,
+                noise_requested,
+                noise_ready,
+            )
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("audio init task failed: {e}")));
+        if let Err(flume::SendError(Ok(io))) = audio_ready_tx.send_async(started).await {
+            let _ = tokio::task::spawn_blocking(move || drop(io)).await;
         }
-        Err(e) => {
-            tracing::error!("voice audio unavailable: {e:#}");
-            let _ = evt_tx.send(VoiceEvent::Error(format!(
-                "audio unavailable (no microphone or playback): {e}"
-            )));
-        }
-    }
+    });
 
-    let mut mic_on = false;
+    let mut mic_on = start_unmuted;
+    let mut ptt_on = false;
     let mut camera_device_id = camera_device_id;
     let mut camera_switch_pending = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
+    let mut screen_mode = ScreenShareMode::default();
     let (cam_tx, cam_rx) = flume::bounded::<(u64, Result<CameraSession>)>(1);
     let (screen_tx, screen_rx) = flume::bounded::<(u64, Result<ScreenSession>)>(1);
     let mut camera_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut screen_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut camera_gen: u64 = 0;
     let mut screen_gen: u64 = 0;
-    let mut audio_tracks: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut audio_tracks: HashMap<u64, PlaybackTask> = HashMap::new();
     let mut video_tracks: HashMap<u64, VideoTrackHandle> = HashMap::new();
+    let mut remote_audio: HashMap<u64, RtcAudioTrack> = HashMap::new();
 
+    let mut peers: Vec<SfuPeer> = Vec::new();
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
-    let emit = |room: &Room,
-                mic: bool,
-                camera: &Option<CameraSession>,
-                screen: &Option<ScreenSession>,
-                last: &mut Vec<VoiceParticipant>| {
-        emit_participants(
-            room,
-            evt_tx,
-            &local_identity,
-            mic,
-            camera.is_some(),
-            screen.is_some(),
-            last,
-        );
-    };
-    emit(
-        &room,
-        mic_on,
-        &camera_session,
-        &screen_session,
-        &mut last_participants,
-    );
+    let mut playback_health_tick = tokio::time::interval(Duration::from_secs(5));
+    playback_health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut speaking_tick = tokio::time::interval(SPEAKING_POLL_INTERVAL);
+    speaking_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame_path_tick = tokio::time::interval(FRAME_PATH_LOG_INTERVAL);
+    frame_path_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    macro_rules! emit {
+        () => {
+            emit_participants(
+                evt_tx,
+                &local_user_id,
+                role,
+                &peers,
+                &speaking,
+                mic_on,
+                camera_session.is_some(),
+                screen_session.is_some(),
+                &mut last_participants,
+            )
+        };
+    }
+
+    emit!();
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let trim_task = runtime::runtime().spawn(async {
@@ -629,53 +572,50 @@ async fn session_main(
 
     loop {
         tokio::select! {
-            event = room_events.recv() => {
-                let Some(event) = event else { break };
+            event = sfu_rx.recv_async() => {
+                let Ok(event) = event else { break };
                 match event {
-                    RoomEvent::TrackSubscribed { track, publication, participant } => {
-                        match track {
-                            RemoteTrack::Audio(audio_track) => {
-                                // Screen-share audio and a plain microphone are
-                                // the same kind of remote track here, so the
-                                // source is the only way to tell from a log
-                                // whether the shared sound ever reached the mix
-                                // the recorder tees from.
-                                tracing::info!(
-                                    "playing remote {:?} audio from {}",
-                                    publication.source(),
-                                    participant.identity().as_str()
-                                );
-                                if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
-                                    let key = track_frame_key(participant.identity().as_str(), audio_track.sid().as_str());
-                                    if let Some(handle) = audio_tracks.remove(&key) {
-                                        handle.abort();
-                                    }
-                                    let handle = spawn_playback(audio_track, key, mixer.clone(), out_fmt);
-                                    audio_tracks.insert(key, handle);
-                                }
-                            }
-                            RemoteTrack::Video(video_track) => {
-                                let key = track_frame_key(participant.identity().as_str(), video_track.sid().as_str());
-                                if let Some(handle) = video_tracks.remove(&key) {
-                                    handle.stop();
-                                }
-                                let handle = spawn_video(video_track, key, frame_store.clone());
-                                video_tracks.insert(key, handle);
-                            }
-                        }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                    SfuEvent::Connected { room } => {
+                        let _ = evt_tx.send(VoiceEvent::Connected { room_name: room });
                     }
-                    RoomEvent::TrackUnsubscribed { track, participant, .. } => {
-                        let key = track_frame_key(participant.identity().as_str(), track.sid().as_str());
-                        if let Some(handle) = audio_tracks.remove(&key) {
-                            handle.abort();
+                    SfuEvent::Peers(next) => {
+                        peers = next;
+                        emit!();
+                    }
+                    SfuEvent::RoomSnapshot => {
+                        let _ = evt_tx.send(VoiceEvent::RoomSnapshot);
+                    }
+                    SfuEvent::RemoteAudio { key, track, recovery } => {
+                        remote_audio.insert(key, track.clone());
+                        if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
+                            let health = if let Some(task) = audio_tracks.remove(&key) {
+                                task.handle.abort();
+                                let _ = task.handle.await;
+                                recovery.then_some(task.health)
+                            } else {
+                                None
+                            };
+                            mixer.remove(key);
+                            speaking.forget(key);
+                            let handle =
+                                spawn_playback(track, key, mixer.clone(), out_fmt, speaking.clone(), health);
+                            audio_tracks.insert(key, handle);
                         }
+                    }
+                    SfuEvent::RemoteVideo { key, stream, receipt } => {
+                        if let Some(handle) = video_tracks.remove(&key) {
+                            handle.stop();
+                        }
+                        let handle = spawn_video(stream, key, frame_store.clone(), receipt);
+                        video_tracks.insert(key, handle);
+                    }
+                    SfuEvent::RemoteGone { key } => {
+                        remote_audio.remove(&key);
+                        if let Some(task) = audio_tracks.remove(&key) {
+                            task.handle.abort();
+                            let _ = task.handle.await;
+                        }
+                        speaking.forget(key);
                         if let Some(handle) = video_tracks.remove(&key) {
                             handle.stop();
                         }
@@ -683,120 +623,142 @@ async fn session_main(
                             mixer.remove(key);
                         }
                         frame_store.remove(key);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
                     }
-                    RoomEvent::ConnectionQualityChanged { quality, participant } => {
-                        if participant.identity().as_str() == local_identity {
-                            match quality {
-                                ConnectionQuality::Excellent | ConnectionQuality::Good => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
-                                }
-                                ConnectionQuality::Poor | ConnectionQuality::Lost => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkWeak);
-                                }
-                            }
+                    SfuEvent::PttActive(active) => {
+                        ptt_on = active;
+                        mic_on = active;
+                        noise.reset();
+                        mic_enabled.store(active, Ordering::Relaxed);
+                        if let Some(io) = &audio_io {
+                            io.set_input_active(active);
                         }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        let _ = evt_tx.send(VoiceEvent::PushToTalkActive(active));
+                        emit!();
                     }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Reconnecting) => {
+                    SfuEvent::NetworkWeak(weak) => {
+                        let _ = evt_tx.send(if weak {
+                            VoiceEvent::NetworkWeak
+                        } else {
+                            VoiceEvent::NetworkRecovered
+                        });
+                    }
+                    SfuEvent::Reconnecting => {
+                        for (key, task) in audio_tracks.drain() {
+                            task.handle.abort();
+                            let _ = task.handle.await;
+                            if let Some(mixer) = &audio_mixer {
+                                mixer.remove(key);
+                            }
+                            speaking.forget(key);
+                        }
+                        remote_audio.clear();
+                        for (key, handle) in video_tracks.drain() {
+                            handle.stop();
+                            frame_store.remove(key);
+                        }
                         let _ = evt_tx.send(VoiceEvent::Reconnecting);
                     }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Connected) => {
+                    SfuEvent::Reconnected => {
                         let _ = evt_tx.send(VoiceEvent::Reconnected);
                     }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Disconnected) => {}
-                    RoomEvent::Reconnecting => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnecting);
+                    SfuEvent::Removed { cause, reason } => {
+                        let _ = evt_tx.send(VoiceEvent::RemovedFromChannel { cause, reason });
                     }
-                    RoomEvent::Reconnected => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnected);
+                    SfuEvent::MutedByModerator => {
+                        mic_on = false;
+                        noise.reset();
+                        mic_enabled.store(false, Ordering::Relaxed);
+                        if let Some(io) = &audio_io {
+                            io.set_input_active(false);
+                        }
+                        emit!();
+                        let _ = evt_tx.send(VoiceEvent::MutedByModerator);
                     }
-                    RoomEvent::Disconnected { reason } => {
-                        let _ = evt_tx.send(VoiceEvent::Disconnected { reason: format!("{reason:?}") });
+                    SfuEvent::MediaRefused(refusal) => {
+                        let _ = evt_tx.send(VoiceEvent::MediaRefused(refusal));
+                    }
+                    SfuEvent::RoomMessage(message) => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessage(message));
+                    }
+                    SfuEvent::RoomMessageSent => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageSent);
+                    }
+                    SfuEvent::RoomMessageFailed => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageFailed);
+                    }
+                    SfuEvent::Error(message) => {
+                        let _ = evt_tx.send(VoiceEvent::Error(message));
+                    }
+                    SfuEvent::Disconnected { reason } => {
+                        let _ = evt_tx.send(VoiceEvent::Disconnected { reason });
                         break;
                     }
-                    RoomEvent::ParticipantConnected(..)
-                    | RoomEvent::ParticipantActive(..)
-                    | RoomEvent::ParticipantDisconnected(..)
-                    | RoomEvent::TrackPublished { .. }
-                    | RoomEvent::TrackUnpublished { .. }
-                    | RoomEvent::TrackMuted { .. }
-                    | RoomEvent::TrackUnmuted { .. }
-                    | RoomEvent::ActiveSpeakersChanged { .. }
-                    | RoomEvent::ParticipantNameChanged { .. }
-                    | RoomEvent::ParticipantsUpdated { .. } => {
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                    }
-                    _ => {}
                 }
             }
             command = cmd_rx.recv_async() => {
                 match command {
+                    Ok(Command::SetNoiseSuppression { enabled, generation }) => {
+                        if let Some(source) = &uplink_source_control {
+                            source.clear_buffer();
+                        }
+                        noise.set_enabled(enabled, generation);
+                    }
                     Ok(Command::SetMicEnabled(enabled)) => {
+                        if role.is_audience() {
+                            continue;
+                        }
                         mic_on = enabled;
+                        noise.reset();
                         mic_enabled.store(enabled, Ordering::Relaxed);
                         if let Some(io) = &audio_io {
                             io.set_input_active(enabled);
                         }
-                        if let Some(publication) = mic_publication.lock().as_ref() {
-                            if enabled {
-                                publication.unmute();
-                            } else {
-                                publication.mute();
-                            }
-                        }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        engine.set_mute(!enabled);
+                        emit!();
                     }
-                    Ok(Command::SetNoiseSuppression(enabled, level)) => {
-                        if let Some(io) = &audio_io {
-                            io.set_noise_suppression(enabled, level);
+                    Ok(Command::PushToTalk(active)) => {
+                        if !role.is_audience() {
+                            continue;
+                        }
+                        engine.push_to_talk(active);
+                        if !active && ptt_on {
+                            ptt_on = false;
+                            mic_on = false;
+                            noise.reset();
+                            mic_enabled.store(false, Ordering::Relaxed);
+                            if let Some(io) = &audio_io {
+                                io.set_input_active(false);
+                            }
+                            emit!();
                         }
                     }
                     Ok(Command::SetCameraEnabled(true)) => {
+                        if role.is_audience() {
+                            continue;
+                        }
                         if camera_session.is_none() && camera_task.is_none() {
                             camera_switch_pending = false;
-                            let room = room.clone();
-                            let identity = local_identity.clone();
+                            let factory = factory.clone();
+                            let identity = local_user_id.clone();
                             let store = frame_store.clone();
                             let tx = cam_tx.clone();
                             let generation = camera_gen;
                             let device = camera_device_id.clone();
                             camera_task = Some(runtime::runtime().spawn(async move {
-                                let result = start_camera_track(&room, &identity, store, device).await;
+                                let result = start_camera_track(&factory, &identity, store, device).await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
                         }
                     }
                     Ok(Command::SetInputDevice(id)) => {
+                        wanted_input_device = id.clone();
+                        noise.reset();
                         if let Some(io) = &audio_io {
                             io.set_input_device(id);
                         }
                     }
                     Ok(Command::SetOutputDevice(id)) => {
+                        wanted_output_device = id.clone();
                         if let Some(io) = &audio_io {
                             io.set_output_device(id);
                         }
@@ -821,36 +783,45 @@ async fn session_main(
                         }
                         if let Some(session) = camera_session.take() {
                             session.controller.stop();
-                            let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
-                            frame_store.remove(local_camera_key(&local_identity));
+                            engine.set_local_camera(None);
+                            engine.set_camera_active(false);
+                            frame_store.remove(local_camera_key(&local_user_id));
                             changed = true;
                         }
                         if changed {
-                            emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                            emit!();
                         }
                     }
-                    Ok(Command::StartScreenShare(pick, share_audio)) => {
+                    Ok(Command::StartScreenShare(pick, share_audio, mode)) => {
+                        if role.is_audience() {
+                            continue;
+                        }
+                        screen_mode = mode;
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
-                            let room = room.clone();
-                            let identity = local_identity.clone();
+                            let factory = factory.clone();
+                            let identity = local_user_id.clone();
                             let store = frame_store.clone();
                             let full_res = screen_full_res.clone();
                             let tx = screen_tx.clone();
                             let generation = screen_gen;
                             let taps = record_taps.clone();
                             let events = evt_tx.clone();
+                            let bus = screen_audio_bus.clone();
                             screen_task = Some(runtime::runtime().spawn(async move {
-                                let result =
-                                    start_screen_track(&room, &identity, store, full_res, pick, share_audio, taps, events).await;
+                                let result = start_screen_track(
+                                    &factory, &identity, store, full_res, pick, share_audio, mode, taps, events,
+                                    bus,
+                                )
+                                .await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
+                        }
+                    }
+                    Ok(Command::SetScreenShareMode(mode)) => {
+                        screen_mode = mode;
+                        if let Some(session) = screen_session.as_mut() {
+                            apply_screen_share_mode(session, mode, &engine);
                         }
                     }
                     Ok(Command::StopScreenShare) => {
@@ -861,21 +832,22 @@ async fn session_main(
                             changed = true;
                         }
                         if let Some(session) = screen_session.take() {
-                            session.stop(&room).await;
-                            frame_store.remove(local_screen_key(&local_identity));
+                            session.stop();
+                            engine.set_local_screen(None);
+                            engine.set_screen_audio(false);
+                            engine.set_screen_active(false);
+                            screen_audio_bus.lock().clear();
+                            frame_store.remove(local_screen_key(&local_user_id));
                             changed = true;
                         }
                         if changed {
-                            emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                            emit!();
                         }
                     }
+                    Ok(Command::ParticipantAction(token)) => engine.participant_action(token),
+                    Ok(Command::SendRoomMessage(message)) => engine.send_room_message(message),
                     Ok(Command::Disconnect) | Err(_) => {
+                        engine.close();
                         abort_task(&mut microphone_task).await;
                         shutdown_audio_io(&mut audio_io).await;
                         if let Some(task) = camera_task.take() {
@@ -888,12 +860,8 @@ async fn session_main(
                             session.controller.stop();
                         }
                         if let Some(session) = screen_session.take() {
-                            session.stopper.stop();
-                            if let Some(audio) = &session.audio {
-                                audio.pump.abort();
-                            }
+                            session.stop();
                         }
-                        let _ = room.close().await;
                         let _ = evt_tx.send(VoiceEvent::Disconnected { reason: "left".into() });
                         break;
                     }
@@ -907,20 +875,15 @@ async fn session_main(
                             camera_switch_pending = false;
                             session.controller.switch(camera_device_id.clone());
                         }
+                        engine.set_local_camera(Some(session.track.clone()));
+                        engine.set_camera_active(true);
                         camera_session = Some(session);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        emit!();
                     }
                     Ok((_, Ok(session))) => {
                         session.controller.stop();
-                        let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
                         if camera_session.is_none() {
-                            frame_store.remove(local_camera_key(&local_identity));
+                            frame_store.remove(local_camera_key(&local_user_id));
                         }
                     }
                     Ok((generation, Err(e))) if generation == camera_gen => {
@@ -934,21 +897,21 @@ async fn session_main(
             }
             result = screen_rx.recv_async() => {
                 match result {
-                    Ok((generation, Ok(session))) if generation == screen_gen => {
+                    Ok((generation, Ok(mut session))) if generation == screen_gen => {
                         screen_task = None;
+                        if session.track.mode != screen_mode {
+                            apply_screen_share_mode(&mut session, screen_mode, &engine);
+                        }
+                        engine.set_local_screen(Some(session.track.clone()));
+                        engine.set_screen_audio(session.audio.is_some());
+                        engine.set_screen_active(true);
                         screen_session = Some(session);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        emit!();
                     }
                     Ok((_, Ok(session))) => {
-                        session.stop(&room).await;
+                        session.stop();
                         if screen_session.is_none() {
-                            frame_store.remove(local_screen_key(&local_identity));
+                            frame_store.remove(local_screen_key(&local_user_id));
                         }
                     }
                     Ok((generation, Err(e))) if generation == screen_gen => {
@@ -960,35 +923,516 @@ async fn session_main(
                     Err(_) => {}
                 }
             }
+            ready = recv_audio_ready(&audio_ready_rx) => {
+                audio_ready_rx = None;
+                match ready {
+                    Some(Ok(audio)) => {
+                        audio_mixer = Some(audio.mixer.clone());
+                        out_fmt = Some(audio.output_format);
+                        out_change_rx = Some(audio.output_format_rx.clone());
+                        device_reset_rx = Some(audio.device_reset_rx.clone());
+                        record_taps = Some(audio.mixer.record_taps());
+
+                        let uplink_source = NativeAudioSource::new(
+                            AudioSourceOptions::default(),
+                            UPLINK_SAMPLE_RATE,
+                            UPLINK_CHANNELS,
+                            AUDIO_SOURCE_QUEUE_SIZE_MS,
+                        );
+                        let uplink_track =
+                            factory.create_audio_track("microphone", uplink_source.clone());
+                        engine.set_local_audio(Some(uplink_track));
+                        uplink_source_control = Some(uplink_source.clone());
+
+                        microphone_task = Some(runtime::runtime().spawn(uplink_pump(
+                            audio.mic_rx.clone(),
+                            audio.input_format_rx.clone(),
+                            uplink_source,
+                            mic_enabled.clone(),
+                            audio.mixer.record_taps(),
+                            screen_audio_bus.clone(),
+                            speaking.clone(),
+                            noise.requested(),
+                            noise.generation(),
+                            noise.ready(),
+                            noise.frames(),
+                            noise.output_rx.clone(),
+                            evt_tx.clone(),
+                        )));
+
+                        if wanted_input_device != opening_input_device {
+                            audio.set_input_device(wanted_input_device.clone());
+                        }
+                        if wanted_output_device != opening_output_device {
+                            audio.set_output_device(wanted_output_device.clone());
+                        }
+                        audio.set_input_active(mic_on);
+                        respawn_audio_playback(
+                            &remote_audio,
+                            &audio.mixer,
+                            audio.output_format,
+                            &mut audio_tracks,
+                            &speaking,
+                        ).await;
+                        audio_io = Some(audio);
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!("voice audio unavailable: {e:#}");
+                        let _ = evt_tx.send(VoiceEvent::Error(format!(
+                            "audio unavailable (no microphone or playback): {e}"
+                        )));
+                    }
+                    None => {}
+                }
+            }
             change = recv_output_change(&out_change_rx) => {
                 if let (Some(new_fmt), Some(mixer)) = (change, &audio_mixer) {
                     out_fmt = Some(new_fmt);
-                    respawn_audio_playback(&room, mixer, new_fmt, &mut audio_tracks);
+                    respawn_audio_playback(
+                        &remote_audio,
+                        mixer,
+                        new_fmt,
+                        &mut audio_tracks,
+                        &speaking,
+                    ).await;
                 }
+            }
+            _ = playback_health_tick.tick() => {
+                let now = Instant::now();
+                for (&key, task) in audio_tracks.iter_mut() {
+                    if let Some(recovery) = task.health.poll(now) {
+                        if recovery.rebind() {
+                            tracing::warn!(key, attempt = recovery.attempt,
+                                "remote audio has no decoded callbacks; checking receiver recovery");
+                        }
+                        engine.refresh_remote_audio(key, recovery);
+                    }
+                }
+            }
+            _ = speaking_tick.tick() => {
+                emit!();
+            }
+            _ = frame_path_tick.tick() => {
+                frame_store.log_frame_path();
             }
             reset = recv_device_reset(&device_reset_rx) => {
                 if let Some(kind) = reset {
-                    let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault {
-                        input: matches!(kind, audio::DeviceResetKind::Input),
-                    });
+                    match kind {
+                        DeviceResetKind::InputChangeFailed { requested, retained, error } => {
+                            if wanted_input_device == requested {
+                                wanted_input_device = retained.clone();
+                            }
+                            let _ = evt_tx.send(VoiceEvent::InputDeviceChangeFailed {
+                                requested, retained, error,
+                            });
+                        }
+                        DeviceResetKind::Input => {
+                            wanted_input_device = None;
+                            noise.reset();
+                            let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault { input: true });
+                        }
+                        DeviceResetKind::Output => {
+                            let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault { input: false });
+                        }
+                    }
                 }
             }
         }
     }
 
-    for handle in audio_tracks.into_values() {
-        handle.abort();
+    for task in audio_tracks.into_values() {
+        task.handle.abort();
     }
     for handle in video_tracks.into_values() {
         handle.stop();
     }
     abort_task(&mut microphone_task).await;
     shutdown_audio_io(&mut audio_io).await;
+    if let Some(rx) = audio_ready_rx.take()
+        && let Ok(Ok(io)) = rx.try_recv()
+    {
+        let _ = tokio::task::spawn_blocking(move || drop(io)).await;
+    }
+    engine.close();
+    engine_task.abort();
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     trim_task.abort();
 
     Ok(())
+}
+
+async fn uplink_pump(
+    mic_rx: flume::Receiver<Vec<i16>>,
+    input_format_rx: flume::Receiver<AudioFormat>,
+    source: NativeAudioSource,
+    mic_enabled: Arc<AtomicBool>,
+    record_taps: record::RecordTaps,
+    screen_audio: ScreenAudioBus,
+    speaking: Arc<audio::SpeakingLevels>,
+    noise_requested: Arc<AtomicBool>,
+    noise_generation: Arc<AtomicU64>,
+    noise_ready: Arc<AtomicBool>,
+    noise_frames: flume::Sender<Vec<i16>>,
+    noise_output: flume::Receiver<noise::FilteredFrame>,
+    events: flume::Sender<VoiceEvent>,
+) {
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    // WebRTC's buffered capture_frame may wait for its 10 ms playout cadence. Keep
+    // that wait off the microphone/Mezon-NS pump so it can service both queues.
+    let (uplink_tx, uplink_rx) = flume::bounded::<UplinkFrame>(10);
+    let sender_noise_requested = noise_requested.clone();
+    let sender_noise_ready = noise_ready.clone();
+    let sender_noise_generation = noise_generation.clone();
+    let sender_mic_enabled = mic_enabled.clone();
+    let _sender_task = AbortOnDrop(runtime::runtime().spawn(async move {
+        let mut seen_noise_generation = sender_noise_generation.load(Ordering::Acquire);
+        while let Ok(frame) = uplink_rx.recv_async().await {
+            let generation = sender_noise_generation.load(Ordering::Acquire);
+            let filtering = sender_noise_requested.load(Ordering::Acquire)
+                && sender_noise_ready.load(Ordering::Acquire);
+            if generation != seen_noise_generation {
+                source.clear_buffer();
+                seen_noise_generation = generation;
+            }
+            if frame.contains_mic
+                && (!sender_mic_enabled.load(Ordering::Relaxed)
+                    || match frame.filtered_generation {
+                        Some(filtered_generation) => {
+                            !filtering || filtered_generation != generation
+                        }
+                        None => filtering,
+                    })
+            {
+                continue;
+            }
+            push_uplink_frame(&source, &frame.samples).await;
+        }
+    }));
+    let mut resampler = audio::MicResampler::new(UPLINK_SAMPLE_RATE);
+    let mut current_in_fmt: Option<AudioFormat> = None;
+    let mut mic_out: Vec<i16> = Vec::new();
+    let mut meter = ScreenAudioMeter::default();
+    let mut noise_overload = NoiseOverload::new();
+    let mut uplink_overruns = 0u64;
+    let mut mic_clock = MicAudioClock::new(Instant::now());
+    let mut tick = tokio::time::interval(UPLINK_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            biased;
+            filtered = noise_output.recv_async() => {
+                let Ok(mut frame) = filtered else { break };
+                if !noise_requested.load(Ordering::Acquire)
+                    || !noise_ready.load(Ordering::Acquire)
+                    || frame.generation != noise_generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                let live = mic_enabled.load(Ordering::Relaxed);
+                if live {
+                    record_taps.push(mezon_record::AudioSource::Mic, &frame.samples, UPLINK_SAMPLE_RATE, UPLINK_CHANNELS);
+                    speaking.observe(LOCAL_AUDIO_KEY, &frame.samples);
+                } else {
+                    frame.samples.fill(0);
+                }
+                if let Some(peak) = mix_screen_audio(&screen_audio, &mut frame.samples) {
+                    meter.observe(peak, live);
+                }
+                let queued = queue_uplink_frame(
+                    &uplink_tx,
+                    UplinkFrame {
+                        samples: frame.samples,
+                        filtered_generation: live.then_some(frame.generation),
+                        contains_mic: live,
+                    },
+                    &mut uplink_overruns,
+                );
+                if !queued && live {
+                    noise_overload.note_drop(
+                        frame.generation,
+                        "uplink",
+                        &events,
+                        &noise_requested,
+                    );
+                }
+            }
+            reconfigure = input_format_rx.recv_async() => {
+                let Ok(in_fmt) = reconfigure else { break };
+                current_in_fmt = Some(in_fmt);
+            }
+            captured = mic_rx.recv_async() => {
+                let Ok(samples) = captured else { break };
+                let Some(in_fmt) = current_in_fmt else { continue };
+
+                let live = mic_enabled.load(Ordering::Relaxed);
+                // Keep sending normal microphone audio while the model loads or fails.
+                let filtering = noise_requested.load(Ordering::Acquire)
+                    && noise_ready.load(Ordering::Acquire);
+                if live && !filtering {
+                    record_taps.push(
+                        mezon_record::AudioSource::Mic,
+                        &samples,
+                        in_fmt.sample_rate,
+                        in_fmt.channels,
+                    );
+                }
+
+                mic_out.clear();
+                resampler.process(&samples, in_fmt.sample_rate, in_fmt.channels, &mut mic_out);
+                if mic_out.is_empty() {
+                    continue;
+                }
+                mic_clock.observe(Instant::now(), mic_out.len());
+                if filtering {
+                    let sent = if live && noise_ready.load(Ordering::Acquire) {
+                        match noise_frames.try_send(std::mem::take(&mut mic_out)) {
+                            Ok(()) => true,
+                            Err(_) => {
+                                noise_overload.note_drop(
+                                    noise_generation.load(Ordering::Acquire),
+                                    "input",
+                                    &events,
+                                    &noise_requested,
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if !sent {
+                        // Pending filtered frames already cover the uplink. Inserting an
+                        // extra silent frame here made brief queue bursts sound crackly.
+                        let shared = take_screen_audio(&screen_audio, UPLINK_TICK_SAMPLES);
+                        if !shared.is_empty() {
+                            let peak = shared.iter().map(|s| s.saturating_abs()).max().unwrap_or(0);
+                            meter.observe(peak, false);
+                            queue_uplink_frame(
+                                &uplink_tx,
+                                UplinkFrame { samples: shared, filtered_generation: None, contains_mic: false },
+                                &mut uplink_overruns,
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if live {
+                    speaking.observe(LOCAL_AUDIO_KEY, &mic_out);
+                } else {
+                    mic_out.iter_mut().for_each(|s| *s = 0);
+                }
+                if let Some(peak) = mix_screen_audio(&screen_audio, &mut mic_out) {
+                    meter.observe(peak, live);
+                }
+                queue_uplink_frame(
+                    &uplink_tx,
+                    UplinkFrame {
+                        samples: std::mem::take(&mut mic_out),
+                        filtered_generation: None,
+                        contains_mic: live,
+                    },
+                    &mut uplink_overruns,
+                );
+            }
+            _ = tick.tick() => {
+                if !mic_clock.fallback_due(Instant::now()) {
+                    continue;
+                }
+                let shared = take_screen_audio(&screen_audio, UPLINK_TICK_SAMPLES * 3);
+                if shared.is_empty() {
+                    continue;
+                }
+                let peak = shared.iter().map(|s| s.saturating_abs()).max().unwrap_or(0);
+                meter.observe(peak, false);
+                queue_uplink_frame(
+                    &uplink_tx,
+                    UplinkFrame { samples: shared, filtered_generation: None, contains_mic: false },
+                    &mut uplink_overruns,
+                );
+            }
+        }
+    }
+}
+
+struct MicAudioClock {
+    covered_until: Instant,
+}
+
+impl MicAudioClock {
+    fn new(now: Instant) -> Self {
+        Self { covered_until: now }
+    }
+
+    fn observe(&mut self, now: Instant, samples: usize) {
+        // Capture callbacks can deliver 40 ms as four consecutive 10 ms frames.
+        // Account for all that audio before starting the silence grace period;
+        // timing only the last callback inserts extra screen-only frames between
+        // normal capture bursts and overfills the WebRTC uplink queue.
+        let duration =
+            Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(UPLINK_SAMPLE_RATE));
+        self.covered_until = self.covered_until.max(now) + duration;
+    }
+
+    fn fallback_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.covered_until) >= MICROPHONE_SILENCE_GRACE
+    }
+}
+
+struct UplinkFrame {
+    samples: Vec<i16>,
+    filtered_generation: Option<u64>,
+    contains_mic: bool,
+}
+
+struct NoiseOverload {
+    total_drops: u64,
+    generation: Option<u64>,
+    window_start: Instant,
+    window_drops: u32,
+    reported_generation: Option<u64>,
+}
+
+impl NoiseOverload {
+    fn new() -> Self {
+        Self {
+            total_drops: 0,
+            generation: None,
+            window_start: Instant::now(),
+            window_drops: 0,
+            reported_generation: None,
+        }
+    }
+
+    fn note_drop(
+        &mut self,
+        generation: u64,
+        stage: &'static str,
+        events: &flume::Sender<VoiceEvent>,
+        requested: &AtomicBool,
+    ) {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.total_drops = 0;
+            self.window_start = Instant::now();
+            self.window_drops = 0;
+        }
+        self.total_drops += 1;
+        if self.window_start.elapsed() >= Duration::from_secs(2) {
+            self.window_start = Instant::now();
+            self.window_drops = 0;
+        }
+        self.window_drops += 1;
+        if self.total_drops == 1 || self.total_drops % 20 == 0 {
+            tracing::warn!(
+                generation,
+                stage,
+                total_drops = self.total_drops,
+                drops_in_window = self.window_drops,
+                "Mezon-NS audio frames dropped"
+            );
+        }
+        if self.window_drops >= 12 && self.reported_generation != Some(generation) {
+            self.reported_generation = Some(generation);
+            requested.store(false, Ordering::Release);
+            tracing::error!(
+                generation,
+                stage,
+                "Mezon-NS disabled after sustained audio frame loss"
+            );
+            let _ = events.send(VoiceEvent::NoiseSuppressionReady {
+                generation,
+                result: Err("Noise filter could not keep up with live audio".into()),
+            });
+        }
+    }
+}
+
+fn queue_uplink_frame(
+    tx: &flume::Sender<UplinkFrame>,
+    frame: UplinkFrame,
+    overruns: &mut u64,
+) -> bool {
+    if tx.try_send(frame).is_err() {
+        *overruns += 1;
+        if *overruns == 1 || *overruns % 20 == 0 {
+            tracing::warn!(
+                uplink_overruns = *overruns,
+                queued_uplink_frames = tx.len(),
+                "voice uplink queue full; stale audio frame skipped"
+            );
+        }
+        false
+    } else {
+        true
+    }
+}
+
+async fn push_uplink_frame(source: &NativeAudioSource, samples: &[i16]) {
+    let frame = AudioFrame {
+        data: std::borrow::Cow::Borrowed(samples),
+        num_channels: UPLINK_CHANNELS,
+        sample_rate: UPLINK_SAMPLE_RATE,
+        samples_per_channel: samples.len() as u32,
+    };
+    if let Err(e) = source.capture_frame(&frame).await {
+        tracing::warn!("uplink capture_frame failed: {e}");
+    }
+}
+
+struct ScreenAudioMeter {
+    peak: Option<i16>,
+    logged_at: Instant,
+}
+
+impl Default for ScreenAudioMeter {
+    fn default() -> Self {
+        Self {
+            peak: None,
+            logged_at: Instant::now(),
+        }
+    }
+}
+
+impl ScreenAudioMeter {
+    fn observe(&mut self, peak: i16, mic_live: bool) {
+        let peak = self.peak.unwrap_or(0).max(peak);
+        self.peak = Some(peak);
+        if self.logged_at.elapsed() < SCREEN_AUDIO_LOG_INTERVAL {
+            return;
+        }
+        tracing::info!(peak, mic_live, "screen audio mixed into the uplink");
+        self.peak = None;
+        self.logged_at = Instant::now();
+    }
+}
+
+fn take_screen_audio(bus: &ScreenAudioBus, limit: usize) -> Vec<i16> {
+    let mut queue = bus.lock();
+    let count = queue.len().min(limit);
+    queue.drain(..count).collect()
+}
+
+fn mix_screen_audio(bus: &ScreenAudioBus, out: &mut [i16]) -> Option<i16> {
+    let mut queue = bus.lock();
+    if queue.is_empty() {
+        return None;
+    }
+    let mut peak = 0i16;
+    for sample in out.iter_mut() {
+        let Some(shared) = queue.pop_front() else {
+            break;
+        };
+        peak = peak.max(shared.saturating_abs());
+        *sample = audio::clamp_i16(*sample as f32 + shared as f32);
+    }
+    Some(peak)
 }
 
 async fn abort_task(task: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -999,147 +1443,73 @@ async fn abort_task(task: &mut Option<tokio::task::JoinHandle<()>>) {
 }
 
 async fn shutdown_audio_io(audio_io: &mut Option<audio::AudioIo>) {
-    let Some(audio_io) = audio_io.take() else {
-        return;
-    };
-    if let Err(error) = tokio::task::spawn_blocking(move || drop(audio_io)).await {
-        tracing::warn!("voice audio shutdown task failed: {error}");
+    if let Some(io) = audio_io.take() {
+        let _ = tokio::task::spawn_blocking(move || drop(io)).await;
     }
-}
-
-struct PublishedMicSource {
-    source: NativeAudioSource,
-    channels: u32,
-    sample_rate: u32,
-}
-
-fn outbound_audio_packets_sent(stats: &[RtcStats]) -> u64 {
-    stats
-        .iter()
-        .filter_map(|stat| match stat {
-            RtcStats::OutboundRtp(outbound) => Some(outbound.sent.packets_sent),
-            _ => None,
-        })
-        .sum()
-}
-
-async fn publish_microphone_track(
-    room: &Room,
-    mic_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
-    mic_enabled: &Arc<AtomicBool>,
-    in_fmt: AudioFormat,
-) -> Result<PublishedMicSource> {
-    let previous = mic_publication.lock().take();
-    if let Some(previous) = previous {
-        let _ = room
-            .local_participant()
-            .unpublish_track(&previous.sid())
-            .await;
-    }
-
-    let source = NativeAudioSource::new(
-        AudioSourceOptions::default(),
-        in_fmt.sample_rate,
-        in_fmt.channels,
-        AUDIO_SOURCE_QUEUE_SIZE_MS,
-    );
-    let mic_track =
-        LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source.clone()));
-    let publication = room
-        .local_participant()
-        .publish_track(
-            LocalTrack::Audio(mic_track),
-            TrackPublishOptions {
-                source: TrackSource::Microphone,
-                ..Default::default()
-            },
-        )
-        .await?;
-    if !mic_enabled.load(Ordering::Relaxed) {
-        publication.mute();
-    }
-    *mic_publication.lock() = Some(publication);
-    Ok(PublishedMicSource {
-        source,
-        channels: in_fmt.channels.max(1),
-        sample_rate: in_fmt.sample_rate,
-    })
 }
 
 async fn start_camera_track(
-    room: &Room,
+    factory: &PeerConnectionFactory,
     identity: &str,
     frame_store: Arc<VideoFrameStore>,
     device_id: Option<String>,
 ) -> Result<CameraSession> {
-    let (controller, track_rx) = camera::start_camera(identity.to_string(), frame_store, device_id);
-    let track = track_rx
+    let (controller, source_rx) =
+        camera::start_camera(identity.to_string(), frame_store, device_id);
+    let source = source_rx
         .recv_async()
         .await
         .map_err(|_| anyhow::anyhow!("camera thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Camera,
-                simulcast: true,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: 1_200_000,
-                    max_framerate: 30.0,
-                }),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let track = factory.create_video_track("camera", source);
+    track.set_content_hint(ContentHint::Fluid);
     Ok(CameraSession { track, controller })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_screen_track(
-    room: &Room,
+    factory: &PeerConnectionFactory,
     identity: &str,
     frame_store: Arc<VideoFrameStore>,
     full_res: Arc<AtomicBool>,
     pick: PickedScreen,
     share_audio: bool,
+    mode: ScreenShareMode,
     record_taps: Option<record::RecordTaps>,
     evt_tx: flume::Sender<VoiceEvent>,
+    screen_audio_bus: ScreenAudioBus,
 ) -> Result<ScreenSession> {
-    // Whether the switch in the picker was on is the first thing to know when a
-    // recording comes out silent, and it left no trace anywhere before.
-    tracing::info!("starting screen share (share system audio: {share_audio})");
-    let (stopper, track_rx) =
-        screen::start_screen(identity.to_string(), frame_store, full_res, pick);
-    let track = track_rx
+    tracing::info!(
+        ?mode,
+        "starting screen share (share system audio: {share_audio})"
+    );
+    let (stopper, source_rx) = screen::start_screen(
+        identity.to_string(),
+        frame_store,
+        full_res,
+        pick,
+        mode.capture_fps(),
+    );
+    let (source, width, _height) = source_rx
         .recv_async()
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: 2_500_000,
-                    max_framerate: 15.0,
-                }),
-                degradation_preference: Some(DegradationPreference::MaintainResolution),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let screen_track = factory.create_video_track("screen", source);
+    apply_screen_content_hint(&screen_track, mode);
+    let track = sfu::ScreenTrack {
+        track: screen_track,
+        width,
+        mode,
+    };
+
     let audio = if share_audio {
-        match start_screen_audio_track(room, record_taps).await {
+        match start_screen_audio(record_taps, screen_audio_bus).await {
             Ok(audio) => {
                 tracing::info!("sharing this machine's system audio with the call");
                 Some(audio)
             }
             Err(e) => {
-                // The screen keeps sharing without it, so a log line was the
-                // only sign — nobody in the call hears the shared sound and the
-                // recording has none either, with nothing to explain why.
                 tracing::warn!("system audio share unavailable: {e:#}");
                 let _ = evt_tx.send(VoiceEvent::Error(format!("screen audio: {e}")));
                 None
@@ -1148,6 +1518,7 @@ async fn start_screen_track(
     } else {
         None
     };
+
     Ok(ScreenSession {
         track,
         stopper,
@@ -1155,41 +1526,39 @@ async fn start_screen_track(
     })
 }
 
-async fn start_screen_audio_track(
-    room: &Room,
+fn apply_screen_content_hint(track: &RtcVideoTrack, mode: ScreenShareMode) {
+    let wanted: ContentHint = mode.content_hint();
+    track.set_content_hint(wanted);
+    if track.content_hint() != wanted {
+        track.set_content_hint(mode.fallback_content_hint());
+    }
+}
+
+fn apply_screen_share_mode(session: &mut ScreenSession, mode: ScreenShareMode, engine: &SfuEngine) {
+    if session.track.mode == mode {
+        return;
+    }
+    session.track.mode = mode;
+    session.stopper.set_capture_fps(mode.capture_fps());
+    apply_screen_content_hint(&session.track.track, mode);
+    engine.set_screen_share_mode(mode);
+    tracing::info!(?mode, "screen share mode changed");
+}
+
+async fn start_screen_audio(
     record_taps: Option<record::RecordTaps>,
+    bus: ScreenAudioBus,
 ) -> Result<ScreenAudioSession> {
     let capture = tokio::task::spawn_blocking(screen_audio::start_screen_audio)
         .await
         .map_err(|e| anyhow::anyhow!("screen audio init task failed: {e}"))?
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let source = NativeAudioSource::new(
-        AudioSourceOptions::default(),
-        screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-        screen_audio::SCREEN_AUDIO_CHANNELS,
-        AUDIO_SOURCE_QUEUE_SIZE_MS,
-    );
-    let track =
-        LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source.clone()));
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Audio(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::ScreenshareAudio,
-                dtx: false,
-                audio_encoding: Some(livekit::options::audio::SPEECH.encoding.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
-
     let rx = capture.rx.clone();
     let pump = runtime::runtime().spawn(async move {
-        let channels = screen_audio::SCREEN_AUDIO_CHANNELS;
+        let channels = screen_audio::SCREEN_AUDIO_CHANNELS.max(1) as usize;
         while let Ok(samples) = rx.recv_async().await {
-            let samples_per_channel = samples.len() as u32 / channels;
-            if samples_per_channel == 0 {
+            if samples.is_empty() {
                 continue;
             }
             if let Some(taps) = &record_taps {
@@ -1197,44 +1566,54 @@ async fn start_screen_audio_track(
                     mezon_record::AudioSource::Screen,
                     &samples,
                     screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-                    channels,
+                    screen_audio::SCREEN_AUDIO_CHANNELS,
                 );
             }
-            let frame = AudioFrame {
-                data: samples.into(),
-                num_channels: channels,
-                sample_rate: screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-                samples_per_channel,
-            };
-            let _ = source.capture_frame(&frame).await;
+            let mut queue = bus.lock();
+            for frame in samples.chunks_exact(channels) {
+                let mono = frame.iter().map(|&s| s as f32).sum::<f32>() / channels as f32;
+                queue.push_back(audio::clamp_i16(mono));
+            }
+            while queue.len() > SCREEN_AUDIO_BACKLOG_LIMIT {
+                queue.pop_front();
+            }
         }
     });
 
     Ok(ScreenAudioSession {
-        track,
         _capture: capture,
         pump,
     })
 }
 
+struct PlaybackTask {
+    handle: tokio::task::JoinHandle<()>,
+    health: playback_health::PlaybackHealth,
+}
+
 fn spawn_playback(
-    track: RemoteAudioTrack,
+    track: RtcAudioTrack,
     key: u64,
     mixer: Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
-) -> tokio::task::JoinHandle<()> {
-    runtime::runtime().spawn(async move {
+    speaking: Arc<audio::SpeakingLevels>,
+    health: Option<playback_health::PlaybackHealth>,
+) -> PlaybackTask {
+    let health = health.unwrap_or_else(|| playback_health::PlaybackHealth::new(Instant::now()));
+    let frame_counter = health.frame_counter();
+    let handle = runtime::runtime().spawn(async move {
         let mut restart_attempts = 0;
         loop {
-            let rtc_track = track.rtc_track();
             let mut stream = NativeAudioStream::new(
-                rtc_track,
+                track.clone(),
                 out_fmt.sample_rate as i32,
                 out_fmt.channels as i32,
             );
             let mut saw_frame = false;
             while let Some(frame) = stream.next().await {
+                frame_counter.fetch_add(1, Ordering::Relaxed);
                 saw_frame = true;
+                speaking.observe(key, &frame.data);
                 mixer.push(key, &frame.data);
             }
             mixer.remove(key);
@@ -1254,7 +1633,17 @@ fn spawn_playback(
             );
             tokio::time::sleep(delay).await;
         }
-    })
+    });
+    PlaybackTask { handle, health }
+}
+
+async fn recv_audio_ready(
+    rx: &Option<flume::Receiver<Result<audio::AudioIo>>>,
+) -> Option<Result<audio::AudioIo>> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
@@ -1273,29 +1662,28 @@ async fn recv_device_reset(
     }
 }
 
-fn respawn_audio_playback(
-    room: &Room,
+async fn respawn_audio_playback(
+    remote_audio: &HashMap<u64, RtcAudioTrack>,
     mixer: &Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
-    audio_tracks: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
+    audio_tracks: &mut HashMap<u64, PlaybackTask>,
+    speaking: &Arc<audio::SpeakingLevels>,
 ) {
-    for (_, handle) in audio_tracks.drain() {
-        handle.abort();
+    for (_, task) in audio_tracks.drain() {
+        task.handle.abort();
+        let _ = task.handle.await;
     }
-    for participant in room.remote_participants().values() {
-        let identity = participant.identity().as_str().to_string();
-        for publication in participant.track_publications().values() {
-            if publication.kind() != TrackKind::Audio || !publication.is_subscribed() {
-                continue;
-            }
-            let Some(RemoteTrack::Audio(track)) = publication.track() else {
-                continue;
-            };
-            let key = track_frame_key(&identity, publication.sid().as_str());
-            mixer.remove(key);
-            let handle = spawn_playback(track, key, mixer.clone(), out_fmt);
-            audio_tracks.insert(key, handle);
-        }
+    for (&key, track) in remote_audio {
+        mixer.remove(key);
+        let handle = spawn_playback(
+            track.clone(),
+            key,
+            mixer.clone(),
+            out_fmt,
+            speaking.clone(),
+            None,
+        );
+        audio_tracks.insert(key, handle);
     }
 }
 
@@ -1337,6 +1725,9 @@ impl VideoConvertSlot {
 }
 
 struct VideoTrackHandle {
+    receipt: Arc<screen_recovery::FrameReceipt>,
+    frame_store: Arc<VideoFrameStore>,
+    key: u64,
     task: tokio::task::JoinHandle<()>,
     slot: Arc<VideoConvertSlot>,
 }
@@ -1345,23 +1736,27 @@ impl VideoTrackHandle {
     fn stop(self) {
         self.task.abort();
         self.slot.close();
+        self.receipt.close(|| self.frame_store.remove(self.key));
     }
 }
 
 fn spawn_video(
-    track: RemoteVideoTrack,
+    mut stream: NativeVideoStream,
     key: u64,
     frame_store: Arc<VideoFrameStore>,
+    receipt: Arc<screen_recovery::FrameReceipt>,
 ) -> VideoTrackHandle {
-    let rtc_track = track.rtc_track();
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
-    let convert_store = frame_store;
+    let received_store = frame_store.clone();
+    let convert_store = frame_store.clone();
+    let convert_receipt = receipt.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("mezon-video-convert".into())
         .spawn(move || {
             let mut bgra: Vec<u8> = Vec::new();
+            let mut invalid_frames = 0u64;
             while let Some(buffer) = convert_slot.take_latest() {
                 let width = buffer.width();
                 let height = buffer.height();
@@ -1369,7 +1764,7 @@ fn spawn_video(
                 let (y, u, v) = buffer.data();
                 bgra.clear();
                 bgra.resize(width as usize * height as usize * 4, 0);
-                i420_to_bgra_into(
+                if !video::try_i420_to_bgra_into(
                     &mut bgra,
                     y,
                     u,
@@ -1379,14 +1774,29 @@ fn spawn_video(
                     sv as usize,
                     width as usize,
                     height as usize,
-                );
-                if let Some(recycled) =
+                ) {
+                    invalid_frames += 1;
+                    if invalid_frames % 100 == 1 {
+                        tracing::warn!(
+                            key,
+                            invalid_frames,
+                            width,
+                            height,
+                            sy,
+                            su,
+                            sv,
+                            "dropping invalid decoded video frame"
+                        );
+                    }
+                    continue;
+                }
+                if let Some(Some(recycled)) = convert_receipt.publish(Instant::now(), || {
                     convert_store.publish(key, width, height, std::mem::take(&mut bgra))
-                {
+                }) {
                     bgra = recycled;
                 }
             }
-            convert_store.remove(key);
+            convert_receipt.close(|| convert_store.remove(key));
         })
     {
         tracing::error!("failed to spawn video convert thread: {e}");
@@ -1394,8 +1804,8 @@ fn spawn_video(
 
     let task_slot = slot.clone();
     let task = runtime::runtime().spawn(async move {
-        let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
+            received_store.note_received(key);
             let mut buffer = frame.buffer.to_i420();
             let (width, height) = bounded_dimensions(
                 buffer.width(),
@@ -1411,7 +1821,13 @@ fn spawn_video(
         task_slot.close();
     });
 
-    VideoTrackHandle { task, slot }
+    VideoTrackHandle {
+        task,
+        slot,
+        receipt,
+        frame_store,
+        key,
+    }
 }
 
 fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
@@ -1425,54 +1841,80 @@ fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) 
     (width, height)
 }
 
-fn is_agent_participant(
-    kind: ParticipantKind,
-    permission: Option<livekit_protocol::ParticipantPermission>,
-) -> bool {
-    #[allow(deprecated)]
-    let legacy_agent_permission = permission.is_some_and(|p| p.agent);
-    legacy_agent_permission || kind == ParticipantKind::Agent
+fn peer_display_metadata(metadata: &str) -> (String, String) {
+    fn field(value: &str) -> String {
+        let value = value.trim();
+        if value == "undefined" {
+            String::new()
+        } else {
+            value.to_owned()
+        }
+    }
+    let metadata = metadata.trim();
+    if metadata.starts_with('{')
+        && let Ok(serde_json::Value::Object(record)) = serde_json::from_str(metadata)
+    {
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(field)
+                .unwrap_or_default()
+        };
+        return (text("username"), text("avatar"));
+    }
+    match metadata.rsplit_once(';') {
+        Some((name, avatar)) => (field(name), field(avatar)),
+        None => (field(metadata), String::new()),
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_participants(
-    room: &Room,
     evt_tx: &flume::Sender<VoiceEvent>,
-    local_identity: &str,
+    local_user_id: &str,
+    local_role: SfuRole,
+    peers: &[SfuPeer],
+    speaking: &audio::SpeakingLevels,
     local_mic_enabled: bool,
     local_camera_on: bool,
     local_screen_on: bool,
     last: &mut Vec<VoiceParticipant>,
 ) {
-    let mut participants = Vec::new();
+    let mut participants = Vec::with_capacity(peers.len() + 1);
 
-    let local = room.local_participant();
     participants.push(VoiceParticipant {
-        identity: local.identity().as_str().to_string(),
-        name: display_name(&local.name(), local.identity().as_str()),
+        session_id: local_user_id.to_string(),
+        identity: local_user_id.to_string(),
+        name: String::new(),
+        metadata_name: String::new(),
+        metadata_avatar: String::new(),
         is_local: true,
-        is_agent: is_agent_participant(local.kind(), local.permission()),
-        speaking: local.is_speaking(),
-        muted: !local_mic_enabled || local_mic_muted(&local),
-        camera: local_camera_on.then(|| local_camera_key(local_identity)),
-        screenshare: local_screen_on.then(|| local_screen_key(local_identity)),
-        quality: network_quality(local.connection_quality()),
+        is_agent: false,
+        is_audience: local_role.is_audience(),
+        speaking: local_mic_enabled && speaking.is_speaking(LOCAL_AUDIO_KEY),
+        muted: !local_mic_enabled,
+        camera: local_camera_on.then(|| local_camera_key(local_user_id)),
+        screenshare: local_screen_on.then(|| local_screen_key(local_user_id)),
+        quality: NetworkQuality::Unknown,
     });
 
-    let mut remotes: Vec<RemoteParticipant> = room.remote_participants().into_values().collect();
-    remotes.sort_by(|a, b| a.identity().as_str().cmp(b.identity().as_str()));
-    for participant in &remotes {
-        let identity = participant.identity().as_str().to_string();
-        let (camera, screenshare) = remote_video_keys(participant, &identity);
+    for peer in peers {
+        let (metadata_name, metadata_avatar) = peer_display_metadata(&peer.metadata);
         participants.push(VoiceParticipant {
-            name: display_name(&participant.name(), &identity),
+            session_id: format!("{}\u{1}peer:{}", peer.user_id, peer.peer_id),
+            identity: peer.user_id.clone(),
+            name: String::new(),
+            metadata_name,
+            metadata_avatar,
             is_local: false,
-            is_agent: is_agent_participant(participant.kind(), participant.permission()),
-            speaking: participant.is_speaking(),
-            muted: remote_mic_muted(participant),
-            camera,
-            screenshare,
-            quality: network_quality(participant.connection_quality()),
-            identity,
+            is_agent: false,
+            is_audience: peer.is_audience,
+            speaking: !peer.muted && peer.audio.is_some_and(|key| speaking.is_speaking(key)),
+            muted: peer.muted,
+            camera: peer.camera,
+            screenshare: peer.screenshare,
+            quality: NetworkQuality::Unknown,
         });
     }
 
@@ -1483,58 +1925,59 @@ fn emit_participants(
     let _ = evt_tx.send(VoiceEvent::Participants(participants));
 }
 
-fn remote_video_keys(
-    participant: &RemoteParticipant,
-    identity: &str,
-) -> (Option<u64>, Option<u64>) {
-    let mut camera = None;
-    let mut screenshare = None;
-    for publication in participant.track_publications().values() {
-        if publication.kind() != TrackKind::Video
-            || !publication.is_subscribed()
-            || publication.is_muted()
-        {
-            continue;
-        }
-        let key = track_frame_key(identity, publication.sid().as_str());
-        match publication.source() {
-            TrackSource::Screenshare => screenshare = Some(key),
-            _ => camera = Some(key),
+#[cfg(test)]
+mod uplink_timing_tests {
+    use super::{MicAudioClock, UPLINK_TICK_SAMPLES};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn continuous_mic_batches_do_not_insert_extra_screen_frames() {
+        let start = Instant::now();
+        for callback_ms in [10, 20, 40, 80] {
+            let mut clock = MicAudioClock::new(start);
+            let mut sent_samples = 0;
+            for elapsed_ms in (0..2_000).step_by(10) {
+                let now = start + Duration::from_millis(elapsed_ms);
+                if elapsed_ms % callback_ms == 0 {
+                    // The capture worker splits a device callback into 10 ms frames.
+                    for _ in 0..callback_ms / 10 {
+                        clock.observe(now, UPLINK_TICK_SAMPLES);
+                        sent_samples += UPLINK_TICK_SAMPLES;
+                    }
+                }
+                if clock.fallback_due(now) {
+                    sent_samples += UPLINK_TICK_SAMPLES * 3;
+                }
+            }
+            assert_eq!(sent_samples, 96_000, "callback interval: {callback_ms} ms");
         }
     }
-    (camera, screenshare)
-}
 
-fn network_quality(quality: ConnectionQuality) -> NetworkQuality {
-    match quality {
-        ConnectionQuality::Excellent => NetworkQuality::Excellent,
-        ConnectionQuality::Good => NetworkQuality::Good,
-        ConnectionQuality::Poor => NetworkQuality::Poor,
-        ConnectionQuality::Lost => NetworkQuality::Unknown,
+    #[test]
+    fn screen_audio_continues_when_the_mic_never_starts() {
+        let start = Instant::now();
+        let clock = MicAudioClock::new(start);
+        assert!(clock.fallback_due(start + Duration::from_millis(30)));
     }
-}
 
-fn local_mic_muted(local: &LocalParticipant) -> bool {
-    local
-        .track_publications()
-        .values()
-        .find(|publication| publication.source() == TrackSource::Microphone)
-        .is_some_and(|publication| publication.is_muted())
-}
+    #[test]
+    fn screen_audio_resumes_after_the_last_mic_batch_is_covered() {
+        let start = Instant::now();
+        let mut clock = MicAudioClock::new(start);
+        for _ in 0..4 {
+            clock.observe(start, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(start + Duration::from_millis(30)));
+        assert!(!clock.fallback_due(start + Duration::from_millis(60)));
+        assert!(clock.fallback_due(start + Duration::from_millis(70)));
 
-fn remote_mic_muted(participant: &RemoteParticipant) -> bool {
-    participant
-        .track_publications()
-        .values()
-        .find(|publication| publication.source() == TrackSource::Microphone)
-        .is_none_or(|publication| publication.is_muted())
-}
-
-fn display_name(name: &str, identity: &str) -> String {
-    if name.trim().is_empty() {
-        identity.to_string()
-    } else {
-        name.to_string()
+        // A resumed callback starts from the current time, not an expired deadline.
+        let resumed = start + Duration::from_secs(1);
+        for _ in 0..4 {
+            clock.observe(resumed, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(resumed + Duration::from_millis(30)));
+        assert!(clock.fallback_due(resumed + Duration::from_millis(70)));
     }
 }
 
@@ -1551,5 +1994,43 @@ mod remote_video_tests {
     fn bounded_dimensions_cap_large_frames_evenly() {
         assert_eq!(bounded_dimensions(3840, 2160, 1920, 1080), (1920, 1080));
         assert_eq!(bounded_dimensions(2560, 1600, 1920, 1080), (1728, 1080));
+    }
+}
+
+#[cfg(test)]
+mod peer_metadata_tests {
+    use super::peer_display_metadata;
+
+    fn pair(name: &str, avatar: &str) -> (String, String) {
+        (name.to_owned(), avatar.to_owned())
+    }
+
+    #[test]
+    fn peer_metadata_splits_name_and_avatar_at_the_last_separator() {
+        assert_eq!(
+            peer_display_metadata("a;b;https://cdn/a.png"),
+            pair("a;b", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata("alice"), pair("alice", ""));
+        assert_eq!(peer_display_metadata(" bob ; "), pair("bob", ""));
+    }
+
+    #[test]
+    fn json_peer_metadata_is_read_like_the_web_client() {
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"Alice","avatar":"https://cdn/a.png"}"#),
+            pair("Alice", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata(r#"{"extName":"x"}"#), pair("", ""));
+        assert_eq!(peer_display_metadata("{broken;x"), pair("{broken", "x"));
+    }
+
+    #[test]
+    fn an_undefined_metadata_field_is_dropped() {
+        assert_eq!(peer_display_metadata("Alice;undefined"), pair("Alice", ""));
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"undefined","avatar":"https://cdn/a.png"}"#),
+            pair("", "https://cdn/a.png")
+        );
     }
 }

@@ -16,6 +16,7 @@ pub struct Avatar {
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     is_anonymous: bool,
     group_default: bool,
+    skeleton: bool,
 }
 
 const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
@@ -34,6 +35,7 @@ impl Avatar {
             image_cache: None,
             is_anonymous: false,
             group_default: false,
+            skeleton: false,
         }
     }
 
@@ -55,6 +57,11 @@ impl Avatar {
 
     pub fn anonymous(mut self, is_anonymous: bool) -> Self {
         self.is_anonymous = is_anonymous;
+        self
+    }
+
+    pub fn skeleton(mut self, skeleton: bool) -> Self {
+        self.skeleton = skeleton;
         self
     }
 
@@ -111,19 +118,125 @@ fn diameter(size: Size) -> Pixels {
     }
 }
 
-fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> AnyElement {
-    div()
+fn style_initials_tile<E>(
+    el: E,
+    size: Pixels,
+    corner_radius: Option<Pixels>,
+    bg: Hsla,
+    text_color: Hsla,
+    initials: SharedString,
+) -> E
+where
+    E: Styled + ParentElement,
+{
+    let el = el
         .flex()
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .size(d)
-        .rounded_full()
+        .size(size)
         .bg(bg)
         .text_color(text_color)
-        .text_size(d * 0.4)
-        .child(initials)
+        .text_size(size * 0.4)
+        .child(initials);
+    match corner_radius {
+        Some(radius) => el.rounded(radius),
+        None => el.rounded_full(),
+    }
+}
+
+pub(crate) fn initials_tile(
+    size: Pixels,
+    corner_radius: Option<Pixels>,
+    bg: Hsla,
+    text_color: Hsla,
+    initials: impl Into<SharedString>,
+) -> AnyElement {
+    style_initials_tile(div(), size, corner_radius, bg, text_color, initials.into())
         .into_any_element()
+}
+
+pub(crate) fn initials_tile_identified(
+    size: Pixels,
+    corner_radius: Option<Pixels>,
+    bg: Hsla,
+    text_color: Hsla,
+    initials: impl Into<SharedString>,
+    id: SharedString,
+    hover_bg: Option<Hsla>,
+) -> AnyElement {
+    let el = style_initials_tile(
+        div().id(id),
+        size,
+        corner_radius,
+        bg,
+        text_color,
+        initials.into(),
+    );
+    match hover_bg {
+        Some(hover_bg) => el
+            .hover(move |s| s.bg(hover_bg).text_color(Hsla::white()))
+            .into_any_element(),
+        None => el.into_any_element(),
+    }
+}
+
+pub(crate) fn clipped_initials_tile(
+    size: Pixels,
+    corner_radius: Pixels,
+    src: SharedString,
+    grayscale: bool,
+    element_bg: Hsla,
+    name: &str,
+) -> AnyElement {
+    if name.is_empty() {
+        return div().size(size).into_any_element();
+    }
+    let mut bg = avatar_color(name);
+    if grayscale {
+        bg = bg.grayscale();
+    }
+    let text_color = avatar_text_color(bg);
+    let initials = name_initials(name);
+    let loading_initials = initials.clone();
+    let fallback_initials = initials;
+    let proxied = src.clone();
+    div()
+        .size(size)
+        .rounded(corner_radius)
+        .overflow_hidden()
+        .child(
+            img(src)
+                .id(("initials-tile-image", gpui::hash(&proxied)))
+                .size(size)
+                .rounded(corner_radius)
+                .object_fit(gpui::ObjectFit::Cover)
+                .grayscale(grayscale)
+                .bg(element_bg)
+                .with_loading(move || {
+                    initials_tile(
+                        size,
+                        Some(corner_radius),
+                        bg,
+                        text_color,
+                        loading_initials.clone(),
+                    )
+                })
+                .with_fallback(move || {
+                    initials_tile(
+                        size,
+                        Some(corner_radius),
+                        bg,
+                        text_color,
+                        fallback_initials.clone(),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> AnyElement {
+    initials_tile(d, None, bg, text_color, initials)
 }
 
 fn anonymous_circle(d: Pixels) -> AnyElement {
@@ -136,6 +249,15 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .rounded_full()
         .bg(Hsla::from(gpui::rgb(0xffffff)))
         .child(img(ANONYMOUS_AVATAR_ICON).size(d * 0.8))
+        .into_any_element()
+}
+
+fn skeleton_circle(d: Pixels, fill: Hsla) -> AnyElement {
+    div()
+        .size(d)
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(fill)
         .into_any_element()
 }
 
@@ -202,11 +324,16 @@ impl RenderOnce for Avatar {
 
         let name = self.name.clone().unwrap_or_default();
         let bg = avatar_color(name.as_ref());
-        let text_color = Hsla::from(gpui::rgb(0xffffff));
+        let text_color = avatar_text_color(bg);
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
         let initials = name_initials(name.as_ref());
         let is_anonymous = self.is_anonymous;
         let group_default = self.group_default;
+        let skeleton_bg = self.skeleton.then(|| Hsla::from(cx.theme().bg_hover));
+        let loading_circle = move |initials: String| match skeleton_bg {
+            Some(fill) => skeleton_circle(image_size, fill),
+            None => initials_circle(image_size, bg, text_color, initials),
+        };
 
         div()
             .size(container_size)
@@ -229,9 +356,7 @@ impl RenderOnce for Avatar {
                         src,
                         grayscale,
                         element_bg,
-                        move || {
-                            initials_circle(image_size, bg, text_color, loading_initials.clone())
-                        },
+                        move || loading_circle(loading_initials.clone()),
                         move || {
                             if let Some(raw) = raw_fallback.clone()
                                 && !raw.is_empty()
@@ -244,14 +369,7 @@ impl RenderOnce for Avatar {
                                     element_bg,
                                     {
                                         let retry_loading = fallback_initials.clone();
-                                        move || {
-                                            initials_circle(
-                                                image_size,
-                                                bg,
-                                                text_color,
-                                                retry_loading.clone(),
-                                            )
-                                        }
+                                        move || loading_circle(retry_loading.clone())
                                     },
                                     {
                                         let final_initials = fallback_initials.clone();
@@ -271,7 +389,7 @@ impl RenderOnce for Avatar {
                     )
                 }
                 None if group_default => group_default_circle(image_size),
-                None => initials_circle(image_size, bg, text_color, initials),
+                None => loading_circle(initials),
             })
             .children(self.indicator.map(|indicator| div().child(indicator)))
     }
@@ -284,12 +402,19 @@ const AVATAR_COLORS: [u32; 7] = [
 ];
 
 fn first_upper_char(name: &str) -> Option<char> {
-    name.chars().next().and_then(|c| c.to_uppercase().next())
+    name.trim()
+        .chars()
+        .next()
+        .and_then(|c| c.to_uppercase().next())
 }
 
 pub(crate) fn avatar_color(name: &str) -> Hsla {
     let code = first_upper_char(name).map(|c| c as u32).unwrap_or(0);
     Hsla::from(gpui::rgb(AVATAR_COLORS[(code % 7) as usize]))
+}
+
+pub(crate) fn avatar_text_color(_bg: Hsla) -> Hsla {
+    Hsla::white()
 }
 
 pub(crate) fn name_initials(name: &str) -> String {

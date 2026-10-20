@@ -4,14 +4,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, Entity, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit,
-    Pixels, SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
-    prelude::*, px, relative, rems, rgb, rgba, size,
+    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontWeight, HighlightStyle,
+    Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource, SharedString, Size,
+    StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point, prelude::*, px,
+    relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode, MessageId,
-    MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind, RichToken,
-    UserId, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, HashtagMeta, LinkKind, Message,
+    MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout,
+    RichRunKind, RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url,
+    is_here_user_id,
 };
 
 use ui::Clickable;
@@ -42,6 +44,10 @@ const SOCIAL_CARD_WIDTH: f32 = 400.;
 const SOCIAL_CARD_PADDING: f32 = 16.;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
+const EMOJI_JUMBO_TOP_PADDING: f32 = 4.;
+const MESSAGE_LINE_HEIGHT: f32 = 1.375;
+const GG_SANS_SPACE_ADVANCE: f32 = 0.22;
+const MESSAGE_CONTENT_MIN_HEIGHT: f32 = 30.;
 
 /// The image proxy is asked for the emoji at the size it will actually be
 /// painted on a 2x display. An atlas tile smaller than its box is magnified
@@ -50,7 +56,22 @@ const EMOJI_JUMBO_SIZE: f32 = 48.;
 fn emoji_source_px(size: Pixels) -> u32 {
     (f32::from(size) * 2.0).round().max(1.0) as u32
 }
+/// Stands in for an inline channel icon in the string selection and copy work off.
+/// Braille blank is never typed, so stripping it out of a copied slice cannot eat a
+/// character someone meant to send.
 pub(crate) const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
+/// Reserves the box the icon is painted into, in the string that actually gets shaped.
+/// It has to be about one em wide, and nothing else about it is observable: the run is
+/// faded out. Braille blank cannot do this job — no bundled font carries it, so its
+/// advance came from whatever the platform fell back to (Apple Symbols, 0.684em on
+/// macOS), which drew the icon at 11px instead of 16 and moved with the OS. Per mille is
+/// the one glyph gg sans defines near an em (1.004em at Normal), and the run pins the
+/// weight because the glyph widens with it.
+///
+/// The two strings are indexed against each other, so this must stay the same number of
+/// UTF-8 bytes as [`INLINE_ICON_PLACEHOLDER`] — `placeholders_agree_on_utf8_length` holds
+/// that line.
+pub(crate) const INLINE_ICON_RESERVE: char = '\u{2030}';
 pub(crate) const ATTACHMENT_PLACEHOLDER: char = '\u{fffc}';
 const RICH_TEXT_PLAN_LIMIT: usize = 512;
 const SELECTABLE_LAYOUT_PLAN_LIMIT: usize = 128;
@@ -133,7 +154,7 @@ fn render_message_content_with_options(
     }
 
     if msg.spans.is_empty() && !msg.is_edited {
-        return div().into_any_element();
+        return empty_message_content().into_any_element();
     }
 
     if options.mentions_only {
@@ -173,7 +194,7 @@ fn render_message_content_with_options(
     if !options.inline
         && let Some(inline) = build_inline_content(msg, ctx, body_color)
     {
-        let mut row = rich_content_row(body_color, false).child(inline);
+        let mut row = message_content_row(body_color).child(inline);
         if msg.is_edited {
             row = row.child(edited_marker(theme, ctx.locale));
         }
@@ -233,6 +254,10 @@ fn spans_need_chip_path(spans: &[MessageSpan]) -> bool {
     })
 }
 
+fn empty_message_content() -> gpui::Div {
+    div()
+}
+
 fn render_deleted_placeholder(msg: &Message, ctx: &RowCtx, theme: &Theme) -> AnyElement {
     let text: SharedString = msg.content.clone().into();
     let selection_range = ctx.selection.borrow().range_for_message(msg.id, &text);
@@ -252,7 +277,7 @@ fn render_deleted_placeholder(msg: &Message, ctx: &RowCtx, theme: &Theme) -> Any
     div()
         .w_full()
         .min_w_0()
-        .min_h(px(30.))
+        .min_h(px(MESSAGE_CONTENT_MIN_HEIGHT))
         .italic()
         .cursor(gpui::CursorStyle::IBeam)
         .text_base()
@@ -503,8 +528,8 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                         };
                         match action {
                             RichClick::Link(url) => open_message_link(url.to_string(), cx),
-                            RichClick::Channel(channel_id) => {
-                                navigate_to_channel(*channel_id, locale.as_ref(), cx)
+                            RichClick::Channel(channel_id, clan_hint) => {
+                                navigate_to_channel(*channel_id, *clan_hint, locale.as_ref(), cx)
                             }
                             RichClick::Mention(user_id) => {
                                 let Some(context) = profile_context else {
@@ -535,7 +560,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                                         return None;
                                     }
                                     match action {
-                                        RichClick::Link(_) | RichClick::Channel(_) => {
+                                        RichClick::Link(_) | RichClick::Channel(..) => {
                                             Some((message_id, range.clone()))
                                         }
                                         RichClick::Mention(_) => None,
@@ -556,7 +581,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     };
 
     let mut row =
-        rich_content_row(body_color, false).child(div().max_w_full().min_w_0().child(content));
+        message_content_row(body_color).child(div().max_w_full().min_w_0().child(content));
     if msg.is_edited {
         row = row.child(edited_marker(theme, ctx.locale));
     }
@@ -650,7 +675,13 @@ fn render_selectable_segmented_spans(
         _ => unreachable!("exactly one segment buffer is available"),
     };
     let visuals = selected.as_ref().map(|_| Rc::new(RefCell::new(Vec::new())));
-    let mut row = rich_content_row(body_color, false).relative().gap_x(px(0.));
+    let mut row = if block_layout {
+        rich_content_row(body_color, false)
+    } else {
+        message_content_row(body_color)
+    }
+    .relative()
+    .gap_x(px(0.));
     if let (Some(paint_visuals), Some(paint_selection)) = (visuals.clone(), selected.clone()) {
         row = row.child(
             canvas(
@@ -669,14 +700,34 @@ fn render_selectable_segmented_spans(
         row = row.text_size(text_size);
     }
     let mut link_part_index = 0usize;
-    for span in spans {
+    for (index, span) in spans.iter().enumerate() {
         match span {
+            MessageSpan::Text(_) if follows_emoji_that_takes_it(spans, index) => {}
+            MessageSpan::Text(text) if separates_inline_spans(spans, index, text) => {
+                let end = base + text.len();
+                let is_selected = selected
+                    .as_ref()
+                    .is_some_and(|range| range.start < end && range.end > base);
+                let bounds = Rc::new(Cell::new(None));
+                segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                row = row.child(SelectableRegion::new(
+                    inline_gap(text, text_size).into_any_element(),
+                    bounds,
+                    is_selected.then(|| rgba(SELECTION_BG)),
+                ));
+                base = end;
+            }
             MessageSpan::Text(text) => {
                 let pieces = memoized_selectable_text_pieces(text, ctx);
                 for piece in pieces.iter() {
                     match piece {
                         CachedSelectableTextPiece::LineBreak => {
                             row = row.child(div().w_full().h_0());
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            // An empty text still lays out one line tall, which is exactly
+                            // the gap wanted; `w_full` keeps it on a row of its own.
+                            row = row.child(div().w_full().child(SharedString::default()));
                         }
                         CachedSelectableTextPiece::Text { text, range } => {
                             let chunk_base = base + range.start;
@@ -702,18 +753,24 @@ fn render_selectable_segmented_spans(
                 emoji_id,
                 src,
             } => {
+                let trailing_gap = gap_after(spans, index);
                 let end = base + name.len();
                 let is_selected = selected
                     .as_ref()
                     .is_some_and(|range| range.start < end && range.end > base);
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                let mut emoji =
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, Some(base));
+                if let Some(gap) = trailing_gap {
+                    emoji = emoji.mr(gap_width(gap, text_size));
+                }
                 row = row.child(SelectableRegion::new(
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base),
+                    emoji.into_any_element(),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
-                base = end;
+                base = end + trailing_gap.map_or(0, |gap| gap.len());
             }
             MessageSpan::Mention {
                 display,
@@ -884,16 +941,25 @@ fn render_selectable_segmented_spans(
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 let end = base + INLINE_ICON_PLACEHOLDER.len_utf8() + chip.label.len();
                 let is_selected = selected
                     .as_ref()
                     .is_some_and(|range| range.start < end && range.end > base);
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                let chip_key = link_part_index;
+                link_part_index += 1;
                 row = row.child(SelectableRegion::new(
-                    render_hashtag_chip(chip, ctx),
+                    render_hashtag_chip(chip, chip_key, ctx),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -1105,9 +1171,13 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 text.push(INLINE_ICON_PLACEHOLDER);
-                text.push_str(&hashtag_chip(display, channel_id.as_deref(), locale, cx).label);
+                text.push_str(
+                    &hashtag_chip(display, channel_id.as_deref(), meta.as_deref(), locale, cx)
+                        .label,
+                );
             }
             MessageSpan::Canvas { title, .. } => text.push_str(title),
         }
@@ -1434,6 +1504,9 @@ pub(crate) enum CachedSelectableTextPiece {
         range: Range<usize>,
     },
     LineBreak,
+    /// A line with nothing on it (`\n\n` in the source): a break alone is zero-height, so the
+    /// blank line the author typed with Shift+Enter has to reserve a line of its own.
+    EmptyLine,
 }
 
 fn memoized_selectable_text_pieces(
@@ -1450,11 +1523,32 @@ fn memoized_selectable_text_pieces(
         return pieces;
     }
 
+    let pieces: Rc<[CachedSelectableTextPiece]> = build_selectable_text_pieces(text).into();
+    let mut memo = ctx.row_memo.borrow_mut();
+    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
+        && !memo.selection_text_pieces.contains_key(text)
+    {
+        memo.selection_text_pieces.clear();
+    }
+    memo.selection_text_pieces
+        .insert(text.clone(), pieces.clone());
+    pieces
+}
+
+fn build_selectable_text_pieces(text: &str) -> Vec<CachedSelectableTextPiece> {
     let mut pieces = Vec::new();
     let mut line_base = 0usize;
+    let line_count = text.split('\n').count();
     for (line_index, line) in text.split('\n').enumerate() {
         if line_index > 0 {
             pieces.push(CachedSelectableTextPiece::LineBreak);
+        }
+        // Only a line *between* two breaks is a blank line the author typed; a newline that
+        // merely ends the span (say, right before a code block) is just the break itself.
+        if line.trim().is_empty() && line_index > 0 && line_index + 1 < line_count {
+            pieces.push(CachedSelectableTextPiece::EmptyLine);
+            line_base += line.len() + 1;
+            continue;
         }
         for range in selectable_text_chunks(line) {
             let chunk = &line[range.clone()];
@@ -1484,15 +1578,6 @@ fn memoized_selectable_text_pieces(
         }
         line_base += line.len() + 1;
     }
-    let pieces: Rc<[CachedSelectableTextPiece]> = pieces.into();
-    let mut memo = ctx.row_memo.borrow_mut();
-    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
-        && !memo.selection_text_pieces.contains_key(text)
-    {
-        memo.selection_text_pieces.clear();
-    }
-    memo.selection_text_pieces
-        .insert(text.clone(), pieces.clone());
     pieces
 }
 
@@ -1593,6 +1678,55 @@ fn selectable_segment_shared(
     ))
 }
 
+fn inline_gap(text: &str, text_size: Option<Pixels>) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(gap_width(text, text_size))
+        .h(rems(MESSAGE_LINE_HEIGHT))
+}
+
+fn gap_width(text: &str, text_size: Option<Pixels>) -> DefiniteLength {
+    let spaces = GG_SANS_SPACE_ADVANCE * text.chars().count() as f32;
+    match text_size {
+        Some(text_size) => (text_size * spaces).into(),
+        None => rems(spaces).into(),
+    }
+}
+
+fn gap_after(spans: &[MessageSpan], index: usize) -> Option<&SharedString> {
+    match spans.get(index + 1) {
+        Some(MessageSpan::Text(text)) if separates_inline_spans(spans, index + 1, text) => {
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+fn separates_inline_spans(spans: &[MessageSpan], index: usize, text: &str) -> bool {
+    !text.is_empty()
+        && text.trim().is_empty()
+        && index
+            .checked_sub(1)
+            .and_then(|previous| spans.get(previous))
+            .is_some_and(is_inline_span)
+        && spans.get(index + 1).is_some_and(is_inline_span)
+        && !text.contains('\n')
+}
+
+fn follows_emoji_that_takes_it(spans: &[MessageSpan], index: usize) -> bool {
+    index.checked_sub(1).is_some_and(|previous| {
+        matches!(spans[previous], MessageSpan::Emoji { .. }) && gap_after(spans, previous).is_some()
+    })
+}
+
+fn is_inline_span(span: &MessageSpan) -> bool {
+    match span {
+        MessageSpan::CodeBlock { .. } | MessageSpan::Heading { .. } => false,
+        MessageSpan::Link { kind, .. } => *kind == LinkKind::Plain,
+        _ => true,
+    }
+}
+
 fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1601,7 +1735,7 @@ fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
         .items_baseline()
         .min_w_0()
         .text_base()
-        .line_height(rems(1.375))
+        .line_height(rems(MESSAGE_LINE_HEIGHT))
         .text_color(body_color);
     if inline {
         row = row.flex_shrink_0();
@@ -1609,6 +1743,10 @@ fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
         row = row.w_full().gap_x(px(4.));
     }
     row
+}
+
+fn message_content_row(body_color: gpui::Rgba) -> gpui::Div {
+    rich_content_row(body_color, false).min_h(px(MESSAGE_CONTENT_MIN_HEIGHT))
 }
 
 fn edited_marker(theme: &Theme, locale: &str) -> AnyElement {
@@ -1735,10 +1873,22 @@ fn append_span(
         MessageSpan::Hashtag {
             display,
             channel_id,
-        } => row.child(render_hashtag_chip(
-            hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app),
-            ctx,
-        )),
+            meta,
+        } => {
+            let key = *span_key;
+            *span_key += 1;
+            row.child(render_hashtag_chip(
+                hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                ),
+                key,
+                ctx,
+            ))
+        }
         MessageSpan::Emoji {
             name,
             emoji_id,
@@ -1747,7 +1897,13 @@ fn append_span(
             let key = *span_key;
             *span_key += 1;
             row.child(render_emoji_span(
-                name, emoji_id, src, body_color, ctx, emoji_size, key,
+                name,
+                emoji_id,
+                src,
+                body_color,
+                ctx,
+                emoji_size,
+                Some(key),
             ))
         }
         MessageSpan::Canvas { title, .. } => row.child(render_canvas_chip(title.clone())),
@@ -1927,6 +2083,17 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
         .into_any_element()
 }
 
+/// A YouTube card opens on the web client's own `/embed/youtube` player page — the
+/// point of the card is the video, not the site around it. Every other social link
+/// (and any URL we cannot read an id out of) opens as it always did.
+fn social_card_launch_url(url: &str, cx: &gpui::App) -> String {
+    AppConfig::try_global(cx)
+        .and_then(|config| {
+            mezon_client::social::build_youtube_embed_route_url(&config.domain_url, url)
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
@@ -1973,7 +2140,7 @@ fn render_social_link_card(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        PlatformStore::open_app_window(resolved.to_string(), cx);
+                        PlatformStore::open_app_window(social_card_launch_url(&resolved, cx), cx);
                     }
                 })
                 .child(
@@ -1991,41 +2158,98 @@ fn render_social_link_card(
         .into_any_element()
 }
 
-fn render_emoji_span(
+pub(super) fn render_emoji_span(
     name: &SharedString,
     emoji_id: &str,
     precomputed_src: &SharedString,
     body_color: gpui::Rgba,
     ctx: &RowCtx,
     size: Pixels,
-    key: usize,
-) -> AnyElement {
+    animation_key: Option<usize>,
+) -> gpui::Div {
     let src: SharedString = if precomputed_src.is_empty() {
         crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
     } else {
         precomputed_src.clone()
     };
     if src.is_empty() {
-        return div()
-            .text_color(body_color)
-            .child(name.clone())
-            .into_any_element();
+        return div().text_color(body_color).child(name.clone());
     }
+    let image_size = emoji_image_size(size);
+    let width = ctx
+        .icon_cache
+        .read(ctx.app)
+        .ready_render_image(&Resource::Uri(src.clone().into()))
+        .map_or(image_size, |image| {
+            emoji_width(image.size(0), image_size, size)
+        });
+    let image = match animation_key {
+        Some(key) => emoji_image_in_box(src, width, image_size, size)
+            .id(("msg-emoji-frames", key))
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                image_size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
+        None => emoji_image(src, width, image_size)
+            .with_fallback(super::reaction_detail::emoji_error_fallback(
+                image_size,
+                ctx.theme.text_muted,
+            ))
+            .into_any_element(),
+    };
+    emoji_box(size, width)
+        .image_cache(ctx.icon_cache.clone())
+        .child(image)
+}
+
+fn emoji_box(size: Pixels, width: Pixels) -> gpui::Div {
     div()
         .flex_none()
-        .size(size)
-        .image_cache(ctx.icon_cache.clone())
-        .child(
-            img(src)
-                .id(("msg-emoji-frames", key))
-                .size(size)
-                .object_fit(ObjectFit::Contain)
-                .with_fallback(super::reaction_detail::emoji_error_fallback(
-                    size,
-                    ctx.theme.text_muted,
-                )),
-        )
-        .into_any_element()
+        .w(width)
+        .when(size < px(EMOJI_JUMBO_SIZE), |emoji| {
+            emoji.relative().h(rems(MESSAGE_LINE_HEIGHT))
+        })
+        .when(size >= px(EMOJI_JUMBO_SIZE), |emoji| {
+            emoji.pt(px(EMOJI_JUMBO_TOP_PADDING))
+        })
+}
+
+fn emoji_width(bitmap: Size<DevicePixels>, height: Pixels, max_width: Pixels) -> Pixels {
+    if bitmap.width.0 <= 0 || bitmap.height.0 <= 0 {
+        return height;
+    }
+    (height * (bitmap.width.0 as f32 / bitmap.height.0 as f32)).min(max_width)
+}
+
+fn emoji_image_size(size: Pixels) -> Pixels {
+    if size >= px(EMOJI_JUMBO_SIZE) {
+        size - px(EMOJI_JUMBO_TOP_PADDING)
+    } else {
+        size
+    }
+}
+
+fn emoji_image(source: impl Into<ImageSource>, width: Pixels, height: Pixels) -> Img {
+    img(source)
+        .w(width)
+        .h(height)
+        .aspect_ratio(width / height)
+        .object_fit(ObjectFit::Contain)
+}
+
+fn emoji_image_in_box(
+    source: impl Into<ImageSource>,
+    width: Pixels,
+    height: Pixels,
+    box_size: Pixels,
+) -> Img {
+    let image = emoji_image(source, width, height);
+    if box_size < px(EMOJI_JUMBO_SIZE) {
+        image.absolute().bottom_0()
+    } else {
+        image
+    }
 }
 
 fn render_mention_chip(
@@ -2137,7 +2361,7 @@ pub(crate) fn profile_popover_trigger(
         })
 }
 
-fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
+fn render_hashtag_chip(chip: HashtagChip, key: usize, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg = theme.tokens.mention_primary;
     let color = theme.tokens.mention_color;
@@ -2174,11 +2398,12 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
         Some(channel_id) => {
             let locale = ctx.locale.to_string();
             let selection = ctx.selection.clone();
-            base.id(("msg-hashtag", channel_id.get() as usize))
+            let clan_hint = chip.clan_hint;
+            base.id(("msg-hashtag", key))
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        navigate_to_channel(channel_id, &locale, cx);
+                        navigate_to_channel(channel_id, clan_hint, &locale, cx);
                     }
                 })
                 .into_any_element()
@@ -2187,11 +2412,12 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
     }
 }
 
-struct HashtagChip {
-    label: SharedString,
-    icon: IconName,
+pub(super) struct HashtagChip {
+    pub(super) label: SharedString,
+    pub(super) icon: IconName,
     italic: bool,
     channel_id: Option<ChannelId>,
+    clan_hint: Option<ClanId>,
 }
 
 struct ResolvedHashtag {
@@ -2199,10 +2425,25 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_chip(display: &str, channel_id: Option<&str>, locale: &str, cx: &App) -> HashtagChip {
+pub(super) fn hashtag_chip(
+    display: &str,
+    channel_id: Option<&str>,
+    meta: Option<&HashtagMeta>,
+    locale: &str,
+    cx: &App,
+) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
-    hashtag_chip_for(display, parsed_channel, resolved, locale)
+    let resolved = parsed_channel
+        .and_then(|cid| hashtag_channel(cid, cx))
+        .or_else(|| {
+            meta.map(|meta| ResolvedHashtag {
+                name: Some(meta.label.clone()),
+                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
+            })
+        });
+    let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);
+    chip.clan_hint = meta.map(|meta| meta.clan_id);
+    chip
 }
 
 fn hashtag_chip_for(
@@ -2219,6 +2460,7 @@ fn hashtag_chip_for(
             icon: resolved.icon,
             italic: false,
             channel_id: parsed_channel,
+            clan_hint: None,
         };
     }
     if display.starts_with("http://") || display.starts_with("https://") {
@@ -2227,6 +2469,7 @@ fn hashtag_chip_for(
             icon: IconName::Hashtag,
             italic: true,
             channel_id: None,
+            clan_hint: None,
         };
     }
     if parsed_channel.is_some() {
@@ -2235,6 +2478,7 @@ fn hashtag_chip_for(
             icon: IconName::LockedPrivate,
             italic: false,
             channel_id: None,
+            clan_hint: None,
         };
     }
     HashtagChip {
@@ -2242,6 +2486,7 @@ fn hashtag_chip_for(
         icon: IconName::Hashtag,
         italic: false,
         channel_id: None,
+        clan_hint: None,
     }
 }
 
@@ -2250,13 +2495,18 @@ fn hashtag_display_label(display: &str) -> SharedString {
 }
 
 fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> Option<AnyElement> {
-    let all_supported = msg.spans.iter().all(|span| {
-        matches!(
-            span,
-            MessageSpan::Text(_) | MessageSpan::Mention { .. } | MessageSpan::Hashtag { .. }
-        )
-    });
-    if !all_supported {
+    // This path exists only to paint channel icons over a single shaped string, and it used
+    // to find that out at the end — after copying the whole body into a String and filling
+    // three vectors, which every chipless message then threw away. Ask the spans first.
+    let mut has_icon = false;
+    for span in &msg.spans {
+        match span {
+            MessageSpan::Hashtag { .. } => has_icon = true,
+            MessageSpan::Text(_) | MessageSpan::Mention { .. } => {}
+            _ => return None,
+        }
+    }
+    if !has_icon {
         return None;
     }
 
@@ -2288,6 +2538,8 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                     range: start..end,
                     color: Some(if is_role { role_color } else { mention_color }),
                     background: Some(if is_role { role_bg } else { mention_bg }),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 if is_role {
                     continue;
@@ -2329,27 +2581,33 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 let icon_index = text.len();
-                text.push(INLINE_ICON_PLACEHOLDER);
+                text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
                 text.push_str(&chip.label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
-                    color: Some(Hsla {
-                        h: 0.,
-                        s: 0.,
-                        l: 0.,
-                        a: 0.,
-                    }),
+                    color: None,
                     background: Some(mention_bg),
+                    font_weight: Some(gpui::FontWeight::NORMAL),
+                    fade_out: Some(1.),
                 });
                 runs.push(StyledRun {
                     range: label_index..end,
                     color: Some(mention_color),
                     background: Some(mention_bg),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 icons.push(IconOverlay {
                     byte_index: icon_index,
@@ -2359,9 +2617,12 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 });
                 if let Some(cid) = chip.channel_id {
                     let locale = ctx.locale.to_string();
+                    let clan_hint = chip.clan_hint;
                     clicks.push(ClickRegion {
                         range: icon_index..end,
-                        action: Box::new(move |_, cx| navigate_to_channel(cid, &locale, cx)),
+                        action: Box::new(move |_, cx| {
+                            navigate_to_channel(cid, clan_hint, &locale, cx)
+                        }),
                     });
                 }
             }
@@ -2402,24 +2663,22 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
 }
 
 fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
-    let channels = ChannelList::global(cx);
-    let store = channels.read(cx);
-    store
-        .find_channel_in_active_clan(channel_id)
-        .or_else(|| {
-            store
-                .clan_id_for_channel(channel_id)
-                .and_then(|clan_id| store.channel(clan_id, channel_id))
-        })
-        .or_else(|| store.user_channel(channel_id))
+    ChannelList::global(cx)
+        .read(cx)
+        .linkable_channel(channel_id)
         .map(|channel| ResolvedHashtag {
             name: (!channel.name.is_empty()).then(|| SharedString::from(channel.name.as_str())),
-            icon: channel_type_icon(channel.channel_type, channel.private),
+            icon: mention_channel_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
         })
 }
 
-fn channel_type_icon(kind: ChannelType, private: bool) -> IconName {
+fn mention_channel_icon(kind: ChannelType, private: bool, age_restricted: i32) -> IconName {
     match kind {
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
         ChannelType::Voice => {
             if private {
                 IconName::SpeakerLocked
@@ -2459,8 +2718,13 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
         .filter(|id| !id.is_zero())
 }
 
-fn navigate_to_channel(channel_id: ChannelId, locale: &str, cx: &mut App) {
-    let Some(clan_id) = clan_for_channel(channel_id, cx) else {
+fn navigate_to_channel(
+    channel_id: ChannelId,
+    clan_hint: Option<ClanId>,
+    locale: &str,
+    cx: &mut App,
+) {
+    let Some(clan_id) = clan_for_channel(channel_id, cx).or(clan_hint) else {
         Shell::global(cx).update(cx, |shell, cx| {
             shell.info(mezon_i18n::t(locale, "message.noAccess"), cx);
         });
@@ -2481,8 +2745,60 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
     store.clan_id_for_channel(channel_id).or_else(|| {
         store
             .user_channel(channel_id)
+            .or_else(|| store.linked_channel(channel_id))
             .map(|channel| channel.clan_id)
     })
+}
+
+pub(super) fn channel_links_needing_detail(_spans: &[MessageSpan], _cx: &App) -> Vec<ChannelId> {
+    Vec::new()
+}
+
+// linked-channel-api: re-add ClanList and channel_url_clan_id to the imports above when restoring.
+// linked-channel-api: pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
+// linked-channel-api:     let mut channel_ids = Vec::new();
+// linked-channel-api:     for span in spans {
+// linked-channel-api:         let MessageSpan::Hashtag {
+// linked-channel-api:             display,
+// linked-channel-api:             channel_id: Some(raw),
+// linked-channel-api:             meta: None,
+// linked-channel-api:         } = span
+// linked-channel-api:         else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         let Some(channel_id) = parse_channel_id(raw) else {
+// linked-channel-api:             continue;
+// linked-channel-api:         };
+// linked-channel-api:         if ChannelList::global(cx)
+// linked-channel-api:             .read(cx)
+// linked-channel-api:             .can_resolve_linked_channel(channel_id)
+// linked-channel-api:             && is_in_linked_clan(display, cx)
+// linked-channel-api:             && hashtag_channel(channel_id, cx).is_none()
+// linked-channel-api:             && !channel_ids.contains(&channel_id)
+// linked-channel-api:         {
+// linked-channel-api:             channel_ids.push(channel_id);
+// linked-channel-api:         }
+// linked-channel-api:     }
+// linked-channel-api:     channel_ids
+// linked-channel-api: }
+// linked-channel-api:
+// linked-channel-api: fn is_in_linked_clan(display: &str, cx: &App) -> bool {
+// linked-channel-api:     let Some(clan_id) = channel_url_clan_id(display) else {
+// linked-channel-api:         return true;
+// linked-channel-api:     };
+// linked-channel-api:     let clans = ClanList::global(cx).read(cx);
+// linked-channel-api:     clans.has_listed() && clans.clan(clan_id).is_some()
+// linked-channel-api: }
+
+pub(super) fn defer_linked_channel_resolve(channel_ids: Vec<ChannelId>, cx: &mut App) {
+    if channel_ids.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.resolve_linked_channels(channel_ids, cx);
+        });
+    });
 }
 
 fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> AnyElement {
@@ -2499,7 +2815,7 @@ fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> An
             .into(),
     };
     if text.is_empty() {
-        return div().into_any_element();
+        return empty_message_content().into_any_element();
     }
 
     let selection_range = ctx.selection.borrow().range_for_message(msg.id, &text);
@@ -2517,7 +2833,7 @@ fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> An
     div()
         .w_full()
         .min_w_0()
-        .min_h(px(30.))
+        .min_h(px(MESSAGE_CONTENT_MIN_HEIGHT))
         .cursor(gpui::CursorStyle::IBeam)
         .text_base()
         .line_height(rems(1.375))
@@ -2546,9 +2862,29 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(code) = meeting_code(&url, cx) {
+        crate::meeting::open_meeting_window(code, cx);
+        return;
+    }
+    if let Some(invite_id) = clan_invite_id(&url, cx) {
+        crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
+        return;
+    }
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    mezon_store::internal_meeting_code(url, Some(&cfg.domain_url))
+}
+
+fn clan_invite_id(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    is_clan_invite_url(url, Some(&cfg.domain_url))
+        .then(|| invite_id_from_url(url))
+        .flatten()
 }
 
 pub(crate) fn resolve_message_link_url(url: &str, text: &str) -> String {
@@ -2834,14 +3170,61 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{CachedSelectableTextPiece, build_selectable_text_pieces};
     use super::{
-        RichRunPalette, RichTextRenderPlan, SelectableSectionCursor, parse_channel_id,
-        rich_highlights_with_link_hover, rich_run_highlight,
-        rich_run_highlight_with_link_underline, rich_text_plan_matches,
+        INLINE_ICON_PLACEHOLDER, INLINE_ICON_RESERVE, RichRunPalette, RichTextRenderPlan,
+        SelectableSectionCursor, parse_channel_id, rich_highlights_with_link_hover,
+        rich_run_highlight, rich_run_highlight_with_link_underline, rich_text_plan_matches,
         selectable_message_layout_identity, selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
+
+    fn piece_shape(text: &str) -> String {
+        build_selectable_text_pieces(text)
+            .iter()
+            .map(|p| match p {
+                CachedSelectableTextPiece::Text { text, .. } => text.to_string(),
+                CachedSelectableTextPiece::LineBreak => "⏎".into(),
+                CachedSelectableTextPiece::EmptyLine => "▯".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_blank_line_between_two_breaks_reserves_a_line() {
+        assert_eq!(piece_shape("a\nb"), "a|⏎|b");
+        assert_eq!(piece_shape("a\n\nb"), "a|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n\n\nb"), "a|⏎|▯|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n  \nb"), "a|⏎|▯|⏎|b");
+    }
+
+    #[test]
+    fn a_newline_that_merely_ends_or_starts_the_span_is_only_a_break() {
+        // The text before / after a code block carries the fence's newline.
+        assert_eq!(piece_shape("a\n"), "a|⏎");
+        assert_eq!(piece_shape("\nb"), "⏎|b");
+        assert_eq!(piece_shape("a\n\n"), "a|⏎|▯|⏎");
+    }
     use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
+
+    /// The shaped string and the string selection indexes into carry different characters
+    /// where a channel icon goes, and every offset is shared between them. Same byte width
+    /// or a selection that crosses a chip lands on the wrong character.
+    #[test]
+    fn placeholders_agree_on_utf8_length() {
+        assert_eq!(
+            INLINE_ICON_PLACEHOLDER.len_utf8(),
+            INLINE_ICON_RESERVE.len_utf8()
+        );
+    }
+
+    /// The reserve is only ever shaped, never read back, so it may be a character someone
+    /// could type. The placeholder is stripped out of copied text wholesale, so it must not.
+    #[test]
+    fn only_the_reserve_may_be_a_typeable_character() {
+        assert!(('\u{2800}'..='\u{28ff}').contains(&INLINE_ICON_PLACEHOLDER));
+    }
 
     #[test]
     fn parse_channel_id_rejects_zero() {
@@ -3058,5 +3441,419 @@ mod hashtag_label_tests {
             chip("#g", Some(2), resolved(Some("g"))).channel_id,
             Some(ChannelId(2))
         );
+    }
+}
+
+#[cfg(test)]
+mod social_card_tests {
+    use super::social_card_launch_url;
+
+    /// The card's whole job: a YouTube link goes to our player page, everything else
+    /// keeps opening what the reader actually clicked.
+    #[gpui::test]
+    fn a_youtube_card_opens_the_configured_embed_route(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                std::sync::Arc::new(mezon_store::AppConfig {
+                    domain_url: "http://127.0.0.1:4207".into(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+
+            assert_eq!(
+                social_card_launch_url("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1m30s", cx),
+                "http://127.0.0.1:4207/embed/youtube?v=jNQXAC9IVRw&t=90"
+            );
+            assert_eq!(
+                social_card_launch_url("https://www.tiktok.com/@user/video/123", cx),
+                "https://www.tiktok.com/@user/video/123"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod emoji_layout_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui::{
+        Bounds, DefiniteLength, DevicePixels, Pixels, RenderImage, SharedString, TestAppContext,
+        div, point, prelude::*, px, rems, rgb, size,
+    };
+    use mezon_store::MessageSpan;
+
+    use super::super::selection::SelectableRegion;
+    use super::{
+        EMOJI_JUMBO_TOP_PADDING, GG_SANS_SPACE_ADVANCE, emoji_box, emoji_image, emoji_image_in_box,
+        emoji_image_size, emoji_width, empty_message_content, follows_emoji_that_takes_it,
+        gap_after, gap_width, inline_gap, message_content_row, rich_content_row,
+        separates_inline_spans,
+    };
+
+    const EMOJI: Pixels = px(48.);
+
+    fn bitmap(width: u32, height: u32) -> Arc<RenderImage> {
+        let pixels = image::RgbaImage::new(width, height);
+        Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]))
+    }
+
+    fn laid_out(cx: &mut TestAppContext, image: Arc<RenderImage>, width: Pixels) -> Bounds<Pixels> {
+        let cx = cx.add_empty_window();
+        let bounds = Rc::new(Cell::new(None));
+        let slot = bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                SelectableRegion::new(
+                    emoji_image(image, width, EMOJI).into_any_element(),
+                    slot,
+                    None,
+                )
+                .into_any_element()
+            },
+        );
+        bounds.get().expect("emoji was laid out")
+    }
+
+    #[gpui::test]
+    fn a_tall_emoji_stays_in_its_square_box_until_it_loads(cx: &mut TestAppContext) {
+        assert_eq!(laid_out(cx, bitmap(48, 96), EMOJI).size, size(EMOJI, EMOJI));
+    }
+
+    #[gpui::test]
+    fn a_loaded_tall_emoji_narrows_like_the_web(cx: &mut TestAppContext) {
+        let image = bitmap(48, 96);
+        let width = emoji_width(image.size(0), EMOJI, EMOJI);
+
+        assert_eq!(width, px(24.));
+        assert_eq!(laid_out(cx, image, width).size, size(px(24.), EMOJI));
+    }
+
+    #[test]
+    fn a_jumbo_emoji_is_as_wide_as_react_lets_it_be() {
+        let height = emoji_image_size(EMOJI);
+
+        assert_eq!(height, px(44.));
+        assert_eq!(
+            emoji_width(size(DevicePixels(64), DevicePixels(64)), height, EMOJI),
+            px(44.)
+        );
+        assert_eq!(
+            emoji_width(size(DevicePixels(96), DevicePixels(48)), height, EMOJI),
+            EMOJI
+        );
+        assert_eq!(
+            emoji_width(size(DevicePixels(92), DevicePixels(128)), height, EMOJI),
+            px(44.) * (92. / 128.)
+        );
+    }
+
+    #[gpui::test]
+    fn a_wide_emoji_stays_in_its_square_box(cx: &mut TestAppContext) {
+        let image = bitmap(96, 48);
+        let width = emoji_width(image.size(0), EMOJI, EMOJI);
+
+        assert_eq!(laid_out(cx, image, width).size, size(EMOJI, EMOJI));
+    }
+
+    #[gpui::test]
+    fn wrapped_jumbo_emoji_rows_are_spaced_like_the_web(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let image = bitmap(48, 96);
+        let height = emoji_image_size(EMOJI);
+        let width = emoji_width(image.size(0), height, EMOJI);
+        let first = Rc::new(Cell::new(None));
+        let second = Rc::new(Cell::new(None));
+        let slots = [first.clone(), second.clone()];
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(40.), px(300.)),
+            move |_, _| {
+                slots
+                    .iter()
+                    .fold(rich_content_row(rgb(0), false), |row, slot| {
+                        row.child(
+                            emoji_box(EMOJI, width).child(SelectableRegion::new(
+                                emoji_image_in_box(image.clone(), width, height, EMOJI)
+                                    .into_any_element(),
+                                slot.clone(),
+                                None,
+                            )),
+                        )
+                    })
+                    .into_any_element()
+            },
+        );
+        let (first, second) = (first.get().unwrap(), second.get().unwrap());
+
+        assert_eq!(first.size, size(px(22.), px(44.)));
+        assert_eq!(second.top() - first.bottom(), px(EMOJI_JUMBO_TOP_PADDING));
+    }
+
+    #[gpui::test]
+    fn an_inline_emoji_keeps_the_text_line_height(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let image = bitmap(48, 96);
+        let line = Rc::new(Cell::new(None));
+        let slot = line.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                let inline = px(24.);
+                SelectableRegion::new(
+                    rich_content_row(rgb(0), false)
+                        .child("text")
+                        .child(
+                            emoji_box(inline, inline)
+                                .child(emoji_image_in_box(image, inline, inline, inline)),
+                        )
+                        .into_any_element(),
+                    slot,
+                    None,
+                )
+                .into_any_element()
+            },
+        );
+
+        assert_eq!(line.get().expect("line was laid out").size.height, px(22.));
+    }
+
+    fn message_content_height(cx: &mut TestAppContext, with_emoji: bool) -> Pixels {
+        let cx = cx.add_empty_window();
+        let bounds = Rc::new(Cell::new(None));
+        let slot = bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(100.)),
+            move |_, _| {
+                let row = message_content_row(rgb(0)).child("text");
+                let row = if with_emoji {
+                    row.child(emoji_box(px(24.), px(24.)).child(emoji_image_in_box(
+                        bitmap(48, 48),
+                        px(24.),
+                        px(24.),
+                        px(24.),
+                    )))
+                } else {
+                    row
+                };
+                SelectableRegion::new(row.into_any_element(), slot, None).into_any_element()
+            },
+        );
+        bounds
+            .get()
+            .expect("message content was laid out")
+            .size
+            .height
+    }
+
+    #[gpui::test]
+    fn text_and_inline_emoji_messages_have_equal_height(cx: &mut TestAppContext) {
+        assert_eq!(message_content_height(cx, false), px(30.));
+        assert_eq!(message_content_height(cx, true), px(30.));
+    }
+
+    #[gpui::test]
+    fn attachment_only_message_has_no_blank_content_band(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let attachment_bounds = Rc::new(Cell::new(None));
+        let attachment_slot = attachment_bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(100.)),
+            move |_, _| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(empty_message_content())
+                    .child(SelectableRegion::new(
+                        div().h(px(40.)).into_any_element(),
+                        attachment_slot,
+                        None,
+                    ))
+                    .into_any_element()
+            },
+        );
+        assert_eq!(
+            attachment_bounds
+                .get()
+                .expect("attachment was laid out")
+                .top(),
+            px(0.)
+        );
+    }
+
+    #[gpui::test]
+    fn inline_emoji_and_text_share_the_same_bottom_edge(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let text_bounds = Rc::new(Cell::new(None));
+        let emoji_bounds = Rc::new(Cell::new(None));
+        let text_slot = text_bounds.clone();
+        let emoji_slot = emoji_bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(100.)),
+            move |_, _| {
+                rich_content_row(rgb(0), false)
+                    .child(SelectableRegion::new(
+                        div().child("một").into_any_element(),
+                        text_slot,
+                        None,
+                    ))
+                    .child(
+                        emoji_box(px(24.), px(24.)).child(SelectableRegion::new(
+                            emoji_image_in_box(bitmap(48, 48), px(24.), px(24.), px(24.))
+                                .into_any_element(),
+                            emoji_slot,
+                            None,
+                        )),
+                    )
+                    .into_any_element()
+            },
+        );
+        assert_eq!(
+            text_bounds.get().expect("text was laid out").bottom(),
+            emoji_bounds.get().expect("emoji was laid out").bottom()
+        );
+    }
+
+    #[gpui::test]
+    fn edited_marker_stays_on_the_jumbo_emoji_baseline(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let emoji_bounds = Rc::new(Cell::new(None));
+        let marker_bounds = Rc::new(Cell::new(None));
+        let emoji_slot = emoji_bounds.clone();
+        let marker_slot = marker_bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(100.)),
+            move |_, _| {
+                rich_content_row(rgb(0), false)
+                    .child(emoji_box(EMOJI, EMOJI).child(SelectableRegion::new(
+                        emoji_image_in_box(bitmap(48, 48), EMOJI, EMOJI, EMOJI).into_any_element(),
+                        emoji_slot,
+                        None,
+                    )))
+                    .child(SelectableRegion::new(
+                        div().text_size(px(9.)).child("(edited)").into_any_element(),
+                        marker_slot,
+                        None,
+                    ))
+                    .into_any_element()
+            },
+        );
+        assert_eq!(
+            marker_bounds.get().expect("marker was laid out").bottom(),
+            emoji_bounds.get().expect("emoji was laid out").bottom()
+        );
+    }
+
+    #[gpui::test]
+    fn a_gap_is_as_wide_as_a_gg_sans_space(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let bounds = Rc::new(Cell::new(None));
+        let slot = bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                SelectableRegion::new(inline_gap(" ", None).into_any_element(), slot, None)
+                    .into_any_element()
+            },
+        );
+        let width = bounds.get().expect("gap was laid out").size.width;
+
+        assert!((width - px(3.52)).abs() < px(0.1), "gap {width:?}");
+    }
+
+    #[test]
+    fn a_gap_is_one_space_per_character_at_the_row_text_size() {
+        assert_eq!(
+            gap_width("  ", None),
+            DefiniteLength::from(rems(GG_SANS_SPACE_ADVANCE * 2.))
+        );
+        assert_eq!(
+            gap_width(" ", Some(px(14.))),
+            DefiniteLength::from(px(14.) * GG_SANS_SPACE_ADVANCE)
+        );
+    }
+
+    fn emoji() -> MessageSpan {
+        MessageSpan::Emoji {
+            name: SharedString::from(":a:"),
+            emoji_id: "1".into(),
+            src: SharedString::default(),
+        }
+    }
+
+    fn text(value: &'static str) -> MessageSpan {
+        MessageSpan::Text(SharedString::from(value))
+    }
+
+    fn separates(spans: &[MessageSpan], index: usize) -> bool {
+        let MessageSpan::Text(value) = &spans[index] else {
+            unreachable!("the probed span is text");
+        };
+        separates_inline_spans(spans, index, value)
+    }
+
+    #[test]
+    fn the_space_between_two_emoji_is_kept() {
+        assert!(separates(&[emoji(), text(" "), emoji()], 1));
+        assert!(separates(&[emoji(), text("  "), emoji()], 1));
+    }
+
+    #[test]
+    fn leading_trailing_and_line_breaking_whitespace_is_not_a_gap() {
+        assert!(!separates(&[text(" "), emoji()], 0));
+        assert!(!separates(&[emoji(), text(" ")], 1));
+        assert!(!separates(&[emoji(), text(" \n "), emoji()], 1));
+        assert!(!separates(&[emoji(), text(" a "), emoji()], 1));
+    }
+
+    #[test]
+    fn an_emoji_takes_the_gap_that_follows_it() {
+        let spans = [emoji(), text(" "), emoji(), text(" hi")];
+
+        assert_eq!(gap_after(&spans, 0).map(|gap| gap.as_ref()), Some(" "));
+        assert!(gap_after(&spans, 2).is_none());
+        assert!(gap_after(&spans, 3).is_none());
+    }
+
+    #[test]
+    fn only_the_gap_an_emoji_took_is_skipped() {
+        let mention = MessageSpan::Mention {
+            display: SharedString::from("@a"),
+            user_id: None,
+            role_id: None,
+        };
+
+        assert!(follows_emoji_that_takes_it(
+            &[emoji(), text(" "), emoji()],
+            1
+        ));
+        assert!(!follows_emoji_that_takes_it(
+            &[mention, text(" "), emoji()],
+            1
+        ));
+        assert!(!follows_emoji_that_takes_it(&[emoji(), text(" ")], 1));
+        assert!(!follows_emoji_that_takes_it(&[emoji(), text(" hi")], 1));
+        assert!(!follows_emoji_that_takes_it(&[text(" "), emoji()], 0));
+    }
+
+    #[test]
+    fn whitespace_next_to_a_block_is_not_a_gap() {
+        let code_block = MessageSpan::CodeBlock {
+            language: None,
+            text: SharedString::from("x"),
+            fenced_source: SharedString::from("```x```"),
+        };
+
+        assert!(!separates(&[code_block, text(" "), emoji()], 1));
     }
 }

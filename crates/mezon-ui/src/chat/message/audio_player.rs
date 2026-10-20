@@ -1,10 +1,13 @@
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use futures::AsyncReadExt;
+use futures::future::Either;
 use gpui::{
-    App, ClickEvent, Context, ElementId, Rgba, SharedString, Task, Window, div,
-    http_client::HttpClient, prelude::*, px,
+    App, BackgroundExecutor, Bounds, ClickEvent, Context, DragMoveEvent, ElementId, Empty,
+    EntityId, FontFeatures, MouseButton, MouseDownEvent, Pixels, Rgba, SharedString, Task, Window,
+    canvas, div, http_client::HttpClient, prelude::*, px, relative,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm, PcmStream};
 
@@ -13,9 +16,16 @@ use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
 const AUDIO_OUTPUT_TOAST_KEY: &str = "audio-output-unavailable";
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
-const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
+const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(200);
+const AUDIO_TICK_IDLE: Duration = Duration::from_secs(1);
+const SEEK_TRACK_WIDTH: f32 = 112.0;
 const AUDIO_FETCH_CHUNK: usize = 64 * 1024;
 const AUDIO_FETCH_QUEUE: usize = 8;
+const AUDIO_FETCH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const AUDIO_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+static TABULAR_FIGURES: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
 
 const PILL_BG: Rgba = Rgba {
     r: 0x50 as f32 / 255.,
@@ -30,10 +40,38 @@ const PLAY_HOVER_BG: Rgba = Rgba {
     a: 1.0,
 };
 const PILL_MIN_WIDTH: f32 = 208.0;
+const TRACK_BG: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.35,
+};
+
+#[derive(Clone)]
+struct SeekDrag(EntityId);
+
+impl Render for SeekDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(Clone)]
+struct PreviewSeekDrag {
+    message_id: i64,
+    index: usize,
+}
+
+impl Render for PreviewSeekDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 pub struct AudioActivation {
     pub url: SharedString,
     pub duration: f64,
+    pub start_secs: f64,
     pub download_url: SharedString,
     pub download_name: SharedString,
 }
@@ -50,8 +88,12 @@ pub struct AudioPlayerView {
     download_name: SharedString,
     player: Option<AudioPlayer>,
     state: LoadState,
+    download_failed: bool,
     want_play: bool,
+    pending_seek: Option<f64>,
     server_duration: f64,
+    playhead: f64,
+    track_bounds: Bounds<Pixels>,
     time_label: SharedString,
     last_label_seconds: (u64, u64),
     _load_task: Option<Task<()>>,
@@ -63,6 +105,7 @@ impl AudioPlayerView {
         let AudioActivation {
             url,
             duration,
+            start_secs,
             download_url,
             download_name,
         } = activation;
@@ -72,10 +115,14 @@ impl AudioPlayerView {
             download_name,
             player: None,
             state: LoadState::Loading,
+            download_failed: false,
             want_play: true,
+            pending_seek: (start_secs > 0.0).then_some(start_secs),
             server_duration: duration,
-            time_label: SharedString::from(time_label(0.0, duration)),
-            last_label_seconds: (0, whole_seconds(duration)),
+            playhead: start_secs.max(0.0),
+            track_bounds: Bounds::default(),
+            time_label: SharedString::from(time_label(start_secs.max(0.0), duration)),
+            last_label_seconds: (whole_seconds(start_secs), whole_seconds(duration)),
             _load_task: None,
             tick_task: None,
         };
@@ -108,26 +155,53 @@ impl AudioPlayerView {
             self.state = LoadState::Failed;
             return;
         }
+        tracing::info!("message audio loading started");
+        self.download_failed = false;
         let client = cx.http_client();
         self._load_task = Some(cx.spawn(async move |this, cx| {
             let (byte_tx, byte_rx) = flume::bounded(AUDIO_FETCH_QUEUE);
             let ready = mezon_audio::spawn_stream_decode(byte_rx);
+            let executor = cx.background_executor().clone();
             let fetch = cx
                 .background_executor()
-                .spawn(async move { fetch_audio(client, url, byte_tx).await });
+                .spawn(async move { fetch_audio(client, url, byte_tx, executor).await });
 
-            if let Ok(Ok(stream)) = ready.recv_async().await {
+            let stream_ready = match futures::future::select(
+                Box::pin(ready.recv_async()),
+                Box::pin(cx.background_executor().timer(AUDIO_READY_TIMEOUT)),
+            )
+            .await
+            {
+                Either::Left((result, _)) => result,
+                Either::Right(_) => {
+                    tracing::warn!("message audio decoder readiness timed out");
+                    let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
+                    return;
+                }
+            };
+
+            if let Ok(Ok(stream)) = stream_ready {
+                tracing::info!("message audio stream ready");
                 let _ = this.update(cx, |view, cx| view.on_stream_ready(stream, cx));
-                if let Err(err) = fetch.await {
-                    tracing::warn!("audio download failed: {err}");
+                match fetch.await {
+                    Ok(bytes) => {
+                        tracing::info!(bytes = bytes.len(), "message audio download complete");
+                    }
+                    Err(err) => {
+                        tracing::warn!("message audio download failed: {err}");
+                        let _ = this.update(cx, |view, cx| view.on_stream_download_failed(cx));
+                    }
                 }
                 return;
             }
 
             let bytes = match fetch.await {
-                Ok(bytes) => bytes,
+                Ok(bytes) => {
+                    tracing::info!(bytes = bytes.len(), "message audio download complete");
+                    bytes
+                }
                 Err(err) => {
-                    tracing::warn!("audio download failed: {err}");
+                    tracing::warn!("message audio download failed: {err}");
                     let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
                     return;
                 }
@@ -139,7 +213,7 @@ impl AudioPlayerView {
             let _ = this.update(cx, |view, cx| match decoded {
                 Ok(pcm) => view.on_pcm_ready(pcm, cx),
                 Err(err) => {
-                    tracing::warn!("audio decode failed: {err}");
+                    tracing::warn!("message audio decode failed: {err}");
                     view.on_load_failed(cx);
                 }
             });
@@ -150,10 +224,7 @@ impl AudioPlayerView {
         self.state = LoadState::Ready;
         if let Some(player) = &self.player {
             player.set_stream(stream);
-            if self.want_play {
-                player.play();
-                self.restart_tick(cx);
-            }
+            self.begin_playback(cx);
         }
         cx.notify();
     }
@@ -162,16 +233,67 @@ impl AudioPlayerView {
         self.state = LoadState::Ready;
         if let Some(player) = &self.player {
             player.set_data(pcm);
-            if self.want_play {
-                player.play();
-                self.restart_tick(cx);
-            }
+            self.begin_playback(cx);
         }
         cx.notify();
     }
 
+    fn begin_playback(&mut self, cx: &mut Context<Self>) {
+        if self.pending_seek.is_some() && !self.apply_pending_seek() {
+            self.restart_tick(cx);
+            return;
+        }
+        if self.want_play {
+            if let Some(player) = &self.player {
+                player.play();
+            }
+            self.restart_tick(cx);
+        }
+    }
+
+    fn apply_pending_seek(&mut self) -> bool {
+        let Some(at) = self.pending_seek else {
+            return true;
+        };
+        let landed = self.player.as_ref().is_some_and(|player| player.seek(at));
+        if !landed {
+            return false;
+        }
+        self.pending_seek = None;
+        self.set_playhead(at);
+        if self.want_play
+            && let Some(player) = &self.player
+            && !player.is_playing()
+        {
+            player.play();
+        }
+        true
+    }
+
+    fn on_stream_download_failed(&mut self, cx: &mut Context<Self>) {
+        self.download_failed = true;
+        let drained_at = self
+            .player
+            .as_ref()
+            .filter(|player| player.finished())
+            .map(|player| player.position_secs());
+        if let Some(position) = drained_at {
+            self.fail_at(position, cx);
+        }
+    }
+
+    fn fail_at(&mut self, position: f64, cx: &mut Context<Self>) {
+        self.set_playhead(position);
+        self.on_load_failed(cx);
+    }
+
     fn on_load_failed(&mut self, cx: &mut Context<Self>) {
         self.state = LoadState::Failed;
+        self.download_failed = false;
+        self.tick_task = None;
+        self.player = None;
+        self.want_play = false;
+        self.pending_seek = None;
         cx.notify();
     }
 
@@ -182,7 +304,16 @@ impl AudioPlayerView {
     fn restart_tick(&mut self, cx: &mut Context<Self>) {
         self.tick_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(AUDIO_TICK_INTERVAL).await;
+                let interval = this
+                    .update(cx, |_view, cx| {
+                        if cx.active_window().is_none() {
+                            AUDIO_TICK_IDLE
+                        } else {
+                            AUDIO_TICK_INTERVAL
+                        }
+                    })
+                    .unwrap_or(AUDIO_TICK_INTERVAL);
+                cx.background_executor().timer(interval).await;
                 let keep_going = this.update(cx, |view, cx| view.tick(cx)).unwrap_or(false);
                 if !keep_going {
                     break;
@@ -192,29 +323,109 @@ impl AudioPlayerView {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(player) = &self.player else {
-            return false;
+        let inactive = cx.active_window().is_none();
+        if self.pending_seek.is_some() {
+            let landed = self.apply_pending_seek();
+            if self.pending_seek.is_some() {
+                if self.download_failed {
+                    self.fail_at(self.playhead, cx);
+                    return false;
+                }
+                return self.want_play
+                    || self
+                        .player
+                        .as_ref()
+                        .is_some_and(|player| player.is_playing());
+            }
+            if landed && !inactive {
+                cx.notify();
+            }
+        }
+        let (finished, position, playing) = {
+            let Some(player) = &self.player else {
+                return self.pending_seek.is_some();
+            };
+            player.poll_output();
+            if inactive {
+                return player.is_playing() || self.pending_seek.is_some();
+            }
+            let finished = player.finished();
+            if finished {
+                player.pause();
+            }
+            (
+                finished,
+                player.position_secs(),
+                player.is_playing() && !finished,
+            )
         };
-        if cx.active_window().is_none() {
-            return player.is_playing();
+        if finished && self.download_failed {
+            self.fail_at(position, cx);
+            return false;
         }
-        let finished = player.finished();
-        if finished {
-            player.pause();
+        let position = if finished {
+            self.effective_duration()
+        } else {
+            position
+        };
+        let before = self.playhead;
+        let before_label = self.last_label_seconds;
+        self.set_playhead(position);
+        let label_changed = self.last_label_seconds != before_label;
+        let thumb_moved = seek_thumb_moved(before, self.playhead, self.effective_duration());
+        if finished || label_changed || thumb_moved {
+            cx.notify();
         }
-        let position = player.position_secs();
+        playing || self.pending_seek.is_some()
+    }
+
+    fn set_playhead(&mut self, position: f64) {
         let duration = self.effective_duration();
+        let position = if duration > 0.0 {
+            position.clamp(0.0, duration)
+        } else {
+            position.max(0.0)
+        };
+        self.playhead = position;
         let seconds = (whole_seconds(position), whole_seconds(duration));
-        let mut changed = false;
         if seconds != self.last_label_seconds {
             self.last_label_seconds = seconds;
             self.time_label = SharedString::from(time_label(position, duration));
-            changed = true;
         }
-        if changed || finished {
+    }
+
+    fn seek_to(&mut self, secs: f64, cx: &mut Context<Self>) {
+        if matches!(self.state, LoadState::Failed) {
+            return;
+        }
+        let duration = self.effective_duration();
+        if duration <= 0.0 {
+            return;
+        }
+        let secs = secs.clamp(0.0, duration);
+        if !self.is_ready() {
+            self.pending_seek = Some(secs);
+            self.set_playhead(secs);
             cx.notify();
+            return;
         }
-        player.is_playing()
+        let landed = self.player.as_ref().is_some_and(|player| player.seek(secs));
+        if landed {
+            self.pending_seek = None;
+        } else {
+            self.pending_seek = Some(secs);
+        }
+        self.set_playhead(secs);
+        cx.notify();
+    }
+
+    fn seek_to_x(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let duration = self.effective_duration();
+        if duration <= 0.0 {
+            return;
+        }
+        let fraction = fraction_from_position(self.track_bounds, x);
+        self.seek_to(fraction as f64 * duration, cx);
     }
 
     fn effective_duration(&self) -> f64 {
@@ -232,28 +443,43 @@ impl AudioPlayerView {
         if matches!(self.state, LoadState::Failed) {
             self.state = LoadState::Loading;
             self.want_play = true;
-            self.time_label = SharedString::from(time_label(0.0, self.server_duration));
-            self.last_label_seconds = (0, whole_seconds(self.server_duration));
+            self.pending_seek = (self.playhead > 0.0).then_some(self.playhead);
             self.start_loading(self.url.clone(), cx);
             cx.notify();
             return;
         }
-        match &self.player {
-            Some(player) if self.is_ready() => {
-                if player.is_playing() {
-                    player.pause();
-                    self.tick_task = None;
-                } else {
-                    player.play();
-                    self.restart_tick(cx);
+        let ready = self.is_ready();
+        let action = self.player.as_ref().map(|player| {
+            if !ready {
+                return PlayAction::Defer;
+            }
+            if player.is_playing() {
+                player.pause();
+                PlayAction::Pause
+            } else {
+                let restart = player.finished();
+                player.play();
+                PlayAction::Play { restart }
+            }
+        });
+        match action {
+            Some(PlayAction::Pause) => self.tick_task = None,
+            Some(PlayAction::Play { restart }) => {
+                if restart {
+                    self.set_playhead(0.0);
                 }
+                self.restart_tick(cx);
             }
-            _ => {
-                self.want_play = !self.want_play;
-            }
+            _ => self.want_play = !self.want_play,
         }
         cx.notify();
     }
+}
+
+enum PlayAction {
+    Pause,
+    Play { restart: bool },
+    Defer,
 }
 
 impl Render for AudioPlayerView {
@@ -270,11 +496,19 @@ impl Render for AudioPlayerView {
         };
         let download_url = self.download_url.clone();
         let download_name = self.download_name.clone();
+        let duration = self.effective_duration();
+        let fraction = if duration > 0.0 {
+            (self.playhead / duration).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let seek = self.seek_track(fraction, cx);
         audio_pill(
             "audio-play",
             "audio-download",
             play_icon,
             self.time_label.clone(),
+            seek,
             cx.listener(|view, _, _window, cx| view.toggle_play(cx)),
             move |_, _, cx| {
                 crate::util::download::save_with_progress_toast(
@@ -287,11 +521,145 @@ impl Render for AudioPlayerView {
     }
 }
 
+impl AudioPlayerView {
+    fn seek_track(&self, fraction: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let entity_id = cx.entity_id();
+        let view = cx.entity();
+        div()
+            .id("audio-seek")
+            .relative()
+            .flex()
+            .items_center()
+            .w(px(SEEK_TRACK_WIDTH))
+            .h(px(14.))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    view.seek_to_x(event.position.x, cx);
+                }),
+            )
+            .on_drag(SeekDrag(entity_id), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(
+                cx.listener(move |view, event: &DragMoveEvent<SeekDrag>, _window, cx| {
+                    let SeekDrag(id) = event.drag(cx);
+                    if *id != entity_id {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    view.seek_to_x(event.event.position.x, cx);
+                }),
+            )
+            .child(seek_track_face(fraction))
+            .child(
+                canvas(
+                    move |bounds, _, cx| view.update(cx, |this, _| this.track_bounds = bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+}
+
+fn seek_track_face(fraction: f32) -> impl IntoElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(4.))
+        .rounded_full()
+        .bg(TRACK_BG)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(relative(fraction))
+                .rounded_full()
+                .bg(gpui::white()),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(-3.))
+                .left(relative(fraction))
+                .ml(px(-5.))
+                .size(px(10.))
+                .rounded_full()
+                .bg(gpui::white()),
+        )
+}
+
+pub(crate) fn preview_seek_track(
+    id: impl Into<ElementId>,
+    owner: (i64, usize),
+    on_fraction: impl Fn(f32, &mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    let bounds = std::rc::Rc::new(std::cell::RefCell::new(Bounds::default()));
+    let paint_bounds = bounds.clone();
+    let down_bounds = bounds.clone();
+    let drag_bounds = bounds.clone();
+    let on_fraction = std::rc::Rc::new(on_fraction);
+    let on_down = on_fraction.clone();
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .items_center()
+        .w(px(SEEK_TRACK_WIDTH))
+        .h(px(14.))
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let fraction = fraction_from_position(*down_bounds.borrow(), event.position.x);
+                on_down(fraction, window, cx);
+            },
+        )
+        .on_drag(
+            PreviewSeekDrag {
+                message_id: owner.0,
+                index: owner.1,
+            },
+            |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            },
+        )
+        .on_drag_move(move |event: &DragMoveEvent<PreviewSeekDrag>, window, cx| {
+            let drag = event.drag(cx);
+            if drag.message_id != owner.0 || drag.index != owner.1 {
+                return;
+            }
+            cx.stop_propagation();
+            let fraction = fraction_from_position(*drag_bounds.borrow(), event.event.position.x);
+            on_fraction(fraction, window, cx);
+        })
+        .child(seek_track_face(0.0))
+        .child(
+            canvas(
+                move |bounds, _, _| *paint_bounds.borrow_mut() = bounds,
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn audio_pill(
     play_id: impl Into<ElementId>,
     download_id: impl Into<ElementId>,
     play_icon: IconName,
     time_label: SharedString,
+    seek: gpui::AnyElement,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_download: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
@@ -303,7 +671,6 @@ pub(crate) fn audio_pill(
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
                 .gap_3()
                 .min_w(px(PILL_MIN_WIDTH))
                 .rounded_full()
@@ -314,25 +681,33 @@ pub(crate) fn audio_pill(
                 .text_color(gpui::white())
                 .child(
                     div()
-                        .id(play_id)
                         .flex()
+                        .flex_row()
                         .items_center()
-                        .justify_center()
-                        .size(px(24.))
-                        .rounded_full()
-                        .bg(gpui::white())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(PLAY_HOVER_BG))
-                        .on_click(on_toggle)
-                        .child(Icon::new(play_icon).size(px(16.)).text_color(PILL_BG)),
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .id(play_id)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(24.))
+                                .rounded_full()
+                                .bg(gpui::white())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(PLAY_HOVER_BG))
+                                .on_click(on_toggle)
+                                .child(Icon::new(play_icon).size(px(16.)).text_color(PILL_BG)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_features(TABULAR_FIGURES.clone())
+                                .whitespace_nowrap()
+                                .child(time_label),
+                        ),
                 )
-                .child(
-                    div()
-                        .ml_2()
-                        .text_size(px(14.))
-                        .whitespace_nowrap()
-                        .child(time_label),
-                )
+                .child(seek)
                 .child(
                     div()
                         .id(download_id)
@@ -447,8 +822,13 @@ async fn fetch_audio(
     client: Arc<dyn HttpClient>,
     url: SharedString,
     byte_tx: flume::Sender<Vec<u8>>,
+    executor: BackgroundExecutor,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut response = client.get(url.as_ref(), ().into(), true).await?;
+    let mut response =
+        with_inactivity_timeout(&executor, client.get(url.as_ref(), ().into(), true))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("audio HTTP response timed out"))?
+            .map_err(|err| anyhow::anyhow!("audio HTTP request failed: {err}"))?;
     if !response.status().is_success() {
         anyhow::bail!("audio fetch status {}", response.status());
     }
@@ -466,8 +846,12 @@ async fn fetch_audio(
 
     let mut body = Vec::new();
     let mut buffer = vec![0u8; AUDIO_FETCH_CHUNK];
+    let mut decoder_connected = true;
     loop {
-        let read = response.body_mut().read(&mut buffer).await?;
+        let read = with_inactivity_timeout(&executor, response.body_mut().read(&mut buffer))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("audio response body timed out"))?
+            .map_err(|err| anyhow::anyhow!("audio response body failed: {err}"))?;
         if read == 0 {
             break;
         }
@@ -475,9 +859,32 @@ async fn fetch_audio(
             anyhow::bail!("response body exceeds the {AUDIO_FETCH_MAX_BYTES} byte transfer limit");
         }
         body.extend_from_slice(&buffer[..read]);
-        let _ = byte_tx.send_async(buffer[..read].to_vec()).await;
+        if decoder_connected {
+            match with_inactivity_timeout(&executor, byte_tx.send_async(buffer[..read].to_vec()))
+                .await
+            {
+                Some(Ok(())) => {}
+                Some(Err(_)) => decoder_connected = false,
+                None => anyhow::bail!("audio decoder stopped accepting data"),
+            }
+        }
     }
     Ok(body)
+}
+
+async fn with_inactivity_timeout<T>(
+    executor: &BackgroundExecutor,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    match futures::future::select(
+        Box::pin(operation),
+        Box::pin(executor.timer(AUDIO_FETCH_IDLE_TIMEOUT)),
+    )
+    .await
+    {
+        Either::Left((result, _)) => Some(result),
+        Either::Right(_) => None,
+    }
 }
 
 pub(crate) fn report_audio_output_unavailable(cx: &mut App) {
@@ -494,16 +901,52 @@ fn whole_seconds(total: f64) -> u64 {
     }
 }
 
-fn format_mmss(total: f64) -> String {
-    let seconds = whole_seconds(total);
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+fn minute_width(total_secs: u64) -> usize {
+    let minutes = total_secs / 60;
+    if minutes < 10 {
+        1
+    } else {
+        minutes.to_string().len()
+    }
+}
+
+fn format_clock(total_secs: u64, minute_width: usize) -> String {
+    format!(
+        "{:0width$}:{:02}",
+        total_secs / 60,
+        total_secs % 60,
+        width = minute_width
+    )
+}
+
+fn seek_thumb_moved(before: f64, after: f64, duration: f64) -> bool {
+    let delta = (after - before).abs();
+    if duration <= 0.0 {
+        return delta >= 0.05;
+    }
+    delta / duration * f64::from(SEEK_TRACK_WIDTH) >= 1.0
+}
+
+fn fraction_from_position(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
+    let width = bounds.size.width;
+    if width <= px(0.0) {
+        return 0.0;
+    }
+    ((x - bounds.left()) / width).clamp(0.0, 1.0)
 }
 
 fn time_label(current: f64, duration: f64) -> String {
-    if whole_seconds(duration) == 0 {
-        return format_mmss(current);
+    let duration_secs = whole_seconds(duration);
+    if duration_secs == 0 {
+        return format_clock(whole_seconds(current), 1);
     }
-    format!("{} / {}", format_mmss(current), format_mmss(duration))
+    let width = minute_width(duration_secs);
+    let current_secs = whole_seconds(current).min(duration_secs);
+    format!(
+        "{} / {}",
+        format_clock(current_secs, width),
+        format_clock(duration_secs, width)
+    )
 }
 
 pub(crate) fn audio_time_label(current: f64, duration: f64) -> SharedString {
@@ -512,12 +955,124 @@ pub(crate) fn audio_time_label(current: f64, duration: f64) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::time_label;
+    use super::{AUDIO_FETCH_IDLE_TIMEOUT, fetch_audio, fraction_from_position, time_label};
+    use futures::AsyncRead;
+    use gpui::{
+        Bounds,
+        http_client::{AsyncBody, FakeHttpClient, Response},
+        point, px, size,
+    };
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    struct StalledBody;
+
+    impl AsyncRead for StalledBody {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+    }
+
+    #[gpui::test]
+    fn stalled_audio_body_times_out_and_closes_decoder_input(cx: &mut gpui::TestAppContext) {
+        let client = FakeHttpClient::create(|_| async {
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from_reader(StalledBody))
+                .unwrap())
+        });
+        let (byte_tx, byte_rx) = flume::bounded(1);
+        let outcome = Arc::new(Mutex::new(None));
+        let task_outcome = Arc::clone(&outcome);
+        let executor = cx.executor();
+        let fetch_executor = executor.clone();
+        let _task = executor.spawn(async move {
+            let result = fetch_audio(
+                client,
+                "http://test.example/audio".into(),
+                byte_tx,
+                fetch_executor,
+            )
+            .await;
+            *task_outcome.lock().unwrap() = Some(result.err().map(|err| err.to_string()));
+        });
+
+        cx.run_until_parked();
+        assert!(outcome.lock().unwrap().is_none());
+        cx.executor().advance_clock(AUDIO_FETCH_IDLE_TIMEOUT);
+        cx.run_until_parked();
+        assert_eq!(
+            outcome.lock().unwrap().as_ref(),
+            Some(&Some("audio response body timed out".to_string()))
+        );
+        assert!(byte_rx.is_disconnected());
+    }
+
+    #[gpui::test]
+    fn disconnected_stream_decoder_keeps_bytes_for_full_decode(cx: &mut gpui::TestAppContext) {
+        let client = FakeHttpClient::create(|_| async {
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from_reader(futures::io::Cursor::new(vec![
+                    1, 2, 3,
+                ])))
+                .unwrap())
+        });
+        let (byte_tx, byte_rx) = flume::bounded(1);
+        drop(byte_rx);
+        let outcome = Arc::new(Mutex::new(None));
+        let task_outcome = Arc::clone(&outcome);
+        let executor = cx.executor();
+        let fetch_executor = executor.clone();
+        let _task = executor.spawn(async move {
+            let result = fetch_audio(
+                client,
+                "http://test.example/audio".into(),
+                byte_tx,
+                fetch_executor,
+            )
+            .await;
+            *task_outcome.lock().unwrap() = Some(result);
+        });
+
+        cx.run_until_parked();
+        let result = outcome.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
 
     #[test]
     fn the_total_is_hidden_until_it_is_known() {
         assert_eq!(time_label(0.0, 0.0), "0:00");
         assert_eq!(time_label(5.0, 0.0), "0:05");
         assert_eq!(time_label(5.0, 222.0), "0:05 / 3:42");
+    }
+
+    #[test]
+    fn the_clock_keeps_one_width_for_the_whole_clip() {
+        let short = time_label(1.0, 90.0);
+        assert_eq!(short, "0:01 / 1:30");
+        assert_eq!(time_label(8.0, 90.0).len(), short.len());
+        assert_eq!(time_label(11.0, 90.0).len(), short.len());
+        let long = time_label(5.0, 700.0);
+        assert_eq!(long, "00:05 / 11:40");
+        assert_eq!(time_label(65.0, 700.0).len(), long.len());
+        assert_eq!(time_label(600.0, 700.0).len(), long.len());
+    }
+
+    #[test]
+    fn a_click_on_the_track_maps_to_a_fraction_of_its_width() {
+        let bounds = Bounds {
+            origin: point(px(10.), px(0.)),
+            size: size(px(100.), px(14.)),
+        };
+        assert!((fraction_from_position(bounds, px(10.)) - 0.0).abs() < f32::EPSILON);
+        assert!((fraction_from_position(bounds, px(60.)) - 0.5).abs() < f32::EPSILON);
+        assert!((fraction_from_position(bounds, px(200.)) - 1.0).abs() < f32::EPSILON);
     }
 }

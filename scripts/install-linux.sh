@@ -8,6 +8,129 @@ for tool in curl tar openssl; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' is required" >&2; exit 1; }
 done
 
+# The tarball holds only the binary: unlike the .deb, nothing here pulls in the
+# GStreamer decoders Mezon needs at runtime. Without one the app still starts, but
+# videos neither play nor get a thumbnail, and GStreamer reports that only in the
+# log -- so install it here, the same way scripts/linux-deps installs build deps,
+# and fall back to naming the package if we cannot.
+if [ "$(id -u)" -eq 0 ]; then
+  maysudo=''
+else
+  maysudo="$(command -v sudo || true)"
+fi
+
+h264_decoder_elements="avdec_h264 openh264dec vah264dec vaapih264dec nvh264dec v4l2h264dec"
+h264_decoder_plugins="libgstlibav.so libgstopenh264.so libgstva.so libgstvaapi.so libgstnvcodec.so libgstvideo4linux2.so"
+
+video_decoder_installed() {
+  local element dir plugin
+  if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    for element in $h264_decoder_elements; do
+      if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+  fi
+  for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
+             /usr/lib/*/gstreamer-1.0 /usr/local/lib/gstreamer-1.0; do
+    for plugin in $h264_decoder_plugins; do
+      if [[ -e "${dir}/${plugin}" ]]; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+video_decoder_hint() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-libav gstreamer1.0-plugins-good"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "sudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugin-openh264 gstreamer1-plugins-good"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "sudo pacman -S --needed gst-libav gst-plugins-good"
+  elif command -v zypper >/dev/null 2>&1; then
+    echo "sudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good"
+  else
+    echo "install your distribution's GStreamer libav (or openh264) plugin"
+  fi
+}
+
+install_video_decoder() {
+  if [ "$(id -u)" -ne 0 ] && [ -z "$maysudo" ]; then
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    if ! $maysudo apt-get update; then
+      echo "warning: apt-get update failed; installing against a stale package index" >&2
+    fi
+    $maysudo apt-get install -y --no-install-recommends \
+      gstreamer1.0-libav gstreamer1.0-plugins-good
+  elif command -v dnf >/dev/null 2>&1; then
+    $maysudo dnf install -y gstreamer1-plugin-libav gstreamer1-plugin-openh264 gstreamer1-plugins-good
+  elif command -v pacman >/dev/null 2>&1; then
+    $maysudo pacman -S --needed --noconfirm gst-libav gst-plugins-good
+  elif command -v zypper >/dev/null 2>&1; then
+    $maysudo zypper install -y gstreamer-plugins-libav gstreamer-plugins-good
+  else
+    return 1
+  fi
+}
+
+gst_element_installed() {
+  command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 "$1" >/dev/null 2>&1
+}
+
+gst_plugin_file_installed() {
+  local dir
+  for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
+             /usr/lib/*/gstreamer-1.0 /usr/local/lib/gstreamer-1.0; do
+    if [[ -e "${dir}/$1" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+hls_demuxer_installed() {
+  { gst_element_installed tsdemux || gst_plugin_file_installed libgstmpegtsdemux.so; } &&
+    { gst_element_installed hlsdemux || gst_plugin_file_installed libgsthls.so; }
+}
+
+hls_demuxer_hint() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "sudo apt-get install -y --no-install-recommends gstreamer1.0-plugins-bad"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "sudo dnf install -y gstreamer1-plugins-bad-free"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "sudo pacman -S --needed gst-plugins-bad"
+  elif command -v zypper >/dev/null 2>&1; then
+    echo "sudo zypper install -y gstreamer-plugins-bad"
+  else
+    echo "install your distribution's GStreamer plugins-bad package"
+  fi
+}
+
+install_hls_demuxer() {
+  if [ "$(id -u)" -ne 0 ] && [ -z "$maysudo" ]; then
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    if ! $maysudo apt-get update; then
+      echo "warning: apt-get update failed; installing against a stale package index" >&2
+    fi
+    $maysudo apt-get install -y --no-install-recommends gstreamer1.0-plugins-bad
+  elif command -v dnf >/dev/null 2>&1; then
+    $maysudo dnf install -y gstreamer1-plugins-bad-free
+  elif command -v pacman >/dev/null 2>&1; then
+    $maysudo pacman -S --needed --noconfirm gst-plugins-bad
+  elif command -v zypper >/dev/null 2>&1; then
+    $maysudo zypper install -y gstreamer-plugins-bad
+  else
+    return 1
+  fi
+}
+
 arch="$(uname -m)"
 case "$arch" in
   x86_64 | aarch64) ;;
@@ -81,6 +204,34 @@ command -v update-desktop-database >/dev/null 2>&1 &&
   update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 &&
   gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+
+if ! video_decoder_installed; then
+  echo ""
+  echo "==> No GStreamer H.264 decoder found; installing one (videos need it)."
+  echo "    This needs root, so you may be asked for your password."
+  if install_video_decoder && video_decoder_installed; then
+    echo "==> Video decoder installed"
+  else
+    echo ""
+    echo "Warning: could not install a GStreamer H.264 decoder automatically."
+    echo "Videos will not play, and videos you send will have no thumbnail, until you run:"
+    echo "    $(video_decoder_hint)"
+  fi
+fi
+
+if ! hls_demuxer_installed; then
+  echo ""
+  echo "==> No GStreamer HLS demuxer found; installing one (streamed videos need it)."
+  echo "    This needs root, so you may be asked for your password."
+  if install_hls_demuxer && hls_demuxer_installed; then
+    echo "==> HLS demuxer installed"
+  else
+    echo ""
+    echo "Warning: could not install a GStreamer HLS demuxer automatically."
+    echo "Videos the server converted to HLS will not play until you run:"
+    echo "    $(hls_demuxer_hint)"
+  fi
+fi
 
 echo "==> Installed Mezon ${version} to ${app_dir}/mezon"
 case ":$PATH:" in

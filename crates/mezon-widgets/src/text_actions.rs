@@ -43,7 +43,7 @@ actions!(
     ]
 );
 
-fn text_input_bindings() -> Vec<KeyBinding> {
+pub fn text_input_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some(TEXT_INPUT_CONTEXT)),
         KeyBinding::new("delete", Delete, Some(TEXT_INPUT_CONTEXT)),
@@ -67,6 +67,7 @@ fn text_input_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-x", Cut, Some(TEXT_INPUT_CONTEXT)),
         KeyBinding::new("secondary-z", Undo, Some(TEXT_INPUT_CONTEXT)),
         KeyBinding::new("secondary-shift-z", Redo, Some(TEXT_INPUT_CONTEXT)),
+        KeyBinding::new("secondary-y", Redo, Some(TEXT_INPUT_CONTEXT)),
         KeyBinding::new(
             "ctrl-cmd-space",
             ShowCharacterPalette,
@@ -155,7 +156,6 @@ fn text_input_bindings() -> Vec<KeyBinding> {
             Some(TEXT_INPUT_CONTEXT),
         ),
         KeyBinding::new("ctrl-shift-end", SelectToDocEnd, Some(TEXT_INPUT_CONTEXT)),
-        KeyBinding::new("ctrl-y", Redo, Some(TEXT_INPUT_CONTEXT)),
     ]);
 
     bindings

@@ -11,7 +11,7 @@ use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
-use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
+use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType, validate_channel_name};
 use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
@@ -73,8 +73,16 @@ pub fn thread_preview_display(content: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub enum ThreadsEvent {
-    ThreadCreated { channel_id: String, clan_id: String },
-    CreateFailed { reason: ThreadCreateFailReason },
+    ThreadCreated {
+        channel_id: String,
+        clan_id: String,
+        parent_id: String,
+        name: String,
+        private: bool,
+    },
+    CreateFailed {
+        reason: ThreadCreateFailReason,
+    },
     LeaveFailed,
     OpenPopoverRequested,
 }
@@ -85,6 +93,9 @@ pub enum ThreadCreateFailReason {
     Api(u32),
     Other,
 }
+
+/// A thread name must be longer than this many characters (web `MINIMUM_CHAT_NAME_LENGTH`).
+const THREAD_NAME_MIN_CHARS: usize = 3;
 
 pub struct ThreadsStore {
     list_channel_id: Option<String>,
@@ -106,6 +117,9 @@ pub struct ThreadsStore {
     _create_task: Option<Task<()>>,
     create_private: i32,
     name_error: Option<String>,
+    /// The name currently in the form fails the character rule — shown under the field as the
+    /// user types, before any submit, the way web's `ThreadNameTextField` does.
+    name_live_invalid: bool,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -160,6 +174,7 @@ impl ThreadsStore {
             _create_task: None,
             create_private: 0,
             name_error: None,
+            name_live_invalid: false,
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -401,18 +416,31 @@ impl ThreadsStore {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn simulate_active_channel_changed_for_test(
+        &mut self,
+        channel_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_active_channel_changed(channel_id, cx);
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.active)
+    }
+
+    pub fn thread_channel_private(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.channel_private)
+    }
+
+    fn find_thread(&self, channel_id: &str) -> Option<&ThreadSummary> {
         self.threads
             .iter()
             .find(|t| t.channel_id == channel_id)
-            .map(|t| t.active)
             .or_else(|| {
-                self.search_results.as_ref().and_then(|results| {
-                    results
-                        .iter()
-                        .find(|t| t.channel_id == channel_id)
-                        .map(|t| t.active)
-                })
+                self.search_results
+                    .as_ref()
+                    .and_then(|results| results.iter().find(|t| t.channel_id == channel_id))
             })
     }
 
@@ -620,7 +648,26 @@ impl ThreadsStore {
     }
 
     pub fn name_error(&self) -> Option<&str> {
-        self.name_error.as_deref()
+        self.name_error
+            .as_deref()
+            .or(self.name_live_invalid.then_some("thread_name_invalid"))
+    }
+
+    /// The user is editing the form again: drop the last submit's inline error, the way
+    /// React's `ThreadNameTextField` resets `nameThreadError` on change.
+    pub fn clear_name_error(&mut self, cx: &mut Context<Self>) {
+        if self.name_error.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Live result of the character rule for the name in the form; only a change of verdict
+    /// repaints, so ordinary typing costs nothing here.
+    pub fn set_name_live_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.name_live_invalid != invalid {
+            self.name_live_invalid = invalid;
+            cx.notify();
+        }
     }
 
     pub fn show_threads_popover(&self, cx: &App) -> bool {
@@ -708,6 +755,7 @@ impl ThreadsStore {
         self.fetch_error = false;
         self.invalidate_create_request();
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -970,6 +1018,7 @@ impl ThreadsStore {
         self.submitting = false;
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -986,6 +1035,7 @@ impl ThreadsStore {
         self.invalidate_create_request();
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -1001,8 +1051,17 @@ impl ThreadsStore {
             return;
         }
         let name = name.trim().to_string();
-        if name.is_empty() {
+        // Web's `ThreadBox` rejects `length <= MINIMUM_CHAT_NAME_LENGTH` (3), so the shortest
+        // accepted name is four characters — what the "longer than 3" message promises.
+        if name.chars().count() <= THREAD_NAME_MIN_CHARS {
             self.name_error = Some("thread_name_too_short".into());
+            cx.notify();
+            return;
+        }
+        // Same rule as the web client's `ValidateSpecialCharacters`; the server rejects such a
+        // name too, but with a bare error code that only ever surfaced as "Something went wrong".
+        if validate_channel_name(&name).is_err() {
+            self.name_error = Some("thread_name_invalid".into());
             cx.notify();
             return;
         }
@@ -1049,11 +1108,15 @@ impl ThreadsStore {
             .map(OutgoingMention::into_transport)
             .collect::<Vec<_>>();
         let mentioned = mentioned_thread_candidates(&transport_mentions, clan_id_parsed, cx);
-        let transport_hashtags = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect::<Vec<_>>();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &message,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis = content_tokens
             .emojis
             .into_iter()
@@ -1124,6 +1187,9 @@ impl ThreadsStore {
 
             let thread_id = thread.channel_id;
             let thread_id_str = thread_id.to_string();
+            let thread_name = Some(thread.channel_label)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(name);
 
             if let Err(e) = api
                 .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
@@ -1202,7 +1268,7 @@ impl ThreadsStore {
                 )
                 .await
             } else {
-                match upload_attachments_now(&api, attachments).await {
+                match upload_attachments_now(&api, attachments, thread_id).await {
                     Ok(uploaded) => {
                         api.send_presigned_message(
                             clan_id_i64,
@@ -1247,6 +1313,9 @@ impl ThreadsStore {
                 cx.emit(ThreadsEvent::ThreadCreated {
                     channel_id: thread_id_str,
                     clan_id: clan_id.clone(),
+                    parent_id,
+                    name: thread_name,
+                    private: channel_private != 0,
                 });
                 cx.notify();
             }) {

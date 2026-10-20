@@ -19,22 +19,23 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine,
-    IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, IMFMediaType,
-    IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER,
-    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
-    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
-    MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
+    IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
+    IMFMediaType, IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK,
+    MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_VIDEO_ROTATION,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::Win32::System::Variant::VT_I8;
+use windows::Win32::System::Variant::{VT_I8, VT_UI4, VT_UI8};
 use windows::core::{BSTR, GUID, HSTRING, Interface, implement};
 
+use crate::poster::Turn;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 fn ensure_media_foundation() -> windows::core::Result<()> {
@@ -74,13 +75,24 @@ struct StagingTextures {
     staging: ID3D11Texture2D,
 }
 
+enum PlayerBackend {
+    MediaFoundation(MediaFoundationPlayer),
+    Webm(Box<crate::webm_player::WebmPlayerImpl>),
+}
+
 pub struct PlayerImpl {
+    inner: PlayerBackend,
+}
+
+struct MediaFoundationPlayer {
     engine: IMFMediaEngine,
+    engine_ex: Option<IMFMediaEngineEx>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     _dxgi_manager: IMFDXGIDeviceManager,
     _notify: IMFMediaEngineNotify,
     textures: RefCell<Option<StagingTextures>>,
+    quarter_turns: Cell<Option<u8>>,
     last_pts: Cell<i64>,
     max_size: Option<(u32, u32)>,
     failed: Arc<AtomicBool>,
@@ -91,13 +103,126 @@ impl PlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        Self::build(url, max_size).map_err(|error| {
+        if crate::webm_player::is_webm_source(url) {
+            return Err(PlayerError::Open);
+        }
+        let inner = MediaFoundationPlayer::build(url, max_size).map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
             PlayerError::Open
+        })?;
+        Ok(Self { inner })
+    }
+
+    pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
+        Self {
+            inner: PlayerBackend::Webm(Box::new(player)),
+        }
+    }
+
+    pub fn from_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        Ok(Self {
+            inner: PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open_bytes(
+                bytes, max_size,
+            )?)),
         })
     }
 
-    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
+    pub fn copy_frame(&self) -> Option<VideoFrame> {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.copy_frame(),
+            PlayerBackend::Webm(player) => player.copy_frame(),
+        }
+    }
+
+    pub fn play(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.play(),
+            PlayerBackend::Webm(player) => player.play(),
+        }
+    }
+
+    pub fn pause(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.pause(),
+            PlayerBackend::Webm(player) => player.pause(),
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_playing(),
+            PlayerBackend::Webm(player) => player.is_playing(),
+        }
+    }
+
+    pub fn current_time(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.current_time(),
+            PlayerBackend::Webm(player) => player.current_time(),
+        }
+    }
+
+    pub fn duration(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.duration(),
+            PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn seek(&self, to_seconds: f64) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.seek(to_seconds),
+            PlayerBackend::Webm(player) => player.seek(to_seconds),
+        }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_volume(volume),
+            PlayerBackend::Webm(player) => player.set_volume(volume),
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.volume(),
+            PlayerBackend::Webm(player) => player.volume(),
+        }
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_muted(muted),
+            PlayerBackend::Webm(player) => player.set_muted(muted),
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_muted(),
+            PlayerBackend::Webm(player) => player.is_muted(),
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.failed(),
+            PlayerBackend::Webm(player) => player.failed(),
+        }
+    }
+}
+
+impl MediaFoundationPlayer {
+    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<PlayerBackend> {
+        Ok(PlayerBackend::MediaFoundation(Self::build_engine(
+            url, max_size,
+        )?))
+    }
+
+    fn build_engine(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
         ensure_media_foundation()?;
         unsafe {
             let mut device: Option<ID3D11Device> = None;
@@ -151,13 +276,16 @@ impl PlayerImpl {
 
             engine.SetSource(&BSTR::from(url))?;
 
+            let engine_ex: Option<IMFMediaEngineEx> = engine.cast().ok();
             Ok(Self {
                 engine,
+                engine_ex,
                 device,
                 context,
                 _dxgi_manager: dxgi_manager,
                 _notify: notify,
                 textures: RefCell::new(None),
+                quarter_turns: Cell::new(None),
                 last_pts: Cell::new(0),
                 max_size,
                 failed,
@@ -165,7 +293,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn copy_frame(&self) -> Option<VideoFrame> {
+    fn copy_frame(&self) -> Option<VideoFrame> {
         unsafe {
             let pts = match self.engine.OnVideoStreamTick() {
                 Ok(pts) => pts,
@@ -225,19 +353,74 @@ impl PlayerImpl {
                 return None;
             }
 
+            let quarter_turns = self.quarter_turns((width, height));
             let pitch = mapped.RowPitch as usize;
             let packed = if mapped.pData.is_null() {
                 None
             } else {
                 let region = pitch.saturating_mul(render_h as usize);
                 let data = std::slice::from_raw_parts(mapped.pData as *const u8, region);
-                crate::frame_util::pack_bgra_rows(data, pitch, render_w, render_h)
+                crate::frame_util::pack_bgra_rows_turned(
+                    data,
+                    pitch,
+                    render_w,
+                    render_h,
+                    quarter_turns,
+                )
             };
             self.context.Unmap(&textures.staging, 0);
 
-            let out = packed?;
+            let (frame_w, frame_h, out) = packed?;
             self.last_pts.set(pts);
-            crate::render_frame::bgra_to_frame(render_w, render_h, out)
+            crate::render_frame::bgra_to_frame(frame_w, frame_h, out)
+        }
+    }
+
+    fn quarter_turns(&self, delivered: (u32, u32)) -> u8 {
+        if let Some(turns) = self.quarter_turns.get() {
+            return turns;
+        }
+        let Some(rotation) = self.stream_rotation() else {
+            return 0;
+        };
+        let turns = if rotation
+            .coded_size
+            .is_some_and(|coded| already_turned(coded, delivered))
+        {
+            0
+        } else {
+            quarter_turns_from_rotation(rotation.degrees)
+        };
+        self.quarter_turns.set(Some(turns));
+        turns
+    }
+
+    fn stream_rotation(&self) -> Option<StreamRotation> {
+        let engine = self.engine_ex.as_ref()?;
+        unsafe {
+            let streams = engine.GetNumberOfStreams().ok()?;
+            for stream in 0..streams {
+                let Some(degrees) = engine
+                    .GetStreamAttribute(stream, &MF_MT_VIDEO_ROTATION)
+                    .ok()
+                    .and_then(|value| propvariant_u32(&value))
+                else {
+                    continue;
+                };
+                let coded_size = engine
+                    .GetStreamAttribute(stream, &MF_MT_FRAME_SIZE)
+                    .ok()
+                    .and_then(|value| propvariant_u64(&value))
+                    .map(unpack_frame_size);
+                return Some(StreamRotation {
+                    degrees,
+                    coded_size,
+                });
+            }
+            Some(StreamRotation {
+                degrees: 0,
+                coded_size: None,
+            })
         }
     }
 
@@ -300,23 +483,23 @@ impl PlayerImpl {
         texture.ok_or_else(|| windows::core::Error::from(E_FAIL))
     }
 
-    pub fn play(&self) {
+    fn play(&self) {
         unsafe {
             let _ = self.engine.Play();
         }
     }
 
-    pub fn pause(&self) {
+    fn pause(&self) {
         unsafe {
             let _ = self.engine.Pause();
         }
     }
 
-    pub fn is_playing(&self) -> bool {
+    fn is_playing(&self) -> bool {
         unsafe { !self.engine.IsPaused().as_bool() }
     }
 
-    pub fn current_time(&self) -> f64 {
+    fn current_time(&self) -> f64 {
         let value = unsafe { self.engine.GetCurrentTime() };
         if value.is_finite() && value >= 0.0 {
             value
@@ -325,7 +508,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn duration(&self) -> f64 {
+    fn duration(&self) -> f64 {
         let value = unsafe { self.engine.GetDuration() };
         if value.is_finite() && value >= 0.0 {
             value
@@ -334,7 +517,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn seek(&self, to_seconds: f64) {
+    fn seek(&self, to_seconds: f64) {
         let target = if to_seconds.is_finite() && to_seconds >= 0.0 {
             to_seconds
         } else {
@@ -345,33 +528,33 @@ impl PlayerImpl {
         }
     }
 
-    pub fn set_volume(&self, volume: f32) {
+    fn set_volume(&self, volume: f32) {
         let target = (volume as f64).clamp(0.0, 1.0);
         unsafe {
             let _ = self.engine.SetVolume(target);
         }
     }
 
-    pub fn volume(&self) -> f32 {
+    fn volume(&self) -> f32 {
         unsafe { self.engine.GetVolume() as f32 }
     }
 
-    pub fn set_muted(&self, muted: bool) {
+    fn set_muted(&self, muted: bool) {
         unsafe {
             let _ = self.engine.SetMuted(muted);
         }
     }
 
-    pub fn is_muted(&self) -> bool {
+    fn is_muted(&self) -> bool {
         unsafe { self.engine.GetMuted().as_bool() }
     }
 
-    pub fn failed(&self) -> bool {
+    fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
     }
 }
 
-impl Drop for PlayerImpl {
+impl Drop for MediaFoundationPlayer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.engine.Shutdown();
@@ -385,6 +568,9 @@ const POSTER_MAX_READS: u32 = 32;
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     if path.is_empty() {
         return None;
+    }
+    if crate::webm_player::is_webm_source(path) {
+        return crate::webm_player::probe_webm(path, max_poster_edge);
     }
     ensure_media_foundation().ok()?;
     unsafe {
@@ -420,14 +606,36 @@ unsafe fn probe_with_source_reader(
         reader.SetCurrentMediaType(stream, None, &requested)?;
 
         let decoded = reader.GetCurrentMediaType(stream)?;
-        let frame_size = decoded.GetUINT64(&MF_MT_FRAME_SIZE)?;
-        let width = (frame_size >> 32) as u32;
-        let height = frame_size as u32;
+        let delivered = unpack_frame_size(decoded.GetUINT64(&MF_MT_FRAME_SIZE)?);
+        let (width, height) = delivered;
         if width == 0 || height == 0 {
             return Err(windows::core::Error::from(E_FAIL));
         }
 
-        let poster_jpeg = poster_frame(&reader, stream, &decoded, width, height, max_poster_edge);
+        let native = reader.GetNativeMediaType(stream, 0).ok();
+        let turn = if native
+            .as_ref()
+            .and_then(|native| native.GetUINT64(&MF_MT_FRAME_SIZE).ok())
+            .is_some_and(|coded| already_turned(unpack_frame_size(coded), delivered))
+        {
+            Turn::default()
+        } else {
+            let degrees = native
+                .as_ref()
+                .and_then(|native| native.GetUINT32(&MF_MT_VIDEO_ROTATION).ok())
+                .unwrap_or(0);
+            Turn::clockwise(quarter_turns_from_rotation(degrees))
+        };
+        let poster_jpeg = poster_frame(
+            &reader,
+            stream,
+            &decoded,
+            width,
+            height,
+            turn,
+            max_poster_edge,
+        );
+        let (width, height) = turn.applied_to((width, height));
         Ok(VideoProbe {
             width,
             height,
@@ -436,12 +644,14 @@ unsafe fn probe_with_source_reader(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn poster_frame(
     reader: &IMFSourceReader,
     stream: u32,
     decoded: &IMFMediaType,
     width: u32,
     height: u32,
+    turn: Turn,
     max_poster_edge: u32,
 ) -> Option<Vec<u8>> {
     unsafe {
@@ -461,6 +671,7 @@ unsafe fn poster_frame(
                 height,
                 stride,
                 bottom_up,
+                turn,
                 max_poster_edge,
             )
         };
@@ -500,6 +711,50 @@ unsafe fn read_first_frame(reader: &IMFSourceReader, stream: u32) -> Option<IMFS
     }
 }
 
+struct StreamRotation {
+    degrees: u32,
+    coded_size: Option<(u32, u32)>,
+}
+
+fn quarter_turns_from_rotation(counter_clockwise_degrees: u32) -> u8 {
+    match counter_clockwise_degrees {
+        90 => 1,
+        180 => 2,
+        270 => 3,
+        _ => 0,
+    }
+}
+
+fn unpack_frame_size(frame_size: u64) -> (u32, u32) {
+    ((frame_size >> 32) as u32, frame_size as u32)
+}
+
+fn already_turned(coded: (u32, u32), delivered: (u32, u32)) -> bool {
+    coded.0 != coded.1 && delivered == (coded.1, coded.0)
+}
+
+fn propvariant_u32(value: &PROPVARIANT) -> Option<u32> {
+    unsafe {
+        let variant = &*value.Anonymous.Anonymous;
+        if variant.vt == VT_UI4 {
+            Some(variant.Anonymous.ulVal)
+        } else {
+            None
+        }
+    }
+}
+
+fn propvariant_u64(value: &PROPVARIANT) -> Option<u64> {
+    unsafe {
+        let variant = &*value.Anonymous.Anonymous;
+        if variant.vt == VT_UI8 {
+            Some(variant.Anonymous.uhVal)
+        } else {
+            None
+        }
+    }
+}
+
 unsafe fn row_pitch(decoded: &IMFMediaType, width: u32) -> (usize, bool) {
     let tightly_packed = width as usize * 4;
     let Ok(declared) = (unsafe { decoded.GetUINT32(&MF_MT_DEFAULT_STRIDE) }) else {
@@ -509,5 +764,34 @@ unsafe fn row_pitch(decoded: &IMFMediaType, width: u32) -> (usize, bool) {
     match signed.unsigned_abs() as usize {
         0 => (tightly_packed, false),
         pitch => (pitch, signed < 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotation_is_corrected_by_the_same_angle_the_other_way() {
+        assert_eq!(quarter_turns_from_rotation(0), 0);
+        assert_eq!(quarter_turns_from_rotation(90), 1);
+        assert_eq!(quarter_turns_from_rotation(180), 2);
+        assert_eq!(quarter_turns_from_rotation(270), 3);
+        assert_eq!(quarter_turns_from_rotation(45), 0);
+        assert_eq!(quarter_turns_from_rotation(360), 0);
+    }
+
+    #[test]
+    fn a_frame_size_is_the_width_over_the_height() {
+        assert_eq!(unpack_frame_size((1920 << 32) | 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn only_a_delivered_frame_that_is_the_swap_of_the_coded_one_is_already_turned() {
+        assert!(already_turned((1920, 1080), (1080, 1920)));
+        assert!(already_turned((1080, 1920), (1920, 1080)));
+        assert!(!already_turned((1920, 1080), (1920, 1080)));
+        assert!(!already_turned((1080, 1080), (1080, 1080)));
+        assert!(!already_turned((1920, 1080), (960, 540)));
     }
 }

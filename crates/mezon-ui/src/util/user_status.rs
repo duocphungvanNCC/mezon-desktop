@@ -1,11 +1,71 @@
-use gpui::{AnyElement, Pixels, Rgba, div, prelude::*, px, rgba};
-use mezon_store::{DmAvatarPresence, UserPresence};
+use gpui::{AnyElement, Hsla, Pixels, Rgba, div, prelude::*, px, rgba};
+use mezon_store::{DmAvatarPresence, InVoiceInfo, UserPresence};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub const PRESENCE_DOT_SIZE: Pixels = px(12.);
 const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceActivityBadge {
+    InVoice,
+    SharingScreen,
+}
+
+impl From<InVoiceInfo> for VoiceActivityBadge {
+    fn from(info: InVoiceInfo) -> Self {
+        if info.sharing_screen {
+            Self::SharingScreen
+        } else {
+            Self::InVoice
+        }
+    }
+}
+
+impl VoiceActivityBadge {
+    pub fn icon(self) -> IconName {
+        match self {
+            Self::InVoice => IconName::Speaker,
+            Self::SharingScreen => IconName::VoiceScreenShareIcon,
+        }
+    }
+
+    pub fn member_label_key(self) -> &'static str {
+        match self {
+            Self::InVoice => "memberPage.inVoice",
+            Self::SharingScreen => "memberPage.shareScreen",
+        }
+    }
+
+    pub fn member_label<'a>(
+        self,
+        in_voice: &'a gpui::SharedString,
+        sharing_screen: &'a gpui::SharedString,
+    ) -> &'a gpui::SharedString {
+        match self {
+            Self::InVoice => in_voice,
+            Self::SharingScreen => sharing_screen,
+        }
+    }
+
+    pub fn topbar_label_key(self) -> &'static str {
+        match self {
+            Self::InVoice => "channelTopbar.invoice",
+            Self::SharingScreen => "channelTopbar.shareScreen",
+        }
+    }
+}
+
+pub fn in_voice_icon_color(theme: &Theme) -> Rgba {
+    theme.status_online
+}
+
+pub fn in_voice_status_label_color(theme: &Theme) -> Hsla {
+    let mut color: Hsla = theme.text_primary.into();
+    color.a *= 0.6;
+    color
+}
 
 pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
     match presence {
@@ -14,6 +74,10 @@ pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
         DmAvatarPresence::Dnd => Some(rgba(0xef4444ff)),
         DmAvatarPresence::Idle => Some(rgba(0xf0b232ff)),
     }
+}
+
+pub fn avatar_status_color(presence: UserPresence) -> Option<Rgba> {
+    presence_badge_color(presence.into())
 }
 
 /// The presence dot drawn over a DM avatar: a filled circle for online/dnd and
@@ -76,18 +140,41 @@ pub fn status_icon(presence: UserPresence) -> IconName {
     }
 }
 
-pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+pub fn status_glyph(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    let icon = Icon::new(status_icon(presence)).size(size);
     match presence {
-        UserPresence::Online => theme.status_online,
-        UserPresence::Idle => theme.status_idle,
-        UserPresence::Dnd => theme.status_dnd,
-        UserPresence::Invisible => theme.status_offline,
+        UserPresence::Idle => icon
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+            .text_color(color)
+            .into_any_element(),
+        _ => icon.text_color(color).into_any_element(),
     }
 }
 
-pub fn status_icon_and_color(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    let presence = UserPresence::from_status(status);
-    (status_icon(presence), status_color(presence, theme))
+pub fn avatar_status_mark(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    match presence {
+        UserPresence::Idle => status_glyph(UserPresence::Idle, size, color),
+        UserPresence::Online | UserPresence::Dnd => {
+            div().size(size).rounded_full().bg(color).into_any_element()
+        }
+        UserPresence::Invisible => div().size(size).into_any_element(),
+    }
+}
+
+pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+    presence_badge_color(presence.into()).unwrap_or(theme.status_offline)
 }
 
 pub fn status_label_key(presence: UserPresence) -> &'static str {
@@ -127,6 +214,16 @@ mod tests {
 
     fn rgba_bits(c: Rgba) -> (u32, u32, u32, u32) {
         (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits())
+    }
+
+    #[test]
+    fn in_voice_icon_tracks_status_online_in_every_theme() {
+        for theme in themes() {
+            assert_eq!(
+                rgba_bits(in_voice_icon_color(&theme)),
+                rgba_bits(theme.status_online),
+            );
+        }
     }
 
     #[test]
@@ -194,6 +291,45 @@ mod tests {
                     presence == UserPresence::Invisible,
                     "{presence:?} offline-color mismatch"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn voice_activity_badge_keeps_icon_and_label_semantics_together() {
+        assert_eq!(VoiceActivityBadge::InVoice.icon(), IconName::Speaker);
+        assert_eq!(
+            VoiceActivityBadge::InVoice.member_label_key(),
+            "memberPage.inVoice"
+        );
+        assert_eq!(
+            VoiceActivityBadge::InVoice.topbar_label_key(),
+            "channelTopbar.invoice"
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.icon(),
+            IconName::VoiceScreenShareIcon
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.member_label_key(),
+            "memberPage.shareScreen"
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.topbar_label_key(),
+            "channelTopbar.shareScreen"
+        );
+    }
+
+    #[test]
+    fn voice_activity_labels_exist_in_every_locale() {
+        for locale in LOCALES {
+            for badge in [
+                VoiceActivityBadge::InVoice,
+                VoiceActivityBadge::SharingScreen,
+            ] {
+                for key in [badge.member_label_key(), badge.topbar_label_key()] {
+                    assert_ne!(mezon_i18n::t(locale, key), key, "missing {key} in {locale}");
+                }
             }
         }
     }

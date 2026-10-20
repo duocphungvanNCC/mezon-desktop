@@ -36,6 +36,107 @@ pub(crate) fn pack_bgra_rows(
     Some(out)
 }
 
+pub(crate) fn pack_bgra_rows_turned(
+    data: &[u8],
+    stride: usize,
+    width: u32,
+    height: u32,
+    quarter_turns: u8,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let turns = quarter_turns % 4;
+    if turns == 0 {
+        return Some((width, height, pack_bgra_rows(data, stride, width, height)?));
+    }
+    let row_bytes = tight_row_bytes(width)?;
+    if width == 0 || height == 0 || stride < row_bytes {
+        return None;
+    }
+    if data.len() < stride.checked_mul(height as usize)? {
+        return None;
+    }
+    let (source_width, source_height) = (width as usize, height as usize);
+    let (turned_width, turned_height) = if turns % 2 == 1 {
+        (source_height, source_width)
+    } else {
+        (source_width, source_height)
+    };
+    let mut out = vec![0u8; turned_width.checked_mul(turned_height)?.checked_mul(4)?];
+    for y in 0..source_height {
+        let row = &data[y * stride..y * stride + row_bytes];
+        for x in 0..source_width {
+            let (turned_x, turned_y) = match turns {
+                1 => (source_height - 1 - y, x),
+                2 => (source_width - 1 - x, source_height - 1 - y),
+                _ => (y, source_width - 1 - x),
+            };
+            let from = x * 4;
+            let to = (turned_y * turned_width + turned_x) * 4;
+            out[to..to + 4].copy_from_slice(&row[from..from + 4]);
+        }
+    }
+    Some((turned_width as u32, turned_height as u32, out))
+}
+
+pub(crate) fn i420_to_bgra(
+    width: u32,
+    height: u32,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let uv_w = w.div_ceil(2);
+    let uv_h = h.div_ceil(2);
+    if y.len() < w * h || u.len() < uv_w * uv_h || v.len() < uv_w * uv_h {
+        return None;
+    }
+    let mut bgra = vec![0u8; w * h * 4];
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let planar = yuv::YuvPlanarImage {
+            y_plane: y,
+            y_stride: w as u32,
+            u_plane: u,
+            u_stride: uv_w as u32,
+            v_plane: v,
+            v_stride: uv_w as u32,
+            width,
+            height,
+        };
+        if yuv::yuv420_to_bgra(
+            &planar,
+            &mut bgra,
+            (w * 4) as u32,
+            yuv::YuvRange::Limited,
+            yuv::YuvStandardMatrix::Bt601,
+        )
+        .is_ok()
+        {
+            return Some(bgra);
+        }
+    }
+    for row in 0..h {
+        for col in 0..w {
+            let y_val = ((i32::from(y[row * w + col]) - 16) * 255) / 219;
+            let u_val = i32::from(u[(row / 2) * uv_w + col / 2]) - 128;
+            let v_val = i32::from(v[(row / 2) * uv_w + col / 2]) - 128;
+            let r = (y_val + ((1436 * v_val) >> 10)).clamp(0, 255) as u8;
+            let g = (y_val - ((352 * u_val + 731 * v_val) >> 10)).clamp(0, 255) as u8;
+            let b = (y_val + ((1814 * u_val) >> 10)).clamp(0, 255) as u8;
+            let i = (row * w + col) * 4;
+            bgra[i] = b;
+            bgra[i + 1] = g;
+            bgra[i + 2] = r;
+            bgra[i + 3] = 255;
+        }
+    }
+    Some(bgra)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +195,68 @@ mod tests {
     #[test]
     fn pack_bgra_rows_rejects_insufficient_data() {
         assert!(pack_bgra_rows(&[0u8; 8], 8, 2, 2).is_none());
+    }
+
+    fn corners() -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in [1u8, 2, 3, 4] {
+            out.extend_from_slice(&[value, value, value, 255]);
+        }
+        out
+    }
+
+    fn first_bytes(bgra: &[u8]) -> Vec<u8> {
+        bgra.chunks_exact(4).map(|pixel| pixel[0]).collect()
+    }
+
+    #[test]
+    fn a_quarter_turn_moves_the_top_left_pixel_to_the_top_right() {
+        let (width, height, turned) =
+            pack_bgra_rows_turned(&corners(), 8, 2, 2, 1).expect("quarter turn");
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(first_bytes(&turned), vec![3, 1, 4, 2]);
+    }
+
+    #[test]
+    fn a_half_turn_reverses_the_pixels() {
+        let (_, _, turned) = pack_bgra_rows_turned(&corners(), 8, 2, 2, 2).expect("half turn");
+        assert_eq!(first_bytes(&turned), vec![4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn three_quarter_turns_are_the_other_way_round() {
+        let (_, _, turned) = pack_bgra_rows_turned(&corners(), 8, 2, 2, 3).expect("three quarters");
+        assert_eq!(first_bytes(&turned), vec![2, 4, 1, 3]);
+    }
+
+    #[test]
+    fn a_quarter_turn_swaps_the_side_lengths_and_drops_row_padding() {
+        let mut data = Vec::new();
+        for value in [1u8, 2, 3, 4, 5, 6] {
+            data.extend_from_slice(&[value, value, value, 255]);
+            if value % 3 == 0 {
+                data.extend_from_slice(&[0xFF; 8]);
+            }
+        }
+        let (width, height, turned) =
+            pack_bgra_rows_turned(&data, 20, 3, 2, 1).expect("padded quarter turn");
+        assert_eq!((width, height), (2, 3));
+        assert_eq!(first_bytes(&turned), vec![4, 1, 5, 2, 6, 3]);
+    }
+
+    #[test]
+    fn no_turn_packs_exactly_like_the_untured_path() {
+        let data = corners();
+        let (width, height, turned) = pack_bgra_rows_turned(&data, 8, 2, 2, 0).expect("no turn");
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(turned, data);
+    }
+
+    #[test]
+    fn a_turn_rejects_what_the_pack_rejects() {
+        assert!(pack_bgra_rows_turned(&[0u8; 8], 8, 2, 2, 1).is_none());
+        assert!(pack_bgra_rows_turned(&[0u8; 16], 4, 2, 2, 1).is_none());
+        assert!(pack_bgra_rows_turned(&[0u8; 16], 8, 0, 2, 1).is_none());
     }
 
     #[test]

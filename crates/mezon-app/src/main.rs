@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(target_os = "linux", test))]
+mod hang_probe;
 mod mcp;
 
 use anyhow::Result;
@@ -298,7 +300,10 @@ fn main() -> Result<()> {
     configure_linux_session();
 
     install_panic_hook();
-    if let Some(exit_code) = mezon_cli::try_run(std::env::args())? {
+    let args: Vec<String> = std::env::args().collect();
+    if mezon_cli::is_cli_invocation(&args)
+        && let Some(exit_code) = mezon_cli::try_run(&args)?
+    {
         std::process::exit(exit_code);
     }
 
@@ -309,7 +314,6 @@ fn main() -> Result<()> {
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
-    // Check if a mezonapp:// deep link URL was passed as argv[1].
     let deep_link_url: Option<String> = std::env::args()
         .nth(1)
         .filter(|a| a.starts_with("mezonapp://"));
@@ -490,7 +494,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn capture_hang_sample(stalled_secs: u64) {
+    for line in hang_probe::report(stalled_secs) {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
@@ -547,6 +559,19 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         transport.clone(),
         app_config.base_img_url.clone(),
     ));
+    let signer_api = api.clone();
+    mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+        app_config
+            .media_origins()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        vec![app_config.imgproxy_base_url.clone()],
+        Arc::new(move |channel_id| {
+            let api = signer_api.clone();
+            Box::pin(async move { api.generate_cdn_signature(channel_id).await })
+        }),
+    ));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Subscribe to screen lock/unlock events.
@@ -564,7 +589,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let (mcp_cmd_tx, mcp_cmd_rx) = futures::channel::mpsc::unbounded::<mezon_mcp::McpCommand>();
 
-    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx) {
+    let mcp_launch = mcp::McpLaunch {
+        enabled: settings.mcp_enabled,
+        read_only: settings.mcp_read_only,
+        port: settings.mcp_port,
+    };
+    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx, mcp_launch) {
         Ok(runtime) => Some((runtime, mcp_cmd_rx)),
         Err(error) => {
             tracing::warn!("MCP control server disabled: {error}");
@@ -646,7 +676,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Err(e) = cx
+            .text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+            ))])
+        {
+            tracing::error!("Failed to register IBM Plex Sans: {e}");
+        }
+
         init_ui(cx);
+        mezon_ui::clipboard::enable_off_main_thread_reads();
 
         AppConfig::init_global(app_config_handle, cx);
 
@@ -749,10 +790,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         cx.update(activate_main_window);
                         continue;
                     }
-                    tracing::info!(
-                        "Received deep link: {}",
+                    let logged_url = if mezon_ui::meeting::deep_link_meeting_code(&url).is_some() {
+                        "mezonapp://meeting"
+                    } else {
                         url.split(['?', '#']).next().unwrap_or_default()
-                    );
+                    };
+                    tracing::info!("Received deep link: {logged_url}");
                     cx.update(activate_main_window);
                     if url.starts_with("mezonapp://callback") {
                         let flow_pending = cx.update(|cx| {
@@ -839,7 +882,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         }
                     } else {
                         cx.update(|cx| {
-                            if let Some(route) = mezon_ui::router::parse_link(&url) {
+                            if let Some(code) = mezon_ui::meeting::deep_link_meeting_code(&url) {
+                                mezon_ui::meeting::open_meeting_from_external_trigger(code, cx);
+                            } else if let Some(route) = mezon_ui::router::parse_link(&url) {
                                 mezon_ui::app::shell::Shell::navigate_from_external_trigger(
                                     cx, route,
                                 );
@@ -948,21 +993,25 @@ fn open_main_window(
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::FriendStore::init(api.clone(), cx);
+    mezon_store::CdnAccess::init(cx);
     mezon_store::ActivityStore::init(api.clone(), settings_entity.clone(), cx);
     mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);
     mezon_store::MessageSearchStore::init(api.clone(), cx);
+    mezon_store::CtrlKSearchStore::init(api.clone(), cx);
     mezon_store::AuditLogStore::init(api.clone(), cx);
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::BuzzStore::init(cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::CallStore::init(api.clone(), cx);
+    mezon_store::MediaPermissionStore::init(cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
     mezon_store::StickerStore::init(api.clone(), cx);
@@ -974,6 +1023,7 @@ fn open_main_window(
     mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
+    mezon_store::MentionSearchStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::EventsStore::init(api.clone(), cx);
@@ -1002,6 +1052,13 @@ fn open_main_window(
         std::sync::Arc::new(|url: &str| mezon_native::browser::open_url_app_window(url)),
         cx,
     );
+    mezon_store::PlatformStore::set_open_managed_app_window(
+        &platform_store,
+        std::sync::Arc::new(|url: &str, key: &str| {
+            mezon_native::browser::open_url_managed_app_window(url, key)
+        }),
+        cx,
+    );
     mezon_store::PlatformStore::set_save_attachment(
         &platform_store,
         std::sync::Arc::new(|url: &str, filename: &str| save_attachment(url, filename)),
@@ -1016,6 +1073,12 @@ fn open_main_window(
                 channel_id: n.channel_id,
                 clan_id: n.clan_id,
                 link: n.link,
+                topic_reply: n
+                    .topic_reply
+                    .map(|reply| mezon_native::notifications::TopicReply {
+                        topic_id: reply.topic_id,
+                        message_id: reply.message_id,
+                    }),
                 icon_path: n.icon_path,
             });
         }),
@@ -1059,7 +1122,13 @@ fn open_main_window(
                     );
                     match notification_route(&target) {
                         Some(route) => {
-                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route)
+                            let topic_reply = notification_topic_reply(&target, &route);
+                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route);
+                            if let Some((channel_id, topic_id, reply_id)) = topic_reply {
+                                mezon_ui::chat::inbox::open_topic_reply(
+                                    cx, channel_id, topic_id, reply_id,
+                                );
+                            }
                         }
                         None => tracing::warn!("notification click with unroutable target"),
                     }
@@ -1073,14 +1142,17 @@ fn open_main_window(
     mezon_store::AudioStore::set_device_enumerator(
         &audio_store,
         std::sync::Arc::new(|| {
-            let inputs = mezon_native::audio::enumerate_input_devices()
+            let snapshot = mezon_native::audio::audio_device_snapshot();
+            let inputs = snapshot
+                .inputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
                     name: d.name,
                 })
                 .collect::<Vec<_>>();
-            let outputs = mezon_native::audio::enumerate_output_devices()
+            let outputs = snapshot
+                .outputs
                 .into_iter()
                 .map(|d| mezon_store::AudioDeviceInfo {
                     id: d.id,
@@ -1090,8 +1162,8 @@ fn open_main_window(
             mezon_store::DeviceSnapshot {
                 inputs,
                 outputs,
-                default_input_name: mezon_native::audio::default_input_device_name(),
-                default_output_name: mezon_native::audio::default_output_device_name(),
+                default_input_name: snapshot.default_input_name,
+                default_output_name: snapshot.default_output_name,
             }
         }),
         cx,
@@ -1154,8 +1226,11 @@ fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpControl
             start: Arc::new({
                 let controller = controller.clone();
                 let runtime = runtime.clone();
-                move |read_only| {
-                    runtime.block_on(controller.start(read_only, None))?;
+                move |read_only, port| {
+                    if let Some(port) = port {
+                        controller.set_preferred_port(port);
+                    }
+                    runtime.block_on(controller.start(read_only, port))?;
                     Ok(mcp_status_snapshot(&runtime, &controller))
                 }
             }),
@@ -1166,6 +1241,10 @@ fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpControl
                     runtime.block_on(controller.stop())?;
                     Ok(mcp_status_snapshot(&runtime, &controller))
                 }
+            }),
+            set_port: Arc::new({
+                let controller = controller.clone();
+                move |port| controller.set_preferred_port(port)
             }),
         },
         cx,
@@ -1306,6 +1385,19 @@ fn notification_route(
     }
 }
 
+fn notification_topic_reply(
+    target: &mezon_native::notifications::NotificationTarget,
+    route: &mezon_ui::Route,
+) -> Option<(mezon_store::ChannelId, i64, mezon_store::MessageId)> {
+    let mezon_ui::Route::Channel { channel_id, .. } = route else {
+        return None;
+    };
+    let reply = target.topic_reply.as_ref()?;
+    let topic_id = reply.topic_id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    let reply_id = reply.message_id.parse::<mezon_store::MessageId>().ok()?;
+    Some((*channel_id, topic_id, reply_id))
+}
+
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
 impl gpui::Global for TrayGlobal {}
 
@@ -1400,7 +1492,50 @@ fn save_attachment(url: &str, filename: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::badge_total;
+    use super::{badge_total, notification_route, notification_topic_reply};
+    use mezon_native::notifications::{NotificationTarget, TopicReply};
+
+    fn target(link: &str, topic_reply: Option<(&str, &str)>) -> NotificationTarget {
+        NotificationTarget {
+            clan_id: Some("1".into()),
+            channel_id: "2".into(),
+            link: Some(link.into()),
+            topic_reply: topic_reply.map(|(topic_id, message_id)| TopicReply {
+                topic_id: topic_id.into(),
+                message_id: message_id.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_topic_notification_opens_its_reply_in_the_linked_channel() {
+        let target = target(
+            "https://mezon.ai/chat/clans/1/channels/2",
+            Some(("88", "99")),
+        );
+        let route = notification_route(&target).unwrap();
+        assert_eq!(
+            notification_topic_reply(&target, &route),
+            Some((mezon_store::ChannelId(2), 88, mezon_store::MessageId(99)))
+        );
+    }
+
+    #[test]
+    fn a_channel_notification_only_opens_the_channel() {
+        let target = target("https://mezon.ai/chat/clans/1/channels/2", None);
+        let route = notification_route(&target).unwrap();
+        assert_eq!(notification_topic_reply(&target, &route), None);
+    }
+
+    #[test]
+    fn a_topic_reply_outside_a_clan_channel_is_ignored() {
+        let target = target(
+            "https://mezon.ai/chat/direct/message/2/3",
+            Some(("88", "99")),
+        );
+        let route = notification_route(&target).unwrap();
+        assert_eq!(notification_topic_reply(&target, &route), None);
+    }
 
     #[test]
     fn badge_total_sums_clan_dm_and_friend_requests() {
