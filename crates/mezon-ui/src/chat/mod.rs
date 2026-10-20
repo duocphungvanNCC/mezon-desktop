@@ -39,6 +39,7 @@ pub mod notification_setting_popover;
 pub mod pinned_popover;
 pub mod record_window;
 pub mod role_style;
+pub mod screen_annotation;
 pub mod screen_draw;
 pub mod screen_share_modal;
 pub mod screen_share_pip;

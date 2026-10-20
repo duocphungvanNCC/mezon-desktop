@@ -39,6 +39,7 @@ use crate::AppConfig;
 use crate::Settings;
 use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
+use crate::desktop_draw::DesktopDraw;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
     FLOWER_DEDUP_WINDOW, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveApp,
@@ -515,6 +516,7 @@ pub struct VoiceStore {
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
     screen_draw: ScreenDrawState,
+    desktop_draw: Option<Entity<DesktopDraw>>,
     pip: Option<PipWindow>,
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -910,6 +912,7 @@ impl VoiceStore {
             auto_focused_screen: None,
             fullscreen_screen: None,
             screen_draw: ScreenDrawState::default(),
+            desktop_draw: None,
             pip: None,
             room_name: String::new(),
             participant_menu: None,
@@ -2823,6 +2826,50 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn shared_screen(&self) -> Option<&PickedScreen> {
+        if !self.screen_share_enabled {
+            return None;
+        }
+        self.last_screen_share.as_ref().map(|(pick, _)| pick)
+    }
+
+    pub fn desktop_draw(&self) -> Option<&Entity<DesktopDraw>> {
+        self.desktop_draw.as_ref()
+    }
+
+    pub fn start_desktop_draw(
+        &mut self,
+        window_share: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<DesktopDraw> {
+        self.end_desktop_draw(cx);
+        let frame_store = self.frame_store();
+        let draw = cx.new(|_| DesktopDraw::new(window_share, frame_store));
+        self.desktop_draw = Some(draw.clone());
+        cx.notify();
+        draw
+    }
+
+    pub fn end_desktop_draw(&mut self, cx: &mut Context<Self>) {
+        let Some(draw) = self.desktop_draw.take() else {
+            return;
+        };
+        draw.update(cx, |draw, cx| draw.shutdown(cx));
+        cx.notify();
+    }
+
+    pub fn end_desktop_draw_for(&mut self, draw: &Entity<DesktopDraw>, cx: &mut Context<Self>) {
+        if self.desktop_draw.as_ref() == Some(draw) {
+            self.end_desktop_draw(cx);
+        }
+    }
+
+    fn end_desktop_draw_if_unshared(&mut self, cx: &mut Context<Self>) {
+        if !self.screen_share_enabled {
+            self.end_desktop_draw(cx);
+        }
+    }
+
     pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
             let _ = prev
@@ -4000,6 +4047,7 @@ impl VoiceStore {
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
+                self.end_desktop_draw_if_unshared(cx);
                 self.sync_screen_auto_focus();
                 self.evict_stale_render_cache();
                 self.flush_texture_drops(None, cx);
@@ -4036,6 +4084,7 @@ impl VoiceStore {
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
+                    self.end_desktop_draw(cx);
                 }
             }
         }
@@ -5018,6 +5067,7 @@ impl VoiceStore {
             return;
         }
         self.last_screen_share = None;
+        self.end_desktop_draw(cx);
         if let Some(session) = &self.session {
             session.stop_screen_share();
         }
@@ -5031,6 +5081,7 @@ impl VoiceStore {
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.screen_draw = ScreenDrawState::default();
+        self.end_desktop_draw(cx);
         self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;

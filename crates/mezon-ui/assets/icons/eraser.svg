@@ -1,3 +1,7 @@
 <svg width="20" height="20" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M16.243 2.757a3.5 3.5 0 0 1 4.95 4.95l-9.193 9.192a3.5 3.5 0 0 1-2.475 1.025H6.5a1.5 1.5 0 0 1-1.5-1.5v-3.025a3.5 3.5 0 0 1 1.025-2.475l10.218-10.167ZM19.778 6.293a1.5 1.5 0 0 0-2.121-2.122l-4.243 4.243 2.121 2.121 4.243-4.242ZM14.12 9.828l-2.12-2.121-5.586 5.586a1.5 1.5 0 0 0-.44 1.06V16h1.647a1.5 1.5 0 0 0 1.06-.44l5.439-5.732ZM3 20.5a1 1 0 0 1 1-1h16a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Z"/>
+  <g transform="rotate(-45 12 12)">
+    <rect x="3.5" y="8" width="17" height="8" rx="2" stroke="currentColor" stroke-width="2"/>
+    <path fill="currentColor" d="M10 8H5.5a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2H10Z"/>
+  </g>
+  <path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M13.5 21H21"/>
 </svg>

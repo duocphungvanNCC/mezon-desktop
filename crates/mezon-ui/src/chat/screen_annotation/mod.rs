@@ -1,0 +1,38 @@
+mod native;
+mod overlay;
+mod toolbar;
+
+use gpui::{App, Entity};
+use mezon_store::{PickedScreen, VoiceStore};
+
+pub(crate) fn desktop_annotation_supported(pick: &PickedScreen) -> bool {
+    native::share_target(pick).is_some()
+}
+
+pub(crate) fn toggle_desktop_annotation(voice: &Entity<VoiceStore>, cx: &mut App) {
+    if voice.read(cx).desktop_draw().is_some() {
+        voice.update(cx, |store, cx| store.end_desktop_draw(cx));
+        return;
+    }
+    let Some(target) = voice.read(cx).shared_screen().and_then(native::share_target) else {
+        return;
+    };
+
+    let draw = voice.update(cx, |store, cx| store.start_desktop_draw(target.is_window(), cx));
+    let Some(opened) = overlay::open(voice.clone(), draw.clone(), target, cx) else {
+        voice.update(cx, |store, cx| store.end_desktop_draw_for(&draw, cx));
+        return;
+    };
+    draw.update(cx, |draw, _| draw.attach_window(opened.handle));
+
+    if let Some(handle) = toolbar::open(
+        voice.clone(),
+        draw.clone(),
+        opened.rect,
+        target.is_window(),
+        opened.native,
+        cx,
+    ) {
+        draw.update(cx, |draw, _| draw.attach_window(handle));
+    }
+}

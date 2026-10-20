@@ -25,6 +25,7 @@ pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod ctrlk_search;
+pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -146,6 +147,7 @@ pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
     SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
+pub use desktop_draw::DesktopDraw;
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
@@ -262,7 +264,8 @@ pub use screen_draw::{
     COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED, COLOR_WHITE,
     COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
     PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK, STROKE_WIDTH_THIN,
-    ScreenDrawState, TextAnnotation,
+    ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TextAnnotation, VanishingStroke,
+    scale_alpha,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};

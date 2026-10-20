@@ -41,6 +41,7 @@ pub struct VideoFrameData {
 
 pub struct VideoFrameStore {
     pub screen_views: Arc<crate::screen_recovery::ScreenViews>,
+    pub screen_annotations: Arc<crate::annotation::ScreenAnnotations>,
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
     recording: AtomicBool,
@@ -52,6 +53,7 @@ impl Default for VideoFrameStore {
         Self {
             state: Mutex::new(VideoFrameState::default()),
             screen_views: Arc::default(),
+            screen_annotations: Arc::default(),
             seq: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
@@ -235,15 +237,15 @@ fn clamp_u8(v: i32) -> u8 {
 }
 
 #[inline]
-fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
 }
 #[inline]
-fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128)
 }
 #[inline]
-fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
 }
 

@@ -1,3 +1,4 @@
+mod annotation;
 mod audio;
 mod camera;
 pub mod compose;
@@ -44,6 +45,9 @@ use parking_lot::{Condvar, Mutex};
 
 use sfu::{SfuConfig, SfuEngine, SfuEvent, SfuPeer};
 
+pub use annotation::{
+    AnnotationItem, AnnotationPoint, AnnotationScene, ScreenAnnotations, arrow_head,
+};
 pub use audio::{
     AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
 };
