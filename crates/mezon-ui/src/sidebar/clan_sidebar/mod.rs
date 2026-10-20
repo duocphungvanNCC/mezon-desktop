@@ -21,6 +21,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 mod direct_unread_list;
+mod mention_indicator;
 use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
 
 const DISCOVER_URL: &str = "https://mezon.ai/clans";
@@ -55,6 +56,10 @@ pub struct ClanSidebar {
     direct_unread: DirectUnreadListState,
     direct_unread_fingerprint: Option<u64>,
     list_state: ListState,
+    mention_targets: mention_indicator::MentionTargets,
+    mention_indices: Vec<usize>,
+    mention_scroll: Option<mention_indicator::MentionScroll>,
+    mention_scroll_queued: bool,
     pending_reveal_ix: Option<usize>,
     reveal_wait_queued: bool,
     dm_active: bool,
@@ -172,6 +177,10 @@ impl ClanSidebar {
             )),
             direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx), cx)),
             list_state,
+            mention_targets: Default::default(),
+            mention_indices: Vec::new(),
+            mention_scroll: None,
+            mention_scroll_queued: false,
             pending_reveal_ix: None,
             reveal_wait_queued: false,
             dm_active: initial_dm_active,
@@ -341,6 +350,16 @@ impl ClanSidebar {
         let count = rows.len();
         let item_count = count + 1;
         let needs_reset = self.list_state.item_count() != item_count;
+        if self.rows.len() != rows.len()
+            || self
+                .rows
+                .iter()
+                .zip(&rows)
+                .any(|(old, new)| old.id_num != new.id_num)
+        {
+            self.mention_scroll = None;
+        }
+        self.mention_indices = mention_indicator::mentioned_clan_indices(&rows);
         self.rows = Rc::new(rows);
         if needs_reset {
             self.list_state.reset(item_count);
@@ -529,7 +548,19 @@ impl Render for ClanSidebar {
                     .child(unread_list)
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
-            .child(div().flex_1().min_h_0().w_full().child(list_element))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .on_scroll_wheel(cx.listener(|this, _, _, _| {
+                        this.mention_scroll = None;
+                    }))
+                    .child(list_element)
+                    .child(self.mention_layout_observer(cx))
+                    .children(self.render_mention_indicators(cx)),
+            )
             .when_some(clan_menu_overlay, move |el, args| {
                 el.child(context_menu_at(
                     args.position,
