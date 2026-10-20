@@ -51,6 +51,7 @@ use crate::ids::{ClanId, UserId};
 use crate::login::LoginStore;
 use crate::media_permission::MediaPermissionStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::screen_draw::ScreenDrawState;
 use crate::users_by_user::UsersByUserStore;
 use crate::wallet::{WalletEvent, WalletStore};
 
@@ -388,6 +389,19 @@ pub enum VoiceRenderFrame {
     Surface(mezon_voice::VideoSurface),
 }
 
+impl VoiceRenderFrame {
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Image(image) => {
+                let s = image.size(0);
+                (s.width.0 as u32, s.height.0 as u32)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Surface(surface) => surface.dimensions(),
+        }
+    }
+}
+
 struct CachedRenderFrame {
     seq: u64,
     frame: VoiceRenderFrame,
@@ -500,6 +514,7 @@ pub struct VoiceStore {
     focused_tile: Option<String>,
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
+    screen_draw: ScreenDrawState,
     pip: Option<PipWindow>,
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -894,6 +909,7 @@ impl VoiceStore {
             focused_tile: None,
             auto_focused_screen: None,
             fullscreen_screen: None,
+            screen_draw: ScreenDrawState::default(),
             pip: None,
             room_name: String::new(),
             participant_menu: None,
@@ -2769,6 +2785,42 @@ impl VoiceStore {
             self.sync_screen_full_res();
             cx.notify();
         }
+    }
+
+    pub fn screen_draw(&self) -> &ScreenDrawState {
+        &self.screen_draw
+    }
+
+    pub fn screen_draw_mut(&mut self) -> &mut ScreenDrawState {
+        &mut self.screen_draw
+    }
+
+    pub fn toggle_screen_draw(&mut self, cx: &mut Context<Self>) {
+        self.screen_draw.toggle_active();
+        if self.screen_draw.is_active
+            && self.fullscreen_screen.is_none()
+            && self.focused_tile.is_none()
+        {
+            if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
+                self.focused_tile = Some(screen_tile_id(&p.session_id));
+                self.sync_screen_full_res();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn set_screen_draw_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.screen_draw.set_active(active);
+        if active
+            && self.fullscreen_screen.is_none()
+            && self.focused_tile.is_none()
+        {
+            if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
+                self.focused_tile = Some(screen_tile_id(&p.session_id));
+                self.sync_screen_full_res();
+            }
+        }
+        cx.notify();
     }
 
     pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
@@ -4978,6 +5030,7 @@ impl VoiceStore {
         self.reconnect_healthy_since = None;
         self.close_pip(cx);
         self.fullscreen_screen = None;
+        self.screen_draw = ScreenDrawState::default();
         self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;

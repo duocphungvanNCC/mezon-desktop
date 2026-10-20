@@ -23,6 +23,10 @@ impl VideoSurface {
     pub fn into_inner(self) -> core_video::pixel_buffer::CVPixelBuffer {
         self.0
     }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.0.get_width() as u32, self.0.get_height() as u32)
+    }
 }
 
 #[derive(Clone)]

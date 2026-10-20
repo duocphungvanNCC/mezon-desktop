@@ -23,6 +23,7 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::media_permission_prompt::{
     media_access_missing, media_access_needed_label, media_permission_badge,
 };
+use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
@@ -2266,7 +2267,9 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let exit_voice = voice.clone();
     let bg_voice = voice.clone();
 
-    let media = match store.render_frame(key) {
+    let frame_opt = store.render_frame(key);
+    let frame_dims = frame_opt.as_ref().map(|f| f.dimensions());
+    let media = match frame_opt {
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
         None => Icon::new(IconName::VoiceScreenShareIcon)
             .size(px(64.))
@@ -2298,6 +2301,9 @@ pub(crate) fn render_screen_fullscreen_overlay(
             exit_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
         });
 
+    let screen_draw_active = store.screen_draw().is_active;
+    let has_annotations = !store.screen_draw().annotations.is_empty();
+
     Some(
         div()
             .absolute()
@@ -2318,9 +2324,21 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .justify_center()
                     .cursor_pointer()
                     .child(media)
+                    .children(
+                        (screen_draw_active || has_annotations).then(|| {
+                            render_screen_draw_overlay(voice, theme, frame_dims, cx)
+                        }),
+                    )
+                    .children(
+                        screen_draw_active.then(|| {
+                            render_draw_toolbox(voice, theme, cx)
+                        }),
+                    )
                     .child(exit_btn)
                     .on_click(move |_, _, cx| {
-                        bg_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+                        if !bg_voice.read(cx).screen_draw().is_active {
+                            bg_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+                        }
                     }),
             )
             .child(
@@ -2810,7 +2828,7 @@ fn render_focus_layout<H: CallLayoutHost>(
         let theme = cx.theme();
         let store = voice.read(cx);
         (
-            focus_main_tile(theme, locale, store, voice, focused),
+            focus_main_tile(theme, locale, store, voice, focused, cx),
             theme.bg_tertiary,
         )
     };
@@ -3157,9 +3175,20 @@ fn focus_main_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    cx: &App,
 ) -> AnyElement {
-    let voice = voice.clone();
+    let voice_click = voice.clone();
     let inner = tile_inner(theme, store, cell, px(80.));
+
+    let frame_dims = if cell.is_screen {
+        cell.key
+            .and_then(|k| store.render_frame(k))
+            .map(|f| f.dimensions())
+    } else {
+        None
+    };
+    let screen_draw_active = store.screen_draw().is_active;
+    let has_annotations = !store.screen_draw().annotations.is_empty();
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -3175,15 +3204,27 @@ fn focus_main_tile(
         .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .child(inner)
+        .children(
+            (cell.is_screen && (screen_draw_active || has_annotations)).then(|| {
+                render_screen_draw_overlay(voice, theme, frame_dims, cx)
+            }),
+        )
+        .children(
+            (cell.is_screen && screen_draw_active).then(|| {
+                render_draw_toolbox(voice, theme, cx)
+            }),
+        )
         .child(tile_metadata(locale, cell))
         .children(tile_audience_badge(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
-            participant_menu_trigger(&voice, cell.identity.clone()),
+            participant_menu_trigger(voice, cell.identity.clone()),
         )
         .on_click(move |_, _, cx| {
-            voice.update(cx, |store, cx| store.clear_focus(cx));
+            if !voice_click.read(cx).screen_draw().is_active {
+                voice_click.update(cx, |store, cx| store.clear_focus(cx));
+            }
         })
         .into_any_element()
 }
@@ -3818,6 +3859,37 @@ fn control_bar(
     if let Some(key) = store.primary_screen_key() {
         let pip_active = store.pip_key() == Some(key);
         let is_fullscreen = store.fullscreen_screen() == Some(key);
+        let draw_active = store.screen_draw().is_active;
+
+        let draw_color: Hsla = if draw_active {
+            gpui::rgb(ACCENT_BLUE).into()
+        } else {
+            theme.text_secondary.into()
+        };
+
+        let draw_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-draw-btn",
+                if draw_active {
+                    gpui::rgba(0x5865f233).into()
+                } else {
+                    gpui::transparent_black()
+                },
+                theme.bg_secondary.into(),
+                IconName::PenEdit,
+                draw_color,
+            )
+            .tooltip(Tooltip::text(if draw_active {
+                "Stop Drawing"
+            } else {
+                "Draw on Screen"
+            }))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| store.toggle_screen_draw(cx));
+            })
+        };
+
         let pip_color: Hsla = if pip_active {
             gpui::rgb(ACCENT_BLUE).into()
         } else {
@@ -3862,7 +3934,7 @@ fn control_bar(
             })
         };
 
-        tail = tail.child(pip_button).child(fs_button);
+        tail = tail.child(draw_button).child(pip_button).child(fs_button);
     }
 
     let right = div()

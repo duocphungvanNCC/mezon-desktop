@@ -59,6 +59,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod realtime_server;
 pub mod roles;
+pub mod screen_draw;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
@@ -256,6 +257,12 @@ pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
+};
+pub use screen_draw::{
+    COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED, COLOR_WHITE,
+    COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
+    PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK, STROKE_WIDTH_THIN,
+    ScreenDrawState, TextAnnotation,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
