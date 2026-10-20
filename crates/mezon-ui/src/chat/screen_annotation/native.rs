@@ -37,8 +37,8 @@ mod platform {
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
     use core_foundation::string::CFString;
     use gpui::Window;
-    use objc::runtime::{NO, Object, YES};
-    use objc::{msg_send, sel, sel_impl};
+    use objc::runtime::{BOOL, NO, Object, YES};
+    use objc::{class, msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::NativeRect;
@@ -148,11 +148,18 @@ mod platform {
     }
 
     #[derive(Clone, Copy)]
-    pub(crate) struct NativeWindow(usize);
+    pub(crate) struct NativeWindow {
+        window: usize,
+        view: usize,
+    }
 
     impl NativeWindow {
         fn ptr(self) -> *mut Object {
-            self.0 as *mut Object
+            self.window as *mut Object
+        }
+
+        fn view(self) -> *mut Object {
+            self.view as *mut Object
         }
 
         pub(crate) fn scale(self, _window: &Window) -> f64 {
@@ -196,6 +203,7 @@ mod platform {
             unsafe {
                 let window = self.ptr();
                 let _: () = msg_send![window, setStyleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
+                let _: BOOL = msg_send![window, makeFirstResponder: self.view()];
                 let _: () = msg_send![window, setHasShadow: NO];
                 let _: () = msg_send![window, setHidesOnDeactivate: NO];
                 let _: () = msg_send![window, setLevel: OVERLAY_LEVEL];
@@ -209,6 +217,26 @@ mod platform {
                 let _: () = msg_send![window, setHidesOnDeactivate: NO];
                 let _: () = msg_send![window, setLevel: TOOLBAR_LEVEL];
                 let _: () = msg_send![window, setSharingType: NS_WINDOW_SHARING_NONE];
+            }
+        }
+
+        pub(crate) fn cursor_position(self) -> Option<(f64, f64)> {
+            let location: CGPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+            let frame = self.frame();
+            let y = main_display_height() - location.y;
+            Some((location.x - frame.x, y - frame.y))
+        }
+
+        pub(crate) fn focus_keyboard(self) {
+            unsafe {
+                let is_key: BOOL = msg_send![self.ptr(), isKeyWindow];
+                if is_key == NO {
+                    let _: () = msg_send![self.ptr(), makeKeyWindow];
+                }
+                let responder: *mut Object = msg_send![self.ptr(), firstResponder];
+                if responder != self.view() {
+                    let _: BOOL = msg_send![self.ptr(), makeFirstResponder: self.view()];
+                }
             }
         }
 
@@ -237,7 +265,10 @@ mod platform {
         };
         let view = appkit.ns_view.as_ptr().cast::<Object>();
         let ns_window: *mut Object = unsafe { msg_send![view, window] };
-        (!ns_window.is_null()).then_some(NativeWindow(ns_window as usize))
+        (!ns_window.is_null()).then_some(NativeWindow {
+            window: ns_window as usize,
+            view: view as usize,
+        })
     }
 }
 
@@ -245,11 +276,13 @@ mod platform {
 mod platform {
     use gpui::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{COLORREF, HWND, RECT};
+    use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
     use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO, ScreenToClient};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IsIconic,
+        GWL_EXSTYLE, GWLP_HWNDPARENT, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST,
+        IsIconic,
         IsWindowVisible, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
         SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
@@ -409,6 +442,19 @@ mod platform {
             }
         }
 
+        pub(crate) fn cursor_position(self) -> Option<(f64, f64)> {
+            let mut point = POINT::default();
+            unsafe { GetCursorPos(&mut point) }.ok()?;
+            if !unsafe { ScreenToClient(self.hwnd(), &mut point) }.as_bool() {
+                return None;
+            }
+            Some((point.x as f64, point.y as f64))
+        }
+
+        pub(crate) fn focus_keyboard(self) {
+            let _ = unsafe { SetFocus(Some(self.hwnd())) };
+        }
+
         pub(crate) fn set_visible(self, visible: bool) {
             let _ = unsafe {
                 ShowWindow(
@@ -435,7 +481,7 @@ mod platform {
     use x11rb::connection::Connection;
     use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
     use x11rb::protocol::xproto::{
-        ClipOrdering, ConfigureWindowAux, ConnectionExt as _, MapState, StackMode,
+        ClipOrdering, ConfigureWindowAux, ConnectionExt as _, InputFocus, MapState, StackMode,
     };
     use x11rb::xcb_ffi::XCBConnection;
 
@@ -556,6 +602,19 @@ mod platform {
         }
 
         pub(crate) fn configure_overlay(self) {}
+
+        pub(crate) fn cursor_position(self) -> Option<(f64, f64)> {
+            self.with_connection(|conn, _| {
+                let reply = conn.query_pointer(self.window).ok()?.reply().ok()?;
+                Some((reply.win_x as f64, reply.win_y as f64))
+            })?
+        }
+
+        pub(crate) fn focus_keyboard(self) {
+            self.with_connection(|conn, _| {
+                let _ = conn.set_input_focus(InputFocus::PARENT, self.window, x11rb::CURRENT_TIME);
+            });
+        }
 
         pub(crate) fn configure_toolbar(self, _overlay: NativeWindow) {
             self.with_connection(|conn, _| {

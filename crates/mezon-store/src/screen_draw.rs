@@ -143,6 +143,87 @@ impl DrawAnnotation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnnotationDrag {
+    pub id: u64,
+    pub start: NormalizedPoint,
+    pub last: NormalizedPoint,
+    pub moved: bool,
+    pub edit_on_click: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextResize {
+    pub id: u64,
+    pub origin: (f32, f32),
+    pub start_distance: f32,
+    pub start_size: f32,
+    pub canvas: (f32, f32),
+    pub resized: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HitBox {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl HitBox {
+    pub fn of_points(points: impl IntoIterator<Item = (f32, f32)>, pad: f32) -> Option<Self> {
+        let mut bounds: Option<Self> = None;
+        for (x, y) in points {
+            let next = match bounds {
+                Some(b) => Self {
+                    left: b.left.min(x),
+                    top: b.top.min(y),
+                    right: b.right.max(x),
+                    bottom: b.bottom.max(y),
+                },
+                None => Self {
+                    left: x,
+                    top: y,
+                    right: x,
+                    bottom: y,
+                },
+            };
+            bounds = Some(next);
+        }
+        bounds.map(|b| Self {
+            left: b.left - pad,
+            top: b.top - pad,
+            right: b.right + pad,
+            bottom: b.bottom + pad,
+        })
+    }
+
+    pub fn of(text: &TextAnnotation, canvas: (f32, f32), text_width: f32) -> Self {
+        let size = text_font_px(text.font_size);
+        let x = text.position.x * canvas.0;
+        let y = text.position.y * canvas.1;
+        let width = text_width.max(size * 2.0);
+        Self {
+            left: x - TEXT_PAD_X / 2.0,
+            top: y - TEXT_PAD_Y / 2.0,
+            right: x + width + TEXT_PAD_X / 2.0,
+            bottom: y + size * TEXT_LINE_HEIGHT + TEXT_PAD_Y / 2.0,
+        }
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
+    }
+
+    pub fn handle_contains(&self, x: f32, y: f32) -> bool {
+        (x - self.right).abs() <= TEXT_HANDLE_SIZE && (y - self.bottom).abs() <= TEXT_HANDLE_SIZE
+    }
+}
+
+pub fn text_font_px(font_size: f32) -> f32 {
+    font_size.clamp(TEXT_MIN_SIZE, TEXT_MAX_SIZE)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VanishingStroke {
     pub stroke: PenStroke,
@@ -192,7 +273,15 @@ pub const ERASER_RADIUS: f32 = 0.02;
 
 const MIN_POINT_SPACING_SQUARED: f32 = 0.000002;
 const MIN_SHAPE_SIZE: f32 = 0.004;
-const TEXT_HIT_RADIUS: f32 = 0.04;
+pub const TEXT_MIN_SIZE: f32 = 10.0;
+pub const TEXT_MAX_SIZE: f32 = 120.0;
+pub const TEXT_LINE_HEIGHT: f32 = 1.3;
+pub const TEXT_PAD_X: f32 = 8.0;
+pub const TEXT_PAD_Y: f32 = 4.0;
+pub const TEXT_HANDLE_SIZE: f32 = 10.0;
+
+const TEXT_DRAG_THRESHOLD: f32 = 0.004;
+const STROKE_HIT_SLOP: f32 = 6.0;
 const UNDO_LIMIT: usize = 50;
 const ELLIPSE_HIT_SEGMENTS: usize = 48;
 
@@ -287,6 +376,9 @@ pub struct ScreenDrawState {
     pub redo_stack: Vec<Vec<DrawAnnotation>>,
     pub current_stroke: Option<PenStroke>,
     pub current_shape: Option<ShapeAnnotation>,
+    pub drag: Option<AnnotationDrag>,
+    pub text_resize: Option<TextResize>,
+    pub selected: Option<u64>,
     pub vanishing: Vec<VanishingStroke>,
     pub editing_text_id: Option<u64>,
     pub editing_text_content: String,
@@ -306,6 +398,9 @@ impl Default for ScreenDrawState {
             redo_stack: Vec::new(),
             current_stroke: None,
             current_shape: None,
+            drag: None,
+            text_resize: None,
+            selected: None,
             vanishing: Vec::new(),
             editing_text_id: None,
             editing_text_content: String::new(),
@@ -329,6 +424,9 @@ impl ScreenDrawState {
         if !active {
             self.current_stroke = None;
             self.current_shape = None;
+            self.drag = None;
+            self.text_resize = None;
+            self.selected = None;
             self.editing_text_id = None;
         }
     }
@@ -340,6 +438,11 @@ impl ScreenDrawState {
         self.active_tool = tool;
         self.current_stroke = None;
         self.current_shape = None;
+        self.drag = None;
+        self.text_resize = None;
+        if !matches!(tool, DrawTool::Text | DrawTool::Pointer) {
+            self.selected = None;
+        }
     }
 
     pub fn set_color(&mut self, color: u32) {
@@ -365,15 +468,32 @@ impl ScreenDrawState {
     }
 
     pub fn is_drawing(&self) -> bool {
-        self.current_stroke.is_some() || self.current_shape.is_some()
+        self.current_stroke.is_some()
+            || self.current_shape.is_some()
+            || self.drag.is_some()
+            || self.text_resize.is_some()
     }
 
-    pub fn pointer_down(&mut self, point: NormalizedPoint) -> bool {
+    pub fn pointer_down(
+        &mut self,
+        point: NormalizedPoint,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> bool {
         if self.active_tool != DrawTool::Text && self.editing_text_id.is_some() {
             self.commit_editing_text();
         }
         match self.active_tool {
-            DrawTool::Pointer => false,
+            DrawTool::Pointer => {
+                if let Some(resize) = self.resize_handle_at(&point, canvas, measure) {
+                    self.text_resize = Some(resize);
+                } else if let Some(existing) = self.annotation_at(&point, canvas, measure) {
+                    self.start_drag(existing, point);
+                } else {
+                    self.selected = None;
+                }
+                true
+            }
             DrawTool::Pen | DrawTool::Highlighter | DrawTool::Laser => {
                 self.start_stroke(point.x, point.y);
                 true
@@ -389,13 +509,17 @@ impl ScreenDrawState {
                 true
             }
             DrawTool::Text => {
-                if let Some(existing) = self.text_near(&point) {
+                if let Some(resize) = self.resize_handle_at(&point, canvas, measure) {
+                    self.commit_editing_text();
+                    self.text_resize = Some(resize);
+                } else if let Some(existing) = self.text_at(&point, canvas, measure) {
                     if self.editing_text_id != Some(existing) {
                         self.commit_editing_text();
-                        self.start_editing_text(existing);
+                        self.start_drag(existing, point);
                     }
                 } else {
                     self.commit_editing_text();
+                    self.selected = None;
                     let id = self.add_text(point.x, point.y, String::new());
                     self.start_editing_text(id);
                 }
@@ -405,6 +529,12 @@ impl ScreenDrawState {
     }
 
     pub fn pointer_move(&mut self, point: NormalizedPoint, pressed: bool) -> bool {
+        if let Some(resize) = self.text_resize {
+            return self.resize_text(resize, point);
+        }
+        if let Some(drag) = self.drag {
+            return self.drag_annotation(drag, point);
+        }
         match self.active_tool {
             DrawTool::Pen | DrawTool::Highlighter | DrawTool::Laser
                 if self.current_stroke.is_some() =>
@@ -423,7 +553,14 @@ impl ScreenDrawState {
     }
 
     pub fn pointer_up(&mut self) -> bool {
-        if self.current_stroke.is_some() {
+        if self.text_resize.take().is_some() {
+            true
+        } else if let Some(drag) = self.drag.take() {
+            if !drag.moved && drag.edit_on_click && self.active_tool == DrawTool::Text {
+                self.start_editing_text(drag.id);
+            }
+            true
+        } else if self.current_stroke.is_some() {
             self.finish_stroke();
             true
         } else if self.current_shape.is_some() {
@@ -434,11 +571,195 @@ impl ScreenDrawState {
         }
     }
 
-    fn text_near(&self, point: &NormalizedPoint) -> Option<u64> {
+    pub fn selected_text(&self) -> Option<&TextAnnotation> {
+        let id = self.selected?;
+        self.text(id)
+    }
+
+    fn text(&self, id: u64) -> Option<&TextAnnotation> {
         self.annotations.iter().find_map(|ann| match ann {
-            DrawAnnotation::Text(t) if t.position.distance(point) < TEXT_HIT_RADIUS => Some(t.id),
+            DrawAnnotation::Text(t) if t.id == id => Some(t),
             _ => None,
         })
+    }
+
+    pub fn selected_annotation(&self) -> Option<&DrawAnnotation> {
+        let id = self.selected?;
+        self.annotations.iter().find(|ann| ann.id() == id)
+    }
+
+    pub fn annotation_bounds(
+        &self,
+        annotation: &DrawAnnotation,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> Option<HitBox> {
+        let to_px = |p: &NormalizedPoint| (p.x * canvas.0, p.y * canvas.1);
+        match annotation {
+            DrawAnnotation::Text(t) => Some(HitBox::of(t, canvas, measure(t))),
+            DrawAnnotation::Stroke(s) => {
+                HitBox::of_points(s.points.iter().map(to_px), s.render_width() / 2.0)
+            }
+            DrawAnnotation::Shape(s) => {
+                HitBox::of_points([to_px(&s.start), to_px(&s.end)], s.width / 2.0)
+            }
+        }
+    }
+
+    fn text_at(
+        &self,
+        point: &NormalizedPoint,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> Option<u64> {
+        let (x, y) = (point.x * canvas.0, point.y * canvas.1);
+        self.annotations.iter().rev().find_map(|ann| match ann {
+            DrawAnnotation::Text(t) if HitBox::of(t, canvas, measure(t)).contains(x, y) => {
+                Some(t.id)
+            }
+            _ => None,
+        })
+    }
+
+    pub fn annotation_at(
+        &self,
+        point: &NormalizedPoint,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> Option<u64> {
+        let to_px = |p: &NormalizedPoint| NormalizedPoint {
+            x: p.x * canvas.0,
+            y: p.y * canvas.1,
+        };
+        let cursor = to_px(point);
+        self.annotations.iter().rev().find_map(|ann| {
+            let hit = match ann {
+                DrawAnnotation::Text(t) => {
+                    HitBox::of(t, canvas, measure(t)).contains(cursor.x, cursor.y)
+                }
+                DrawAnnotation::Stroke(s) => {
+                    let pixels: Vec<NormalizedPoint> = s.points.iter().map(to_px).collect();
+                    let stroke = PenStroke {
+                        points: pixels,
+                        ..s.clone()
+                    };
+                    stroke_intersects_point(
+                        &stroke,
+                        &cursor,
+                        s.render_width() / 2.0 + STROKE_HIT_SLOP,
+                    )
+                }
+                DrawAnnotation::Shape(s) => {
+                    let shape = ShapeAnnotation {
+                        start: to_px(&s.start),
+                        end: to_px(&s.end),
+                        ..s.clone()
+                    };
+                    shape_intersects_point(&shape, &cursor, s.width / 2.0 + STROKE_HIT_SLOP)
+                }
+            };
+            hit.then_some(ann.id())
+        })
+    }
+
+    pub fn hit_test(
+        &self,
+        point: &NormalizedPoint,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> bool {
+        self.resize_handle_at(point, canvas, measure).is_some()
+            || self.annotation_at(point, canvas, measure).is_some()
+    }
+
+    fn start_drag(&mut self, id: u64, point: NormalizedPoint) {
+        let was_selected = self.selected == Some(id);
+        self.selected = Some(id);
+        self.drag = Some(AnnotationDrag {
+            id,
+            start: point,
+            last: point,
+            moved: false,
+            edit_on_click: was_selected,
+        });
+    }
+
+    fn resize_handle_at(
+        &self,
+        point: &NormalizedPoint,
+        canvas: (f32, f32),
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> Option<TextResize> {
+        let text = self.selected_text()?;
+        if self.editing_text_id == Some(text.id) {
+            return None;
+        }
+        let (x, y) = (point.x * canvas.0, point.y * canvas.1);
+        if !HitBox::of(text, canvas, measure(text)).handle_contains(x, y) {
+            return None;
+        }
+        let origin = (text.position.x * canvas.0, text.position.y * canvas.1);
+        Some(TextResize {
+            id: text.id,
+            origin,
+            start_distance: (x - origin.0).hypot(y - origin.1).max(1.0),
+            start_size: text_font_px(text.font_size),
+            canvas,
+            resized: false,
+        })
+    }
+
+    fn resize_text(&mut self, resize: TextResize, point: NormalizedPoint) -> bool {
+        let x = point.x * resize.canvas.0;
+        let y = point.y * resize.canvas.1;
+        let distance = (x - resize.origin.0).hypot(y - resize.origin.1);
+        let size = text_font_px(resize.start_size * distance / resize.start_distance);
+        if !resize.resized {
+            self.push_undo();
+        }
+        self.text_resize = Some(TextResize {
+            resized: true,
+            ..resize
+        });
+        if let Some(text) = self.annotations.iter_mut().find_map(|ann| match ann {
+            DrawAnnotation::Text(t) if t.id == resize.id => Some(t),
+            _ => None,
+        }) {
+            text.font_size = size;
+        }
+        true
+    }
+
+    fn drag_annotation(&mut self, drag: AnnotationDrag, point: NormalizedPoint) -> bool {
+        if !drag.moved && drag.start.distance(&point) < TEXT_DRAG_THRESHOLD {
+            return false;
+        }
+        if !drag.moved {
+            self.push_undo();
+        }
+        self.drag = Some(AnnotationDrag {
+            moved: true,
+            last: point,
+            ..drag
+        });
+        let dx = point.x - drag.last.x;
+        let dy = point.y - drag.last.y;
+        let shift = |p: &mut NormalizedPoint| {
+            p.x += dx;
+            p.y += dy;
+        };
+        match self.annotations.iter_mut().find(|ann| ann.id() == drag.id) {
+            Some(DrawAnnotation::Text(t)) => {
+                t.position = NormalizedPoint::new(t.position.x + dx, t.position.y + dy);
+            }
+            Some(DrawAnnotation::Stroke(s)) => s.points.iter_mut().for_each(shift),
+            Some(DrawAnnotation::Shape(s)) => {
+                shift(&mut s.start);
+                shift(&mut s.end);
+            }
+            None => {}
+        }
+        true
     }
 
     pub fn start_stroke(&mut self, x: f32, y: f32) {
@@ -494,6 +815,8 @@ impl ScreenDrawState {
     pub fn cancel_stroke(&mut self) {
         self.current_stroke = None;
         self.current_shape = None;
+        self.drag = None;
+        self.text_resize = None;
     }
 
     fn start_shape(&mut self, kind: ShapeKind, point: NormalizedPoint) {
@@ -597,6 +920,8 @@ impl ScreenDrawState {
             return false;
         };
         self.editing_text_id = None;
+        self.drag = None;
+        self.text_resize = None;
         let current = std::mem::replace(&mut self.annotations, prev);
         self.redo_stack.push(current);
         true
@@ -607,6 +932,8 @@ impl ScreenDrawState {
             return false;
         };
         self.editing_text_id = None;
+        self.drag = None;
+        self.text_resize = None;
         let current = std::mem::replace(&mut self.annotations, next);
         self.undo_stack.push(current);
         true
@@ -623,6 +950,7 @@ impl ScreenDrawState {
     }
 
     pub fn set_editing_text_content(&mut self, content: String) {
+        let content = content.replace(['\n', '\r'], " ");
         if let Some(id) = self.editing_text_id {
             self.update_text(id, content.clone());
             self.editing_text_content = content;
@@ -638,6 +966,7 @@ impl ScreenDrawState {
         } else {
             let content = std::mem::take(&mut self.editing_text_content);
             self.update_text(id, content);
+            self.selected = Some(id);
         }
         self.editing_text_content.clear();
     }
@@ -666,6 +995,9 @@ impl ScreenDrawState {
     pub fn clear(&mut self) {
         self.current_stroke = None;
         self.current_shape = None;
+        self.drag = None;
+        self.text_resize = None;
+        self.selected = None;
         self.vanishing.clear();
         self.editing_text_id = None;
         self.editing_text_content.clear();

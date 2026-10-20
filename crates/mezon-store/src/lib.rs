@@ -264,7 +264,9 @@ pub use screen_draw::{
     COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED, COLOR_WHITE,
     COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
     PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK, STROKE_WIDTH_THIN,
-    ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TextAnnotation, VanishingStroke,
+    ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE, TEXT_LINE_HEIGHT,
+    TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, HitBox, AnnotationDrag, TextResize, VanishingStroke,
+    text_font_px,
     scale_alpha,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};

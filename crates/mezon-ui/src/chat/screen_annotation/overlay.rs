@@ -1,20 +1,23 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Subscription, Task,
     Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
     prelude::*, px, size,
 };
-use mezon_store::{ContentViewport, DesktopDraw, DrawTool, NormalizedPoint, VoiceStore};
+use mezon_store::{
+    ContentViewport, DesktopDraw, DrawTool, NormalizedPoint, TextAnnotation, VoiceStore,
+};
 
 use super::native::{NativeRect, NativeWindow, ShareTarget, native_window};
 use crate::app::window_controls::linux_app_id;
-use crate::chat::screen_draw::{cursor_for_tool, paint_draw_state};
+use crate::chat::screen_draw::{cursor_for_tool, paint_draw_state, text_width};
 use crate::components::primitives::{Input, InputEvent, InputState};
 
 const WINDOW_TRACK_INTERVAL: Duration = Duration::from_millis(120);
 const DISPLAY_TRACK_INTERVAL: Duration = Duration::from_millis(1000);
+const HOVER_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const TEXT_EDITOR_MIN_WIDTH: f32 = 220.;
 const TEXT_EDITOR_BACKGROUND: u32 = 0x000000b3;
 
@@ -37,9 +40,12 @@ pub(super) struct AnnotationOverlay {
     focus: FocusHandle,
     text_editor: Option<TextEditor>,
     click_through: Option<bool>,
+    hovering: bool,
+    native_scale: f64,
     visible: bool,
     _subscriptions: Vec<Subscription>,
     _tracker: Option<Task<()>>,
+    _hover_poll: Option<Task<()>>,
 }
 
 pub(super) fn open(
@@ -119,17 +125,24 @@ impl AnnotationOverlay {
             focus: cx.focus_handle(),
             text_editor: None,
             click_through: None,
+            hovering: false,
+            native_scale: 1.0,
             visible: true,
             _subscriptions: subscriptions,
             _tracker: None,
+            _hover_poll: None,
         };
         this.report_canvas(window, cx);
         this.sync_click_through(cx);
         this.start_tracker(window, cx);
+        this.start_hover_poll(window, cx);
         this
     }
 
     fn report_canvas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(native) = self.native {
+            self.native_scale = native.scale(window);
+        }
         let viewport = window.viewport_size();
         self.draw.update(cx, |draw, cx| {
             draw.set_canvas(f32::from(viewport.width), f32::from(viewport.height), cx)
@@ -150,7 +163,9 @@ impl AnnotationOverlay {
     }
 
     fn sync_click_through(&mut self, cx: &mut Context<Self>) {
-        let pass_through = self.draw.read(cx).state().active_tool == DrawTool::Pointer;
+        let state = self.draw.read(cx).state();
+        let pass_through =
+            state.active_tool == DrawTool::Pointer && !self.hovering && !state.is_drawing();
         if self.click_through == Some(pass_through) {
             return;
         }
@@ -180,6 +195,48 @@ impl AnnotationOverlay {
         }));
     }
 
+    fn start_hover_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        self._hover_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HOVER_POLL_INTERVAL).await;
+                let alive = handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.poll_hover(window, cx)).is_ok()
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn poll_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.draw.read(cx).state();
+        let hovering = state.active_tool == DrawTool::Pointer
+            && self
+                .native
+                .and_then(|native| native.cursor_position())
+                .is_some_and(|(x, y)| {
+                    let viewport = window.viewport_size();
+                    let canvas = (f32::from(viewport.width), f32::from(viewport.height));
+                    let point = NormalizedPoint {
+                        x: (x / self.native_scale) as f32 / canvas.0.max(1.0),
+                        y: (y / self.native_scale) as f32 / canvas.1.max(1.0),
+                    };
+                    let inside = (0.0..=1.0).contains(&point.x) && (0.0..=1.0).contains(&point.y);
+                    let measure = |text: &TextAnnotation| text_width(window, text);
+                    inside && state.hit_test(&point, canvas, &measure)
+                });
+        if hovering == self.hovering {
+            return;
+        }
+        self.hovering = hovering;
+        self.sync_click_through(cx);
+        cx.notify();
+    }
+
     fn follow_target(&mut self) -> bool {
         let Some(native) = self.native else {
             return false;
@@ -207,22 +264,34 @@ impl AnnotationOverlay {
         }
     }
 
-    fn normalize(&self, position: Point<Pixels>, window: &Window) -> NormalizedPoint {
+    fn normalize(&self, position: Point<Pixels>, window: &Window) -> (NormalizedPoint, (f32, f32)) {
         let viewport = window.viewport_size();
-        ContentViewport::fill(f32::from(viewport.width), f32::from(viewport.height))
-            .to_normalized(f32::from(position.x), f32::from(position.y))
+        let canvas = (f32::from(viewport.width), f32::from(viewport.height));
+        let point = ContentViewport::fill(canvas.0, canvas.1)
+            .to_normalized(f32::from(position.x), f32::from(position.y));
+        (point, canvas)
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let point = self.normalize(event.position, window);
+        let (point, canvas) = self.normalize(event.position, window);
+        let measure = |text: &TextAnnotation| text_width(window, text);
         let editing = self.draw.update(cx, |draw, cx| {
             draw.edit(cx, |state| {
-                state.pointer_down(point);
+                state.pointer_down(point, canvas, &measure);
                 state.editing_text_id
             })
         });
+        self.after_pointer(editing, window, cx);
+    }
+
+    fn after_pointer(&mut self, editing: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_text_editor(editing, window, cx);
-        if self.text_editor.is_none() {
+        if self.text_editor.is_some() {
+            if let Some(native) = self.native {
+                native.focus_keyboard();
+            }
+            window.prevent_default();
+        } else {
             self.focus.focus(window, cx);
         }
     }
@@ -243,18 +312,23 @@ impl AnnotationOverlay {
         if !state.is_drawing() && !erasing {
             return;
         }
-        let point = self.normalize(event.position, window);
+        let (point, _) = self.normalize(event.position, window);
         self.draw.update(cx, |draw, cx| {
             draw.edit(cx, |state| state.pointer_move(point, pressed))
         });
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.draw.read(cx).state().is_drawing() {
             return;
         }
-        self.draw
-            .update(cx, |draw, cx| draw.edit(cx, |state| state.pointer_up()));
+        let editing = self.draw.update(cx, |draw, cx| {
+            draw.edit(cx, |state| {
+                state.pointer_up();
+                state.editing_text_id
+            })
+        });
+        self.after_pointer(editing, window, cx);
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -370,7 +444,11 @@ impl AnnotationOverlay {
 impl Render for AnnotationOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.draw.read(cx).state().clone();
-        let cursor = cursor_for_tool(state.active_tool);
+        let cursor = match state.active_tool {
+            DrawTool::Pointer if state.is_drawing() => CursorStyle::ClosedHand,
+            DrawTool::Pointer if self.hovering => CursorStyle::OpenHand,
+            tool => cursor_for_tool(tool),
+        };
         let text_editor = self.render_text_editor(window, cx);
 
         div()

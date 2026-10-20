@@ -2,19 +2,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, Div, Entity, FontWeight, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, PathBuilder, Pixels, Point, Rgba, SharedString, Stateful,
-    TextAlign, Window, canvas, div, fill, point, prelude::*, px, size,
+    AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, Div, Entity, FontWeight,
+    IntoElement, KeyDownEvent, MouseButton, PathBuilder, Pixels, Point, Rgba, SharedString,
+    Stateful, Subscription, TextAlign, WeakEntity, Window, canvas, div, fill, outline, point, prelude::*, px,
+    size,
 };
 use mezon_store::{
-    ContentViewport, DesktopDraw, DrawAnnotation, DrawTool, PRESET_COLORS, PRESET_WIDTHS,
-    STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind,
-    TextAnnotation, VoiceStore, scale_alpha,
+    ContentViewport, DesktopDraw, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
+    PRESET_WIDTHS, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation,
+    ShapeKind, TEXT_HANDLE_SIZE, TEXT_LINE_HEIGHT, TextAnnotation, VoiceStore, scale_alpha,
+    text_font_px,
 };
 use mezon_theme::Theme;
 use ui::Tooltip;
 
-use crate::components::primitives::{Icon, IconName, h_flex};
+use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState, h_flex};
 
 const ACCENT_BLUE: u32 = 0x5865f2;
 const CLOSE_RED: u32 = 0xef4444;
@@ -27,7 +29,12 @@ const DESKTOP_TOOLS: &[DrawTool] = &[
     DrawTool::Eraser,
 ];
 
-const IN_APP_TOOLS: &[DrawTool] = &[DrawTool::Pen, DrawTool::Text, DrawTool::Eraser];
+const IN_APP_TOOLS: &[DrawTool] = &[
+    DrawTool::Pointer,
+    DrawTool::Pen,
+    DrawTool::Text,
+    DrawTool::Eraser,
+];
 
 #[derive(Clone)]
 pub(crate) enum DrawTarget {
@@ -98,7 +105,7 @@ fn tool_icon(tool: DrawTool) -> IconName {
 
 fn tool_label(tool: DrawTool) -> &'static str {
     match tool {
-        DrawTool::Pointer => "Mouse (right-click or Esc)",
+        DrawTool::Pointer => "Select and move",
         DrawTool::Pen => "Pen",
         DrawTool::Highlighter => "Highlighter",
         DrawTool::Laser => "Vanishing pen",
@@ -464,10 +471,12 @@ pub(crate) fn render_screen_draw_overlay(
         )
     };
     let normalize = move |bounds: Bounds<Pixels>, position: Point<Pixels>| {
-        viewport_for(bounds).to_normalized(
+        let vp = viewport_for(bounds);
+        let point = vp.to_normalized(
             f32::from(position.x - bounds.origin.x),
             f32::from(position.y - bounds.origin.y),
-        )
+        );
+        (point, (vp.width, vp.height))
     };
 
     let draw_state_for_canvas = draw_state.clone();
@@ -502,27 +511,34 @@ pub(crate) fn render_screen_draw_overlay(
         let voice_down = voice.clone();
         let voice_move = voice.clone();
         let voice_up = voice.clone();
-        let voice_key = voice.clone();
 
         overlay = overlay
             .cursor(cursor)
-            .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+            .on_mouse_down(MouseButton::Left, move |e, window, cx| {
                 cx.stop_propagation();
                 let Some(bounds) = bounds_for_down.lock().ok().and_then(|g| *g) else {
                     return;
                 };
-                let point = normalize(bounds, e.position);
+                let (point, canvas) = normalize(bounds, e.position);
+                let before = voice_down.read(cx).screen_draw().editing_text_id;
+                let measure = |text: &TextAnnotation| text_width(window, text);
                 voice_down.update(cx, |store, cx| {
-                    if store.screen_draw_mut().pointer_down(point) {
+                    if store
+                        .screen_draw_mut()
+                        .pointer_down(point, canvas, &measure)
+                    {
                         cx.notify();
                     }
                 });
+                if open_in_app_editor(&voice_down, before, window, cx) {
+                    window.prevent_default();
+                }
             })
             .on_mouse_move(move |e, _, cx| {
                 let Some(bounds) = bounds_for_move.lock().ok().and_then(|g| *g) else {
                     return;
                 };
-                let point = normalize(bounds, e.position);
+                let (point, _) = normalize(bounds, e.position);
                 let pressed = e.pressed_button == Some(MouseButton::Left);
                 voice_move.update(cx, |store, cx| {
                     if store.screen_draw_mut().pointer_move(point, pressed) {
@@ -530,162 +546,201 @@ pub(crate) fn render_screen_draw_overlay(
                     }
                 });
             })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                voice_up.update(cx, |store, cx| {
-                    if store.screen_draw_mut().pointer_up() {
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                let before = voice_up.read(cx).screen_draw().editing_text_id;
+                let released = voice_up.update(cx, |store, cx| {
+                    let released = store.screen_draw_mut().pointer_up();
+                    if released {
                         cx.notify();
                     }
+                    released
                 });
-            })
-            .on_key_down(move |event: &KeyDownEvent, _, cx| {
-                voice_key.update(cx, |store, cx| {
-                    let state = store.screen_draw_mut();
-                    if state.editing_text_id.is_none() {
-                        return;
-                    }
-                    let key = event.keystroke.key.as_str();
-                    let modifiers = &event.keystroke.modifiers;
-                    let mut content = state.editing_text_content.clone();
-                    match key {
-                        "enter" => state.commit_editing_text(),
-                        "escape" => state.cancel_editing_text(),
-                        "backspace" => {
-                            content.pop();
-                            state.set_editing_text_content(content);
-                        }
-                        "space" => {
-                            content.push(' ');
-                            state.set_editing_text_content(content);
-                        }
-                        _ if !modifiers.control && !modifiers.alt && !modifiers.platform => {
-                            let typed = event.keystroke.key_char.as_deref().unwrap_or(key);
-                            if typed.chars().count() != 1 {
-                                return;
-                            }
-                            content.push_str(typed);
-                            state.set_editing_text_content(content);
-                        }
-                        _ => return,
-                    }
-                    cx.notify();
-                });
+                if released {
+                    open_in_app_editor(&voice_up, before, window, cx);
+                }
             });
 
-        if let Some(ann) = draw_state.editing_text() {
-            overlay = overlay.child(render_inline_text_editor(
-                voice,
-                ann,
-                &draw_state.editing_text_content,
-                draw_state.stroke_color,
-            ));
+        if let (Some(text), Some(editor)) =
+            (draw_state.editing_text(), voice.read(cx).screen_draw_editor())
+        {
+            overlay = overlay.child(
+                div()
+                    .absolute()
+                    .left(gpui::relative(text.position.x))
+                    .top(gpui::relative(text.position.y))
+                    .child(editor),
+            );
         }
     }
 
     overlay.into_any_element()
 }
 
-fn render_inline_text_editor(
+fn open_in_app_editor(
     voice: &Entity<VoiceStore>,
-    ann: &TextAnnotation,
-    content: &str,
-    color: u32,
-) -> AnyElement {
-    let voice_commit = voice.clone();
-    let voice_cancel = voice.clone();
-    let content_text = SharedString::from(content.to_string());
+    before: Option<u64>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let started = {
+        let state = voice.read(cx).screen_draw();
+        state
+            .editing_text()
+            .filter(|text| Some(text.id) != before)
+            .map(|text| (text.clone(), state.editing_text_content.clone()))
+    };
+    if let Some((text, content)) = started {
+        let editor_voice = voice.clone();
+        let editor = cx.new(|cx| DrawTextEditor::new(editor_voice, &text, content, window, cx));
+        voice.update(cx, |store, _| {
+            store.set_screen_draw_editor(text.id, editor.into())
+        });
+    }
+    voice.read(cx).screen_draw().editing_text_id.is_some()
+}
 
-    div()
-        .id("screen-draw-text-editor-card")
-        .absolute()
-        .left(gpui::relative(ann.position.x))
-        .top(gpui::relative(ann.position.y))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .rounded_lg()
-        .bg(gpui::rgba(0x18181bf5))
-        .border_2()
-        .border_color(gpui::rgba(color))
-        .shadow_xl()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| cx.stop_propagation())
-        .child(
-            div()
-                .min_w(px(160.))
-                .max_w(px(320.))
-                .flex()
-                .items_center()
-                .text_sm()
+pub(crate) struct DrawTextEditor {
+    voice: WeakEntity<VoiceStore>,
+    input: Entity<InputState>,
+    color: u32,
+    _subscription: Subscription,
+}
+
+impl DrawTextEditor {
+    fn new(
+        voice: Entity<VoiceStore>,
+        text: &TextAnnotation,
+        content: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder("Type a note, Enter to place")
+                .borderless()
+                .text_size(px(14.))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if content.is_empty() {
-                    Hsla::from(gpui::rgba(0xffffff66))
-                } else {
-                    Hsla::from(gpui::rgba(color))
-                })
-                .child(if content.is_empty() {
-                    SharedString::from("Type note... (Enter to save)")
-                } else {
-                    content_text
-                }),
-        )
-        .child(
-            div()
-                .id("screen-draw-text-commit")
-                .size(px(24.))
-                .rounded_md()
-                .bg(gpui::rgb(0x10b981))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .tooltip(Tooltip::text("Commit (Enter)"))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(gpui::rgb(0xffffff))
-                        .child("✓"),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    voice_commit.update(cx, |store, cx| {
-                        store.screen_draw_mut().commit_editing_text();
-                        cx.notify();
-                    });
-                }),
-        )
-        .child(
-            div()
-                .id("screen-draw-text-cancel")
-                .size(px(24.))
-                .rounded_md()
-                .bg(gpui::rgb(CLOSE_RED))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .tooltip(Tooltip::text("Cancel (Esc)"))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(gpui::rgb(0xffffff))
-                        .child("✕"),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    voice_cancel.update(cx, |store, cx| {
-                        store.screen_draw_mut().cancel_editing_text();
-                        cx.notify();
-                    });
-                }),
-        )
-        .into_any_element()
+                .text_color(gpui::rgba(text.color));
+            if !content.is_empty() {
+                input.set_value(content, window, cx);
+            }
+            input
+        });
+        let subscription =
+            cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let value = input.read(cx).value().to_string();
+                    this.edit(cx, |state| state.set_editing_text_content(value));
+                }
+                InputEvent::PressEnter => this.edit(cx, |state| state.commit_editing_text()),
+            });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        Self {
+            voice: voice.downgrade(),
+            input,
+            color: text.color,
+            _subscription: subscription,
+        }
+    }
+
+    fn edit(&self, cx: &mut App, f: impl FnOnce(&mut ScreenDrawState)) {
+        let _ = self.voice.update(cx, |store, cx| {
+            f(store.screen_draw_mut());
+            cx.notify();
+        });
+    }
+}
+
+impl Render for DrawTextEditor {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let voice_commit = self.voice.clone();
+        let voice_cancel = self.voice.clone();
+        let voice_escape = self.voice.clone();
+
+        h_flex()
+            .id("screen-draw-text-editor-card")
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(gpui::rgba(0x18181bf5))
+            .border_2()
+            .border_color(gpui::rgba(self.color))
+            .shadow_xl()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                cx.stop_propagation();
+                let _ = voice_escape.update(cx, |store, cx| {
+                    store.screen_draw_mut().cancel_editing_text();
+                    cx.notify();
+                });
+            })
+            .child(
+                div()
+                    .min_w(px(180.))
+                    .max_w(px(320.))
+                    .child(Input::new(&self.input)),
+            )
+            .child(
+                div()
+                    .id("screen-draw-text-commit")
+                    .size(px(24.))
+                    .rounded_md()
+                    .bg(gpui::rgb(0x10b981))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .tooltip(Tooltip::text("Commit (Enter)"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(gpui::rgb(0xffffff))
+                            .child("✓"),
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = voice_commit.update(cx, |store, cx| {
+                            store.screen_draw_mut().commit_editing_text();
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("screen-draw-text-cancel")
+                    .size(px(24.))
+                    .rounded_md()
+                    .bg(gpui::rgb(CLOSE_RED))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .tooltip(Tooltip::text("Cancel (Esc)"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(gpui::rgb(0xffffff))
+                            .child("✕"),
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = voice_cancel.update(cx, |store, cx| {
+                            store.screen_draw_mut().cancel_editing_text();
+                            cx.notify();
+                        });
+                    }),
+            )
+    }
 }
 
 pub(crate) fn paint_draw_state(
@@ -722,12 +777,94 @@ pub(crate) fn paint_draw_state(
     if let Some(s) = &state.current_shape {
         paint_shape(window, vp, origin, s);
     }
+    if matches!(state.active_tool, DrawTool::Text | DrawTool::Pointer)
+        && let Some(selected) = state.selected_annotation()
+        && state.editing_text_id != Some(selected.id())
+    {
+        paint_selection(window, state, vp, origin, selected);
+    }
+}
+
+pub(crate) fn text_width(window: &Window, text: &TextAnnotation) -> f32 {
+    if text.content.is_empty() {
+        return 0.0;
+    }
+    f32::from(shape_text(window, text).width())
+}
+
+fn shape_text(window: &Window, text: &TextAnnotation) -> gpui::ShapedLine {
+    let mut run = window.text_style().to_run(text.content.len());
+    run.color = gpui::rgba(text.color).into();
+    run.font.weight = FontWeight::BOLD;
+    window.text_system().shape_line(
+        SharedString::from(text.content.clone()),
+        px(text_font_px(text.font_size)),
+        std::slice::from_ref(&run),
+        None,
+    )
+}
+
+fn paint_selection(
+    window: &mut Window,
+    state: &ScreenDrawState,
+    vp: &ContentViewport,
+    origin: Point<Pixels>,
+    selected: &DrawAnnotation,
+) {
+    let canvas = (vp.width, vp.height);
+    let measure = |text: &TextAnnotation| text_width(window, text);
+    let Some(frame) = state.annotation_bounds(selected, canvas, &measure) else {
+        return;
+    };
+    let left = origin.x + px(vp.offset_x + frame.left);
+    let top = origin.y + px(vp.offset_y + frame.top);
+    let accent = gpui::rgb(ACCENT_BLUE);
+    window.paint_quad(outline(
+        Bounds {
+            origin: point(left - px(2.0), top - px(2.0)),
+            size: size(
+                px(frame.right - frame.left + 4.0),
+                px(frame.bottom - frame.top + 4.0),
+            ),
+        },
+        accent,
+        BorderStyle::Dashed,
+    ));
+    if !matches!(selected, DrawAnnotation::Text(_)) {
+        return;
+    }
+    let handle = px(TEXT_HANDLE_SIZE);
+    let center = point(
+        origin.x + px(vp.offset_x + frame.right),
+        origin.y + px(vp.offset_y + frame.bottom),
+    );
+    window.paint_quad(
+        fill(
+            Bounds {
+                origin: point(center.x - handle / 2.0, center.y - handle / 2.0),
+                size: size(handle, handle),
+            },
+            accent,
+        )
+        .corner_radii(px(2.0)),
+    );
+    let inner = handle - px(4.0);
+    window.paint_quad(
+        fill(
+            Bounds {
+                origin: point(center.x - inner / 2.0, center.y - inner / 2.0),
+                size: size(inner, inner),
+            },
+            gpui::rgb(0xffffff),
+        )
+        .corner_radii(px(1.0)),
+    );
 }
 
 fn to_screen(
     vp: &ContentViewport,
     origin: Point<Pixels>,
-    pt: &mezon_store::NormalizedPoint,
+    pt: &NormalizedPoint,
 ) -> Point<Pixels> {
     let (x, y) = vp.to_pixels(pt);
     point(origin.x + px(x), origin.y + px(y))
@@ -736,7 +873,7 @@ fn to_screen(
 fn screen_points(
     vp: &ContentViewport,
     origin: Point<Pixels>,
-    points: &[mezon_store::NormalizedPoint],
+    points: &[NormalizedPoint],
 ) -> Vec<Point<Pixels>> {
     points.iter().map(|pt| to_screen(vp, origin, pt)).collect()
 }
@@ -848,29 +985,7 @@ fn paint_text_annotation(
     }
 
     let anchor = to_screen(vp, origin, &text.position);
-    let font_size = px(text.font_size.clamp(12.0, 36.0));
-    let color: Hsla = gpui::rgba(text.color).into();
-
-    let mut run = window.text_style().to_run(text.content.len());
-    run.color = color;
-    run.font.weight = FontWeight::BOLD;
-
-    let line = window.text_system().shape_line(
-        SharedString::from(text.content.clone()),
-        font_size,
-        std::slice::from_ref(&run),
-        None,
-    );
-
-    let pad_x = px(8.0);
-    let pad_y = px(4.0);
-    let line_height = font_size * 1.3;
-
-    let bg_bounds = Bounds {
-        origin: point(anchor.x - pad_x * 0.5, anchor.y - pad_y * 0.5),
-        size: size(line.width() + pad_x, line_height + pad_y),
-    };
-    window.paint_quad(fill(bg_bounds, gpui::rgba(0x000000b3)).corner_radii(px(4.0)));
-
+    let line_height = px(text_font_px(text.font_size)) * TEXT_LINE_HEIGHT;
+    let line = shape_text(window, text);
     let _ = line.paint(anchor, line_height, TextAlign::Left, None, window, cx);
 }

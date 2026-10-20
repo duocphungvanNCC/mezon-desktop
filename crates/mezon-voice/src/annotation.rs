@@ -3,17 +3,16 @@ use std::sync::Arc;
 use cosmic_text::Weight;
 use parking_lot::Mutex;
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform,
+    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Rect,
+    Stroke, Transform,
 };
 
 use crate::compose::TextPainter;
 use crate::video::{rgb_to_u, rgb_to_v, rgb_to_y};
 
 const TEXT_LINE_HEIGHT: f32 = 1.3;
-const TEXT_PAD_X: f32 = 8.0;
-const TEXT_PAD_Y: f32 = 4.0;
-const TEXT_PILL_RADIUS: f32 = 4.0;
-const TEXT_PILL_COLOR: u32 = 0x000000b3;
+const MIN_CANVAS_SCALE: f32 = 0.25;
+const MAX_CANVAS_SCALE: f32 = 8.0;
 const ARROW_HEAD_MIN: f32 = 12.0;
 const ARROW_HEAD_PER_WIDTH: f32 = 3.5;
 const ARROW_HEAD_SPREAD: f32 = 0.45;
@@ -247,7 +246,7 @@ impl AnnotationCompositor {
         let frame_w = width as f32;
         let frame_h = height as f32;
         let scale = if scene.canvas_width > 0.0 {
-            frame_w / scene.canvas_width
+            (frame_w / scene.canvas_width).clamp(MIN_CANVAS_SCALE, MAX_CANVAS_SCALE)
         } else {
             1.0
         };
@@ -339,31 +338,14 @@ impl AnnotationCompositor {
                     }
                     let size = (font_size * scale).max(6.0);
                     let painter = self.text.get_or_insert_with(TextPainter::new);
-                    let text_width = painter.measure(content, size, Weight::BOLD);
                     let line_height = size * TEXT_LINE_HEIGHT;
                     let (x, y) = to_px(position);
-                    let pad_x = TEXT_PAD_X * scale;
-                    let pad_y = TEXT_PAD_Y * scale;
-                    let pill_x = x - pad_x / 2.0;
-                    let pill_y = y - pad_y / 2.0;
-                    let pill_w = text_width + pad_x;
-                    let pill_h = line_height + pad_y;
-                    if let Some(path) =
-                        rounded_rect(pill_x, pill_y, pill_w, pill_h, TEXT_PILL_RADIUS * scale)
-                    {
-                        fill_path(&mut pixmap, &path, TEXT_PILL_COLOR);
+                    let coverage =
+                        painter.coverage(content, size, Weight::BOLD, x, y + line_height / 2.0);
+                    for &(gx, gy, _) in &coverage {
+                        bounds.include(gx as f32, gy as f32, 0.0);
                     }
-                    painter.draw(
-                        &mut pixmap,
-                        content,
-                        size,
-                        Weight::BOLD,
-                        x,
-                        y + line_height / 2.0,
-                        *color >> 8,
-                    );
-                    bounds.include(pill_x, pill_y, 0.0);
-                    bounds.include(pill_x + pill_w, pill_y + pill_h, 0.0);
+                    paint_coverage(&mut pixmap, &coverage, *color);
                 }
             }
         }
@@ -395,8 +377,8 @@ impl PixelBounds {
         let (l, t, r, b) = self.rect?;
         let left = (l.floor().max(0.0) as usize).min(width) & !1;
         let top = (t.floor().max(0.0) as usize).min(height) & !1;
-        let right = ((r.ceil().max(0.0) as usize + 1) & !1).min(width & !1);
-        let bottom = ((b.ceil().max(0.0) as usize + 1) & !1).min(height & !1);
+        let right = ((r.ceil().max(0.0) as usize).saturating_add(1) & !1).min(width & !1);
+        let bottom = ((b.ceil().max(0.0) as usize).saturating_add(1) & !1).min(height & !1);
         (right > left && bottom > top).then_some((left, top, right, bottom))
     }
 }
@@ -552,18 +534,33 @@ fn fill_polygon(pixmap: &mut Pixmap, points: &[(f32, f32)], color: u32) {
     }
 }
 
-fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
-    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
-    let mut builder = PathBuilder::new();
-    builder.move_to(x + r, y);
-    builder.line_to(x + w - r, y);
-    builder.quad_to(x + w, y, x + w, y + r);
-    builder.line_to(x + w, y + h - r);
-    builder.quad_to(x + w, y + h, x + w - r, y + h);
-    builder.line_to(x + r, y + h);
-    builder.quad_to(x, y + h, x, y + h - r);
-    builder.line_to(x, y + r);
-    builder.quad_to(x, y, x + r, y);
-    builder.close();
-    builder.finish()
+fn paint_coverage(pixmap: &mut Pixmap, coverage: &[(i32, i32, u8)], color: u32) {
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let red = (color >> 24) & 0xff;
+    let green = (color >> 16) & 0xff;
+    let blue = (color >> 8) & 0xff;
+    let opacity = color & 0xff;
+    let pixels = pixmap.pixels_mut();
+    for &(x, y, cover) in coverage {
+        if x < 0 || y < 0 || x >= width || y >= height {
+            continue;
+        }
+        let Some(slot) = pixels.get_mut(y as usize * width as usize + x as usize) else {
+            continue;
+        };
+        let alpha = cover as u32 * opacity / 255;
+        let inverse = 255 - alpha;
+        let mix = |source: u32, existing: u8| {
+            ((source * alpha + existing as u32 * inverse + 127) / 255) as u8
+        };
+        if let Some(blended) = PremultipliedColorU8::from_rgba(
+            mix(red, slot.red()),
+            mix(green, slot.green()),
+            mix(blue, slot.blue()),
+            mix(255, slot.alpha()),
+        ) {
+            *slot = blended;
+        }
+    }
 }

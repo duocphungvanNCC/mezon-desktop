@@ -516,6 +516,7 @@ pub struct VoiceStore {
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
     screen_draw: ScreenDrawState,
+    screen_draw_editor: Option<(u64, gpui::AnyView)>,
     desktop_draw: Option<Entity<DesktopDraw>>,
     pip: Option<PipWindow>,
     room_name: String,
@@ -912,6 +913,7 @@ impl VoiceStore {
             auto_focused_screen: None,
             fullscreen_screen: None,
             screen_draw: ScreenDrawState::default(),
+            screen_draw_editor: None,
             desktop_draw: None,
             pip: None,
             room_name: String::new(),
@@ -2799,21 +2801,24 @@ impl VoiceStore {
     }
 
     pub fn toggle_screen_draw(&mut self, cx: &mut Context<Self>) {
-        self.screen_draw.toggle_active();
-        if self.screen_draw.is_active
-            && self.fullscreen_screen.is_none()
-            && self.focused_tile.is_none()
-        {
-            if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
-                self.focused_tile = Some(screen_tile_id(&p.session_id));
-                self.sync_screen_full_res();
-            }
-        }
-        cx.notify();
+        let active = !self.screen_draw.is_active;
+        self.set_screen_draw_active(active, cx);
+    }
+
+    pub fn screen_draw_editor(&self) -> Option<gpui::AnyView> {
+        let (id, view) = self.screen_draw_editor.as_ref()?;
+        (self.screen_draw.editing_text_id == Some(*id)).then(|| view.clone())
+    }
+
+    pub fn set_screen_draw_editor(&mut self, id: u64, view: gpui::AnyView) {
+        self.screen_draw_editor = Some((id, view));
     }
 
     pub fn set_screen_draw_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.screen_draw.set_active(active);
+        if !active {
+            self.screen_draw_editor = None;
+        }
         if active
             && self.fullscreen_screen.is_none()
             && self.focused_tile.is_none()
@@ -5081,6 +5086,7 @@ impl VoiceStore {
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.screen_draw = ScreenDrawState::default();
+        self.screen_draw_editor = None;
         self.end_desktop_draw(cx);
         self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
