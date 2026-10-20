@@ -469,6 +469,18 @@ impl RoleSettingPage {
         active: bool,
         cx: &mut Context<Self>,
     ) {
+        if !active
+            && PermissionStore::global(cx)
+                .read(cx)
+                .permission_definitions()
+                .iter()
+                .any(|permission| {
+                    permission.id == permission_id
+                        && mezon_store::is_required_role_permission(&permission.slug)
+                })
+        {
+            return;
+        }
         if active {
             self.draft_permission_ids.insert(permission_id);
         } else {
@@ -1048,7 +1060,6 @@ impl RoleSettingPage {
                                         locale,
                                         theme,
                                         can_edit,
-                                        is_everyone,
                                         is_clan_owner,
                                         window,
                                         cx,

@@ -255,7 +255,8 @@ pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
-    RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
+    RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, is_required_role_permission,
+    parse_role_color,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};

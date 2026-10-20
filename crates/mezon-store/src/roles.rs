@@ -22,6 +22,10 @@ pub const MAX_ROLE_ICON_BYTES: u64 = 256 * 1024;
 
 const DEFAULT_ROLE_PERMISSION_SLUGS: &[&str] = &[crate::PERMISSION_SEND_MESSAGE, "view-channel"];
 
+pub fn is_required_role_permission(slug: &str) -> bool {
+    DEFAULT_ROLE_PERMISSION_SLUGS.contains(&slug)
+}
+
 const ROLE_EVENT_CREATED: i32 = 1;
 const ROLE_EVENT_UPDATED: i32 = 2;
 const ROLE_EVENT_DELETED: i32 = 3;
@@ -111,6 +115,30 @@ pub struct RoleDraft {
     pub remove_permission_ids: Vec<i64>,
     pub add_user_ids: Vec<i64>,
     pub remove_user_ids: Vec<i64>,
+}
+
+impl RoleDraft {
+    fn require_permissions(&mut self, permission_ids: &[i64]) {
+        self.remove_permission_ids
+            .retain(|id| !permission_ids.contains(id));
+        for id in permission_ids {
+            if !self.add_permission_ids.contains(id) {
+                self.add_permission_ids.push(*id);
+            }
+        }
+    }
+}
+
+async fn resolve_required_role_permissions(
+    api: &AppApi,
+    cached: Option<Vec<i64>>,
+) -> anyhow::Result<Vec<i64>> {
+    if let Some(ids) = cached {
+        return Ok(ids);
+    }
+    let list = api.get_list_permission().await?;
+    default_role_permission_ids(list.permissions.iter().map(|p| (p.slug.as_str(), p.id)))
+        .ok_or_else(|| anyhow::anyhow!("required role permissions are missing or invalid"))
 }
 
 pub struct RolesStore {
@@ -826,43 +854,23 @@ impl RolesStore {
         let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let default_permission_ids = if let Some(ids) = default_permission_ids {
-                Some(ids)
-            } else {
-                match api.get_list_permission().await {
-                    Ok(list) => default_role_permission_ids(
-                        list.permissions
-                            .iter()
-                            .map(|permission| (permission.slug.as_str(), permission.id)),
-                    ),
-                    Err(err) => {
-                        let _ = this.update(cx, |this, cx| {
-                            if this.reset_generation != generation {
-                                return;
-                            }
-                            this.saving.remove(&clan_id);
-                            tracing::error!("load default role permissions failed: {err}");
-                            cx.notify();
-                        });
-                        return;
-                    }
-                }
-            };
+            let resolved = resolve_required_role_permissions(&api, default_permission_ids).await;
             if !this
                 .update(cx, |this, _| this.reset_generation == generation)
                 .unwrap_or(false)
             {
                 return;
             }
-            let Some(default_permission_ids) = default_permission_ids else {
-                let _ = this.update(cx, |this, cx| {
-                    this.saving.remove(&clan_id);
-                    tracing::error!(
-                        "default role permissions are missing or invalid for {clan_id}"
-                    );
-                    cx.notify();
-                });
-                return;
+            let default_permission_ids = match resolved {
+                Ok(ids) => ids,
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.saving.remove(&clan_id);
+                        tracing::error!("load required role permissions failed: {err}");
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             let request =
                 create_role_request(clan_id, draft, max_permission_id, default_permission_ids);
@@ -899,8 +907,38 @@ impl RolesStore {
         if !self.saving.insert(clan_id) {
             return;
         }
+        let default_permission_ids = default_role_permission_ids(
+            PermissionStore::global(cx)
+                .read(cx)
+                .permission_definitions()
+                .iter()
+                .map(|permission| (permission.slug.as_str(), permission.id)),
+        );
+        let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            let resolved = resolve_required_role_permissions(&api, default_permission_ids).await;
+            if !this
+                .update(cx, |this, _| this.reset_generation == generation)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let default_permission_ids = match resolved {
+                Ok(ids) => ids,
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.saving.remove(&clan_id);
+                        tracing::error!("load required role permissions failed: {err}");
+                        cx.emit(RolesEvent::RoleSaveFailed { clan_id, role_id });
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let mut draft = draft;
+            draft.require_permissions(&default_permission_ids);
+
             let request = api::UpdateRoleRequest {
                 role_id: role_id.get(),
                 title: Some(draft.title),
@@ -916,6 +954,10 @@ impl RolesStore {
             };
             let result = api.update_role(request).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+
                 this.saving.remove(&clan_id);
                 match result {
                     Ok(()) => {
@@ -1189,23 +1231,18 @@ fn default_role_permission_ids<'a>(
 
 fn create_role_request(
     clan_id: ClanId,
-    draft: RoleDraft,
+    mut draft: RoleDraft,
     max_permission_id: i64,
     default_permission_ids: Vec<i64>,
 ) -> api::CreateRoleRequest {
-    let mut active_permission_ids = draft.add_permission_ids;
-    for permission_id in default_permission_ids {
-        if !active_permission_ids.contains(&permission_id) {
-            active_permission_ids.push(permission_id);
-        }
-    }
+    draft.require_permissions(&default_permission_ids);
     api::CreateRoleRequest {
         title: draft.title,
         color: draft.color,
         role_icon: draft.icon,
         clan_id: clan_id.get(),
         max_permission_id,
-        active_permission_ids,
+        active_permission_ids: draft.add_permission_ids,
         add_user_ids: draft.add_user_ids,
         ..Default::default()
     }
@@ -1417,6 +1454,32 @@ mod tests {
     const TEST_CLAN: ClanId = ClanId(1);
     const TEST_SELF: i64 = 42;
     const TEST_ACTOR: i64 = 77;
+
+    #[test]
+    fn required_role_permissions_cannot_be_removed_when_saving() {
+        let mut draft = RoleDraft {
+            title: "Role".into(),
+            color: DEFAULT_ROLE_COLOR.into(),
+            icon: String::new(),
+            add_permission_ids: vec![7, 41],
+            remove_permission_ids: vec![41, 92, 8],
+            add_user_ids: vec![],
+            remove_user_ids: vec![],
+        };
+        draft.require_permissions(&[41, 92]);
+        draft.require_permissions(&[41, 92]);
+        assert_eq!(draft.add_permission_ids, vec![7, 41, 92]);
+        assert_eq!(draft.remove_permission_ids, vec![8]);
+    }
+
+    #[test]
+    fn only_send_and_view_are_required_role_permissions() {
+        assert!(is_required_role_permission("send-message"));
+        assert!(is_required_role_permission("view-channel"));
+        for slug in ["administrator", "delete-message", "manage-clan", ""] {
+            assert!(!is_required_role_permission(slug));
+        }
+    }
 
     #[test]
     fn create_role_request_grants_defaults_and_preserves_explicit_fields() {

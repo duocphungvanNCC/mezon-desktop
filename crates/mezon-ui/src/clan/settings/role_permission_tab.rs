@@ -1,7 +1,7 @@
 use gpui::{Context, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use mezon_store::{
-    PERMISSION_ADMINISTRATOR, PERMISSION_SEND_MESSAGE, PermissionDefinition, PermissionStore,
+    PERMISSION_ADMINISTRATOR, PermissionDefinition, PermissionStore, is_required_role_permission,
 };
 
 use super::role_setting_page::RoleSettingPage;
@@ -64,7 +64,6 @@ impl RoleSettingPage {
         locale: &str,
         theme: &Theme,
         can_edit: bool,
-        is_everyone: bool,
         is_clan_owner: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -121,7 +120,6 @@ impl RoleSettingPage {
                             theme,
                             perm,
                             can_edit,
-                            is_everyone,
                             is_clan_owner,
                             user_permission_level,
                             cx,
@@ -139,16 +137,15 @@ impl RoleSettingPage {
         theme: &Theme,
         perm: &PermissionDefinition,
         can_edit: bool,
-        is_everyone: bool,
         is_clan_owner: bool,
         user_permission_level: i32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let checked = self.draft_permission_ids.contains(&perm.id);
+        let required = is_required_role_permission(&perm.slug);
+        let checked = required || self.draft_permission_ids.contains(&perm.id);
         let hide_admin = !is_clan_owner && can_edit && perm.slug == PERMISSION_ADMINISTRATOR;
-        let lock_everyone_send = is_everyone && perm.slug == PERMISSION_SEND_MESSAGE;
         let lock_hierarchy = !is_clan_owner && can_edit && perm.level >= user_permission_level;
-        let disabled = !can_edit || hide_admin || lock_everyone_send || lock_hierarchy;
+        let disabled = !can_edit || hide_admin || required || lock_hierarchy;
         let title = localized_permission_title(locale, perm);
         let description = localized_permission_description(locale, &perm.slug);
         let perm_id = perm.id;
