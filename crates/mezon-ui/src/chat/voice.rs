@@ -4005,21 +4005,24 @@ fn control_bar(
 
 const PTT_HINT_WIDTH_PX: f32 = 320.;
 const PTT_HINT_CARET_PX: f32 = 12.;
+const NETWORK_WARNING_WIDTH_PX: f32 = 352.;
 const NETWORK_WARNING_BG: u32 = 0xfde8d7;
 const NETWORK_WARNING_TEXT: u32 = 0x202124;
+const NETWORK_WARNING_ICON: u32 = 0xb45309;
 
 fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
     let card_bg: Hsla = gpui::rgb(NETWORK_WARNING_BG).into();
     let text_color: Hsla = gpui::rgb(NETWORK_WARNING_TEXT).into();
-    let message = mezon_i18n::t(locale, "channelVoice.networkWarning");
+    let title = mezon_i18n::t(locale, "channelVoice.networkWarning.title");
+    let body = mezon_i18n::t(locale, "channelVoice.networkWarning.body");
     let dismiss = voice.clone();
-    div()
+    let callout = div()
         .id("voice-network-warning")
         .occlude()
         .absolute()
         .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
         .left(px(-16.))
-        .w(px(PTT_HINT_WIDTH_PX))
+        .w(px(NETWORK_WARNING_WIDTH_PX))
         .flex()
         .flex_col()
         .child(
@@ -4028,20 +4031,48 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .rounded(px(16.))
                 .bg(card_bg)
                 .shadow_lg()
-                .p_4()
-                .pl_2()
+                .py_3()
+                .pl_4()
+                .pr_3()
                 .flex()
                 .flex_row()
-                .items_start()
+                .items_center()
                 .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded_full()
+                        .bg(with_alpha(gpui::rgb(NETWORK_WARNING_ICON), 0.15))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(18.))
+                                .text_color(gpui::rgb(NETWORK_WARNING_ICON)),
+                        ),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .flex()
+                        .flex_col()
                         .text_left()
-                        .text_color(text_color)
-                        .child(message),
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_color)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(with_alpha(text_color, 0.75))
+                                .child(body),
+                        ),
                 )
                 .child(
                     div()
@@ -4070,8 +4101,8 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .h(px(PTT_HINT_CARET_PX / 2.))
                 .path("icons/tour-caret-down.svg")
                 .text_color(card_bg),
-        )
-        .into_any_element()
+        );
+    deferred(callout).into_any_element()
 }
 
 fn network_weak_dot(theme: &Theme, network_weak: bool, cx: &App) -> Option<gpui::Div> {
