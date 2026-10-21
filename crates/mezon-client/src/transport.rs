@@ -3447,6 +3447,29 @@ pub fn is_link_markdown_kind(kind: &str) -> bool {
     )
 }
 
+fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
+    let open = body.iter().filter(|&&c| c == '(').count();
+    let mut close = body.iter().filter(|&&c| c == ')').count();
+    let mut len = body.len();
+    while close > open {
+        let mut before_punctuation = len;
+        while before_punctuation > 0
+            && matches!(
+                body[before_punctuation - 1],
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"'
+            )
+        {
+            before_punctuation -= 1;
+        }
+        if before_punctuation == 0 || body[before_punctuation - 1] != ')' {
+            break;
+        }
+        len = before_punctuation - 1;
+        close -= 1;
+    }
+    len
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -3487,6 +3510,8 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             while j < n && !matches!(chars[j], ' ' | '\n' | '\r' | '\t') {
                 j += 1;
             }
+            let j =
+                i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
                 let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
@@ -11789,6 +11814,45 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_link_wrapped_in_parens_leaves_the_close_paren_out() {
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)"),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com))"),
+            vec![md("lk", 5, 18)]
+        );
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)."),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com)!)"),
+            vec![md("lk", 5, 18)]
+        );
+    }
+
+    #[test]
+    fn detect_markdown_link_keeps_a_close_paren_it_opened() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
+    }
+
+    #[test]
+    fn send_content_link_wrapped_in_parens_stops_before_the_close_paren() {
+        let sent = build_send_content(
+            "(https://www.youtube.com/)",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.markdowns, vec![md("lk", 1, 25)]);
     }
 
     #[test]
