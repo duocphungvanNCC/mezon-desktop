@@ -127,6 +127,7 @@ pub struct TopicDiscussion {
     pub last_message_content: String,
     pub last_message_attachments: Vec<crate::transport::ApiAttachment>,
     pub last_message_timestamp: u32,
+    pub unread_count: u32,
 }
 
 fn id_str(value: i64) -> String {
@@ -1098,6 +1099,7 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
             .unwrap_or_default(),
         last_message_attachments: Vec::new(),
         last_message_timestamp,
+        unread_count: t.unread_count.max(0) as u32,
     }
 }
 
@@ -1660,9 +1662,11 @@ mod tests {
             channel_id: 5,
             content: "topic title".into(),
             update_time_seconds: 100,
+            unread_count: 3,
             ..Default::default()
         });
         assert_eq!(topic.id, "10");
+        assert_eq!(topic.unread_count, 3);
         assert_eq!(topic.message_id, "20");
         assert_eq!(topic.content, "topic title");
         assert_eq!(

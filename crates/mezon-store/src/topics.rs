@@ -19,6 +19,7 @@ use crate::messages::{
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topic_badges::{TopicBadgeStore, TopicListing};
 use crate::upload_jobs::UploadJob;
 use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
@@ -1848,8 +1849,13 @@ impl TopicsStore {
 
         let api = self.api.clone();
         let clan_id = clan_id.to_string();
+        let listing = TopicBadgeStore::try_global(cx)
+            .map(|store| store.update(cx, |store, _| store.begin_topic_listing()));
         cx.spawn(async move |this, cx| {
             let result = api.list_sd_topics(&clan_id, TOPICS_LIMIT, page).await;
+            if let Some(listing) = listing {
+                cx.update(|cx| report_topic_listing(&clan_id, listing, &result, cx));
+            }
             let _ = this.update(cx, |this, cx| {
                 this.apply_fetch_result(&clan_id, generation, page, append, result, cx);
             });
@@ -2045,7 +2051,27 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
             .unwrap_or(0),
         content,
         last_sent_message: ev.last_sent_message.clone(),
+        unread_count: 0,
     }
+}
+
+fn report_topic_listing(
+    clan_id: &str,
+    listing: TopicListing,
+    result: &Result<Vec<TopicDiscussion>, anyhow::Error>,
+    cx: &mut App,
+) {
+    let Some(store) = TopicBadgeStore::try_global(cx) else {
+        return;
+    };
+    let listed: &[TopicDiscussion] = match (result, clan_id.parse::<ClanId>()) {
+        (Ok(topics), Ok(_)) => topics,
+        _ => &[],
+    };
+    let clan_id = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
+    store.update(cx, |store, cx| {
+        store.end_topic_listing(clan_id, listed, listing, cx)
+    });
 }
 
 #[cfg(test)]
@@ -2164,6 +2190,7 @@ mod tests {
             last_message_content: String::new(),
             last_message_attachments: Vec::new(),
             last_message_timestamp,
+            unread_count: 0,
         }
     }
 

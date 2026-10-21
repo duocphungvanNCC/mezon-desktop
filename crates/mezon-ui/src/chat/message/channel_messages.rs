@@ -2074,6 +2074,13 @@ impl ChannelMessages {
         this._subs.push(
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
+                    if MessagesStore::global(cx)
+                        .read(cx)
+                        .pending_topic_jump()
+                        .is_none()
+                    {
+                        this.topic_list_topic = None;
+                    }
                     this.refresh_topic_messages(cx);
                     if this.at_bottom {
                         this.sync_topic_seen(cx);
@@ -2085,6 +2092,14 @@ impl ChannelMessages {
             }),
         );
         this.refresh_topic_messages(cx);
+        let topic_box = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = topic_box.update(cx, |this, cx| {
+                if this.at_bottom {
+                    this.sync_topic_seen(cx);
+                }
+            });
+        });
         if let Some(target) = MessagesStore::global(cx).read(cx).pending_topic_jump() {
             this.begin_highlight(target, cx);
         }
@@ -2139,11 +2154,10 @@ impl ChannelMessages {
                 meta.rpl.hash(&mut hasher);
                 meta.lsnt.hash(&mut hasher);
             }
-            let badge = badges
+            let unread = badges
                 .as_ref()
-                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
-                .unwrap_or(0);
-            badge.hash(&mut hasher);
+                .is_some_and(|store| store.read(cx).topic_has_unread(&topic_id.to_string()));
+            unread.hash(&mut hasher);
         }
         if !any_topic {
             return;
