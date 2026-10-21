@@ -347,6 +347,7 @@ impl DirectMessageStore {
                 RealtimeKind::UserChannelAdded,
                 RealtimeKind::UserChannelRemoved,
                 RealtimeKind::ChannelUpdated,
+                RealtimeKind::ChannelCreated,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -373,6 +374,9 @@ impl DirectMessageStore {
                             this.dm_space_joined = false;
                             this.loading = false;
                             this.freshness.mark_stale();
+                            if let Some(badge) = crate::badge::BadgeService::try_global(cx) {
+                                badge.update(cx, |badge, _| badge.forget_dm_push_channels());
+                            }
                             this.fetch(cx);
                         })
                         .is_err()
@@ -932,6 +936,15 @@ impl DirectMessageStore {
                 cx.emit(DirectEvent::Changed { channel_id: None });
                 cx.notify();
             }
+            RealtimeEvent::ChannelCreated(e) => {
+                let me = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badge| badge.read(cx).current_user_id(cx));
+                let Some(channel_id) = reopened_by_peer(e, me) else {
+                    return;
+                };
+                tracing::info!("conversation {channel_id} reopened by the peer, joining it");
+                self.follow_reopened_conversation(channel_id, me, cx);
+            }
             RealtimeEvent::UserChannelRemoved(e) => {
                 let channel_id = ChannelId(e.channel_id);
                 if self.channels.find(channel_id).is_none() {
@@ -948,6 +961,45 @@ impl DirectMessageStore {
             }
             _ => {}
         }
+    }
+
+    fn follow_reopened_conversation(
+        &self,
+        channel_id: ChannelId,
+        me: Option<UserId>,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        cx.spawn(async move |this, cx| {
+            let desc = match api.list_channel_detail(channel_id.get()).await {
+                Ok(desc) => desc,
+                Err(e) => {
+                    tracing::warn!(
+                        "list_channel_detail for reopened conversation {channel_id} failed: {e}"
+                    );
+                    return;
+                }
+            };
+            let channel = reopened_conversation(&desc);
+            if let Err(e) = api
+                .join_chat(0, channel_id.get(), channel.kind.channel_type(), false)
+                .await
+            {
+                tracing::warn!("join_chat for conversation {channel_id} failed: {e}");
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation
+                    || this.channels.find(channel_id).is_some()
+                {
+                    return;
+                }
+                if let Some(me) = me {
+                    this.insert_after_member_lookup(channel, me, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn note_message(
@@ -1480,6 +1532,43 @@ fn group_desc_payload(
         None => carry(current.map(|(_, avatar)| avatar)),
     };
     (label, avatar)
+}
+
+fn is_conversation_type(channel_type: i32) -> bool {
+    channel_type == DirectKind::Dm.channel_type()
+        || channel_type == DirectKind::Group.channel_type()
+}
+
+fn reopened_by_peer(
+    event: &mezon_proto::realtime::ChannelCreatedEvent,
+    me: Option<UserId>,
+) -> Option<ChannelId> {
+    if event.clan_id != 0 || event.channel_id == 0 || !is_conversation_type(event.channel_type) {
+        return None;
+    }
+    if me.is_some_and(|me| me.get() == event.creator_id) {
+        return None;
+    }
+    Some(ChannelId(event.channel_id))
+}
+
+fn reopened_conversation(desc: &ApiChannelDesc) -> DirectChannel {
+    let (last_sent_timestamp, last_seen_timestamp) = opened_activity(desc);
+    DirectChannel {
+        id: ChannelId(desc.channel_id),
+        label: desc.channel_label.clone(),
+        kind: DirectKind::from_raw(desc.channel_type),
+        avatar: desc.channel_avatar.clone(),
+        peer_user_id: None,
+        peer_username: String::new(),
+        creator_id: (desc.creator_id != 0).then_some(UserId(desc.creator_id)),
+        online: false,
+        member_count: desc.member_count.max(0) as u32,
+        unread_count: 1,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        create_time_seconds: 0,
+    }
 }
 
 fn enrich_direct_from_event_users(
@@ -3187,5 +3276,89 @@ mod tests {
             vec![Some(ChannelId(1)), Some(ChannelId(2))],
             "20 messages must coalesce into one change per conversation"
         );
+    }
+
+    fn created_event(
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        creator_id: i64,
+    ) -> mezon_proto::realtime::ChannelCreatedEvent {
+        mezon_proto::realtime::ChannelCreatedEvent {
+            clan_id,
+            channel_id,
+            channel_type,
+            creator_id,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_conversation_reopened_by_the_peer_is_followed() {
+        let me = Some(UserId(7));
+        assert_eq!(
+            reopened_by_peer(&created_event(0, 42, 3, 0), me),
+            Some(ChannelId(42))
+        );
+        assert_eq!(
+            reopened_by_peer(&created_event(0, 43, 2, 9), me),
+            Some(ChannelId(43))
+        );
+        assert_eq!(
+            reopened_by_peer(&created_event(0, 44, 3, 0), None),
+            Some(ChannelId(44))
+        );
+    }
+
+    #[test]
+    fn channels_that_are_not_a_reopened_conversation_are_ignored() {
+        let me = Some(UserId(7));
+        assert_eq!(reopened_by_peer(&created_event(0, 42, 3, 7), me), None);
+        assert_eq!(reopened_by_peer(&created_event(5, 42, 1, 0), me), None);
+        assert_eq!(reopened_by_peer(&created_event(5, 42, 3, 0), me), None);
+        assert_eq!(reopened_by_peer(&created_event(0, 42, 1, 0), me), None);
+        assert_eq!(reopened_by_peer(&created_event(0, 0, 3, 0), me), None);
+    }
+
+    #[test]
+    fn a_reopened_conversation_keeps_its_kind_and_comes_back_unread() {
+        let detail = |channel_type, last_sent_timestamp| ApiChannelDesc {
+            channel_id: 42,
+            channel_label: "group".into(),
+            channel_type,
+            clan_id: 0,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 1,
+            count_mess_unread: 0,
+            member_count: 3,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 90,
+            last_sent_message_id: 0,
+            last_sent_timestamp,
+            badge_count: 0,
+            active: 1,
+            creator_id: 5,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        };
+
+        let group = reopened_conversation(&detail(2, 100));
+        assert_eq!(group.id, ChannelId(42));
+        assert_eq!(group.kind.channel_type(), 2);
+        assert_eq!(group.unread_count, 1);
+        assert_eq!(group.last_sent_timestamp, 100);
+        assert!(group.is_unread());
+
+        let dm = reopened_conversation(&detail(3, 0));
+        assert_eq!(dm.kind.channel_type(), 3);
+        assert!(dm.is_unread());
+        assert!(dm.last_sent_timestamp > 0);
     }
 }
