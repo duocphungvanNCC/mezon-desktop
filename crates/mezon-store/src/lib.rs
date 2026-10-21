@@ -25,6 +25,7 @@ pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod ctrlk_search;
+pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -59,6 +60,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod realtime_server;
 pub mod roles;
+pub mod screen_draw;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
@@ -145,6 +147,7 @@ pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
     SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
+pub use desktop_draw::DesktopDraw;
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
@@ -256,6 +259,14 @@ pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
+};
+pub use screen_draw::{
+    AnnotationDrag, COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED,
+    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, NormalizedPoint,
+    PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK,
+    STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE,
+    TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize, VanishingStroke,
+    scale_alpha, text_font_px,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};

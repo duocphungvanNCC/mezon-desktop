@@ -5846,6 +5846,7 @@ dependencies = [
  "base64 0.22.1",
  "block",
  "chrono",
+ "core-foundation 0.10.0",
  "flume",
  "futures",
  "gpui",
@@ -5880,6 +5881,7 @@ dependencies = [
  "unicode-segmentation",
  "windows 0.61.3",
  "x11rb",
+ "xcb",
  "zed-scap",
 ]
 

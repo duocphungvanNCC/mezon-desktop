@@ -47,6 +47,7 @@ gpui = { workspace = true, features = ["inspector", "test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block = "0.1"
+core-foundation.workspace = true
 objc.workspace = true
 raw-window-handle.workspace = true
 
@@ -54,7 +55,8 @@ raw-window-handle.workspace = true
 libc.workspace = true
 raw-window-handle.workspace = true
 scap = { workspace = true, features = ["wayland", "x11"] }
-x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "shape"] }
+xcb = "1.4.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle.workspace = true
