@@ -3464,6 +3464,8 @@
   "message.systemMessages.aMessage": "un message",
   "message.systemMessages.allPinned": "tous les messages",
   "message.systemMessages.allThreads": "tous les fils",
+  "message.systemMessages.changedGroupAvatar": "a changé la photo du groupe.",
+  "message.systemMessages.changedGroupName": "a renommé le groupe en {{name}}.",
   "message.systemMessages.deletedAThread": "a supprimé un fil :",
   "message.systemMessages.messages": "épinglés.",
   "message.systemMessages.pinned": "a épinglé",

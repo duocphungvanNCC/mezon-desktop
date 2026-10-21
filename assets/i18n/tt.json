@@ -3473,6 +3473,8 @@
   "message.systemMessages.aMessage": "Хәбәр",
   "message.systemMessages.allPinned": "Барлык төяп куелганнар",
   "message.systemMessages.allThreads": "Барлык ботакламалар",
+  "message.systemMessages.changedGroupAvatar": "төркем рәсемен үзгәртте.",
+  "message.systemMessages.changedGroupName": "төркем исемен {{name}} итеп үзгәртте.",
   "message.systemMessages.deletedAThread": "Ботаклама бетерелде:",
   "message.systemMessages.messages": "хәбәрләр.",
   "message.systemMessages.pinned": "Төяп куелган",

@@ -3471,6 +3471,8 @@
   "message.systemMessages.aMessage": "một tin nhắn",
   "message.systemMessages.allPinned": "tất cả tin nhắn",
   "message.systemMessages.allThreads": "tất cả chủ đề",
+  "message.systemMessages.changedGroupAvatar": "đã đổi ảnh nhóm.",
+  "message.systemMessages.changedGroupName": "đã đổi tên nhóm thành {{name}}.",
   "message.systemMessages.deletedAThread": "đã xóa một chủ đề:",
   "message.systemMessages.messages": "đã ghim.",
   "message.systemMessages.pinned": "đã ghim",

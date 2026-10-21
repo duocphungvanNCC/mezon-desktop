@@ -1442,6 +1442,7 @@ impl ChannelMessages {
             let mut memo = this.row_memo.borrow_mut();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.group_updates.clear();
             memo.selection_layouts.clear();
             memo.selection_text_pieces.clear();
             cx.notify();
@@ -3794,6 +3795,7 @@ impl ChannelMessages {
             memo.display_names.clear();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.group_updates.clear();
             memo.selection_layouts.clear();
             memo.selection_text_pieces.clear();
         }

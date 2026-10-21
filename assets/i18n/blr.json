@@ -3464,6 +3464,8 @@
   "message.systemMessages.aMessage": "адно паведамленне",
   "message.systemMessages.allPinned": "усе замацаваныя паведамленні",
   "message.systemMessages.allThreads": "усе трэды",
+  "message.systemMessages.changedGroupAvatar": "змяніў(-ла) фота групы.",
+  "message.systemMessages.changedGroupName": "змяніў(-ла) назву групы на {{name}}.",
   "message.systemMessages.deletedAThread": "выдаліў трэд:",
   "message.systemMessages.messages": "замацавана.",
   "message.systemMessages.pinned": "замацавана",

@@ -3464,6 +3464,8 @@
   "message.systemMessages.aMessage": "wiadomość",
   "message.systemMessages.allPinned": "wszystkie wiadomości",
   "message.systemMessages.allThreads": "wszystkie wątki",
+  "message.systemMessages.changedGroupAvatar": "zmienił(a) zdjęcie grupy.",
+  "message.systemMessages.changedGroupName": "zmienił(a) nazwę grupy na {{name}}.",
   "message.systemMessages.deletedAThread": "heeft een onderwerp verwijderd:",
   "message.systemMessages.messages": "przypięte.",
   "message.systemMessages.pinned": "przypięty",
