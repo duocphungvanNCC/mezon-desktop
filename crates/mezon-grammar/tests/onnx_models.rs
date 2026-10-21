@@ -78,10 +78,23 @@ fn neural_accent_keeps_ok_pronoun() {
 
 #[test]
 fn neural_accent_restores_minh_sua_roi_nhe() {
-    for input in ["minh sua roi nhé", "minh sua roi nhe"] {
-        let out = apply_neural_accent_onnx(input);
-        assert_eq!(out, "mình sửa rồi nhé", "{input} -> {out}");
-        let corrected = MezonGrammarClient::new().correct(input).corrected;
-        assert_eq!(corrected, "Mình sửa rồi nhé", "{input} -> {corrected}");
-    }
+    assert_eq!(
+        apply_neural_accent_onnx("minh sua roi nhe"),
+        "mình sửa rồi nhé"
+    );
+    assert_eq!(
+        apply_neural_accent_onnx("minh sua roi nhé"),
+        "minh sua roi nhé"
+    );
+    assert_eq!(apply_neural_accent_onnx("em sẽ làm ngay"), "em sẽ làm ngay");
+    let client = MezonGrammarClient::new();
+    assert_eq!(
+        client.correct("minh sua roi nhe").corrected,
+        "Mình sửa rồi nhé"
+    );
+    assert_eq!(
+        client.correct("minh sua roi nhé").corrected,
+        "Mình sửa rồi nhé"
+    );
+    assert!(!apply_neural_accent_onnx("Bob ban oi").contains("Bọn"));
 }

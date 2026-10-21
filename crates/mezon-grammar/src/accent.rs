@@ -1,7 +1,7 @@
 use crate::onnx::{ACCENT_MAX_CHARS, ACCENT_VOCAB_SIZE, accent_char_id};
 use crate::rules::{
-    CONFUSABLE_PHRASES, is_foreign_or_tech_word, is_predominantly_english_sentence, match_case,
-    strip_accents,
+    COMPILED_CONFUSABLES, CONFUSABLE_PHRASES, contains_vietnamese_diacritics,
+    is_foreign_or_tech_word, is_predominantly_english_sentence, match_case, strip_accents,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -58,8 +58,6 @@ static VOWEL_VARIANTS: LazyLock<HashMap<char, Vec<char>>> = LazyLock::new(|| {
         ("u", "uùúủũụưừứửữự"),
         ("y", "yỳýỷỹỵ"),
         ("d", "dđ"),
-        ("b", "bn"),
-        ("n", "nb"),
     ];
     for (base, variants) in pairs {
         let lower: Vec<char> = variants.chars().collect();
@@ -134,7 +132,10 @@ fn pair_key(first: &str, second: &str, third: Option<&str>) -> String {
 }
 
 pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
-    if text.trim().is_empty() || is_predominantly_english_sentence(text) {
+    if text.trim().is_empty()
+        || is_predominantly_english_sentence(text)
+        || contains_vietnamese_diacritics(text)
+    {
         return text.to_string();
     }
     if RE_SENTENCE.is_match(text) {
@@ -187,23 +188,18 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
 }
 
 fn apply_confusable_prepass(text: &str) -> String {
-    let mut phrases: Vec<(&str, &str)> = CONFUSABLE_PHRASES
-        .iter()
-        .copied()
-        .filter(|(wrong, _)| wrong.contains(' '))
-        .collect();
-    phrases.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.chars().count()));
     let mut current = text.to_string();
-    for (wrong, right) in phrases {
-        let Ok(re) = Regex::new(&format!(r"(?i)(?<!\w){}(?!\w)", regex::escape(wrong))) else {
-            continue;
-        };
-        if !re.is_match(&current) {
+    for phrase in COMPILED_CONFUSABLES
+        .iter()
+        .filter(|phrase| phrase.multi_word)
+    {
+        if !phrase.re.is_match(&current) {
             continue;
         }
-        current = re
+        current = phrase
+            .re
             .replace_all(&current, |caps: &regex::Captures| {
-                title_if_needed(&caps[0], right)
+                title_if_needed(&caps[0], phrase.replacement)
             })
             .to_string();
     }

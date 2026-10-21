@@ -288,7 +288,7 @@ pub static TEENCODE_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
         ("bik", "biết"),
         ("ns", "nói"),
         ("thik", "thích"),
-        ("thx", "thích"),
+        ("thx", "cảm ơn"),
         ("iu", "yêu"),
         ("zui", "vui"),
         ("vuii", "vui"),
@@ -706,6 +706,90 @@ pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = Laz
     list
 });
 
+pub struct CompiledConfusable {
+    pub re: Regex,
+    pub replacement: &'static str,
+    pub multi_word: bool,
+}
+
+pub static COMPILED_CONFUSABLES: LazyLock<Vec<CompiledConfusable>> = LazyLock::new(|| {
+    CONFUSABLE_PHRASES
+        .iter()
+        .map(|(wrong, right)| CompiledConfusable {
+            re: Regex::new(&format!(r"(?i)\b{}\b", regex::escape(wrong))).unwrap(),
+            replacement: right,
+            multi_word: wrong.contains(' '),
+        })
+        .collect()
+});
+
+static RE_SPACE_BEFORE_PUNCT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+([,.\?!:;\]\)\}])").unwrap());
+static RE_SPACE_AFTER_PUNCT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([,.\?!:;])([^\s0-9,.\?!:;\'\x22\]\)\}])").unwrap());
+static RE_MULTI_SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+").unwrap());
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
+static RE_FENCED_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
+static RE_INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`\n]+`").unwrap());
+static RE_EMOJI_SHORTCODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":[A-Za-z0-9_+\-]+:").unwrap());
+static RE_VN_DIACRITIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]").unwrap()
+});
+
+pub fn contains_vietnamese_diacritics(text: &str) -> bool {
+    RE_VN_DIACRITIC.is_match(text)
+}
+
+fn protected_literal_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for re in [
+        &*RE_FENCED_CODE,
+        &*RE_URL,
+        &*RE_INLINE_CODE,
+        &*RE_EMOJI_SHORTCODE,
+    ] {
+        for matched in re.find_iter(text) {
+            spans.push((matched.start(), matched.end()));
+        }
+    }
+    spans.sort_by_key(|span| span.0);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+fn rewrite_outside_spans(
+    text: &str,
+    spans: &[(usize, usize)],
+    rewrite: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for &(start, end) in spans {
+        if start > cursor {
+            out.push_str(&rewrite(&text[cursor..start]));
+        }
+        let start = start.max(cursor);
+        if end > start {
+            out.push_str(&text[start..end]);
+            cursor = end;
+        }
+    }
+    if cursor < text.len() {
+        out.push_str(&rewrite(&text[cursor..]));
+    }
+    out
+}
+
 /// Case-matching helper to preserve casing style (UPPER, Capitalized, lower).
 pub fn match_case(original: &str, replacement: &str) -> String {
     if original.is_empty() || replacement.is_empty() {
@@ -766,13 +850,14 @@ pub fn is_predominantly_english_sentence(text: &str) -> bool {
 /// Normalizes spacing around punctuation marks.
 pub fn normalize_punctuation_spacing(text: &str) -> (String, Vec<CorrectionEdit>) {
     let mut edits = Vec::new();
-    let re1 = Regex::new(r"\s+([,.\?!:;\]\)\}])").unwrap();
-    let re2 = Regex::new(r"([,.\?!:;])([^\s0-9,.\?!:;\'\x22\]\)\}])").unwrap();
-    let re3 = Regex::new(r"[ \t]+").unwrap();
-
-    let step1 = re1.replace_all(text, "$1");
-    let step2 = re2.replace_all(&step1, "$1 $2");
-    let cleaned = re3.replace_all(&step2, " ").trim().to_string();
+    let protected = protected_literal_spans(text);
+    let step1 = rewrite_outside_spans(text, &protected, |part| {
+        RE_SPACE_BEFORE_PUNCT.replace_all(part, "$1").into_owned()
+    });
+    let step2 = rewrite_outside_spans(&step1, &protected_literal_spans(&step1), |part| {
+        RE_SPACE_AFTER_PUNCT.replace_all(part, "$1 $2").into_owned()
+    });
+    let cleaned = RE_MULTI_SPACE.replace_all(&step2, " ").trim().to_string();
 
     if cleaned != text.trim() {
         edits.push(CorrectionEdit {

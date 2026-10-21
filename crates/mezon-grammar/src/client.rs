@@ -3,7 +3,7 @@ use crate::neural::apply_neural_accent;
 use crate::onnx::quick_replies_with_intent;
 use crate::pronoun::{extract_target_pronoun, suggest_quick_replies};
 use crate::rules::{
-    CONFUSABLE_PHRASES, CorrectionEdit, CorrectionResult, TEENCODE_MAP, is_foreign_or_tech_word,
+    COMPILED_CONFUSABLES, CorrectionEdit, CorrectionResult, TEENCODE_MAP, is_foreign_or_tech_word,
     is_predominantly_english_sentence, match_case, normalize_punctuation_spacing,
     normalize_sentence_capitalization, normalize_tone_placement, restore_diacritics,
 };
@@ -86,30 +86,28 @@ impl MezonGrammarClient {
             };
         }
 
-        let mut phrases: Vec<(&str, &str)> = CONFUSABLE_PHRASES.iter().copied().collect();
-        phrases.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.chars().count()));
-        for (wrong, right) in phrases {
-            let pattern = format!(r"(?i)\b{}\b", regex::escape(wrong));
-            if let Ok(re) = Regex::new(&pattern) {
-                if re.is_match(&current) {
-                    current = re
-                        .replace_all(&current, |caps: &regex::Captures| {
-                            let matched = &caps[0];
-                            let rep = match_case(matched, right);
-                            edits.push(CorrectionEdit {
-                                original: matched.to_string(),
-                                replacement: rep.clone(),
-                                reason: "Sửa chính tả / từ dễ lẫn".to_string(),
-                            });
-                            rep
-                        })
-                        .to_string();
-                }
+        for phrase in COMPILED_CONFUSABLES.iter() {
+            if phrase.re.is_match(&current) {
+                let replacement = phrase.replacement;
+                current = phrase
+                    .re
+                    .replace_all(&current, |caps: &regex::Captures| {
+                        let matched = &caps[0];
+                        let rep = match_case(matched, replacement);
+                        edits.push(CorrectionEdit {
+                            original: matched.to_string(),
+                            replacement: rep.clone(),
+                            reason: "Sửa chính tả / từ dễ lẫn".to_string(),
+                        });
+                        rep
+                    })
+                    .to_string();
             }
         }
 
-        let re_word = Regex::new(r"\b\p{L}+\b").unwrap();
-        current = re_word
+        static RE_WORD: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b[\p{L}\p{N}]+\b").unwrap());
+        current = RE_WORD
             .replace_all(&current, |caps: &regex::Captures| {
                 let word = &caps[0];
                 if is_foreign_or_tech_word(word) {

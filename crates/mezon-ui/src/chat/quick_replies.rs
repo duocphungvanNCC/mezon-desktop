@@ -9,15 +9,24 @@ pub fn message_bucket(store: &MessagesStore, for_topic: bool) -> Option<ChannelI
     }
 }
 
-pub fn last_text_message_for_quick_replies(
-    store: &MessagesStore,
+pub fn last_text_message_for_quick_replies<'a>(
+    store: &'a MessagesStore,
     bucket: ChannelId,
-) -> Option<&Message> {
+    viewer_id: Option<&str>,
+) -> Option<&'a Message> {
+    if !store.is_reading_live_tail(bucket) {
+        return None;
+    }
     store
         .messages_in_channel(bucket)
         .iter()
         .rev()
-        .find(|message| quick_reply_source_text(message).is_some())
+        .find(|message| {
+            if viewer_id.is_some_and(|id| message.is_sent_by(id)) {
+                return false;
+            }
+            quick_reply_source_text(message).is_some()
+        })
 }
 
 pub fn quick_reply_source_text(message: &Message) -> Option<&str> {

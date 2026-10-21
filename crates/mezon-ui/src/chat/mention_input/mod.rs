@@ -118,6 +118,54 @@ pub fn init(cx: &mut App) {
     });
 }
 
+pub(crate) fn grammar_correction_bar(
+    theme: &Theme,
+    text: SharedString,
+    cap_top: bool,
+    on_apply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("grammar-correction-bar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .gap_2()
+        .p_2()
+        .when(cap_top, |bar| bar.rounded_tl_lg().rounded_tr_lg())
+        .bg(theme.tokens.theme_setting_nav)
+        .text_size(px(14.))
+        .child(
+            div()
+                .id("grammar-correction-apply")
+                .flex_1()
+                .min_w_0()
+                .cursor_pointer()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(text)
+                .on_click(on_apply),
+        )
+        .child(
+            div()
+                .id("grammar-correction-close")
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .size_5()
+                .cursor_pointer()
+                .hover(|style| style.opacity(0.7))
+                .on_click(on_dismiss)
+                .child(
+                    Icon::new(IconName::Close)
+                        .size_4()
+                        .text_color(theme.tokens.text_theme_primary),
+                ),
+        )
+}
+
 pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
     if matches!(
         Router::global(cx).read(cx).route(),
@@ -3347,6 +3395,11 @@ impl MentionInput {
             self.clear_grammar_correction(cx);
             return;
         }
+        if self.grammar_suggestion.is_some() || self.grammar_correction_open {
+            self.grammar_suggestion = None;
+            self.grammar_correction_open = false;
+            cx.notify();
+        }
         self.grammar_generation += 1;
         let generation = self.grammar_generation;
         let draft_snapshot = content.to_string();
@@ -3370,6 +3423,9 @@ impl MentionInput {
                     return;
                 }
                 if this.input.read(cx).value_shared().as_ref() != draft_snapshot.as_str() {
+                    this.grammar_suggestion = None;
+                    this.grammar_correction_open = false;
+                    cx.notify();
                     return;
                 }
                 this._grammar_task = None;
@@ -3403,61 +3459,67 @@ impl MentionInput {
             return;
         };
         self.clear_grammar_correction(cx);
+        let corrected = text.to_string();
+        self.retarget_committed(&corrected);
+        self.last_content = SharedString::from(corrected.clone());
         self.input.update(cx, |input, cx| {
-            input.set_value(text.as_ref(), window, cx);
+            input.set_value(&corrected, window, cx);
         });
-        let content = self.input.read(cx).value_shared();
-        self.after_content_change(content, cx);
+        self.sync_ranges(cx);
+        self.sync_history_payload(cx);
+    }
+
+    fn retarget_committed(&mut self, text: &str) {
+        let mut search_from = 0usize;
+        let mut tokens = std::mem::take(&mut self.committed);
+        tokens.sort_by_key(|token| token.start);
+        let mut kept = Vec::with_capacity(tokens.len());
+        for mut token in tokens {
+            let display = token.display.as_str();
+            if display.is_empty() {
+                continue;
+            }
+            let Some(relative) = text[search_from..].find(display) else {
+                continue;
+            };
+            let start = search_from + relative;
+            let end = start + display.len();
+            token.start = start;
+            token.end = end;
+            search_from = end;
+            kept.push(token);
+        }
+        self.committed = kept;
+    }
+
+    pub(crate) fn fill_quick_reply(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let end = self.input.read(cx).value_shared().len();
+        self.input.update(cx, |input, cx| {
+            input.replace_range(0..end, text, window, cx);
+        });
+        self.focus_input(window, cx);
     }
 
     fn build_grammar_correction_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let text = self.grammar_suggestion.clone().unwrap_or_default();
-        div()
-            .id("grammar-correction-bar")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w_full()
-            .gap_2()
-            .p_2()
-            .rounded_tl_lg()
-            .rounded_tr_lg()
-            .bg(theme.tokens.theme_setting_nav)
-            .text_size(px(14.))
-            .child(
-                div()
-                    .id("grammar-correction-apply")
-                    .flex_1()
-                    .min_w_0()
-                    .cursor_pointer()
-                    .text_color(theme.tokens.text_theme_primary)
-                    .child(text)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.apply_grammar_correction(window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .id("grammar-correction-close")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .size_5()
-                    .cursor_pointer()
-                    .hover(|style| style.opacity(0.7))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.dismiss_grammar_popup(cx);
-                    }))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size_4()
-                            .text_color(theme.tokens.text_theme_primary),
-                    ),
-            )
-            .into_any_element()
+        grammar_correction_bar(
+            &theme,
+            text,
+            true,
+            cx.listener(|this, _, window, cx| {
+                this.apply_grammar_correction(window, cx);
+            }),
+            cx.listener(|this, _, _, cx| {
+                this.dismiss_grammar_popup(cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {

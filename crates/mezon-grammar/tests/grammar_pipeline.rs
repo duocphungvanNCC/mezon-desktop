@@ -2,6 +2,7 @@ use mezon_grammar::MAX_CORRECTION_CHAR_COUNT;
 use mezon_grammar::client::MezonGrammarClient;
 use mezon_grammar::grammar_checker::check_grammar_syntax;
 use mezon_grammar::pronoun::extract_target_pronoun;
+use mezon_grammar::rules::normalize_punctuation_spacing;
 
 #[test]
 fn test_teencode_and_confusables() {
@@ -194,4 +195,24 @@ fn test_reciprocal_pronoun_extraction() {
         ),
         "anh"
     );
+}
+
+#[test]
+fn test_punctuation_keeps_url_emoji_and_code() {
+    let (fixed, _) =
+        normalize_punctuation_spacing("xem https://mezon.ai nhe :smile: va `a.b` ```code.x```");
+    assert!(fixed.contains("https://mezon.ai"), "{fixed}");
+    assert!(fixed.contains(":smile:"), "{fixed}");
+    assert!(fixed.contains("`a.b`"), "{fixed}");
+    assert!(fixed.contains("```code.x```"), "{fixed}");
+    assert!(!fixed.contains("https: //"), "{fixed}");
+    let (spaced, _) = normalize_punctuation_spacing("hello ,world");
+    assert_eq!(spaced, "hello, world");
+}
+
+#[test]
+fn test_thx_and_weekday_teencode() {
+    let client = MezonGrammarClient::new();
+    assert_eq!(client.correct("thx").corrected, "Cảm ơn");
+    assert_eq!(client.correct("t2").corrected, "Thứ hai");
 }

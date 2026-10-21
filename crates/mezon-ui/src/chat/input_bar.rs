@@ -1,3 +1,4 @@
+use crate::chat::mention_input::grammar_correction_bar as shared_grammar_correction_bar;
 use crate::chat::message::invite_card::member_count_label;
 use crate::chat::quick_replies::{
     last_text_message_for_quick_replies, message_bucket, quick_reply_source_text,
@@ -12,7 +13,9 @@ use gpui::{
 };
 use mezon_grammar::client::MezonGrammarClient;
 use mezon_store::MessageId;
-use mezon_store::{ChannelId, MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
+use mezon_store::{
+    BadgeService, ChannelId, MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore,
+};
 
 const OGP_PREVIEW_MEMBER_DOT: u32 = 0x22_c5_5e;
 const QUICK_REPLY_PILL_BLUE: u32 = 0x3b_82_f6;
@@ -55,8 +58,9 @@ impl InputBar {
     ) -> Self {
         let settings_entity = settings.clone();
         let settings_observe = cx.observe(settings, |this, _, cx| {
-            this.sync_quick_replies(cx);
-            cx.notify();
+            if this.sync_quick_replies(cx) {
+                cx.notify();
+            }
         });
         let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
         let messages_sub = cx.subscribe(
@@ -66,8 +70,7 @@ impl InputBar {
                     cx.notify();
                     return;
                 }
-                if Self::quick_replies_need_refresh(event) {
-                    this.sync_quick_replies(cx);
+                if Self::quick_replies_need_refresh(event) && this.sync_quick_replies(cx) {
                     cx.notify();
                 }
             },
@@ -105,35 +108,41 @@ impl InputBar {
         )
     }
 
-    fn clear_quick_replies(&mut self) {
+    fn clear_quick_replies(&mut self) -> bool {
+        let changed = self.quick_reply_bucket.is_some()
+            || self.quick_reply_source_id.is_some()
+            || !self.quick_replies.is_empty()
+            || self._quick_reply_task.is_some();
         self.quick_reply_bucket = None;
         self.quick_reply_source_id = None;
         self.quick_replies.clear();
         self._quick_reply_task = None;
+        changed
     }
 
-    fn sync_quick_replies(&mut self, cx: &mut Context<Self>) {
+    fn sync_quick_replies(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.settings.read(cx).quick_replies_enabled {
-            self.clear_quick_replies();
-            return;
+            return self.clear_quick_replies();
         }
         let store = MessagesStore::global(cx).read(cx);
         let bucket = message_bucket(store, self.for_topic);
         let Some(bucket) = bucket else {
-            self.clear_quick_replies();
-            return;
+            return self.clear_quick_replies();
         };
-        let Some(message) = last_text_message_for_quick_replies(store, bucket) else {
-            self.clear_quick_replies();
-            return;
+        let viewer_id = BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx))
+            .map(|id| id.0.to_string());
+        let Some(message) =
+            last_text_message_for_quick_replies(store, bucket, viewer_id.as_deref())
+        else {
+            return self.clear_quick_replies();
         };
         let Some(source_text) = quick_reply_source_text(message) else {
-            self.clear_quick_replies();
-            return;
+            return self.clear_quick_replies();
         };
         if self.quick_reply_bucket == Some(bucket) && self.quick_reply_source_id == Some(message.id)
         {
-            return;
+            return false;
         }
         self.quick_reply_bucket = Some(bucket);
         self.quick_reply_source_id = Some(message.id);
@@ -163,6 +172,7 @@ impl InputBar {
             })
             .ok();
         }));
+        true
     }
 
     pub fn sync(
@@ -277,7 +287,7 @@ impl InputBar {
                     .child(text.clone())
                     .on_click(cx.listener(move |_, _, window, cx| {
                         mention_input.update(cx, |input, cx| {
-                            input.probe_set_text(text.as_ref(), window, cx);
+                            input.fill_quick_reply(text.as_ref(), window, cx);
                         });
                     }))
             }))
@@ -395,52 +405,20 @@ impl InputBar {
         cap_top: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id("grammar-correction-bar")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w_full()
-            .gap_2()
-            .p_2()
-            .when(cap_top, |bar| bar.rounded_tl_lg().rounded_tr_lg())
-            .bg(theme.tokens.theme_setting_nav)
-            .text_size(px(14.))
-            .child(
-                div()
-                    .id("grammar-correction-apply")
-                    .flex_1()
-                    .min_w_0()
-                    .cursor_pointer()
-                    .text_color(theme.tokens.text_theme_primary)
-                    .child(text)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.mention_input.update(cx, |input, cx| {
-                            input.apply_grammar_correction(window, cx);
-                        });
-                    })),
-            )
-            .child(
-                div()
-                    .id("grammar-correction-close")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .size_5()
-                    .cursor_pointer()
-                    .hover(|style| style.opacity(0.7))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.mention_input
-                            .update(cx, |input, cx| input.dismiss_grammar_popup(cx));
-                    }))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size_4()
-                            .text_color(theme.tokens.text_theme_primary),
-                    ),
-            )
+        shared_grammar_correction_bar(
+            theme,
+            text,
+            cap_top,
+            cx.listener(|this, _, window, cx| {
+                this.mention_input.update(cx, |input, cx| {
+                    input.apply_grammar_correction(window, cx);
+                });
+            }),
+            cx.listener(|this, _, _, cx| {
+                this.mention_input
+                    .update(cx, |input, cx| input.dismiss_grammar_popup(cx));
+            }),
+        )
     }
 
     fn render_bar(&self, theme: std::sync::Arc<Theme>, cx: &mut Context<Self>) -> impl IntoElement {
