@@ -1369,6 +1369,7 @@ fn direct_from_created(
 ) -> DirectChannel {
     let kind = DirectKind::from_raw(desc.channel_type);
     let is_dm = matches!(kind, DirectKind::Dm);
+    let (last_sent_timestamp, last_seen_timestamp) = opened_activity(desc);
     DirectChannel {
         id: ChannelId(desc.channel_id),
         label: if is_dm {
@@ -1396,10 +1397,18 @@ fn direct_from_created(
         online: false,
         member_count: desc.member_count.max(0) as u32,
         unread_count: desc.count_mess_unread.max(0) as u32,
-        last_sent_timestamp: desc.last_sent_timestamp,
-        last_seen_timestamp: desc.last_seen_timestamp,
+        last_sent_timestamp,
+        last_seen_timestamp,
         create_time_seconds: 0,
     }
+}
+
+fn opened_activity(desc: &ApiChannelDesc) -> (i64, i64) {
+    if desc.last_sent_timestamp > 0 {
+        return (desc.last_sent_timestamp, desc.last_seen_timestamp);
+    }
+    let now = crate::message_time::unix_now_seconds();
+    (now, now)
 }
 
 fn direct_group_from_created(
@@ -1412,6 +1421,7 @@ fn direct_group_from_created(
     } else {
         fallback_member_count
     };
+    let (last_sent_timestamp, last_seen_timestamp) = opened_activity(desc);
     DirectChannel {
         id: ChannelId(desc.channel_id),
         label: if label.is_empty() {
@@ -1431,8 +1441,8 @@ fn direct_group_from_created(
         online: false,
         member_count,
         unread_count: desc.count_mess_unread.max(0) as u32,
-        last_sent_timestamp: desc.last_sent_timestamp,
-        last_seen_timestamp: desc.last_seen_timestamp,
+        last_sent_timestamp,
+        last_seen_timestamp,
         create_time_seconds: 0,
     }
 }
@@ -2500,6 +2510,44 @@ mod tests {
         assert_eq!(list.find(ChannelId(3)).unwrap().unread_count, 7);
         assert_eq!(list.pending_created, Some(ChannelId(3)));
         assert_index_consistent(&list);
+    }
+
+    #[test]
+    fn a_dm_opened_without_server_activity_lands_on_top_and_reads_as_seen() {
+        let now = crate::message_time::unix_now_seconds();
+        let mut list = list_from(vec![dm(1, now - 60), dm(2, now - 3_600)]);
+        let desc = api_channel_desc(42, "server-label", 3, 2, 0);
+        list.upsert_created(direct_from_created(
+            &desc,
+            UserId(5),
+            "Trang",
+            "avatar.png",
+            "trang",
+        ));
+        let ids: Vec<ChannelId> = list.channels.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![ChannelId(42), ChannelId(1), ChannelId(2)]);
+        assert!(!list.find(ChannelId(42)).unwrap().is_unread());
+        assert_index_consistent(&list);
+    }
+
+    #[test]
+    fn a_group_opened_without_server_activity_lands_on_top() {
+        let now = crate::message_time::unix_now_seconds();
+        let mut list = list_from(vec![dm(1, now - 60)]);
+        let desc = api_channel_desc(43, "group", 2, 3, 0);
+        list.upsert_created(direct_group_from_created(&desc, "phat, nghia", 3));
+        assert_eq!(list.channels[0].id, ChannelId(43));
+        assert!(!list.channels[0].is_unread());
+    }
+
+    #[test]
+    fn a_created_dm_keeps_the_server_activity_it_was_given() {
+        let mut desc = api_channel_desc(44, "server-label", 3, 2, 0);
+        desc.last_sent_timestamp = 500;
+        desc.last_seen_timestamp = 400;
+        let dm = direct_from_created(&desc, UserId(5), "Trang", "", "trang");
+        assert_eq!(dm.last_sent_timestamp, 500);
+        assert_eq!(dm.last_seen_timestamp, 400);
     }
 
     #[test]
