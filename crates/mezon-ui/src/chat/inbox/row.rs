@@ -15,8 +15,10 @@ use mezon_store::{
 };
 
 use crate::chat::file_type_icon::file_type_icon_for;
-use crate::chat::message::code_block_copy_overlay;
 use crate::chat::message::parts::FILE_NAME_COLOR;
+use crate::chat::message::{
+    code_block_copy_overlay, interactive_link_text, resolve_message_link_url,
+};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
@@ -935,6 +937,8 @@ fn render_inbox_styled_body(
     theme: &Theme,
     text: &str,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    spans: &[MessageSpan],
+    id: (SharedString, usize),
 ) -> gpui::AnyElement {
     if text.is_empty() {
         return div().into_any_element();
@@ -942,12 +946,48 @@ fn render_inbox_styled_body(
     let code_style = inline_code_highlight_style(theme);
     let (text, highlights) = strip_inline_code_markers(text, highlights, code_style);
     let (display_text, display_highlights) = inject_link_word_joiners(&text, highlights);
+    let links = inbox_body_links(&display_text, &display_highlights, spans);
     div()
         .w_full()
         .min_w_0()
         .text_sm()
-        .child(StyledText::new(display_text).with_highlights(display_highlights))
+        .child(interactive_link_text(
+            id,
+            StyledText::new(display_text).with_highlights(display_highlights),
+            links,
+        ))
         .into_any_element()
+}
+
+fn inbox_body_links(
+    text: &str,
+    highlights: &[(Range<usize>, HighlightStyle)],
+    spans: &[MessageSpan],
+) -> Vec<(Range<usize>, String)> {
+    let mut targets: std::collections::HashMap<&str, std::collections::VecDeque<String>> =
+        std::collections::HashMap::new();
+    for span in spans {
+        if let MessageSpan::Link { text, url, .. } = span {
+            targets
+                .entry(text.as_ref())
+                .or_default()
+                .push_back(resolve_message_link_url(url, text));
+        }
+    }
+    highlights
+        .iter()
+        .filter_map(|(range, style)| {
+            if !is_link_highlight(style) {
+                return None;
+            }
+            let label = text.get(range.clone())?.replace(LINK_WORD_JOINER, "");
+            let url = targets
+                .get_mut(label.as_str())
+                .and_then(|urls| urls.pop_front())
+                .unwrap_or(label);
+            (!url.is_empty()).then(|| (range.clone(), url))
+        })
+        .collect()
 }
 
 fn backtick_run_len(bytes: &[u8], at: usize) -> usize {
@@ -1132,6 +1172,7 @@ fn take_inbox_inline_element(
     batch: &mut Vec<MessageSpan>,
     offset: &mut usize,
     full_highlights: &[(Range<usize>, HighlightStyle)],
+    notification_id: &str,
 ) -> Option<gpui::AnyElement> {
     if batch.is_empty() {
         return None;
@@ -1149,8 +1190,15 @@ fn take_inbox_inline_element(
     let end = start + batch_text.len();
     let clipped = clip_highlights(full_highlights, start, end);
     *offset = end;
+    let element = render_inbox_styled_body(
+        theme,
+        &text[start..end],
+        clipped,
+        batch,
+        (notification_id.to_string().into(), start),
+    );
     batch.clear();
-    Some(render_inbox_styled_body(theme, &text[start..end], clipped))
+    Some(element)
 }
 
 fn render_inbox_message_spans(
@@ -1185,6 +1233,7 @@ fn render_inbox_message_spans(
                 &mut inline_batch,
                 &mut offset,
                 &full_highlights,
+                notification_id,
             ) {
                 children.push(element);
             }
@@ -1217,6 +1266,7 @@ fn render_inbox_message_spans(
         &mut inline_batch,
         &mut offset,
         &full_highlights,
+        notification_id,
     ) {
         children.push(element);
     }
@@ -1263,7 +1313,13 @@ fn render_message_content(
         body_link_ranges,
         body_inline_span_ranges,
     );
-    render_inbox_styled_body(theme, &text_str, highlights)
+    render_inbox_styled_body(
+        theme,
+        &text_str,
+        highlights,
+        body_spans,
+        (notification_id.to_string().into(), 0),
+    )
 }
 
 fn render_inbox_code_block(
@@ -1917,6 +1973,127 @@ pub fn notification_copy_text(notification: &InboxNotification) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LinkHost(Box<dyn Fn() -> gpui::AnyElement>);
+
+    impl gpui::Render for LinkHost {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            (self.0)()
+        }
+    }
+
+    #[gpui::test]
+    fn inbox_message_links_open_original_urls_after_wrapping(cx: &mut gpui::TestAppContext) {
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.update(|cx| {
+            let store = mezon_store::PlatformStore::init(cx);
+            let opened = opened.clone();
+            mezon_store::PlatformStore::set_open_url(
+                &store,
+                std::sync::Arc::new(move |url| {
+                    opened.lock().unwrap().push(url.to_string());
+                    Ok(())
+                }),
+                cx,
+            );
+        });
+        let cx = cx.add_empty_window();
+        let text: SharedString =
+            "https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuvwxyz".into();
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(140.), px(160.)),
+            |_, cx| {
+                let text = text.clone();
+                cx.new(|_| {
+                    LinkHost(Box::new(move || {
+                        render_message_content(
+                            &Theme::dark(),
+                            &text,
+                            &[],
+                            &[],
+                            &[],
+                            &[],
+                            "notification",
+                        )
+                        .into_any_element()
+                    }))
+                })
+                .into_any_element()
+            },
+        );
+        cx.simulate_click(gpui::point(px(5.), px(8.)), gpui::Modifiers::none());
+        assert_eq!(*opened.lock().unwrap(), vec![text.to_string()]);
+        let label: SharedString = "Tài liệu 📎".into();
+        let spans = vec![MessageSpan::Link {
+            text: label.clone(),
+            url: "https://example.com/document".into(),
+            kind: Default::default(),
+        }];
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(300.), px(80.)),
+            |_, cx| {
+                cx.new(|_| {
+                    LinkHost(Box::new(move || {
+                        render_message_content(
+                            &Theme::dark(),
+                            &label,
+                            &[],
+                            &[],
+                            &inbox_inline_span_ranges(&label, &spans),
+                            &spans,
+                            "notification",
+                        )
+                        .into_any_element()
+                    }))
+                })
+                .into_any_element()
+            },
+        );
+        cx.simulate_click(gpui::point(px(5.), px(8.)), gpui::Modifiers::none());
+        assert_eq!(
+            opened.lock().unwrap().last().unwrap(),
+            "https://example.com/document"
+        );
+    }
+
+    #[test]
+    fn inbox_link_targets_preserve_duplicate_labels_and_invalid_ranges() {
+        let theme = Theme::dark();
+        let spans = vec![
+            MessageSpan::Link {
+                text: "tài liệu".into(),
+                url: "https://example.com/a".into(),
+                kind: Default::default(),
+            },
+            MessageSpan::Text(" ".into()),
+            MessageSpan::Link {
+                text: "tài liệu".into(),
+                url: "https://example.com/b".into(),
+                kind: Default::default(),
+            },
+        ];
+        let text = "tài liệu tài liệu";
+        let highlights = inbox_content_highlights(
+            &theme,
+            text,
+            &[],
+            &[],
+            &inbox_inline_span_ranges(text, &spans),
+        );
+        let (display, highlights) = inject_link_word_joiners(text, highlights);
+        let links = inbox_body_links(&display, &highlights, &spans);
+        assert_eq!(
+            links
+                .iter()
+                .map(|(_, url)| url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://example.com/a", "https://example.com/b"]
+        );
+        assert!(inbox_body_links("", &[(0..1, link_highlight_style(&theme))], &[]).is_empty());
+        assert!(inbox_body_links("é", &[(0..1, link_highlight_style(&theme))], &[]).is_empty());
+    }
 
     #[test]
     fn mention_byte_range_handles_vietnamese_utf16_offsets() {

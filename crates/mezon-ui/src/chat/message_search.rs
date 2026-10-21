@@ -11,8 +11,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageId, MessageSearchStore, MessageSpan,
-    MessagesStore, RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken,
-    autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
+    MessagesStore, RichClick, RichLayout, RichRunKind, SearchDropdownMode, SearchHit,
+    SearchPageToken, autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
     search_content_highlight_terms, search_dropdown_mode, search_page_count, search_page_numbers,
     should_show_search_dropdown,
 };
@@ -25,8 +25,9 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::mention_input::filter_members_for_search;
 use crate::chat::message::{
-    RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
-    render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
+    RichRunPalette, code_block_copy_overlay, format_message_time, interactive_link_text,
+    open_message_link, render_ogp_preview, render_poll_card_readonly,
+    rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -1215,20 +1216,28 @@ fn render_rich_search_content(
         ));
     }
 
-    let occupied: Vec<(Range<usize>, HighlightStyle)> =
-        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    let occupied: Vec<(Range<usize>, HighlightStyle)> = tokens
+        .iter()
+        .filter(|(_, _, kind)| *kind != SearchHighlightKind::QueryMatch)
+        .map(|(r, s, _)| (r.clone(), *s))
+        .collect();
     tokens.extend(
         search_auto_link_highlights(theme, text.as_ref(), &occupied)
             .into_iter()
             .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
     );
 
+    let links = search_content_links(text.as_ref(), &tokens, Some(layout));
     let highlights = search_merge_content_highlights(text.as_ref(), tokens, body_style);
 
     div()
         .w_full()
         .min_w_0()
-        .child(StyledText::new(text).with_highlights(highlights))
+        .child(interactive_link_text(
+            "search-body",
+            StyledText::new(text).with_highlights(highlights),
+            links,
+        ))
         .into_any_element()
 }
 
@@ -1251,25 +1260,60 @@ fn render_search_styled_plain(text: &str, terms: &[String], theme: &Theme) -> gp
             SearchHighlightKind::QueryMatch,
         ));
     }
-    let occupied: Vec<(Range<usize>, HighlightStyle)> =
-        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    let occupied: Vec<(Range<usize>, HighlightStyle)> = tokens
+        .iter()
+        .filter(|(_, _, kind)| *kind != SearchHighlightKind::QueryMatch)
+        .map(|(r, s, _)| (r.clone(), *s))
+        .collect();
     tokens.extend(
         search_auto_link_highlights(theme, text, &occupied)
             .into_iter()
             .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
     );
+    let links = search_content_links(text, &tokens, None);
     let highlights = search_merge_content_highlights(text, tokens, body_style);
     div()
         .w_full()
         .min_w_0()
-        .child(
+        .child(interactive_link_text(
+            "search-body",
             StyledText::new(text.to_string()).with_highlights(if highlights.is_empty() {
                 vec![(0..text.len(), body_style)]
             } else {
                 highlights
             }),
-        )
+            links,
+        ))
         .into_any_element()
+}
+
+fn search_content_links(
+    text: &str,
+    tokens: &[(Range<usize>, HighlightStyle, SearchHighlightKind)],
+    layout: Option<&RichLayout>,
+) -> Vec<(Range<usize>, String)> {
+    let mut links: Vec<_> = tokens
+        .iter()
+        .filter_map(|(range, _, kind)| {
+            if *kind != SearchHighlightKind::Link {
+                return None;
+            }
+            text.get(range.clone())
+                .map(|url| (range.clone(), url.to_string()))
+        })
+        .collect();
+    if let Some(layout) = layout {
+        links.extend(layout.runs.iter().filter_map(|run| {
+            search_char_boundary_range(text, run.range.clone())?;
+            match &run.click {
+                Some(RichClick::Link(url)) if !url.is_empty() => {
+                    Some((run.range.clone(), url.to_string()))
+                }
+                _ => None,
+            }
+        }));
+    }
+    links
 }
 
 fn search_link_highlight_style(theme: &Theme) -> HighlightStyle {
@@ -2229,6 +2273,91 @@ mod header_search_bar_tests {
     use super::{SEARCH_BAR_WIDTH_COLLAPSED, render_header_search_bar};
     use crate::chat::layout::ChatLayout;
     use crate::theme::Theme;
+
+    struct LinkHost(Box<dyn Fn() -> gpui::AnyElement>);
+
+    impl Render for LinkHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            (self.0)()
+        }
+    }
+
+    #[gpui::test]
+    fn search_message_links_open_their_targets_after_rerender(cx: &mut gpui::TestAppContext) {
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.update(|cx| {
+            let store = mezon_store::PlatformStore::init(cx);
+            let opened = opened.clone();
+            mezon_store::PlatformStore::set_open_url(
+                &store,
+                std::sync::Arc::new(move |url| {
+                    opened.lock().unwrap().push(url.to_string());
+                    Ok(())
+                }),
+                cx,
+            );
+        });
+        let cx = cx.add_empty_window();
+        for (label, url) in [
+            ("Tài liệu 📎", "https://example.com/first"),
+            ("Tài liệu 📎", "https://example.com/second"),
+        ] {
+            let layout = mezon_store::RichLayout {
+                text: label.to_string().into(),
+                runs: vec![mezon_store::RichRun {
+                    range: 0..label.len(),
+                    kind: mezon_store::RichRunKind::Link,
+                    click: Some(mezon_store::RichClick::Link(url.to_string().into())),
+                }]
+                .into(),
+                content_tokens: None,
+            };
+            cx.draw(point(px(0.), px(0.)), size(px(300.), px(80.)), |_, cx| {
+                cx.new(|_| {
+                    LinkHost(Box::new(move || {
+                        super::render_rich_search_content(
+                            &layout,
+                            &["Tài".to_string()],
+                            &Theme::dark(),
+                        )
+                    }))
+                })
+                .into_any_element()
+            });
+            cx.simulate_click(point(px(5.), px(8.)), Modifiers::none());
+        }
+        cx.draw(point(px(0.), px(0.)), size(px(300.), px(80.)), |_, cx| {
+            cx.new(|_| {
+                LinkHost(Box::new(|| {
+                    super::render_search_styled_plain(
+                        "https://example.com/plain",
+                        &["example".to_string()],
+                        &Theme::dark(),
+                    )
+                }))
+            })
+            .into_any_element()
+        });
+        cx.simulate_click(point(px(5.), px(8.)), Modifiers::none());
+        assert_eq!(
+            *opened.lock().unwrap(),
+            vec![
+                "https://example.com/first",
+                "https://example.com/second",
+                "https://example.com/plain"
+            ]
+        );
+        cx.draw(point(px(0.), px(0.)), size(px(300.), px(80.)), |_, cx| {
+            cx.new(|_| {
+                LinkHost(Box::new(|| {
+                    super::render_search_styled_plain("Văn bản thường", &[], &Theme::dark())
+                }))
+            })
+            .into_any_element()
+        });
+        cx.simulate_click(point(px(5.), px(8.)), Modifiers::none());
+        assert_eq!(opened.lock().unwrap().len(), 3);
+    }
 
     struct DragAreaHost {
         pressed_behind: Rc<Cell<bool>>,
