@@ -2819,10 +2819,7 @@ impl VoiceStore {
         if !active {
             self.screen_draw_editor = None;
         }
-        if active
-            && self.fullscreen_screen.is_none()
-            && self.focused_tile.is_none()
-        {
+        if active && self.fullscreen_screen.is_none() && self.focused_tile.is_none() {
             if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
                 self.focused_tile = Some(screen_tile_id(&p.session_id));
                 self.sync_screen_full_res();
@@ -2836,6 +2833,10 @@ impl VoiceStore {
             return None;
         }
         self.last_screen_share.as_ref().map(|(pick, _)| pick)
+    }
+
+    pub fn shared_monitor(&self) -> Option<mezon_voice::SharedMonitor> {
+        self.frame_store.as_ref()?.shared_monitor()
     }
 
     pub fn desktop_draw(&self) -> Option<&Entity<DesktopDraw>> {

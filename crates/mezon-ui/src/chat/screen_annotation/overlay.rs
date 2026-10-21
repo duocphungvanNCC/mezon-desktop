@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Subscription, Task,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
-    prelude::*, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
+    FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    WindowOptions, canvas, div, prelude::*, px, size,
 };
 use mezon_store::{
     ContentViewport, DesktopDraw, DrawTool, NormalizedPoint, TextAnnotation, VoiceStore,
@@ -114,7 +114,9 @@ impl AnnotationOverlay {
         ];
         let release_draw = draw.clone();
         cx.on_release(move |_, cx| {
-            voice.update(cx, |store, cx| store.end_desktop_draw_for(&release_draw, cx));
+            voice.update(cx, |store, cx| {
+                store.end_desktop_draw_for(&release_draw, cx)
+            });
         })
         .detach();
 
@@ -202,7 +204,8 @@ impl AnnotationOverlay {
                 cx.background_executor().timer(HOVER_POLL_INTERVAL).await;
                 let alive = handle
                     .update(cx, |_, window, cx| {
-                        this.update(cx, |this, cx| this.poll_hover(window, cx)).is_ok()
+                        this.update(cx, |this, cx| this.poll_hover(window, cx))
+                            .is_ok()
                     })
                     .unwrap_or(false);
                 if !alive {
@@ -272,7 +275,12 @@ impl AnnotationOverlay {
         (point, canvas)
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (point, canvas) = self.normalize(event.position, window);
         let measure = |text: &TextAnnotation| text_width(window, text);
         let editing = self.draw.update(cx, |draw, cx| {
@@ -305,7 +313,12 @@ impl AnnotationOverlay {
         });
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let pressed = event.pressed_button == Some(MouseButton::Left);
         let state = self.draw.read(cx).state();
         let erasing = pressed && state.active_tool == DrawTool::Eraser;
@@ -335,8 +348,9 @@ impl AnnotationOverlay {
         let key = event.keystroke.key.as_str();
         if self.text_editor.is_some() {
             if key == "escape" {
-                self.draw
-                    .update(cx, |draw, cx| draw.edit(cx, |state| state.cancel_editing_text()));
+                self.draw.update(cx, |draw, cx| {
+                    draw.edit(cx, |state| state.cancel_editing_text())
+                });
                 self.text_editor = None;
                 self.focus.focus(window, cx);
                 cx.stop_propagation();
@@ -369,12 +383,21 @@ impl AnnotationOverlay {
         self.draw.update(cx, |draw, cx| draw.edit(cx, f))
     }
 
-    fn sync_text_editor(&mut self, editing: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_text_editor(
+        &mut self,
+        editing: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(id) = editing else {
             self.text_editor = None;
             return;
         };
-        if self.text_editor.as_ref().is_some_and(|editor| editor.id == id) {
+        if self
+            .text_editor
+            .as_ref()
+            .is_some_and(|editor| editor.id == id)
+        {
             return;
         }
         let state = self.draw.read(cx).state();

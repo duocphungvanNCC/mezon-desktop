@@ -23,7 +23,9 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::media_permission_prompt::{
     media_access_missing, media_access_needed_label, media_permission_badge,
 };
-use crate::chat::screen_annotation::{desktop_annotation_supported, toggle_desktop_annotation};
+use crate::chat::screen_annotation::{
+    desktop_annotation_supported, draw_unavailable, toggle_desktop_annotation,
+};
 use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
@@ -2326,15 +2328,10 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .cursor_pointer()
                     .child(media)
                     .children(
-                        (screen_draw_active || has_annotations).then(|| {
-                            render_screen_draw_overlay(voice, theme, frame_dims, cx)
-                        }),
+                        (screen_draw_active || has_annotations)
+                            .then(|| render_screen_draw_overlay(voice, theme, frame_dims, cx)),
                     )
-                    .children(
-                        screen_draw_active.then(|| {
-                            render_draw_toolbox(voice, theme, cx)
-                        }),
-                    )
+                    .children(screen_draw_active.then(|| render_draw_toolbox(voice, theme, cx)))
                     .child(exit_btn)
                     .on_click(move |_, _, cx| {
                         if !bg_voice.read(cx).screen_draw().is_active {
@@ -3206,14 +3203,11 @@ fn focus_main_tile(
         .cursor_pointer()
         .child(inner)
         .children(
-            (cell.is_screen && (screen_draw_active || has_annotations)).then(|| {
-                render_screen_draw_overlay(voice, theme, frame_dims, cx)
-            }),
+            (cell.is_screen && (screen_draw_active || has_annotations))
+                .then(|| render_screen_draw_overlay(voice, theme, frame_dims, cx)),
         )
         .children(
-            (cell.is_screen && screen_draw_active).then(|| {
-                render_draw_toolbox(voice, theme, cx)
-            }),
+            (cell.is_screen && screen_draw_active).then(|| render_draw_toolbox(voice, theme, cx)),
         )
         .child(tile_metadata(locale, cell))
         .children(tile_audience_badge(locale, cell))
@@ -3860,9 +3854,7 @@ fn control_bar(
     if let Some(key) = store.primary_screen_key() {
         let pip_active = store.pip_key() == Some(key);
         let is_fullscreen = store.fullscreen_screen() == Some(key);
-        let desktop_draw = store
-            .shared_screen()
-            .is_some_and(desktop_annotation_supported);
+        let desktop_draw = desktop_annotation_supported(store);
         let draw_active = if desktop_draw {
             store.desktop_draw().is_some()
         } else {
@@ -3947,7 +3939,10 @@ fn control_bar(
             })
         };
 
-        tail = tail.child(draw_button).child(pip_button).child(fs_button);
+        tail = tail
+            .children((!draw_unavailable(store)).then_some(draw_button))
+            .child(pip_button)
+            .child(fs_button);
     }
 
     let right = div()

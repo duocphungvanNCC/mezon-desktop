@@ -1,13 +1,13 @@
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use gpui::{AnyElement, DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
+#[cfg(not(target_os = "windows"))]
+use gpui::MouseButton;
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use gpui::{AnyElement, DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, Window, WindowBackgroundAppearance,
     WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size,
 };
-#[cfg(not(target_os = "windows"))]
-use gpui::MouseButton;
 use mezon_store::{DesktopDraw, VoiceStore};
 
 use super::native::{NativeRect, NativeWindow, native_window};
@@ -95,7 +95,9 @@ impl AnnotationToolbar {
         let release_voice = voice.clone();
         let release_draw = draw.clone();
         cx.on_release(move |_, cx| {
-            release_voice.update(cx, |store, cx| store.end_desktop_draw_for(&release_draw, cx));
+            release_voice.update(cx, |store, cx| {
+                store.end_desktop_draw_for(&release_draw, cx)
+            });
         })
         .detach();
         Self {

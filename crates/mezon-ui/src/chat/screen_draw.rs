@@ -4,8 +4,8 @@ use std::time::Instant;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, Div, Entity, FontWeight,
     IntoElement, KeyDownEvent, MouseButton, PathBuilder, Pixels, Point, Rgba, SharedString,
-    Stateful, Subscription, TextAlign, WeakEntity, Window, canvas, div, fill, outline, point, prelude::*, px,
-    size,
+    Stateful, Subscription, TextAlign, WeakEntity, Window, canvas, div, fill, outline, point,
+    prelude::*, px, size,
 };
 use mezon_store::{
     ContentViewport, DesktopDraw, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
@@ -317,8 +317,7 @@ fn width_row(
                 .items_center()
                 .justify_center()
                 .when(enabled, |s| {
-                    s.cursor_pointer()
-                        .hover(|s| s.bg(gpui::rgba(0xffffff20)))
+                    s.cursor_pointer().hover(|s| s.bg(gpui::rgba(0xffffff20)))
                 })
                 .when(is_active, |s| s.bg(gpui::rgba(0xffffff30)))
                 .child(
@@ -560,9 +559,10 @@ pub(crate) fn render_screen_draw_overlay(
                 }
             });
 
-        if let (Some(text), Some(editor)) =
-            (draw_state.editing_text(), voice.read(cx).screen_draw_editor())
-        {
+        if let (Some(text), Some(editor)) = (
+            draw_state.editing_text(),
+            voice.read(cx).screen_draw_editor(),
+        ) {
             overlay = overlay.child(
                 div()
                     .absolute()
@@ -861,11 +861,7 @@ fn paint_selection(
     );
 }
 
-fn to_screen(
-    vp: &ContentViewport,
-    origin: Point<Pixels>,
-    pt: &NormalizedPoint,
-) -> Point<Pixels> {
+fn to_screen(vp: &ContentViewport, origin: Point<Pixels>, pt: &NormalizedPoint) -> Point<Pixels> {
     let (x, y) = vp.to_pixels(pt);
     point(origin.x + px(x), origin.y + px(y))
 }

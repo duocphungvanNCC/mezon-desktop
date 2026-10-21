@@ -106,13 +106,10 @@ impl DesktopDraw {
         let Some(frame_store) = &self.frame_store else {
             return;
         };
-        let scene = self
-            .state
-            .has_content()
-            .then(|| {
-                self.state
-                    .annotation_scene(self.canvas.0, self.canvas.1, Instant::now())
-            });
+        let scene = self.state.has_content().then(|| {
+            self.state
+                .annotation_scene(self.canvas.0, self.canvas.1, Instant::now())
+        });
         frame_store.screen_annotations.set_scene(scene);
     }
 }

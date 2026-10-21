@@ -39,9 +39,18 @@ pub struct VideoFrameData {
     pub seq: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SharedMonitor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 pub struct VideoFrameStore {
     pub screen_views: Arc<crate::screen_recovery::ScreenViews>,
     pub screen_annotations: Arc<crate::annotation::ScreenAnnotations>,
+    shared_monitor: Mutex<Option<SharedMonitor>>,
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
     recording: AtomicBool,
@@ -54,6 +63,7 @@ impl Default for VideoFrameStore {
             state: Mutex::new(VideoFrameState::default()),
             screen_views: Arc::default(),
             screen_annotations: Arc::default(),
+            shared_monitor: Mutex::new(None),
             seq: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
@@ -78,6 +88,14 @@ struct VideoFrameState {
 }
 
 impl VideoFrameStore {
+    pub fn shared_monitor(&self) -> Option<SharedMonitor> {
+        *self.shared_monitor.lock()
+    }
+
+    pub(crate) fn set_shared_monitor(&self, monitor: Option<SharedMonitor>) {
+        *self.shared_monitor.lock() = monitor;
+    }
+
     pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) -> Option<Vec<u8>> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let required = bgra.len();

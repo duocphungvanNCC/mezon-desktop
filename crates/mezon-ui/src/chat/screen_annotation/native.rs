@@ -1,4 +1,4 @@
-use mezon_store::PickedScreen;
+use mezon_store::{PickedScreen, VoiceStore};
 
 pub(crate) use platform::{NativeWindow, ShareTarget, native_window};
 
@@ -19,11 +19,11 @@ impl NativeRect {
     }
 }
 
-pub(crate) fn share_target(pick: &PickedScreen) -> Option<ShareTarget> {
-    match pick {
+pub(crate) fn share_target(store: &VoiceStore) -> Option<ShareTarget> {
+    match store.shared_screen()? {
         PickedScreen::Target(target) => ShareTarget::from_scap(target),
         #[cfg(target_os = "linux")]
-        PickedScreen::LinuxPortal => None,
+        PickedScreen::LinuxPortal => store.shared_monitor().map(ShareTarget::from_monitor),
     }
 }
 
@@ -202,7 +202,8 @@ mod platform {
         pub(crate) fn configure_overlay(self) {
             unsafe {
                 let window = self.ptr();
-                let _: () = msg_send![window, setStyleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
+                let _: () =
+                    msg_send![window, setStyleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
                 let _: BOOL = msg_send![window, makeFirstResponder: self.view()];
                 let _: () = msg_send![window, setHasShadow: NO];
                 let _: () = msg_send![window, setHidesOnDeactivate: NO];
@@ -213,7 +214,8 @@ mod platform {
         pub(crate) fn configure_toolbar(self, _overlay: NativeWindow) {
             unsafe {
                 let window = self.ptr();
-                let _: () = msg_send![window, setStyleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
+                let _: () =
+                    msg_send![window, setStyleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
                 let _: () = msg_send![window, setHidesOnDeactivate: NO];
                 let _: () = msg_send![window, setLevel: TOOLBAR_LEVEL];
                 let _: () = msg_send![window, setSharingType: NS_WINDOW_SHARING_NONE];
@@ -282,10 +284,10 @@ mod platform {
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GWLP_HWNDPARENT, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST,
-        IsIconic,
-        IsWindowVisible, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
-        SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        IsIconic, IsWindowVisible, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED,
+        WS_EX_TRANSPARENT,
     };
 
     use super::NativeRect;
@@ -508,6 +510,16 @@ mod platform {
             })
         }
 
+        #[cfg(target_os = "linux")]
+        pub(crate) fn from_monitor(monitor: mezon_voice::SharedMonitor) -> Self {
+            Self::Area(NativeRect {
+                x: monitor.x,
+                y: monitor.y,
+                width: monitor.width,
+                height: monitor.height,
+            })
+        }
+
         pub(crate) fn is_window(&self) -> bool {
             matches!(self, Self::Window(_))
         }
@@ -550,10 +562,9 @@ mod platform {
 
     impl NativeWindow {
         fn with_connection<R>(self, f: impl FnOnce(&XCBConnection, u32) -> R) -> Option<R> {
-            let conn = unsafe {
-                XCBConnection::from_raw_xcb_connection(self.connection as *mut _, false)
-            }
-            .ok()?;
+            let conn =
+                unsafe { XCBConnection::from_raw_xcb_connection(self.connection as *mut _, false) }
+                    .ok()?;
             let result = f(&conn, self.root);
             let _ = conn.flush();
             Some(result)

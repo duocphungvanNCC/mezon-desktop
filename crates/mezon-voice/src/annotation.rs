@@ -134,7 +134,11 @@ impl ScreenAnnotations {
 
     pub(crate) fn clear_waker(&self, token: u64) {
         let mut state = self.state.lock();
-        if state.waker.as_ref().is_some_and(|(current, _)| *current == token) {
+        if state
+            .waker
+            .as_ref()
+            .is_some_and(|(current, _)| *current == token)
+        {
             state.waker = None;
         }
     }
@@ -233,7 +237,12 @@ impl AnnotationCompositor {
         }
     }
 
-    fn rasterize(&mut self, scene: &AnnotationScene, width: u32, height: u32) -> Option<YuvOverlay> {
+    fn rasterize(
+        &mut self,
+        scene: &AnnotationScene,
+        width: u32,
+        height: u32,
+    ) -> Option<YuvOverlay> {
         if width < 2 || height < 2 || scene.items.is_empty() {
             return None;
         }
@@ -383,7 +392,13 @@ impl PixelBounds {
     }
 }
 
-fn yuv_overlay(pixmap: &Pixmap, left: usize, top: usize, right: usize, bottom: usize) -> YuvOverlay {
+fn yuv_overlay(
+    pixmap: &Pixmap,
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+) -> YuvOverlay {
     let width = right - left;
     let height = bottom - top;
     let stride = pixmap.width() as usize;

@@ -21,11 +21,13 @@ use crate::screen_picker::{
     PickedScreen, pick_is_window, pick_uses_portal, portal_source_types_for_pick,
     scap_target_for_pick,
 };
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::video::SharedMonitor;
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
+use crate::video::i420_to_bgra_into;
 #[cfg(target_os = "macos")]
 use crate::video::nv12_full_to_i420;
-use crate::video::i420_to_bgra_into;
 use crate::video::{VideoFrameStore, local_screen_key};
 
 #[cfg(target_os = "macos")]
@@ -244,6 +246,8 @@ pub fn start_screen(
             let pump_stop = thread_stop.clone();
             let pump_control = thread_control.clone();
             let restartable = !use_portal;
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            let pump_store = frame_store.clone();
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
@@ -333,6 +337,15 @@ pub fn start_screen(
                                     return;
                                 }
                             };
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            pump_store.set_shared_monitor(capturer.monitor_area().map(|area| {
+                                SharedMonitor {
+                                    x: area.origin.x,
+                                    y: area.origin.y,
+                                    width: area.size.width,
+                                    height: area.size.height,
+                                }
+                            }));
                             capturer.start_capture();
                             let mut reconfigure = false;
                             while !pump_stop.load(Ordering::Relaxed) {
@@ -664,6 +677,7 @@ pub fn start_screen(
                 annotations.clear_waker(token);
             }
             frame_store.remove(local_screen_key(&identity));
+            frame_store.set_shared_monitor(None);
             if !sent_track {
                 let timed_out = first_frame_deadline.is_some_and(|at| Instant::now() >= at);
                 let msg = slot.take_error().unwrap_or_else(|| {
