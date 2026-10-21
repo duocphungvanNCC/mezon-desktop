@@ -1628,6 +1628,7 @@ fn render_photo(
         .relative()
         .w(px(box_w))
         .h(px(box_h))
+        .max_w_full()
         .rounded_md()
         .overflow_hidden();
     // `render_album` already refuses to open a tile that is still uploading;
