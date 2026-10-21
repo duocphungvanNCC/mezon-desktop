@@ -725,6 +725,7 @@ pub struct ChannelList {
     channel_detail_failed: HashSet<ChannelId>,
     ctrlk_focus: Option<CtrlKFocusChannel>,
     channel_details_for_settings: HashSet<ChannelId>,
+    archived_threads_to_open: HashSet<ChannelId>,
     detached_channel_details: HashMap<(ClanId, ChannelId), Channel>,
     linked_channels: HashMap<ChannelId, Channel>,
     linked_channel_pending: HashSet<ChannelId>,
@@ -909,6 +910,7 @@ impl ChannelList {
         self.channel_detail_failed.clear();
         self.ctrlk_focus = None;
         self.channel_details_for_settings.clear();
+        self.archived_threads_to_open.clear();
         self.detached_channel_details.clear();
         self.linked_channels.clear();
         self.linked_channel_pending.clear();
@@ -1036,6 +1038,7 @@ impl ChannelList {
             channel_detail_failed: HashSet::new(),
             ctrlk_focus: None,
             channel_details_for_settings: HashSet::new(),
+            archived_threads_to_open: HashSet::new(),
             detached_channel_details: HashMap::new(),
             linked_channels: HashMap::new(),
             linked_channel_pending: HashSet::new(),
@@ -2216,6 +2219,7 @@ impl ChannelList {
                     Some(desc) => this.apply_channel_detail(clan_id, desc, cx),
                     None => {
                         this.channel_details_for_settings.remove(&channel_id);
+                        this.archived_threads_to_open.remove(&channel_id);
                         this.channel_detail_failed.insert(channel_id);
                         cx.notify();
                     }
@@ -2244,6 +2248,11 @@ impl ChannelList {
         self.ensure_channel_in_clan(clan_id, channel_id, cx)
     }
 
+    pub fn allow_archived_thread(&mut self, channel_id: ChannelId) {
+        self.channel_detail_failed.remove(&channel_id);
+        self.archived_threads_to_open.insert(channel_id);
+    }
+
     fn apply_channel_detail(
         &mut self,
         clan_id: ClanId,
@@ -2251,6 +2260,7 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let channel_id = ChannelId(desc.channel_id);
+        let open_archived = self.archived_threads_to_open.remove(&channel_id);
         if self.is_locally_removed(channel_id) {
             self.channel_details_for_settings.remove(&channel_id);
             return;
@@ -2258,7 +2268,7 @@ impl ChannelList {
         let badge = desc.badge_count.max(0) as u32;
         let mut channel = channel_from_desc(desc, badge, Vec::new(), false);
         channel.clan_id = clan_id;
-        if !channel.visible_in_sidebar() {
+        if !channel.visible_in_sidebar() && !open_archived {
             if self.channel_details_for_settings.remove(&channel_id) {
                 self.detached_channel_details
                     .insert((clan_id, channel_id), channel);
@@ -15498,6 +15508,59 @@ mod tests {
                     .expect("settings detail");
                 assert_eq!(thread.name, "hidden thread");
                 assert_eq!(thread.topic, "thread topic");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_archived_thread_opened_from_search_joins_the_clan_structure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use mezon_client::transport::ApiChannelDesc;
+
+        let archived_thread = || ApiChannelDesc {
+            channel_id: 9,
+            channel_label: "old thread".into(),
+            channel_type: CHANNEL_TYPE_THREAD,
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id: 1,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            active: CHANNEL_ACTIVE_ARCHIVED,
+            creator_id: 0,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        };
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.apply_channel_detail(ClanId(1), archived_thread(), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+
+                channels.allow_archived_thread(ChannelId(9));
+                channels.apply_channel_detail(ClanId(1), archived_thread(), cx);
+                assert!(channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                let thread = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("archived thread");
+                assert!(thread.is_archived());
+                assert!(!thread.visible_in_sidebar());
+                assert_eq!(thread.parent_id, Some(ChannelId(1)));
+                assert!(channels.archived_threads_to_open.is_empty());
             });
         });
     }

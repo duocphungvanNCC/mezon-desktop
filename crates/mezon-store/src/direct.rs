@@ -1217,6 +1217,65 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn reopen_conversation(
+        &mut self,
+        channel_id: ChannelId,
+        kind: DirectKind,
+        label: String,
+        avatar: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if !self.insert_reopened(channel_id, kind, label, avatar) {
+            return Task::ready(Ok(()));
+        }
+        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.notify();
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.open_dm_by_channel_id(channel_id.get()).await;
+            let _ = this.update(cx, |this, cx| match &result {
+                Ok(()) => {
+                    this.first_listing_done = false;
+                    this.refresh(cx);
+                }
+                Err(e) => {
+                    tracing::warn!("open_dm_by_channel_id failed for {channel_id}: {e}");
+                    this.forget_conversation(channel_id, cx);
+                }
+            });
+            result
+        })
+    }
+
+    fn insert_reopened(
+        &mut self,
+        channel_id: ChannelId,
+        kind: DirectKind,
+        label: String,
+        avatar: String,
+    ) -> bool {
+        if self.channels.find(channel_id).is_some() {
+            return false;
+        }
+        let now = crate::message_time::unix_now_seconds();
+        self.channels.upsert_created(DirectChannel {
+            id: channel_id,
+            label,
+            kind,
+            avatar,
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 0,
+            last_sent_timestamp: now,
+            last_seen_timestamp: now,
+            create_time_seconds: 0,
+        });
+        true
+    }
+
     pub fn group_owned_by_me(&self, channel_id: ChannelId, cx: &App) -> bool {
         let me = crate::badge::BadgeService::try_global(cx)
             .and_then(|badge| badge.read(cx).current_user_id(cx));
@@ -2873,6 +2932,38 @@ mod tests {
                 for id in 1..=5i64 {
                     assert_eq!(unread_of(store, id), 4);
                 }
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_closed_group_reopened_from_search_lands_on_top_as_read(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, _| {
+                seed(store, &[(1, 10), (2, 20)]);
+                assert!(store.insert_reopened(
+                    ChannelId(9),
+                    DirectKind::Group,
+                    "team".into(),
+                    "avatar.png".into(),
+                ));
+                assert_eq!(order(store), vec![9, 2, 1]);
+                let group = store.find(ChannelId(9)).expect("reopened group");
+                assert_eq!(group.kind, DirectKind::Group);
+                assert_eq!(group.label, "team");
+                assert_eq!(group.avatar, "avatar.png");
+                assert!(!group.is_unread());
+                assert_index_agrees_with_order(store);
+
+                assert!(!store.insert_reopened(
+                    ChannelId(1),
+                    DirectKind::Dm,
+                    "renamed".into(),
+                    String::new(),
+                ));
+                assert_eq!(store.find(ChannelId(1)).expect("dm").label, "dm-1");
+                assert_eq!(order(store), vec![9, 2, 1]);
             });
         });
     }

@@ -3395,6 +3395,10 @@ impl AppApi {
         self.transport.close_dm_by_channel_id(channel_id).await
     }
 
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        self.transport.open_dm_by_channel_id(channel_id).await
+    }
+
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
         self.transport.list_loged_device().await
     }
