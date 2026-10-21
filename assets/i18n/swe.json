@@ -3469,6 +3469,8 @@
   "message.systemMessages.aMessage": "ett meddelande",
   "message.systemMessages.allPinned": "alla meddelanden",
   "message.systemMessages.allThreads": "alla trådar",
+  "message.systemMessages.changedGroupAvatar": "ändrade gruppbilden.",
+  "message.systemMessages.changedGroupName": "ändrade gruppnamnet till {{name}}.",
   "message.systemMessages.deletedAThread": "raderade tråd:",
   "message.systemMessages.messages": "spikade.",
   "message.systemMessages.pinned": "spikat",

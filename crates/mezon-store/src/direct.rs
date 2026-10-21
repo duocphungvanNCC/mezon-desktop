@@ -1039,6 +1039,7 @@ impl DirectMessageStore {
     }
 
     pub fn note_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) -> bool {
+        crate::platform::PlatformStore::dismiss_channel_notification(cx, None, channel_id.get());
         let Some(ch) = self.channels.find_mut(channel_id) else {
             return false;
         };
@@ -1368,6 +1369,7 @@ fn direct_from_created(
 ) -> DirectChannel {
     let kind = DirectKind::from_raw(desc.channel_type);
     let is_dm = matches!(kind, DirectKind::Dm);
+    let (last_sent_timestamp, last_seen_timestamp) = opened_activity(desc);
     DirectChannel {
         id: ChannelId(desc.channel_id),
         label: if is_dm {
@@ -1395,10 +1397,18 @@ fn direct_from_created(
         online: false,
         member_count: desc.member_count.max(0) as u32,
         unread_count: desc.count_mess_unread.max(0) as u32,
-        last_sent_timestamp: desc.last_sent_timestamp,
-        last_seen_timestamp: desc.last_seen_timestamp,
+        last_sent_timestamp,
+        last_seen_timestamp,
         create_time_seconds: 0,
     }
+}
+
+fn opened_activity(desc: &ApiChannelDesc) -> (i64, i64) {
+    if desc.last_sent_timestamp > 0 {
+        return (desc.last_sent_timestamp, desc.last_seen_timestamp);
+    }
+    let now = crate::message_time::unix_now_seconds();
+    (now, now)
 }
 
 fn direct_group_from_created(
@@ -1411,6 +1421,7 @@ fn direct_group_from_created(
     } else {
         fallback_member_count
     };
+    let (last_sent_timestamp, last_seen_timestamp) = opened_activity(desc);
     DirectChannel {
         id: ChannelId(desc.channel_id),
         label: if label.is_empty() {
@@ -1430,8 +1441,8 @@ fn direct_group_from_created(
         online: false,
         member_count,
         unread_count: desc.count_mess_unread.max(0) as u32,
-        last_sent_timestamp: desc.last_sent_timestamp,
-        last_seen_timestamp: desc.last_seen_timestamp,
+        last_sent_timestamp,
+        last_seen_timestamp,
         create_time_seconds: 0,
     }
 }
@@ -2502,6 +2513,44 @@ mod tests {
     }
 
     #[test]
+    fn a_dm_opened_without_server_activity_lands_on_top_and_reads_as_seen() {
+        let now = crate::message_time::unix_now_seconds();
+        let mut list = list_from(vec![dm(1, now - 60), dm(2, now - 3_600)]);
+        let desc = api_channel_desc(42, "server-label", 3, 2, 0);
+        list.upsert_created(direct_from_created(
+            &desc,
+            UserId(5),
+            "Trang",
+            "avatar.png",
+            "trang",
+        ));
+        let ids: Vec<ChannelId> = list.channels.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![ChannelId(42), ChannelId(1), ChannelId(2)]);
+        assert!(!list.find(ChannelId(42)).unwrap().is_unread());
+        assert_index_consistent(&list);
+    }
+
+    #[test]
+    fn a_group_opened_without_server_activity_lands_on_top() {
+        let now = crate::message_time::unix_now_seconds();
+        let mut list = list_from(vec![dm(1, now - 60)]);
+        let desc = api_channel_desc(43, "group", 2, 3, 0);
+        list.upsert_created(direct_group_from_created(&desc, "phat, nghia", 3));
+        assert_eq!(list.channels[0].id, ChannelId(43));
+        assert!(!list.channels[0].is_unread());
+    }
+
+    #[test]
+    fn a_created_dm_keeps_the_server_activity_it_was_given() {
+        let mut desc = api_channel_desc(44, "server-label", 3, 2, 0);
+        desc.last_sent_timestamp = 500;
+        desc.last_seen_timestamp = 400;
+        let dm = direct_from_created(&desc, UserId(5), "Trang", "", "trang");
+        assert_eq!(dm.last_sent_timestamp, 500);
+        assert_eq!(dm.last_seen_timestamp, 400);
+    }
+
+    #[test]
     fn replace_clears_pending_created_when_server_returns_it() {
         let mut list = list_from(vec![dm(1, 100), dm(99, 50)]);
         list.pending_created = Some(ChannelId(99));
@@ -2608,6 +2657,26 @@ mod tests {
         let (events, badges) = run_listing_then_badges(true, false, false);
         assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
         assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[gpui::test]
+    fn note_read_closes_the_dm_toast_before_the_channel_is_cached(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            let shown = crate::platform::PlatformStore::arm_channel_show(Some("9181"));
+            let other = crate::platform::PlatformStore::arm_channel_show(Some("9182"));
+            store.update(cx, |store, cx| {
+                assert!(!store.note_read(ChannelId(9181), cx));
+            });
+            assert!(crate::platform::PlatformStore::channel_show_cancelled(
+                Some("9181"),
+                shown
+            ));
+            assert!(!crate::platform::PlatformStore::channel_show_cancelled(
+                Some("9182"),
+                other
+            ));
+        });
     }
 
     #[gpui::test]

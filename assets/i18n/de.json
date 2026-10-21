@@ -3469,6 +3469,8 @@
   "message.systemMessages.aMessage": "eine Nachricht",
   "message.systemMessages.allPinned": "alle angepinnten",
   "message.systemMessages.allThreads": "alle Threads",
+  "message.systemMessages.changedGroupAvatar": "hat das Gruppenbild geändert.",
+  "message.systemMessages.changedGroupName": "hat den Gruppennamen in {{name}} geändert.",
   "message.systemMessages.deletedAThread": "hat einen Thread gelöscht:",
   "message.systemMessages.messages": "Nachrichten angepinnt.",
   "message.systemMessages.pinned": "hat angepinnt",

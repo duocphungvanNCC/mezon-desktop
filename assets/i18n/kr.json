@@ -3469,6 +3469,8 @@
   "message.systemMessages.aMessage": "메시지",
   "message.systemMessages.allPinned": "모든 메시지",
   "message.systemMessages.allThreads": "모든 스레드",
+  "message.systemMessages.changedGroupAvatar": "그룹 사진을 변경했습니다.",
+  "message.systemMessages.changedGroupName": "그룹 이름을 {{name}}(으)로 변경했습니다.",
   "message.systemMessages.deletedAThread": "스레드 삭제:",
   "message.systemMessages.messages": "메시지 고정됨.",
   "message.systemMessages.pinned": "고정됨",

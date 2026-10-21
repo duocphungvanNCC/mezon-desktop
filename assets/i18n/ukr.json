@@ -3468,6 +3468,8 @@
   "message.systemMessages.aMessage": "одне повідомлення",
   "message.systemMessages.allPinned": "всі закріплені повідомлення",
   "message.systemMessages.allThreads": "всі треди",
+  "message.systemMessages.changedGroupAvatar": "змінив(-ла) фото групи.",
+  "message.systemMessages.changedGroupName": "змінив(-ла) назву групи на {{name}}.",
   "message.systemMessages.deletedAThread": "видалив тред:",
   "message.systemMessages.messages": "закріплено.",
   "message.systemMessages.pinned": "закріплено",

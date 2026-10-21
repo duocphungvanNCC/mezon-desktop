@@ -25,6 +25,7 @@ pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod ctrlk_search;
+pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -59,6 +60,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod realtime_server;
 pub mod roles;
+pub mod screen_draw;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
@@ -145,6 +147,7 @@ pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
     SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
+pub use desktop_draw::DesktopDraw;
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
@@ -152,9 +155,9 @@ pub use direct::{
 pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
-    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, generate_snowflake_id,
-    is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
-    validate_emoji_create_shortname, validate_emoticon_file,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, emoji_sources_generation,
+    generate_snowflake_id, is_valid_emoticon_shortname, normalize_emoji_shortname,
+    strip_emoji_colons, validate_emoji_create_shortname, validate_emoticon_file,
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
@@ -165,7 +168,8 @@ pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     AttachmentSeedInput, ChannelAttachment, FetchedChannelAttachments, GalleryEvent, GalleryStore,
     LoadDirection, MediaFilter, UploaderInfo, enrich_uploader, fetch_channel_attachments,
-    initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
@@ -256,6 +260,14 @@ pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
+pub use screen_draw::{
+    AnnotationDrag, COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED,
+    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, NormalizedPoint,
+    PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK,
+    STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE,
+    TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize, VanishingStroke,
+    scale_alpha, text_font_px,
+};
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
@@ -284,8 +296,8 @@ pub use voice::{
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
     list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
-    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
-    validate_sound_file,
+    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_bytes,
+    upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,

@@ -3707,6 +3707,8 @@
   "message.systemMessages.aMessage": "Сообщение",
   "message.systemMessages.allPinned": "Все закреплённые",
   "message.systemMessages.allThreads": "Все ветки",
+  "message.systemMessages.changedGroupAvatar": "изменил(а) фото группы.",
+  "message.systemMessages.changedGroupName": "изменил(а) название группы на {{name}}.",
   "message.systemMessages.deletedAThread": "Ветка удалена:",
   "message.systemMessages.messages": "сообщения.",
   "message.systemMessages.pinned": "Закреплённое",

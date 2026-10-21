@@ -1593,6 +1593,16 @@ pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
     }
 }
 
+pub fn message_sender_name(message: &api::ChannelMessage) -> &str {
+    if !message.clan_nick.is_empty() {
+        &message.clan_nick
+    } else if !message.display_name.is_empty() {
+        &message.display_name
+    } else {
+        &message.username
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiEntityMention {
     pub user_id: i64,
@@ -4664,13 +4674,7 @@ impl MezonTransport {
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
-        let sender_name = if !message.clan_nick.is_empty() {
-            message.clan_nick.clone()
-        } else if !message.display_name.is_empty() {
-            message.display_name.clone()
-        } else {
-            message.username.clone()
-        };
+        let sender_name = message_sender_name(message).to_string();
 
         let attachments = parse_message_attachments(&message.attachments);
         let references = parse_message_references(&message.references);
@@ -10585,16 +10589,48 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeControlError {
+    pub action: String,
+    pub code: i64,
+    pub message: Option<String>,
+}
+
+impl RealtimeControlError {
+    pub const FORBIDDEN: i64 = 403;
+
+    pub fn is_forbidden(&self) -> bool {
+        self.code == Self::FORBIDDEN
+    }
+}
+
+impl std::fmt::Display for RealtimeControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{} error: code={} {}", self.action, self.code, message),
+            None => write!(f, "{} error: code={}", self.action, self.code),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeControlError {}
+
 fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
     if let Some(error) = realtime_error_from_body(response) {
-        anyhow::bail!(
-            "{action} error: code={} {}",
-            error.code,
-            error.message.trim()
-        );
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(error.code),
+            message: Some(error.message.trim().to_owned()),
+        }
+        .into());
     }
     if code != 0 {
-        anyhow::bail!("{action} error: code={code}");
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(code),
+            message: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -13189,6 +13225,10 @@ mod tests {
         assert!(
             message.contains("join_clan_chat error: code=403 Not allowed"),
             "{message}"
+        );
+        assert!(
+            err.downcast_ref::<RealtimeControlError>()
+                .is_some_and(RealtimeControlError::is_forbidden)
         );
     }
 

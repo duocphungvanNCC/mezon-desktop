@@ -120,25 +120,13 @@ pub fn resolve_pin_avatar_url(
     channel_id: Option<mezon_store::ChannelId>,
     cx: &App,
 ) -> String {
-    let clan_id = effective_clan_id(clan_id, cx);
-    let user_id = sender_id.parse::<UserId>().ok().filter(|id| !id.is_zero());
-
-    if let Some(user_id) = user_id {
-        if let Some(clan_id) = clan_id
-            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
-                .filter(|url| !url.is_empty())
-        {
-            return url;
-        }
-        if let Some(channel_id) = channel_id
-            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Direct(channel_id), cx)
-                .filter(|url| !url.is_empty())
-        {
-            return url;
-        }
-    }
-
-    fallback_avatar.to_string()
+    mezon_store::pinned::resolve_pin_avatar_url(
+        sender_id,
+        fallback_avatar,
+        effective_clan_id(clan_id, cx),
+        channel_id,
+        cx,
+    )
 }
 
 pub fn resolve_message_sender_label(
@@ -2180,6 +2168,11 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
         return SharedString::default();
     }
     let mut memo = ctx.row_memo.borrow_mut();
+    let generation = mezon_store::emoji_sources_generation();
+    if memo.reaction_srcs_generation != generation {
+        memo.reaction_srcs.clear();
+        memo.reaction_srcs_generation = generation;
+    }
     if let Some(src) = memo.reaction_srcs.get(&reaction.emoji_id) {
         return src.clone();
     }

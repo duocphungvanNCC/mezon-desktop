@@ -39,6 +39,7 @@ use crate::AppConfig;
 use crate::Settings;
 use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
+use crate::desktop_draw::DesktopDraw;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
     FLOWER_DEDUP_WINDOW, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveApp,
@@ -51,6 +52,7 @@ use crate::ids::{ClanId, UserId};
 use crate::login::LoginStore;
 use crate::media_permission::MediaPermissionStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::screen_draw::ScreenDrawState;
 use crate::users_by_user::UsersByUserStore;
 use crate::wallet::{WalletEvent, WalletStore};
 
@@ -388,6 +390,19 @@ pub enum VoiceRenderFrame {
     Surface(mezon_voice::VideoSurface),
 }
 
+impl VoiceRenderFrame {
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Image(image) => {
+                let s = image.size(0);
+                (s.width.0 as u32, s.height.0 as u32)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Surface(surface) => surface.dimensions(),
+        }
+    }
+}
+
 struct CachedRenderFrame {
     seq: u64,
     frame: VoiceRenderFrame,
@@ -500,6 +515,9 @@ pub struct VoiceStore {
     focused_tile: Option<String>,
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
+    screen_draw: ScreenDrawState,
+    screen_draw_editor: Option<(u64, gpui::AnyView)>,
+    desktop_draw: Option<Entity<DesktopDraw>>,
     pip: Option<PipWindow>,
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -894,6 +912,9 @@ impl VoiceStore {
             focused_tile: None,
             auto_focused_screen: None,
             fullscreen_screen: None,
+            screen_draw: ScreenDrawState::default(),
+            screen_draw_editor: None,
+            desktop_draw: None,
             pip: None,
             room_name: String::new(),
             participant_menu: None,
@@ -2771,6 +2792,90 @@ impl VoiceStore {
         }
     }
 
+    pub fn screen_draw(&self) -> &ScreenDrawState {
+        &self.screen_draw
+    }
+
+    pub fn screen_draw_mut(&mut self) -> &mut ScreenDrawState {
+        &mut self.screen_draw
+    }
+
+    pub fn toggle_screen_draw(&mut self, cx: &mut Context<Self>) {
+        let active = !self.screen_draw.is_active;
+        self.set_screen_draw_active(active, cx);
+    }
+
+    pub fn screen_draw_editor(&self) -> Option<gpui::AnyView> {
+        let (id, view) = self.screen_draw_editor.as_ref()?;
+        (self.screen_draw.editing_text_id == Some(*id)).then(|| view.clone())
+    }
+
+    pub fn set_screen_draw_editor(&mut self, id: u64, view: gpui::AnyView) {
+        self.screen_draw_editor = Some((id, view));
+    }
+
+    pub fn set_screen_draw_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.screen_draw.set_active(active);
+        if !active {
+            self.screen_draw_editor = None;
+        }
+        if active && self.fullscreen_screen.is_none() && self.focused_tile.is_none() {
+            if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
+                self.focused_tile = Some(screen_tile_id(&p.session_id));
+                self.sync_screen_full_res();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn shared_screen(&self) -> Option<&PickedScreen> {
+        if !self.screen_share_enabled {
+            return None;
+        }
+        self.last_screen_share.as_ref().map(|(pick, _)| pick)
+    }
+
+    pub fn shared_monitor(&self) -> Option<mezon_voice::SharedMonitor> {
+        self.frame_store.as_ref()?.shared_monitor()
+    }
+
+    pub fn desktop_draw(&self) -> Option<&Entity<DesktopDraw>> {
+        self.desktop_draw.as_ref()
+    }
+
+    pub fn start_desktop_draw(
+        &mut self,
+        window_share: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<DesktopDraw> {
+        self.end_desktop_draw(cx);
+        let frame_store = self.frame_store();
+        let draw = cx.new(|_| DesktopDraw::new(window_share, frame_store));
+        self.desktop_draw = Some(draw.clone());
+        cx.notify();
+        draw
+    }
+
+    pub fn end_desktop_draw(&mut self, cx: &mut Context<Self>) {
+        let Some(draw) = self.desktop_draw.take() else {
+            return;
+        };
+        draw.update(cx, |draw, cx| draw.shutdown(cx));
+        cx.notify();
+    }
+
+    pub fn end_desktop_draw_for(&mut self, draw: &Entity<DesktopDraw>, cx: &mut Context<Self>) {
+        if self.desktop_draw.as_ref() == Some(draw) {
+            self.end_desktop_draw(cx);
+        }
+    }
+
+    fn end_desktop_draw_if_unshared(&mut self, cx: &mut Context<Self>) {
+        if !self.screen_share_enabled {
+            self.end_desktop_draw(cx);
+        }
+    }
+
     pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
             let _ = prev
@@ -3948,6 +4053,7 @@ impl VoiceStore {
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
+                self.end_desktop_draw_if_unshared(cx);
                 self.sync_screen_auto_focus();
                 self.evict_stale_render_cache();
                 self.flush_texture_drops(None, cx);
@@ -3984,6 +4090,7 @@ impl VoiceStore {
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
+                    self.end_desktop_draw(cx);
                 }
             }
         }
@@ -4966,6 +5073,7 @@ impl VoiceStore {
             return;
         }
         self.last_screen_share = None;
+        self.end_desktop_draw(cx);
         if let Some(session) = &self.session {
             session.stop_screen_share();
         }
@@ -4978,6 +5086,9 @@ impl VoiceStore {
         self.reconnect_healthy_since = None;
         self.close_pip(cx);
         self.fullscreen_screen = None;
+        self.screen_draw = ScreenDrawState::default();
+        self.screen_draw_editor = None;
+        self.end_desktop_draw(cx);
         self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;
@@ -5105,6 +5216,42 @@ pub async fn upload_sound_file(
         .map_err(|e| e.to_string())
 }
 
+pub async fn upload_sound_bytes(
+    api: &AppApi,
+    data: Vec<u8>,
+    extension: &str,
+    max_bytes: u64,
+) -> Result<(i64, String), String> {
+    let filetype = validate_sound_bytes(&data, extension, max_bytes)?;
+    let extension = extension.to_ascii_lowercase();
+    let id = crate::emoji::generate_snowflake_id();
+    api.upload_emoticon("sounds", id, &extension, filetype, data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn validate_sound_bytes(
+    data: &[u8],
+    extension: &str,
+    max_bytes: u64,
+) -> Result<&'static str, String> {
+    if data.is_empty() {
+        return Err("empty".into());
+    }
+    if data.len() as u64 > max_bytes {
+        return Err("size_limit".into());
+    }
+    let extension = extension.to_ascii_lowercase();
+    let mime =
+        mezon_audio::sniff_sound_mime(&data).ok_or_else(|| "unsupported_type".to_string())?;
+    let filetype = match extension.as_str() {
+        "wav" if mime == "audio/wav" => "audio/wav",
+        "mp3" | "mpeg" if mime == "audio/mpeg" => "audio/mpeg",
+        _ => return Err("unsupported_type".into()),
+    };
+    Ok(filetype)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -5116,12 +5263,28 @@ mod tests {
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
         is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
-        release_interactive_window, solo_tile_for, validate_sound_file, voice_join_error_message,
+        release_interactive_window, solo_tile_for, validate_sound_bytes, validate_sound_file,
+        voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use mezon_voice::VoiceEvent;
     use parking_lot::Mutex;
+
+    #[test]
+    fn processed_sound_bytes_enforce_type_and_size() {
+        let wav = b"RIFF\0\0\0\0WAVE";
+        assert_eq!(validate_sound_bytes(wav, "wav", 12), Ok("audio/wav"));
+        assert_eq!(
+            validate_sound_bytes(wav, "mp3", 12),
+            Err("unsupported_type".into())
+        );
+        assert_eq!(
+            validate_sound_bytes(wav, "wav", 11),
+            Err("size_limit".into())
+        );
+        assert_eq!(validate_sound_bytes(&[], "wav", 12), Err("empty".into()));
+    }
 
     #[test]
     fn a_closed_window_from_an_earlier_launch_does_not_release_the_current_one() {
@@ -5724,6 +5887,25 @@ mod tests {
         bytes[0..3].copy_from_slice(b"ID3");
         bytes[6..10].copy_from_slice(&[0, 0, 0, 100]);
         bytes[110..112].copy_from_slice(&[0xFF, 0xFB]);
+        std::fs::write(&mp3_path, bytes).unwrap();
+        assert!(validate_sound_file(&mp3_path, MAX_SOUND_BYTES).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_sound_file_accepts_mp3_with_padding_after_the_id3_tag() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-pad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mp3_path = dir.join("padded.mp3");
+        let mut bytes = vec![0u8; 30];
+        bytes[0..4].copy_from_slice(b"ID3\x03");
+        bytes[9] = 20;
+        bytes.extend_from_slice(&[0u8; 600]);
+        for _ in 0..3 {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+            bytes.extend_from_slice(&frame);
+        }
         std::fs::write(&mp3_path, bytes).unwrap();
         assert!(validate_sound_file(&mp3_path, MAX_SOUND_BYTES).is_ok());
         let _ = std::fs::remove_dir_all(&dir);

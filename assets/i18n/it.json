@@ -3469,6 +3469,8 @@
   "message.systemMessages.aMessage": "un messaggio",
   "message.systemMessages.allPinned": "tutti i messaggi",
   "message.systemMessages.allThreads": "tutte le discussioni",
+  "message.systemMessages.changedGroupAvatar": "ha cambiato l'immagine del gruppo.",
+  "message.systemMessages.changedGroupName": "ha cambiato il nome del gruppo in {{name}}.",
   "message.systemMessages.deletedAThread": "ha eliminato una discussione:",
   "message.systemMessages.messages": "fissati.",
   "message.systemMessages.pinned": "fissato",

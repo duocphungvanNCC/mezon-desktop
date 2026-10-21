@@ -3473,6 +3473,8 @@
   "message.systemMessages.aMessage": "a message",
   "message.systemMessages.allPinned": "all pinned",
   "message.systemMessages.allThreads": "all threads",
+  "message.systemMessages.changedGroupAvatar": "changed the group avatar.",
+  "message.systemMessages.changedGroupName": "changed the group name to {{name}}.",
   "message.systemMessages.deletedAThread": "deleted a thread:",
   "message.systemMessages.messages": "messages.",
   "message.systemMessages.pinned": "pinned",

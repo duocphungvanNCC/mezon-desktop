@@ -3468,6 +3468,8 @@
   "message.systemMessages.aMessage": "een bericht",
   "message.systemMessages.allPinned": "alle berichten",
   "message.systemMessages.allThreads": "alle topics",
+  "message.systemMessages.changedGroupAvatar": "heeft de groepsafbeelding gewijzigd.",
+  "message.systemMessages.changedGroupName": "heeft de groepsnaam gewijzigd in {{name}}.",
   "message.systemMessages.deletedAThread": "heeft een onderwerp verwijderd:",
   "message.systemMessages.messages": "vastgezet.",
   "message.systemMessages.pinned": "vastgezet",

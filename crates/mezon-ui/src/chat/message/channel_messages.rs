@@ -1377,6 +1377,7 @@ pub struct ChannelMessages {
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     emoji_recent: Rc<Vec<RecentEmojiCell>>,
+    emoji_sources_generation: u64,
     _emoji_observe: Subscription,
     _quick_menu_observe: Option<Subscription>,
     channel_permissions_fp: Option<(bool, bool, bool)>,
@@ -1441,6 +1442,7 @@ impl ChannelMessages {
             let mut memo = this.row_memo.borrow_mut();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.group_updates.clear();
             memo.selection_layouts.clear();
             memo.selection_text_pieces.clear();
             cx.notify();
@@ -1899,13 +1901,16 @@ impl ChannelMessages {
                 .into_iter()
                 .cloned()
                 .collect();
-            let changed = this.emoji_recent.len() != next.len()
+            let emoji_sources_generation = mezon_store::emoji_sources_generation();
+            let changed = this.emoji_sources_generation != emoji_sources_generation
+                || this.emoji_recent.len() != next.len()
                 || this
                     .emoji_recent
                     .iter()
                     .zip(&next)
                     .any(|(a, b)| a.id.as_ref() != b.id.as_str());
             if changed {
+                this.emoji_sources_generation = emoji_sources_generation;
                 this.emoji_recent = Rc::new(recent_emoji_cells(&next, cx));
                 cx.notify();
             }
@@ -2041,6 +2046,7 @@ impl ChannelMessages {
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
             emoji_recent,
+            emoji_sources_generation: mezon_store::emoji_sources_generation(),
             _emoji_observe: emoji_observe,
             _quick_menu_observe: quick_menu_observe,
             channel_permissions_fp: None,
@@ -2068,6 +2074,13 @@ impl ChannelMessages {
         this._subs.push(
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
+                    if MessagesStore::global(cx)
+                        .read(cx)
+                        .pending_topic_jump()
+                        .is_none()
+                    {
+                        this.topic_list_topic = None;
+                    }
                     this.refresh_topic_messages(cx);
                     if this.at_bottom {
                         this.sync_topic_seen(cx);
@@ -2079,6 +2092,14 @@ impl ChannelMessages {
             }),
         );
         this.refresh_topic_messages(cx);
+        let topic_box = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = topic_box.update(cx, |this, cx| {
+                if this.at_bottom {
+                    this.sync_topic_seen(cx);
+                }
+            });
+        });
         if let Some(target) = MessagesStore::global(cx).read(cx).pending_topic_jump() {
             this.begin_highlight(target, cx);
         }
@@ -2133,11 +2154,10 @@ impl ChannelMessages {
                 meta.rpl.hash(&mut hasher);
                 meta.lsnt.hash(&mut hasher);
             }
-            let badge = badges
+            let unread = badges
                 .as_ref()
-                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
-                .unwrap_or(0);
-            badge.hash(&mut hasher);
+                .is_some_and(|store| store.read(cx).topic_has_unread(&topic_id.to_string()));
+            unread.hash(&mut hasher);
         }
         if !any_topic {
             return;
@@ -3789,6 +3809,7 @@ impl ChannelMessages {
             memo.display_names.clear();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.group_updates.clear();
             memo.selection_layouts.clear();
             memo.selection_text_pieces.clear();
         }
