@@ -219,6 +219,10 @@ impl BadgeService {
         cx.notify();
     }
 
+    pub fn forget_dm_push_channels(&mut self) {
+        self.dm_push_channels.clear();
+    }
+
     pub fn current_user_id(&self, cx: &App) -> Option<UserId> {
         self.current_user_id_raw(cx).map(UserId)
     }
@@ -816,5 +820,53 @@ mod tests {
         let mut chat = audit_log_push(0, 42, 0);
         chat.code = 0;
         assert!(!is_own_group_update(&chat, Some(42)));
+    }
+
+    #[gpui::test]
+    fn a_new_socket_lets_the_notification_stream_count_a_dm_again(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = std::sync::Arc::new(mezon_client::AppApi::new(
+                std::sync::Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| {
+                AuthState::Authenticated(mezon_client::Session {
+                    user_id: "7".to_string(),
+                    ..Default::default()
+                })
+            });
+            let badge = BadgeService::init(auth_state, cx);
+            ClanList::init(api.clone(), cx);
+            let dms = DirectMessageStore::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api, cx);
+            let dm = ChannelId(900);
+            dms.update(cx, |dms, cx| {
+                let message = ChannelMessage {
+                    channel_id: dm.get(),
+                    mode: STREAM_MODE_DM,
+                    sender_id: 5,
+                    display_name: "peer".to_string(),
+                    create_time_seconds: 100,
+                    ..Default::default()
+                };
+                dms.insert_from_message(&message, false, false, cx);
+            });
+            let unread = |cx: &App| dms.read(cx).find(dm).map(|channel| channel.unread_count);
+            assert_eq!(unread(cx), Some(0));
+
+            badge.update(cx, |badge, cx| {
+                badge.dm_push_channels.insert(dm);
+                badge.note_dm_notification(dm, 200, cx);
+            });
+            assert_eq!(unread(cx), Some(0));
+
+            badge.update(cx, |badge, cx| {
+                badge.forget_dm_push_channels();
+                badge.note_dm_notification(dm, 300, cx);
+            });
+            assert_eq!(unread(cx), Some(1));
+        });
     }
 }
