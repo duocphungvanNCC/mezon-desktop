@@ -3460,10 +3460,10 @@ impl MentionInput {
         };
         self.clear_grammar_correction(cx);
         let corrected = text.to_string();
+        let end = self.input.read(cx).value_shared().len();
         self.retarget_committed(&corrected);
-        self.last_content = SharedString::from(corrected.clone());
         self.input.update(cx, |input, cx| {
-            input.set_value(&corrected, window, cx);
+            input.replace_range(0..end, &corrected, window, cx);
         });
         self.sync_ranges(cx);
         self.sync_history_payload(cx);

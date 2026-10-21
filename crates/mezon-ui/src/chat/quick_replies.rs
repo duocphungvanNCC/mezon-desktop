@@ -17,16 +17,22 @@ pub fn last_text_message_for_quick_replies<'a>(
     if !store.is_reading_live_tail(bucket) {
         return None;
     }
-    store
-        .messages_in_channel(bucket)
+    last_unanswered_text_message(store.messages_in_channel(bucket), viewer_id)
+}
+
+fn last_unanswered_text_message<'a>(
+    messages: &'a [Message],
+    viewer_id: Option<&str>,
+) -> Option<&'a Message> {
+    let message = messages
         .iter()
         .rev()
-        .find(|message| {
-            if viewer_id.is_some_and(|id| message.is_sent_by(id)) {
-                return false;
-            }
-            quick_reply_source_text(message).is_some()
-        })
+        .find(|message| quick_reply_source_text(message).is_some())?;
+    if viewer_id.is_some_and(|id| message.is_sent_by(id)) {
+        None
+    } else {
+        Some(message)
+    }
 }
 
 pub fn quick_reply_source_text(message: &Message) -> Option<&str> {
@@ -45,7 +51,7 @@ pub fn quick_reply_source_text(message: &Message) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::quick_reply_source_text;
+    use super::{last_unanswered_text_message, quick_reply_source_text};
     use mezon_store::Message;
     use mezon_store::ids::{ChannelId, MessageId};
     use mezon_store::message::MessageCode;
@@ -108,6 +114,26 @@ mod tests {
         assert_eq!(
             quick_reply_source_text(&minimal_message("hello", MessageCode::Chat)),
             Some("hello")
+        );
+    }
+
+    #[test]
+    fn skips_pills_when_newest_text_is_ours() {
+        let mut theirs = minimal_message("cau hoi", MessageCode::Chat);
+        theirs.sender_id = "other".into();
+        let mut ours = minimal_message("da tra loi", MessageCode::Chat);
+        ours.sender_id = "me".into();
+        let messages = [theirs, ours];
+        assert!(last_unanswered_text_message(&messages, Some("me")).is_none());
+        assert_eq!(
+            last_unanswered_text_message(&messages, Some("other"))
+                .map(|message| message.content.as_str()),
+            Some("da tra loi")
+        );
+        assert_eq!(
+            last_unanswered_text_message(&messages[..1], Some("me"))
+                .map(|message| message.content.as_str()),
+            Some("cau hoi")
         );
     }
 }

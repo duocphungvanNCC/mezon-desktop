@@ -62,7 +62,12 @@ static INTENT_SESSION: OnceLock<Mutex<SessionSlot>> = OnceLock::new();
 static ACCENT_SESSION: OnceLock<Mutex<SessionSlot>> = OnceLock::new();
 
 fn load_session(bytes: &[u8]) -> Result<Session, ort::Error> {
-    Session::builder()?.commit_from_memory(bytes)
+    Session::builder()?
+        .with_intra_threads(1)?
+        .with_inter_threads(1)?
+        .with_intra_op_spinning(false)?
+        .with_inter_op_spinning(false)?
+        .commit_from_memory(bytes)
 }
 
 fn intent_slot() -> &'static Mutex<SessionSlot> {
