@@ -1438,6 +1438,7 @@ fn search_merge_content_highlights(
     let text_len = text.len();
     let mut styled = Vec::new();
     let mut links = Vec::new();
+    let mut queries = Vec::new();
     for (range, style, kind) in tokens {
         if range.start >= range.end || range.end > text_len {
             continue;
@@ -1447,7 +1448,13 @@ fn search_merge_content_highlights(
         }
         match kind {
             SearchHighlightKind::Link => links.push((range, style)),
-            SearchHighlightKind::QueryMatch => styled.push((range, style)),
+            SearchHighlightKind::QueryMatch => queries.push((
+                range,
+                HighlightStyle {
+                    background_color: style.background_color,
+                    ..Default::default()
+                },
+            )),
             SearchHighlightKind::Rich(RichRunKind::Link) => links.push((range, style)),
             SearchHighlightKind::Rich(_) => styled.push((range, style)),
         }
@@ -1479,7 +1486,7 @@ fn search_merge_content_highlights(
     if cursor < text_len {
         highlights.push((cursor..text_len, body_style));
     }
-    highlights
+    gpui::combine_highlights(highlights, queries).collect()
 }
 
 fn search_highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
@@ -2274,6 +2281,50 @@ mod header_search_bar_tests {
     use crate::chat::layout::ChatLayout;
     use crate::theme::Theme;
 
+    #[test]
+    fn query_highlights_preserve_link_style_across_the_entire_url() {
+        use super::*;
+
+        let text = "https://example.com/plain";
+        for theme in [Theme::dark(), Theme::light()] {
+            let link_style = search_link_highlight_style(&theme);
+            let query_style = HighlightStyle {
+                color: Some(theme.tokens.text_theme_message.into()),
+                background_color: Some(theme.tokens.bg_item_theme_hover.into()),
+                ..Default::default()
+            };
+            for query in [0..5, 8..15, 20..25, 0..text.len()] {
+                for kind in [
+                    SearchHighlightKind::Link,
+                    SearchHighlightKind::Rich(RichRunKind::Link),
+                ] {
+                    let highlights = search_merge_content_highlights(
+                        text,
+                        vec![
+                            (query.clone(), query_style, SearchHighlightKind::QueryMatch),
+                            (0..text.len(), link_style, kind),
+                        ],
+                        HighlightStyle::default(),
+                    );
+                    assert_eq!(highlights.first().unwrap().0.start, 0);
+                    assert_eq!(highlights.last().unwrap().0.end, text.len());
+                    for (range, style) in highlights {
+                        assert_eq!(style.color, link_style.color);
+                        assert_eq!(style.underline, link_style.underline);
+                        assert_eq!(
+                            style.background_color,
+                            if search_ranges_overlap(&range, &query) {
+                                query_style.background_color
+                            } else {
+                                None
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     struct LinkHost(Box<dyn Fn() -> gpui::AnyElement>);
 
     impl Render for LinkHost {
@@ -2298,6 +2349,7 @@ mod header_search_bar_tests {
             );
         });
         let cx = cx.add_empty_window();
+        let host = cx.update(|_, cx| cx.new(|_| LinkHost(Box::new(|| div().into_any_element()))));
         for (label, url) in [
             ("Tài liệu 📎", "https://example.com/first"),
             ("Tài liệu 📎", "https://example.com/second"),
@@ -2312,17 +2364,20 @@ mod header_search_bar_tests {
                 .into(),
                 content_tokens: None,
             };
-            cx.draw(point(px(0.), px(0.)), size(px(300.), px(80.)), |_, cx| {
-                cx.new(|_| {
-                    LinkHost(Box::new(move || {
+            cx.update(|_, cx| {
+                host.update(cx, |host, cx| {
+                    host.0 = Box::new(move || {
                         super::render_rich_search_content(
                             &layout,
                             &["Tài".to_string()],
                             &Theme::dark(),
                         )
-                    }))
-                })
-                .into_any_element()
+                    });
+                    cx.notify();
+                });
+            });
+            cx.draw(point(px(0.), px(0.)), size(px(300.), px(80.)), |_, _| {
+                host.clone().into_any_element()
             });
             cx.simulate_click(point(px(5.), px(8.)), Modifiers::none());
         }
