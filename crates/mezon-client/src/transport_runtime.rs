@@ -1812,6 +1812,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let src = src.to_string();
+        let dst = dst.to_string();
+
+        runtime()
+            .spawn(async move { transport.link_cdn_file(&src, &dst).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
@@ -3264,6 +3275,15 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.close_dm_by_channel_id(0, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.open_dm_by_channel_id(0, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

@@ -125,6 +125,24 @@ impl std::fmt::Display for EnvelopeStatus {
 
 const ENVELOPE_NOT_FOUND: i32 = 404;
 
+#[derive(Debug, Clone, Copy)]
+struct HttpFallbackStatus {
+    status: u16,
+}
+
+impl std::fmt::Display for HttpFallbackStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP fallback failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpFallbackStatus {}
+
+fn is_http_conflict(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpFallbackStatus>()
+        .is_some_and(|failure| failure.status == http::StatusCode::CONFLICT.as_u16())
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
     anyhow::Error::new(ApiStatusError {
@@ -1572,6 +1590,16 @@ pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
         clan_avatar.to_string()
     } else {
         user_avatar.to_string()
+    }
+}
+
+pub fn message_sender_name(message: &api::ChannelMessage) -> &str {
+    if !message.clan_nick.is_empty() {
+        &message.clan_nick
+    } else if !message.display_name.is_empty() {
+        &message.display_name
+    } else {
+        &message.username
     }
 }
 
@@ -3419,6 +3447,29 @@ pub fn is_link_markdown_kind(kind: &str) -> bool {
     )
 }
 
+fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
+    let open = body.iter().filter(|&&c| c == '(').count();
+    let mut close = body.iter().filter(|&&c| c == ')').count();
+    let mut len = body.len();
+    while close > open {
+        let mut before_punctuation = len;
+        while before_punctuation > 0
+            && matches!(
+                body[before_punctuation - 1],
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"'
+            )
+        {
+            before_punctuation -= 1;
+        }
+        if before_punctuation == 0 || body[before_punctuation - 1] != ')' {
+            break;
+        }
+        len = before_punctuation - 1;
+        close -= 1;
+    }
+    len
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -3459,6 +3510,8 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             while j < n && !matches!(chars[j], ' ' | '\n' | '\r' | '\t') {
                 j += 1;
             }
+            let j =
+                i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
                 let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
@@ -4154,6 +4207,7 @@ impl MezonTransport {
                     api_index: api_index as i32,
                     api_name: api_name.to_string(),
                     body,
+                    region: 0,
                 },
             )),
         };
@@ -4444,7 +4498,10 @@ impl MezonTransport {
                     status.as_u16()
                 );
             }
-            anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
+            return Err(HttpFallbackStatus {
+                status: status.as_u16(),
+            }
+            .into());
         }
         if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
             anyhow::bail!(
@@ -4642,13 +4699,7 @@ impl MezonTransport {
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
-        let sender_name = if !message.clan_nick.is_empty() {
-            message.clan_nick.clone()
-        } else if !message.display_name.is_empty() {
-            message.display_name.clone()
-        } else {
-            message.username.clone()
-        };
+        let sender_name = message_sender_name(message).to_string();
 
         let attachments = parse_message_attachments(&message.attachments);
         let references = parse_message_references(&message.references);
@@ -4946,6 +4997,7 @@ impl MezonTransport {
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
+            "LinkCDNFile" => 214,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -7329,6 +7381,34 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::LinkCdnFileRequest {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        }
+        .encode_to_vec();
+        let has_http_session = self.http_fallback.read().is_some();
+        let sent = match self
+            .send_api_request_with_http_fallback(cid, "LinkCDNFile", body.clone())
+            .await
+        {
+            Err(error) if has_http_session && is_unknown_api_error(&error) => self
+                .send_api_request_over_http("LinkCDNFile", body)
+                .await
+                .map(|response| (0, response)),
+            sent => sent,
+        };
+        match sent {
+            Ok((0, _)) => Ok(()),
+            Ok((code, _)) => Err(api_status_error(code)),
+            Err(error) if is_http_conflict(&error) => {
+                Err(api_status_error(ApiStatusError::ALREADY_EXISTS))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Search threads by label within a parent channel.
@@ -10534,16 +10614,48 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeControlError {
+    pub action: String,
+    pub code: i64,
+    pub message: Option<String>,
+}
+
+impl RealtimeControlError {
+    pub const FORBIDDEN: i64 = 403;
+
+    pub fn is_forbidden(&self) -> bool {
+        self.code == Self::FORBIDDEN
+    }
+}
+
+impl std::fmt::Display for RealtimeControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{} error: code={} {}", self.action, self.code, message),
+            None => write!(f, "{} error: code={}", self.action, self.code),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeControlError {}
+
 fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
     if let Some(error) = realtime_error_from_body(response) {
-        anyhow::bail!(
-            "{action} error: code={} {}",
-            error.code,
-            error.message.trim()
-        );
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(error.code),
+            message: Some(error.message.trim().to_owned()),
+        }
+        .into());
     }
     if code != 0 {
-        anyhow::bail!("{action} error: code={code}");
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(code),
+            message: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -10799,6 +10911,7 @@ mod tests {
                     api_index: 1,
                     api_name: "X".to_string(),
                     body: vec![0x08, 0x00],
+                    region: 0,
                 },
             )),
         };
@@ -11704,6 +11817,45 @@ mod tests {
     }
 
     #[test]
+    fn detect_markdown_link_wrapped_in_parens_leaves_the_close_paren_out() {
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)"),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com))"),
+            vec![md("lk", 5, 18)]
+        );
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)."),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com)!)"),
+            vec![md("lk", 5, 18)]
+        );
+    }
+
+    #[test]
+    fn detect_markdown_link_keeps_a_close_paren_it_opened() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
+    }
+
+    #[test]
+    fn send_content_link_wrapped_in_parens_stops_before_the_close_paren() {
+        let sent = build_send_content(
+            "(https://www.youtube.com/)",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.markdowns, vec![md("lk", 1, 25)]);
+    }
+
+    #[test]
     fn detect_markdown_tags_social_links_by_platform() {
         assert_eq!(
             detect_markdown("https://www.youtube.com/watch?v=lHW3fsJQ1sg"),
@@ -12170,8 +12322,16 @@ mod tests {
                     } else {
                         Vec::new()
                     };
+                    let linked_twice = path.ends_with("LinkCDNFile")
+                        && api::LinkCdnFileRequest::decode(&buf[head_end..])
+                            .is_ok_and(|request| request.dst == LINKED_DST);
+                    let status = if linked_twice {
+                        "409 Conflict"
+                    } else {
+                        "200 OK"
+                    };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -12210,6 +12370,104 @@ mod tests {
             .await
             .expect_err("channel 0 has no signature");
         assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    const LINK_SRC: &str = "1cf93b197d401000/2090000000000000001_photo.png";
+    const LINK_DST: &str = "1d0000000000abcd/2090000000000000001_photo.png";
+    const LINKED_DST: &str = "1d0000000000abcd/2090000000000000002_linked.png";
+
+    fn live_fallback(port: u16) -> HttpFallbackSession {
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        fallback
+    }
+
+    fn open_transport(port: u16) -> MezonTransport {
+        let mut t = transport(true);
+        t.connect_gate = Duration::from_millis(50);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(live_fallback(port)));
+        t
+    }
+
+    fn answer_next_socket_request(
+        t: &MezonTransport,
+        code: u32,
+        body: Vec<u8>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = answered.clone();
+        let pending = t.pending_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let executor = {
+                    let mut pending = pending.lock();
+                    let cid = pending.keys().next().copied();
+                    cid.and_then(|cid| pending.remove(&cid))
+                };
+                if let Some(executor) = executor {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = executor.sender.send((code, body));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        answered
+    }
+
+    fn unknown_api_envelope() -> Vec<u8> {
+        realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 404,
+                message: "Not found.".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_goes_over_http_when_the_socket_does_not_know_it() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        let answered = answer_next_socket_request(&t, 0, unknown_api_envelope());
+
+        t.link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect("the link should go through over HTTP");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_already_linked_over_the_socket_is_not_sent_again() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        answer_next_socket_request(&t, ApiStatusError::ALREADY_EXISTS, Vec::new());
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), None);
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_conflict_over_http_reads_as_already_linked() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(live_fallback(port)));
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINKED_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -12577,6 +12835,7 @@ mod tests {
         assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
+        assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -13030,6 +13289,10 @@ mod tests {
         assert!(
             message.contains("join_clan_chat error: code=403 Not allowed"),
             "{message}"
+        );
+        assert!(
+            err.downcast_ref::<RealtimeControlError>()
+                .is_some_and(RealtimeControlError::is_forbidden)
         );
     }
 

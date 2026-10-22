@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
@@ -9,11 +7,12 @@ use gpui::{
 use mezon_store::{
     AccountEvent, AccountStore, AuthState, AutoUpdateStatus, AutoUpdateStore,
     CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
-    ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore,
-    MessagesStore, NoiseSuppressionStatus, PinnedEvent, PinnedMessagesStore, Settings, StreamStore,
-    THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState,
-    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind, DirectMessageStore,
+    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
+    NoiseSuppressionStatus, PickedSearchUser, PinnedEvent, PinnedMessagesStore, Settings,
+    StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore,
+    UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_user_name_tokens, retain_picked_search_users,
 };
 use ui::{PopoverMenuHandle, Tooltip};
 
@@ -22,6 +21,7 @@ use crate::chat::age_restricted::{AgeRestrictedGate, age_gate_blocks};
 use crate::chat::area::ChatArea;
 use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::message_search::{
@@ -90,7 +90,7 @@ pub struct ChatLayout {
     message_search_input: Option<Entity<InputState>>,
     message_search_context: Option<(ChannelId, ClanId, bool)>,
     search_dropdown_index: Option<usize>,
-    search_mention_ids: HashMap<String, String>,
+    search_picked_users: Vec<PickedSearchUser>,
     _message_search_input_sub: Option<Subscription>,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
@@ -550,7 +550,7 @@ impl ChatLayout {
             message_search_input: None,
             message_search_context: None,
             search_dropdown_index: None,
-            search_mention_ids: HashMap::new(),
+            search_picked_users: Vec::new(),
             _message_search_input_sub: None,
             inbox_handle: PopoverMenuHandle::default(),
             thread_popover_handle: PopoverMenuHandle::default(),
@@ -777,13 +777,9 @@ impl ChatLayout {
         if query.trim().is_empty() {
             return;
         }
-        let mention_ids = self.search_mention_ids.clone();
-        let query = expand_mention_name_tokens(&query, |name| {
-            let key = name.to_lowercase();
-            if let Some(id) = mention_ids.get(&key) {
-                return Some(id.clone());
-            }
-            resolve_mention_name_to_user_id(name, clan_id, is_direct, channel_id, cx)
+        let members = mention_member_pool(cx);
+        let query = expand_user_name_tokens(&query, &self.search_picked_users, |name| {
+            resolve_member_name_to_user_id(&members, name)
         });
         self.show_search_options = false;
         self.show_results_panel = true;
@@ -834,7 +830,7 @@ impl ChatLayout {
         }
         self.message_search_panel = None;
         self.message_search_context = None;
-        self.search_mention_ids.clear();
+        self.search_picked_users.clear();
         cx.notify();
     }
 
@@ -883,9 +879,14 @@ impl ChatLayout {
         let Some(input) = self.message_search_input.clone() else {
             return;
         };
-        if trigger == '~' && !display.is_empty() && !id.is_empty() {
-            self.search_mention_ids
-                .insert(display.to_lowercase(), id.to_string());
+        if matches!(trigger, '~' | '>') && !display.is_empty() && !id.is_empty() {
+            self.search_picked_users
+                .retain(|pick| pick.trigger != trigger || pick.display != display);
+            self.search_picked_users.push(PickedSearchUser {
+                trigger,
+                display: display.to_string(),
+                user_id: id.to_string(),
+            });
         }
         let current = input.read(cx).value().to_string();
         let next = mezon_store::insert_filter_markup(&current, trigger, display, id);
@@ -900,11 +901,11 @@ impl ChatLayout {
     }
 
     pub(crate) fn on_search_input_cleared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_picked_users.clear();
         if self.show_results_panel {
             self.close_results_panel(cx);
             self.message_search_expanded = false;
             self.show_search_options = false;
-            self.search_mention_ids.clear();
             self.blur_message_search(window, cx);
         } else {
             self.show_search_options = false;
@@ -946,6 +947,7 @@ impl ChatLayout {
                 }
                 InputEvent::Change => {
                     let query = input_for_sub.read(cx).value().to_string();
+                    retain_picked_search_users(&mut this.search_picked_users, &query);
                     this.show_search_options = this.message_search_expanded
                         && crate::chat::message_search::should_show_message_search_dropdown(&query);
                     this.reset_search_dropdown_index(cx);
@@ -3306,6 +3308,7 @@ impl ChatLayout {
             | Route::SettingsDevices
             | Route::SettingsAppearance
             | Route::SettingsActivity
+            | Route::SettingsChat
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
@@ -3354,28 +3357,11 @@ impl ChatLayout {
     }
 }
 
-fn resolve_mention_name_to_user_id(
-    name: &str,
-    clan_id: ClanId,
-    is_direct: bool,
-    channel_id: ChannelId,
-    cx: &App,
-) -> Option<String> {
+fn resolve_member_name_to_user_id(members: &[MentionMemberRaw], name: &str) -> Option<String> {
     let needle = name.to_lowercase();
-    if is_direct {
-        let store = GroupMembersStore::global(cx);
-        let store = store.read(cx);
-        return store.members(channel_id).iter().find_map(|member| {
-            let username_match = member.user.username.eq_ignore_ascii_case(name);
-            let name_match = member.name().to_lowercase() == needle;
-            (username_match || name_match).then(|| member.id().to_string())
-        });
-    }
-    let store = ClanMembersStore::global(cx);
-    let store = store.read(cx);
-    store.members(clan_id).into_iter().find_map(|member| {
-        let username_match = member.user.username.eq_ignore_ascii_case(name);
-        let name_match = member.name().to_lowercase() == needle;
-        (username_match || name_match).then(|| member.id().to_string())
-    })
+    members
+        .iter()
+        .find(|member| member.username.eq_ignore_ascii_case(name))
+        .or_else(|| members.iter().find(|member| member.display_lc == needle))
+        .map(|member| member.user_id.clone())
 }
