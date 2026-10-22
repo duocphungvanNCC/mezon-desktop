@@ -77,6 +77,8 @@ const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const COMMITTED_MASK_START: char = '\u{E010}';
+const COMMITTED_MASK_END: char = '\u{E011}';
 const PASTE_SAFETY_CAP_UTF16: usize = 100_000;
 const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 40.;
@@ -313,6 +315,52 @@ impl CommittedToken {
             end: token.end,
         }
     }
+}
+
+fn committed_mask_placeholder(index: usize) -> String {
+    format!("{COMMITTED_MASK_START}{index}.{COMMITTED_MASK_END}")
+}
+
+fn mask_committed_for_grammar(text: &str, committed: &[CommittedToken]) -> (String, Vec<String>) {
+    let mut tokens: Vec<&CommittedToken> = committed
+        .iter()
+        .filter(|token| {
+            matches!(
+                token.kind,
+                TokenKind::Mention { .. } | TokenKind::Emoji { .. }
+            )
+        })
+        .collect();
+    tokens.sort_by_key(|token| token.start);
+    let mut out = String::with_capacity(text.len());
+    let mut originals = Vec::with_capacity(tokens.len());
+    let mut cursor = 0usize;
+    for token in tokens {
+        if token.start < cursor || token.end > text.len() || token.start >= token.end {
+            continue;
+        }
+        if !text.is_char_boundary(token.start) || !text.is_char_boundary(token.end) {
+            continue;
+        }
+        if text.get(token.start..token.end) != Some(token.display.as_str()) {
+            continue;
+        }
+        out.push_str(&text[cursor..token.start]);
+        out.push_str(&committed_mask_placeholder(originals.len()));
+        originals.push(token.display.clone());
+        cursor = token.end;
+    }
+    out.push_str(&text[cursor..]);
+    (out, originals)
+}
+
+fn unmask_committed_for_grammar(text: &str, originals: &[String]) -> String {
+    let mut current = text.to_string();
+    for (index, original) in originals.iter().enumerate() {
+        let placeholder = committed_mask_placeholder(index);
+        current = current.replacen(&placeholder, original, 1);
+    }
+    current
 }
 
 #[derive(Clone)]
@@ -3403,19 +3451,27 @@ impl MentionInput {
         self.grammar_generation += 1;
         let generation = self.grammar_generation;
         let draft_snapshot = content.to_string();
-        let draft_for_worker = draft_snapshot.clone();
+        let (masked_draft, committed_masks) = mask_committed_for_grammar(content, &self.committed);
         self._grammar_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(GRAMMAR_CORRECTION_DEBOUNCE)
                 .await;
+            let original_draft = draft_snapshot.clone();
             let suggestion = cx
                 .background_executor()
                 .spawn(async move {
                     let client = MezonGrammarClient::shared();
-                    client
-                        .correct_within_limit(&draft_for_worker)
-                        .filter(|result| result.has_errors)
-                        .map(|result| result.corrected)
+                    let result = client.correct_within_limit(&masked_draft)?;
+                    let corrected =
+                        unmask_committed_for_grammar(&result.corrected, &committed_masks);
+                    if corrected.contains('\u{E010}') {
+                        return None;
+                    }
+                    if corrected == original_draft.trim() {
+                        None
+                    } else {
+                        Some(corrected)
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -5053,5 +5109,34 @@ mod mention_trigger_tests {
     #[test]
     fn a_trailing_separator_is_not_highlighted_as_a_space() {
         assert_eq!(highlight_word_ranges("Timeriel", "timer_"), vec![0..5]);
+    }
+}
+
+#[cfg(test)]
+mod grammar_committed_mask_tests {
+    use super::{
+        CommittedToken, TokenKind, mask_committed_for_grammar, unmask_committed_for_grammar,
+    };
+
+    #[test]
+    fn masks_mention_display_and_restores_it() {
+        let display = "@huy.lexuan";
+        let text = format!("hoi {display} di");
+        let start = text.find(display).expect("mention");
+        let token = CommittedToken {
+            kind: TokenKind::Mention {
+                user_id: "1".into(),
+                role_id: String::new(),
+            },
+            display: display.into(),
+            start,
+            end: start + display.len(),
+        };
+        let (masked, originals) = mask_committed_for_grammar(&text, &[token]);
+        assert!(!masked.contains(display), "{masked}");
+        assert_eq!(originals, vec![display.to_string()]);
+        let restored = unmask_committed_for_grammar(&masked.replace("hoi", "Hoi"), &originals);
+        assert!(restored.contains(display), "{restored}");
+        assert!(!restored.contains("@huy. Lexuan"), "{restored}");
     }
 }

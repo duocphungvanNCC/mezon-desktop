@@ -733,6 +733,10 @@ static RE_FENCED_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]
 static RE_INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`\n]+`").unwrap());
 static RE_EMOJI_SHORTCODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":[A-Za-z0-9_+\-]+:").unwrap());
+static RE_DOTTED_OR_AT_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\S*[.@]\S+").unwrap());
+const LITERAL_MASK_START: char = '\u{E000}';
+const LITERAL_MASK_END: char = '\u{E001}';
 static RE_VN_DIACRITIC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]").unwrap()
 });
@@ -741,13 +745,14 @@ pub fn contains_vietnamese_diacritics(text: &str) -> bool {
     RE_VN_DIACRITIC.is_match(text)
 }
 
-fn protected_literal_spans(text: &str) -> Vec<(usize, usize)> {
+pub(crate) fn protected_literal_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     for re in [
         &*RE_FENCED_CODE,
         &*RE_URL,
         &*RE_INLINE_CODE,
         &*RE_EMOJI_SHORTCODE,
+        &*RE_DOTTED_OR_AT_TOKEN,
     ] {
         for matched in re.find_iter(text) {
             spans.push((matched.start(), matched.end()));
@@ -765,6 +770,47 @@ fn protected_literal_spans(text: &str) -> Vec<(usize, usize)> {
         }
     }
     merged
+}
+
+fn span_overlaps_any(start: usize, end: usize, spans: &[(usize, usize)]) -> bool {
+    spans.iter().any(|&(from, to)| start < to && end > from)
+}
+
+fn literal_mask_placeholder(index: usize) -> String {
+    format!("{LITERAL_MASK_START}{index}.{LITERAL_MASK_END}")
+}
+
+pub(crate) fn mask_protected_literals(text: &str) -> (String, Vec<String>) {
+    let spans = protected_literal_spans(text);
+    if spans.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut originals = Vec::with_capacity(spans.len());
+    let mut cursor = 0usize;
+    for &(start, end) in &spans {
+        if start < cursor || end > text.len() || start >= end {
+            continue;
+        }
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        out.push_str(&text[cursor..start]);
+        out.push_str(&literal_mask_placeholder(originals.len()));
+        originals.push(text[start..end].to_string());
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    (out, originals)
+}
+
+pub(crate) fn unmask_protected_literals(text: &str, originals: &[String]) -> String {
+    let mut current = text.to_string();
+    for (index, original) in originals.iter().enumerate() {
+        let placeholder = literal_mask_placeholder(index);
+        current = current.replacen(&placeholder, original, 1);
+    }
+    current
 }
 
 fn rewrite_outside_spans(
@@ -874,13 +920,25 @@ pub fn normalize_sentence_capitalization(text: &str) -> (String, Vec<CorrectionE
     let mut edits = Vec::new();
     let re = Regex::new(r"(^|[.?!]\s+)(\p{L})").unwrap();
 
-    let capitalized = re
+    let mut capitalized = re
         .replace_all(text, |caps: &regex::Captures| {
             let prefix = &caps[1];
             let letter = &caps[2];
             format!("{}{}", prefix, letter.to_uppercase())
         })
-        .to_string();
+        .into_owned();
+    for &(start, end) in &protected_literal_spans(text) {
+        if start < end
+            && end <= text.len()
+            && end <= capitalized.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+            && capitalized.is_char_boundary(start)
+            && capitalized.is_char_boundary(end)
+        {
+            capitalized.replace_range(start..end, &text[start..end]);
+        }
+    }
 
     if capitalized != text {
         edits.push(CorrectionEdit {
@@ -1365,17 +1423,19 @@ pub fn restore_diacritics(text: &str) -> (String, Vec<CorrectionEdit>) {
     }
 
     let re_token = Regex::new(r"(\p{L}+|[^\p{L}]+)").unwrap();
-    let mut tokens: Vec<String> = re_token
-        .find_iter(text)
-        .map(|m| m.as_str().to_string())
-        .collect();
+    let protected = protected_literal_spans(text);
+    let mut tokens: Vec<String> = Vec::new();
     let mut word_indices = Vec::new();
-
     let re_word = Regex::new(r"^\p{L}+$").unwrap();
-    for (i, t) in tokens.iter().enumerate() {
-        if re_word.is_match(t) && !is_foreign_or_tech_word(t) {
-            word_indices.push(i);
+    for matched in re_token.find_iter(text) {
+        let token = matched.as_str().to_string();
+        if re_word.is_match(&token)
+            && !is_foreign_or_tech_word(&token)
+            && !span_overlaps_any(matched.start(), matched.end(), &protected)
+        {
+            word_indices.push(tokens.len());
         }
+        tokens.push(token);
     }
 
     if word_indices.is_empty() {

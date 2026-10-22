@@ -2,7 +2,7 @@ use mezon_grammar::MAX_CORRECTION_CHAR_COUNT;
 use mezon_grammar::client::MezonGrammarClient;
 use mezon_grammar::grammar_checker::check_grammar_syntax;
 use mezon_grammar::pronoun::extract_target_pronoun;
-use mezon_grammar::rules::normalize_punctuation_spacing;
+use mezon_grammar::rules::{normalize_punctuation_spacing, restore_diacritics};
 
 #[test]
 fn test_teencode_and_confusables() {
@@ -215,4 +215,36 @@ fn test_thx_and_weekday_teencode() {
     let client = MezonGrammarClient::new();
     assert_eq!(client.correct("thx").corrected, "Cảm ơn");
     assert_eq!(client.correct("t2").corrected, "Thứ hai");
+}
+
+#[test]
+fn test_keeps_already_accented_ngay() {
+    let client = MezonGrammarClient::new();
+    assert_eq!(client.correct("em sẽ làm ngay").corrected, "Em sẽ làm ngay");
+    assert_eq!(
+        client.correct("anh đi ngay nhé").corrected,
+        "Anh đi ngay nhé"
+    );
+}
+
+#[test]
+fn test_keeps_dotted_and_at_tokens() {
+    let samples = [
+        "mezon.ai",
+        "google.com",
+        "huy@ncc.asia",
+        "main.rs",
+        "@huy.lexuan",
+    ];
+    let client = MezonGrammarClient::new();
+    for sample in samples {
+        let (fixed, _) = normalize_punctuation_spacing(sample);
+        assert_eq!(fixed, sample, "{sample}");
+        assert_eq!(client.correct(sample).corrected, sample, "{sample}");
+    }
+    let (restored, _) = restore_diacritics("google.com");
+    assert_eq!(restored, "google.com");
+    let corrected = client.correct("hoi @huy.lexuan di").corrected;
+    assert!(corrected.contains("@huy.lexuan"), "{corrected}");
+    assert!(!corrected.contains("@huy. Lexuan"), "{corrected}");
 }

@@ -1,7 +1,8 @@
 use crate::onnx::{ACCENT_MAX_CHARS, ACCENT_VOCAB_SIZE, accent_char_id};
 use crate::rules::{
     COMPILED_CONFUSABLES, CONFUSABLE_PHRASES, contains_vietnamese_diacritics,
-    is_foreign_or_tech_word, is_predominantly_english_sentence, match_case, strip_accents,
+    is_foreign_or_tech_word, is_predominantly_english_sentence, match_case,
+    protected_literal_spans, strip_accents,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -220,6 +221,19 @@ fn title_if_needed(matched: &str, replacement: &str) -> String {
 
 fn protected_indices(text: &str) -> HashSet<usize> {
     let mut protected = HashSet::new();
+    for &(start, end) in &protected_literal_spans(text) {
+        if start >= end || end > text.len() {
+            continue;
+        }
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        let from = text[..start].chars().count();
+        let len = text[start..end].chars().count();
+        for idx in from..from + len {
+            protected.insert(idx);
+        }
+    }
     let mut char_pos = 0usize;
     let mut alpha_tokens = Vec::new();
     for matched in RE_TOKEN.find_iter(text) {
