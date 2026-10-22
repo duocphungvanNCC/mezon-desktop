@@ -382,6 +382,25 @@ fn reopen_at(
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn matroska_duration_seconds(bytes: &[u8]) -> Option<f64> {
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    let mut demuxer = open_demuxer(&bytes).ok()?;
+    if let Some(duration) = header_duration_seconds(demuxer.info()) {
+        return Some(duration);
+    }
+    let video_track = demuxer
+        .tracks()
+        .iter()
+        .find(|track| track.track_type() == TrackType::Video)?
+        .track_number()
+        .get();
+    let timestamp_scale = demuxer.info().timestamp_scale().get();
+    video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)
+        .ok()
+        .filter(|duration| *duration > 0.0)
+}
+
 fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
     let ticks = info.duration()?;
     let scale = info.timestamp_scale().get() as f64;

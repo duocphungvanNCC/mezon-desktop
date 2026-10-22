@@ -149,6 +149,8 @@ enum PreparedInner {
     Webm(Box<webm_player::WebmPlayerImpl>),
     #[cfg(target_os = "macos")]
     Remuxed(std::path::PathBuf),
+    #[cfg(windows)]
+    MediaFoundation(platform::MediaFoundationSource),
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -162,8 +164,12 @@ impl PreparedVideo {
             )),
         };
         #[cfg(windows)]
-        let inner =
-            PreparedInner::Webm(Box::new(webm_player::WebmPlayerImpl::open(url, max_size)?));
+        let inner = match platform::prepare_media_foundation(url) {
+            Some(source) => PreparedInner::MediaFoundation(source),
+            None => {
+                PreparedInner::Webm(Box::new(webm_player::WebmPlayerImpl::open(url, max_size)?))
+            }
+        };
         Ok(Self { inner, max_size })
     }
 }
@@ -186,9 +192,11 @@ impl VideoPlayer {
             PreparedInner::Remuxed(path) => {
                 platform::PlayerImpl::open_file(&path, prepared.max_size)?
             }
+            #[cfg(windows)]
+            PreparedInner::MediaFoundation(source) => {
+                platform::PlayerImpl::from_media_foundation(source, prepared.max_size)?
+            }
         };
-        #[cfg(windows)]
-        let _ = prepared.max_size;
         Ok(Self { inner })
     }
 
