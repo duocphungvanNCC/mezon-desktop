@@ -64,6 +64,7 @@ pub use permission::{
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::messages::MEDIA_POOL_VERSION;
 pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
