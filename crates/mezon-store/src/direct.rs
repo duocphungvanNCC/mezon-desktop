@@ -741,8 +741,10 @@ impl DirectMessageStore {
                 match result {
                     Ok(list) => {
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
-                        let mut new_channels: Vec<DirectChannel> =
-                            list.into_iter().map(direct_from_api).collect();
+                        let mut new_channels: Vec<DirectChannel> = list
+                            .into_iter()
+                            .map(|channel| direct_from_api_with_profile(channel, cx))
+                            .collect();
                         let local_counts: HashMap<ChannelId, u32> = this
                             .channels
                             .as_slice()
@@ -847,8 +849,10 @@ impl DirectMessageStore {
                         // listing, so its cache is warm and the join can fan out.
                         this.join_dm_space(cx);
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
-                        let channels: Vec<DirectChannel> =
-                            list.into_iter().map(direct_from_api).collect();
+                        let channels: Vec<DirectChannel> = list
+                            .into_iter()
+                            .map(|channel| direct_from_api_with_profile(channel, cx))
+                            .collect();
                         this.has_more = has_more;
                         this.current_page = 1;
                         this.apply_fetched_page(channels, &badge_map, badges_complete, cx);
@@ -877,6 +881,25 @@ impl DirectMessageStore {
         cx.notify();
     }
 
+    pub(crate) fn apply_user_profile(
+        &mut self,
+        user: &crate::clan_members::User,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for channel in &mut self.channels.channels {
+            if reconcile_direct_profile(channel, user) {
+                cx.emit(DirectEvent::Changed {
+                    channel_id: Some(channel.id),
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelUpdated(e) => {
@@ -890,6 +913,7 @@ impl DirectMessageStore {
                 if !e.channel_avatar.is_empty() {
                     ch.avatar = e.channel_avatar.clone();
                 }
+                reconcile_cached_direct_profile(ch, cx);
                 cx.emit(DirectEvent::Changed { channel_id: None });
                 cx.notify();
             }
@@ -909,6 +933,7 @@ impl DirectMessageStore {
                 let self_id = crate::badge::BadgeService::try_global(cx)
                     .and_then(|badge| badge.read(cx).current_user_id(cx));
                 enrich_direct_from_event_users(&mut channel, &e.users, self_id);
+                reconcile_cached_direct_profile(&mut channel, cx);
                 let member_count = channel.member_count;
                 let inserted = self.channels.push_new(channel);
                 tracing::info!(
@@ -983,7 +1008,8 @@ impl DirectMessageStore {
         increment_unread: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let channel = direct_from_message(m, from_me, increment_unread);
+        let mut channel = direct_from_message(m, from_me, increment_unread);
+        reconcile_cached_direct_profile(&mut channel, cx);
         if from_me {
             self.insert_after_member_lookup(channel, UserId(m.sender_id), cx);
             return false;
@@ -1028,6 +1054,7 @@ impl DirectMessageStore {
                     &users_from_channel_members(&members),
                     Some(self_id),
                 );
+                reconcile_cached_direct_profile(&mut channel, cx);
                 if channel.label.is_empty() || !this.channels.push_new(channel) {
                     return;
                 }
@@ -1598,6 +1625,40 @@ fn direct_from_message(
     }
 }
 
+fn reconcile_direct_profile(channel: &mut DirectChannel, user: &crate::clan_members::User) -> bool {
+    if channel.kind != DirectKind::Dm || channel.peer_user_id != Some(user.id) {
+        return false;
+    }
+    let name = if user.display_name.is_empty() {
+        &user.username
+    } else {
+        &user.display_name
+    };
+    let changed = channel.label != *name
+        || channel.avatar != user.avatar_url
+        || channel.peer_username != user.username;
+    channel.label.clone_from(name);
+    channel.avatar.clone_from(&user.avatar_url);
+    channel.peer_username.clone_from(&user.username);
+    changed
+}
+
+fn direct_from_api_with_profile(channel: ApiDirectChannel, cx: &App) -> DirectChannel {
+    let mut channel = direct_from_api(channel);
+    reconcile_cached_direct_profile(&mut channel, cx);
+    channel
+}
+
+fn reconcile_cached_direct_profile(channel: &mut DirectChannel, cx: &App) {
+    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx)
+        && let Some(user) = channel
+            .peer_user_id
+            .and_then(|id| store.read(cx).confirmed_profile(id))
+    {
+        reconcile_direct_profile(channel, user);
+    }
+}
+
 fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
     let kind = DirectKind::from_raw(c.channel_type);
     let (avatar, peer_user_id, peer_username, online) = match kind {
@@ -1646,6 +1707,104 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn shared_profile_notifies_dm_observer_and_survives_late_listing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (direct, users, _observer) = cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let direct = DirectMessageStore::init(api.clone(), cx);
+            let users = crate::users_by_user::UsersByUserStore::init(api, cx);
+            direct.update(cx, |store, _| {
+                let mut channel = dm(1, 100);
+                channel.peer_user_id = Some(UserId(42));
+                store.channels = list_from(vec![channel]);
+            });
+            let sink = observed.clone();
+            let observer = cx.observe(&direct, move |_, _| sink.set(true));
+            (direct, users, observer)
+        });
+        cx.run_until_parked();
+        observed.set(false);
+        cx.update(|cx| {
+            users.update(cx, |store, cx| {
+                store.apply_user_profile(
+                    crate::clan_members::User {
+                        id: UserId(42),
+                        username: "peer".into(),
+                        display_name: "Newest".into(),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        assert!(observed.get());
+        cx.update(|cx| {
+            assert_eq!(direct.read(cx).find(ChannelId(1)).unwrap().label, "Newest");
+            let stale = direct_from_api_with_profile(api_dm(1, "Old", 3), cx);
+            assert_eq!(stale.label, "Newest");
+            assert!(stale.avatar.is_empty());
+        });
+        observed.set(false);
+        cx.update(|cx| {
+            users.update(cx, |store, cx| {
+                store.apply_user_profile(
+                    crate::clan_members::User {
+                        id: UserId(42),
+                        username: "peer".into(),
+                        display_name: "Newest".into(),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        assert!(!observed.get());
+    }
+
+    #[gpui::test]
+    fn confirmed_profile_changes_dm_and_preserves_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| DirectMessageStore::new(api, cx));
+            store.update(cx, |store, cx| {
+                let mut peer = dm(1, 100);
+                peer.peer_user_id = Some(UserId(7));
+                peer.avatar = "old.png".into();
+                let mut group = peer.clone();
+                group.id = ChannelId(2);
+                group.kind = DirectKind::Group;
+                group.label = "Team".into();
+                store.channels = list_from(vec![peer, group]);
+                store.apply_user_profile(
+                    &crate::clan_members::User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                let peer = store.find(ChannelId(1)).unwrap();
+                assert_eq!(peer.label, "user");
+                assert!(peer.avatar.is_empty());
+                assert_eq!(peer.last_sent_timestamp, 100);
+                assert_eq!(store.find(ChannelId(2)).unwrap().label, "Team");
+            });
+        });
+    }
+
     use super::*;
     use mezon_client::transport::ApiMessageContent;
 

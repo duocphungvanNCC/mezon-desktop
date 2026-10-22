@@ -12,6 +12,26 @@ use crate::ids::{ChannelId, ClanId, RoleId, UserId};
 use crate::presence::PresenceStore;
 use crate::users_by_user::UsersByUserStore;
 
+pub(crate) fn apply_user_profile(user: &User, cx: &mut App) {
+    if let Some(store) = ClanMembersStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+    if let Some(store) = GroupMembersStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+    if let Some(store) = DirectMessageStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+}
+
+pub(crate) fn reconcile_user_profile(user: &mut User, cx: &App) {
+    if let Some(store) = UsersByUserStore::try_global(cx)
+        && let Some(profile) = store.read(cx).confirmed_profile(user.id)
+    {
+        user.update_profile(profile);
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserProfileView {
     pub user_id: UserId,
@@ -178,20 +198,15 @@ pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) ->
                     .member(channel_id, user_id)
                     .map(|member| member.avatar().to_string()),
                 DirectKind::Dm => {
+                    if is_current_user(user_id, cx)
+                        && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
+                    {
+                        return Some(account.avatar_url.clone().unwrap_or_default());
+                    }
                     if let Some(url) = UsersByUserStore::global(cx)
                         .read(cx)
                         .user(user_id)
                         .map(|user| user.avatar_url.clone())
-                    {
-                        return Some(url);
-                    }
-                    if is_current_user(user_id, cx)
-                        && let Some(url) = AccountStore::global(cx)
-                            .read(cx)
-                            .account
-                            .as_ref()
-                            .and_then(|acct| acct.avatar_url.clone())
-                            .filter(|url| !url.is_empty())
                     {
                         return Some(url);
                     }
@@ -281,20 +296,7 @@ fn resolve_direct(
             if is_current_user(user_id, cx)
                 && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
             {
-                let mut view = cached
-                    .unwrap_or_else(|| UserProfileView::from_account(user_id, account, online));
-                if !account.display_name.is_empty() {
-                    view.display_name = account.display_name.clone();
-                }
-                if !account.username.is_empty() {
-                    view.username = account.username.clone();
-                }
-                if let Some(avatar) = account.avatar_url.as_ref().filter(|url| !url.is_empty()) {
-                    view.avatar_url = avatar.clone();
-                }
-                if let Some(about_me) = account.about_me.as_ref() {
-                    view.about_me = about_me.clone();
-                }
+                let mut view = UserProfileView::from_account(user_id, account, online);
                 view.conversation_create_time_seconds = conversation_create_time_seconds;
                 return Some(view);
             }

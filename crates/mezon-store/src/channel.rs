@@ -673,7 +673,6 @@ pub struct ChannelList {
     badge_seeds: HashMap<ClanId, BadgeSeed>,
     joined_clans: HashSet<ClanId>,
     joining_clans: HashMap<ClanId, Shared<Task<()>>>,
-    clan_subscriptions: Option<Task<()>>,
     /// Set the moment the socket drops, cleared by the `resync` that follows.
     /// It records that the joins above already belong to the new session, so the
     /// reconnect does not bump the generation a second time and cancel the join
@@ -882,7 +881,6 @@ impl ChannelList {
         self.badge_seeds.clear();
         self.joined_clans.clear();
         self.joining_clans.clear();
-        self.clan_subscriptions = None;
         self.forgotten_clans.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
@@ -999,7 +997,6 @@ impl ChannelList {
             badge_seeds: HashMap::new(),
             joined_clans: HashSet::new(),
             joining_clans: HashMap::new(),
-            clan_subscriptions: None,
             forgot_socket_session: false,
             socket_generation: 0,
             forgotten_clans: HashSet::new(),
@@ -1057,7 +1054,6 @@ impl ChannelList {
     }
 
     fn on_rejoined_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.subscribe_listed_clans(cx);
         if !self.forgotten_clans.remove(&clan_id) {
             return;
         }
@@ -1187,39 +1183,6 @@ impl ChannelList {
 
     pub fn cancel_badge_seed(&mut self, clan_id: ClanId) {
         self.badge_seeding.remove(&clan_id);
-    }
-
-    fn subscribe_listed_clans(&mut self, cx: &mut Context<Self>) {
-        if self.clan_subscriptions.is_some()
-            || *self.api.status().borrow() != ConnectionStatus::Connected
-        {
-            return;
-        }
-        let generation = (self.reset_generation, self.socket_generation);
-        self.clan_subscriptions = Some(cx.spawn(async move |this, cx| {
-            let mut attempted = HashSet::new();
-            loop {
-                let next = this.update(cx, |this, cx| {
-                    if generation != (this.reset_generation, this.socket_generation) {
-                        return None;
-                    }
-                    let Some(id) = ClanList::global(cx)
-                        .read(cx)
-                        .clans
-                        .iter()
-                        .map(|clan| clan.id)
-                        .find(|id| !attempted.contains(id))
-                    else {
-                        this.clan_subscriptions = None;
-                        return None;
-                    };
-                    attempted.insert(id);
-                    Some(this.ensure_clan_joined(id, cx))
-                });
-                let Ok(Some(join)) = next else { break };
-                join.await;
-            }
-        }));
     }
 
     /// Subscribe the socket to a clan's channel streams — and never before the
@@ -4391,7 +4354,6 @@ impl ChannelList {
         // with the old one, so the clans have to be re-subscribed from scratch.
         self.joined_clans.clear();
         self.joining_clans.clear();
-        self.clan_subscriptions = None;
         self.forgot_socket_session = true;
     }
 
@@ -4421,7 +4383,6 @@ impl ChannelList {
             drop(self.ensure_clan_joined(clan_id, cx));
             self.seed_badges(clan_id, cx).detach();
         }
-        self.subscribe_listed_clans(cx);
     }
 
     pub fn active_channel(&self) -> Option<&Channel> {
@@ -11772,119 +11733,6 @@ mod tests {
                      none of the clan's private channels or threads"
                 );
             });
-        });
-    }
-
-    #[gpui::test]
-    fn profile_realtime_subscribes_from_dm_and_reconnects(cx: &mut gpui::TestAppContext) {
-        let (release_first, first_listing) = futures::channel::oneshot::channel::<()>();
-        let (release_second, second_listing) = futures::channel::oneshot::channel::<()>();
-        let (channels, _status_rx) = cx.update(|cx| {
-            let channels = init_channel_list(cx);
-            let status_rx = channels.read(cx).api.status();
-            channels.update(cx, |channels, cx| {
-                channels._conn_watch = Task::ready(());
-                channels.subscribe_listed_clans(cx);
-                assert!(channels.clan_subscriptions.is_none());
-                channels.api.set_status(ConnectionStatus::Connected);
-                channels.loading.insert(
-                    ClanId(1),
-                    cx.spawn(async move |_, _| {
-                        let _ = first_listing.await;
-                    })
-                    .shared(),
-                );
-                channels.loading.insert(
-                    ClanId(2),
-                    cx.spawn(async move |_, _| {
-                        let _ = second_listing.await;
-                    })
-                    .shared(),
-                );
-            });
-            ClanList::global(cx).update(cx, |clans, cx| {
-                clans.update_clans(
-                    vec![test_clan(ClanId(1), "One"), test_clan(ClanId(2), "Two")],
-                    cx,
-                );
-            });
-            (channels, status_rx)
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            channels.update(cx, |channels, cx| {
-                assert_eq!(channels.active_clan_id, None);
-                assert!(channels.joining_clans.contains_key(&ClanId(1)));
-                assert!(!channels.joining_clans.contains_key(&ClanId(2)));
-                channels.loading.insert(
-                    ClanId(3),
-                    cx.spawn(async move |_, _| {
-                        std::future::pending::<()>().await;
-                    })
-                    .shared(),
-                );
-            });
-            ClanList::global(cx).update(cx, |clans, cx| {
-                clans.update_clans(
-                    vec![
-                        test_clan(ClanId(1), "One"),
-                        test_clan(ClanId(2), "Two"),
-                        test_clan(ClanId(3), "Late"),
-                    ],
-                    cx,
-                );
-            });
-        });
-        release_first.send(()).unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            channels.update(cx, |channels, _| {
-                assert!(!channels.joined_clans.contains(&ClanId(1)));
-                assert!(channels.joining_clans.contains_key(&ClanId(2)));
-                assert!(!channels.joining_clans.contains_key(&ClanId(3)));
-            })
-        });
-        release_second.send(()).unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            channels.update(cx, |channels, cx| {
-                assert!(channels.joining_clans.contains_key(&ClanId(3)));
-                channels.forget_socket_session();
-                assert!(channels.clan_subscriptions.is_none());
-                assert!(channels.joining_clans.is_empty());
-                channels.resync(cx);
-                assert!(channels.clan_subscriptions.is_some());
-                channels.reset(cx);
-                assert!(channels.clan_subscriptions.is_none());
-            })
-        });
-        cx.update(|cx| {
-            ClanList::global(cx).update(cx, |clans, cx| clans.update_clans(Vec::new(), cx));
-            channels.update(cx, |channels, cx| channels.subscribe_listed_clans(cx));
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            channels.update(cx, |channels, cx| {
-                assert!(channels.clan_subscriptions.is_none());
-                channels.loading.insert(
-                    ClanId(4),
-                    cx.spawn(async move |_, _| {
-                        std::future::pending::<()>().await;
-                    })
-                    .shared(),
-                );
-            });
-            ClanList::global(cx).update(cx, |clans, cx| {
-                clans.update_clans(vec![test_clan(ClanId(4), "New session")], cx)
-            });
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            channels.update(cx, |channels, cx| {
-                assert_eq!(channels.active_clan_id, None);
-                assert!(channels.joining_clans.contains_key(&ClanId(4)));
-                channels.reset(cx);
-            })
         });
     }
 
