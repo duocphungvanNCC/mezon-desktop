@@ -2028,6 +2028,7 @@
   "common.modalUnknowChannel.okayGotIt": "알겠습니다",
   "common.modalUnknowChannel.permissionError": "이 콘텐츠에 액세스할 필요한 권한이 없습니다. 오류라고 생각되면 관리자에게 문의하세요.",
   "common.muteNotification": "알림 끄기",
+  "common.new": "새",
   "common.newMention": "새 알림",
   "common.newMessage": "새 메시지",
   "common.newUpdateAvailable": "새 업데이트가 있습니다",

@@ -373,16 +373,24 @@ pub(super) fn render_clan_row(
                 avatar: clan.proxied_avatar_url.clone(),
                 muted,
             },
-            |drag, _, _, cx| {
-                cx.stop_propagation();
-                let name = drag.name.clone();
-                let avatar = drag.avatar.clone();
-                let muted = drag.muted;
-                cx.new(|_| ClanDragPreview {
-                    name,
-                    avatar,
-                    muted,
-                })
+            {
+                let sidebar = sidebar.clone();
+                move |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    let _ = sidebar.update(cx, |this, cx| {
+                        this.clan_drag_active = true;
+                        this.cancel_mention_reveal();
+                        cx.notify();
+                    });
+                    let name = drag.name.clone();
+                    let avatar = drag.avatar.clone();
+                    let muted = drag.muted;
+                    cx.new(|_| ClanDragPreview {
+                        name,
+                        avatar,
+                        muted,
+                    })
+                }
             },
         )
         .drag_over::<ClanReorderDrag>(move |style, drag, _, _| {
