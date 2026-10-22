@@ -1812,6 +1812,27 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_room(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_merge(breakout_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
         let transport = self.inner.clone();
         let src = src.to_string();
@@ -3279,6 +3300,15 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.open_dm_by_channel_id(0, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Add users to a channel.
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         let transport = self.inner.clone();
@@ -3476,6 +3506,26 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .upload_attachment_file(&filename, &filetype, size, width, height, channel_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn upload_oauth_file(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+        let filename = filename.to_string();
+        let filetype = filetype.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .upload_oauth_file(&filename, &filetype, size)
                     .await
             })
             .await

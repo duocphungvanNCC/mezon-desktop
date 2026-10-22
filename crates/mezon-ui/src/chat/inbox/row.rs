@@ -5,20 +5,19 @@ use gpui::{
     App, ClickEvent, Entity, FontWeight, HighlightStyle, Hsla, ObjectFit, SharedString, StyledText,
     UnderlineStyle, Window, div, img, prelude::*, px, rgb,
 };
+use mezon_store::user_profile::CachedUserProfiles;
 use mezon_store::{
     AppConfig, AttachmentSeedInput, Channel, ChannelAttachment, ChannelId, ChannelList,
     ChannelType, ClanId, ClanList, ClanMembersStore, DirectMessageStore, InboxCategory,
-    InboxMentionSpan, InboxMessageContent, InboxNotification, MessageId, MessageSourceSpan,
-    MessageSpan, ProfileContext, RolesStore, Settings, TopicDiscussion, TopicReplyPreview, UserId,
-    UsersByUserStore, attachment_link_is_image, attachment_link_is_video, format_file_size,
-    inbox_content_from_raw, message_content_is_attachment, resolve_user_profile,
+    InboxMentionSpan, InboxNotification, MessageId, MessageSpan, ProfileContext, RolesStore,
+    Settings, TopicDiscussion, TopicReplyPreview, TopicsStore, UserId, UserProfileView,
+    attachment_link_is_image, attachment_link_is_video, format_file_size, inbox_spans_from_raw,
+    message_content_is_attachment, resolve_user_profile,
 };
 
 use crate::chat::file_type_icon::file_type_icon_for;
+use crate::chat::message::code_block_copy_overlay;
 use crate::chat::message::parts::FILE_NAME_COLOR;
-use crate::chat::message::{
-    code_block_copy_overlay, interactive_link_text, resolve_message_link_url,
-};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
@@ -27,6 +26,7 @@ use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
+const TOPIC_DEFAULT_AVATAR: &str = "icons/avatar-user.svg";
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
@@ -64,7 +64,7 @@ pub(crate) struct NotificationRowView {
     for_you_line: Option<ForYouLine>,
     body_text: SharedString,
     body_is_attachment: bool,
-    body_spans: InboxMessageContent,
+    body_spans: Vec<MessageSpan>,
     body_link_ranges: Vec<Range<usize>>,
     body_inline_span_ranges: Vec<(Range<usize>, InboxInlineHighlight)>,
     mention_spans: Vec<InboxMentionSpan>,
@@ -77,6 +77,13 @@ pub(crate) struct NotificationRowView {
     has_more_attachment: bool,
     media: Option<InboxMediaOpen>,
     pub(crate) can_jump: bool,
+    pub(crate) profile_dependencies: ProfileDependencies,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ProfileDependencies {
+    pub(crate) clans: [Option<ClanId>; 2],
+    pub(crate) global: bool,
 }
 
 #[derive(Clone)]
@@ -108,68 +115,74 @@ fn format_inbox_time(ts: u32, locale: &SharedString) -> String {
 fn resolve_for_you_profile(
     notification: &InboxNotification,
     sender_id: &str,
-    cx: &App,
-) -> (String, String, Option<SharedString>, String) {
+    profile_clan_id: Option<ClanId>,
+    profiles: &CachedUserProfiles,
+    mut clan_profile_for: impl FnMut(ClanId, UserId) -> Option<UserProfileView>,
+) -> (String, Option<SharedString>, String, ProfileDependencies) {
     let message = notification.message.as_ref();
-    let user_id = sender_id.parse::<UserId>().ok();
-    let store_user = user_id.and_then(|uid| UsersByUserStore::global(cx).read(cx).user(uid));
-    let clan_profile = notification
-        .clan_id
-        .parse::<ClanId>()
-        .ok()
-        .and_then(|clan| {
-            user_id.and_then(|uid| resolve_user_profile(uid, ProfileContext::Clan(clan), cx))
-        });
-
-    let username = message
-        .map(|m| m.username.as_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| store_user.map(|user| user.username.clone()))
+    let user_id = sender_id.parse::<UserId>().ok().filter(|id| !id.is_zero());
+    let payload_avatar = message
+        .map(|message| message.avatar.as_str())
+        .filter(|url| !url.is_empty())
         .or_else(|| {
-            clan_profile
-                .as_ref()
-                .map(|profile| profile.username.clone())
-        })
-        .unwrap_or_default();
-
-    let display_name = store_user
-        .map(|user| {
-            if user.display_name.is_empty() {
-                user.username.clone()
-            } else {
-                user.display_name.clone()
+            (!notification.avatar_url.is_empty()).then_some(notification.avatar_url.as_str())
+        });
+    let mut dependencies = ProfileDependencies::default();
+    let mut clan_profile = None;
+    if payload_avatar.is_none()
+        && let Some(uid) = user_id
+    {
+        let notification_clan = notification
+            .effective_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok());
+        for (index, clan) in [
+            notification_clan,
+            profile_clan_id.filter(|clan| Some(*clan) != notification_clan),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dependencies.clans[index] = clan;
+            if let Some(profile) = clan.and_then(|clan| clan_profile_for(clan, uid))
+                && !profile.avatar_url.is_empty()
+            {
+                clan_profile = Some(profile);
+                break;
             }
-        })
-        .or_else(|| message.map(sender_display_name))
-        .or_else(|| {
-            clan_profile.as_ref().map(|profile| {
-                if profile.display_name.is_empty() {
-                    profile.username.clone()
-                } else {
-                    profile.display_name.clone()
-                }
-            })
-        })
+        }
+    }
+    dependencies.global = clan_profile.is_none();
+    let profile = clan_profile
+        .as_ref()
+        .or_else(|| user_id.and_then(|uid| profiles.profile(uid)));
+    let username = message
+        .map(|message| message.username.as_str())
         .filter(|name| !name.is_empty())
-        .or_else(|| (!username.is_empty()).then(|| username.clone()))
+        .or_else(|| profile.map(|profile| profile.username.as_str()))
         .unwrap_or_default();
+    let display_name = if clan_profile.is_some() {
+        profile
+            .map(|profile| profile.display_name.clone())
+            .unwrap_or_default()
+    } else {
+        message
+            .map(sender_display_name)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                profile
+                    .map(|profile| profile.display_name.clone())
+                    .filter(|name| !name.is_empty())
+            })
+            .unwrap_or_else(|| username.to_string())
+    };
+    let avatar = payload_avatar.or_else(|| {
+        clan_profile
+            .as_ref()
+            .map(|profile| profile.avatar_url.as_str())
+            .or_else(|| user_id.and_then(|uid| profiles.cached_avatar_url(uid)))
+    });
 
-    let avatar = message
-        .and_then(|m| (!m.avatar.is_empty()).then(|| m.avatar.clone()))
-        .or_else(|| (!notification.avatar_url.is_empty()).then(|| notification.avatar_url.clone()))
-        .or_else(|| {
-            store_user
-                .map(|user| user.avatar_url.clone())
-                .filter(|url| !url.is_empty())
-        })
-        .or_else(|| {
-            clan_profile
-                .map(|profile| profile.avatar_url)
-                .filter(|url| !url.is_empty())
-        });
-
-    let subject_suffix = if !username.is_empty() && notification.subject.starts_with(&username) {
+    let subject_suffix = if !username.is_empty() && notification.subject.starts_with(username) {
         notification.subject[username.len()..].to_string()
     } else {
         notification.subject.clone()
@@ -177,9 +190,9 @@ fn resolve_for_you_profile(
 
     (
         display_name,
-        username,
-        avatar_from(avatar.as_deref().unwrap_or("")),
+        avatar_from(avatar.unwrap_or("")),
         subject_suffix,
+        dependencies,
     )
 }
 
@@ -364,17 +377,14 @@ pub(crate) fn notification_jump_route(notification: &InboxNotification, cx: &App
 pub(crate) fn build_notification_row_view(
     notification: &InboxNotification,
     locale: &SharedString,
+    profile_clan_id: Option<ClanId>,
+    profiles: &CachedUserProfiles,
     cx: &App,
 ) -> NotificationRowView {
     let clan_id = notification
         .effective_clan_id()
         .and_then(|id| id.parse::<ClanId>().ok());
-    let sender_id = notification
-        .message
-        .as_ref()
-        .map(|m| m.sender_id.as_str())
-        .filter(|id| !id.is_empty() && *id != "0")
-        .unwrap_or(notification.sender_id.as_str());
+    let sender_id = notification_sender_id(notification);
     let fallback_avatar = notification
         .message
         .as_ref()
@@ -391,6 +401,7 @@ pub(crate) fn build_notification_row_view(
     let is_mentions = notification.category == InboxCategory::Mentions;
     let is_messages = notification.category == InboxCategory::Messages;
     let (resolved_name, mut avatar_url, _) = clan_id
+        .filter(|_| notification.category != InboxCategory::ForYou)
         .map(|clan| resolve_sender(clan, sender_id, fallback_avatar, &fallback_name, cx))
         .unwrap_or((
             fallback_name.clone().into(),
@@ -427,14 +438,14 @@ pub(crate) fn build_notification_row_view(
         .map(|m| m.mention_spans_for_render())
         .unwrap_or_default();
     let body_spans = message_preview
-        .and_then(|m| inbox_content_from_raw(&m.raw_content))
+        .and_then(|m| inbox_spans_from_raw(&m.raw_content))
         .unwrap_or_default();
     let body_text_str = body_text.to_string();
     let body_raw_content = message_preview
         .map(|m| m.raw_content.as_str())
         .unwrap_or("");
     let body_link_ranges = inbox_link_ranges(&body_text_str, body_raw_content);
-    let body_inline_span_ranges = inbox_inline_span_ranges(&body_spans.source_spans);
+    let body_inline_span_ranges = inbox_inline_span_ranges(&body_text_str, &body_spans);
     let attachment_link = message_preview
         .map(|m| m.attachment_link.clone())
         .unwrap_or_default();
@@ -465,9 +476,23 @@ pub(crate) fn build_notification_row_view(
         _ => None,
     };
 
+    let mut profile_dependencies = ProfileDependencies {
+        clans: [clan_id, None],
+        global: false,
+    };
     let for_you_line = if notification.category == InboxCategory::ForYou {
-        let (display_name, _, avatar, subject_suffix) =
-            resolve_for_you_profile(notification, sender_id, cx);
+        let (display_name, avatar, subject_suffix, dependencies) = resolve_for_you_profile(
+            notification,
+            sender_id,
+            profile_clan_id,
+            profiles,
+            |clan, uid| {
+                ClanMembersStore::try_global(cx)
+                    .and_then(|store| store.read(cx).member(clan, uid))
+                    .map(|member| UserProfileView::from_clan_member(member, false))
+            },
+        );
+        profile_dependencies = dependencies;
         if avatar.is_some() {
             avatar_url = avatar;
         }
@@ -499,6 +524,7 @@ pub(crate) fn build_notification_row_view(
     });
 
     NotificationRowView {
+        profile_dependencies,
         sender_name,
         avatar_url,
         time_label,
@@ -524,16 +550,26 @@ pub(crate) fn build_notification_row_view(
     }
 }
 
+pub(crate) fn notification_sender_id(notification: &InboxNotification) -> &str {
+    notification
+        .message
+        .as_ref()
+        .map(|message| message.sender_id.as_str())
+        .filter(|id| !id.is_empty() && *id != "0")
+        .unwrap_or(notification.sender_id.as_str())
+}
+
 pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
-    let clan_id = topic.clan_id.parse::<ClanId>().ok();
-    let sender_id = if topic.last_sender_id.is_empty() {
-        topic.creator_id.as_str()
-    } else {
-        topic.last_sender_id.as_str()
-    };
-    let (avatar_name, avatar_url, _) = clan_id
-        .map(|clan| resolve_sender(clan, sender_id, "", "", cx))
-        .unwrap_or((SharedString::default(), None, false));
+    let (avatar_name, avatar_url) = TopicsStore::global(cx)
+        .read(cx)
+        .inbox_avatar(topic, cx)
+        .map(|(name, avatar)| {
+            let avatar = AppConfig::try_global(cx)
+                .map(|cfg| cfg.avatar_proxy(avatar))
+                .unwrap_or_else(|| avatar.to_string());
+            (SharedString::from(name.to_string()), avatar_from(&avatar))
+        })
+        .unwrap_or_default();
     TopicRowView {
         avatar_name,
         avatar_url,
@@ -674,22 +710,47 @@ fn clip_highlights(
         .collect()
 }
 
-fn inbox_inline_span_ranges(
-    body_spans: &[MessageSourceSpan],
+fn span_ranges_in_text(
+    text: &str,
+    spans: &[MessageSpan],
 ) -> Vec<(Range<usize>, InboxInlineHighlight)> {
-    body_spans
-        .iter()
-        .filter_map(|source| {
-            let kind = match &source.span {
-                MessageSpan::Mention { role_id, .. } => InboxInlineHighlight::Mention {
-                    is_role: role_id.as_deref().is_some_and(|id| !id.is_empty()),
-                },
-                MessageSpan::Link { .. } => InboxInlineHighlight::Link,
-                _ => return None,
-            };
-            Some((source.range.clone(), kind))
-        })
-        .collect()
+    let mut cursor = 0usize;
+    let mut out = Vec::new();
+    for span in spans {
+        if matches!(span, MessageSpan::CodeBlock { .. }) {
+            continue;
+        }
+        let Some(piece) = span_inline_text(span) else {
+            continue;
+        };
+        if piece.is_empty() {
+            continue;
+        }
+        if !text[cursor..].starts_with(piece) {
+            break;
+        }
+        let start = cursor;
+        let end = start + piece.len();
+        match span {
+            MessageSpan::Mention { role_id, .. } => {
+                let is_role = role_id.as_deref().is_some_and(|id| !id.is_empty());
+                out.push((start..end, InboxInlineHighlight::Mention { is_role }));
+            }
+            MessageSpan::Link { .. } => {
+                out.push((start..end, InboxInlineHighlight::Link));
+            }
+            _ => {}
+        }
+        cursor = end;
+    }
+    out
+}
+
+fn inbox_inline_span_ranges(
+    text: &str,
+    body_spans: &[MessageSpan],
+) -> Vec<(Range<usize>, InboxInlineHighlight)> {
+    span_ranges_in_text(text, body_spans)
 }
 
 fn inbox_link_ranges(text: &str, raw_content: &str) -> Vec<Range<usize>> {
@@ -912,62 +973,19 @@ fn render_inbox_styled_body(
     theme: &Theme,
     text: &str,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
-    spans: Option<&[MessageSourceSpan]>,
-    id: (SharedString, usize),
 ) -> gpui::AnyElement {
     if text.is_empty() {
         return div().into_any_element();
     }
     let code_style = inline_code_highlight_style(theme);
-    let mut links = spans
-        .map(|spans| inbox_body_links(theme, text, spans))
-        .unwrap_or_default();
-    let (text, highlights) = strip_inline_code_markers(text, highlights, code_style, &mut links);
-    let (display_text, display_highlights) =
-        inject_link_word_joiners(&text, highlights, &mut links);
+    let (text, highlights) = strip_inline_code_markers(text, highlights, code_style);
+    let (display_text, display_highlights) = inject_link_word_joiners(&text, highlights);
     div()
         .w_full()
         .min_w_0()
         .text_sm()
-        .child(interactive_link_text(
-            id,
-            StyledText::new(display_text).with_highlights(display_highlights),
-            links,
-        ))
+        .child(StyledText::new(display_text).with_highlights(display_highlights))
         .into_any_element()
-}
-
-fn inbox_body_links(
-    theme: &Theme,
-    text: &str,
-    spans: &[MessageSourceSpan],
-) -> Vec<(Range<usize>, String)> {
-    let mut links = Vec::new();
-    let mut occupied = Vec::new();
-    for source in spans {
-        let Some(range) = char_boundary_range(text, source.range.clone()) else {
-            continue;
-        };
-        if let MessageSpan::Link { text, url, .. } = &source.span {
-            let url = resolve_message_link_url(url, text);
-            if !url.is_empty() {
-                links.push((range.clone(), url));
-            }
-        }
-        if !matches!(
-            &source.span,
-            MessageSpan::Text(_) | MessageSpan::Bold(_) | MessageSpan::Heading { .. }
-        ) {
-            occupied.push((range, HighlightStyle::default()));
-        }
-    }
-    links.extend(
-        inbox_auto_link_highlights(theme, text, &occupied)
-            .into_iter()
-            .filter_map(|(range, _)| text.get(range.clone()).map(|url| (range, url.to_string()))),
-    );
-    links.sort_by_key(|(range, _)| range.start);
-    links
 }
 
 fn backtick_run_len(bytes: &[u8], at: usize) -> usize {
@@ -1009,30 +1027,11 @@ fn strip_inline_code_markers(
     text: &str,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     code_style: HighlightStyle,
-    links: &mut Vec<(Range<usize>, String)>,
 ) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
     let pairs = find_backtick_code_pairs(text);
     if pairs.is_empty() {
         return (text.to_string(), highlights);
     }
-    links.retain_mut(|(range, _)| {
-        if pairs
-            .iter()
-            .any(|(open, close)| ranges_overlap(range, &(*open..close + 1)))
-        {
-            return false;
-        }
-        let removed_before = |index| {
-            pairs
-                .iter()
-                .flat_map(|(open, close)| [*open, *close])
-                .filter(|marker| *marker < index)
-                .count()
-        };
-        range.start -= removed_before(range.start);
-        range.end -= removed_before(range.end);
-        true
-    });
     let mut boundaries: Vec<usize> = vec![0, text.len()];
     for (open, close) in &pairs {
         boundaries.push(*open);
@@ -1099,7 +1098,6 @@ const LINK_WORD_JOINER: char = '\u{2060}';
 fn inject_link_word_joiners(
     text: &str,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
-    links: &mut Vec<(Range<usize>, String)>,
 ) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
     let mut break_after = std::collections::BTreeSet::new();
     for (range, style) in &highlights {
@@ -1135,13 +1133,6 @@ fn inject_link_word_joiners(
         }
     }
     orig_to_new[text.len()] = display.len();
-    links.retain_mut(|(range, _)| {
-        let Some(valid) = char_boundary_range(text, range.clone()) else {
-            return false;
-        };
-        *range = orig_to_new[valid.start]..orig_to_new[valid.end];
-        true
-    });
     let remapped = highlights
         .into_iter()
         .filter_map(|(range, style)| {
@@ -1150,6 +1141,19 @@ fn inject_link_word_joiners(
         })
         .collect();
     (display, remapped)
+}
+
+fn span_inline_text(span: &MessageSpan) -> Option<&str> {
+    match span {
+        MessageSpan::Text(text)
+        | MessageSpan::Bold(text)
+        | MessageSpan::Code(text)
+        | MessageSpan::Link { text, .. }
+        | MessageSpan::Mention { display: text, .. }
+        | MessageSpan::Hashtag { display: text, .. }
+        | MessageSpan::Heading { text, .. } => Some(text.as_ref()),
+        _ => None,
+    }
 }
 
 fn inline_code_highlight_style(theme: &Theme) -> HighlightStyle {
@@ -1163,28 +1167,28 @@ fn inline_code_highlight_style(theme: &Theme) -> HighlightStyle {
 fn take_inbox_inline_element(
     theme: &Theme,
     text: &str,
-    batch: &mut Vec<MessageSourceSpan>,
+    batch: &mut Vec<MessageSpan>,
+    offset: &mut usize,
     full_highlights: &[(Range<usize>, HighlightStyle)],
-    notification_id: &str,
 ) -> Option<gpui::AnyElement> {
-    let start = batch.first()?.range.start;
-    let end = batch.last()?.range.end;
-    let chunk = text.get(start..end)?;
+    if batch.is_empty() {
+        return None;
+    }
+    let batch_text: String = batch.iter().filter_map(span_inline_text).collect();
+    if batch_text.is_empty() {
+        batch.clear();
+        return None;
+    }
+    let Some(rel) = text[*offset..].find(&batch_text) else {
+        batch.clear();
+        return None;
+    };
+    let start = *offset + rel;
+    let end = start + batch_text.len();
     let clipped = clip_highlights(full_highlights, start, end);
-    let sources: Vec<_> = batch
-        .drain(..)
-        .map(|mut source| {
-            source.range = source.range.start - start..source.range.end - start;
-            source
-        })
-        .collect();
-    Some(render_inbox_styled_body(
-        theme,
-        chunk,
-        clipped,
-        Some(&sources),
-        (notification_id.to_string().into(), start),
-    ))
+    *offset = end;
+    batch.clear();
+    Some(render_inbox_styled_body(theme, &text[start..end], clipped))
 }
 
 fn render_inbox_message_spans(
@@ -1193,7 +1197,7 @@ fn render_inbox_message_spans(
     mention_spans: &[InboxMentionSpan],
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
-    body_spans: &[MessageSourceSpan],
+    body_spans: &[MessageSpan],
     notification_id: &str,
 ) -> gpui::AnyElement {
     if body_spans.is_empty() {
@@ -1207,18 +1211,18 @@ fn render_inbox_message_spans(
         body_inline_span_ranges,
     );
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    let mut inline_batch: Vec<MessageSourceSpan> = Vec::new();
+    let mut inline_batch: Vec<MessageSpan> = Vec::new();
+    let mut offset = 0usize;
     let mut code_key = 0usize;
 
-    for source in body_spans {
-        let span = &source.span;
+    for span in body_spans {
         if matches!(span, MessageSpan::CodeBlock { .. }) {
             if let Some(element) = take_inbox_inline_element(
                 theme,
                 text,
                 &mut inline_batch,
+                &mut offset,
                 &full_highlights,
-                notification_id,
             ) {
                 children.push(element);
             }
@@ -1228,6 +1232,9 @@ fn render_inbox_message_spans(
                 ..
             } = span
             {
+                if let Some(rel) = text[offset..].find(code_text.as_ref()) {
+                    offset += rel + code_text.len();
+                }
                 let copy_id =
                     SharedString::from(format!("inbox-code-copy-{notification_id}-{code_key}"));
                 code_key += 1;
@@ -1240,14 +1247,14 @@ fn render_inbox_message_spans(
             }
             continue;
         }
-        inline_batch.push(source.clone());
+        inline_batch.push(span.clone());
     }
     if let Some(element) = take_inbox_inline_element(
         theme,
         text,
         &mut inline_batch,
+        &mut offset,
         &full_highlights,
-        notification_id,
     ) {
         children.push(element);
     }
@@ -1266,19 +1273,16 @@ fn render_message_content(
     mention_spans: &[InboxMentionSpan],
     body_link_ranges: &[Range<usize>],
     body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
-    body_spans: &InboxMessageContent,
+    body_spans: &[MessageSpan],
     notification_id: &str,
 ) -> impl IntoElement {
     let text_str = text.to_string();
     if text_str.is_empty() {
         return div().into_any_element();
     }
-    let aligned = body_spans.text.is_empty() || body_spans.text == text_str;
-    let has_code_block = aligned
-        && body_spans
-            .spans
-            .iter()
-            .any(|span| matches!(span, MessageSpan::CodeBlock { .. }));
+    let has_code_block = body_spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::CodeBlock { .. }));
     if has_code_block {
         return render_inbox_message_spans(
             theme,
@@ -1286,7 +1290,7 @@ fn render_message_content(
             mention_spans,
             body_link_ranges,
             body_inline_span_ranges,
-            &body_spans.source_spans,
+            body_spans,
             notification_id,
         );
     }
@@ -1297,13 +1301,7 @@ fn render_message_content(
         body_link_ranges,
         body_inline_span_ranges,
     );
-    render_inbox_styled_body(
-        theme,
-        &text_str,
-        highlights,
-        aligned.then_some(body_spans.source_spans.as_slice()),
-        (notification_id.to_string().into(), 0),
-    )
+    render_inbox_styled_body(theme, &text_str, highlights)
 }
 
 fn render_inbox_code_block(
@@ -1912,12 +1910,18 @@ pub fn render_topic_body(
         .items_start()
         .p_1()
         .pt_1()
-        .child(render_avatar(
-            &view.avatar_name,
-            view.avatar_url.as_ref(),
-            Size::Medium,
-            avatar_cache,
-        ))
+        .child(
+            Avatar::new()
+                .name(view.avatar_name.clone())
+                .src(
+                    view.avatar_url
+                        .clone()
+                        .unwrap_or_else(|| TOPIC_DEFAULT_AVATAR.into()),
+                )
+                .fallback_src(TOPIC_DEFAULT_AVATAR)
+                .with_size(Size::Medium)
+                .image_cache(avatar_cache),
+        )
         .child(
             v_flex()
                 .flex_1()
@@ -1957,267 +1961,189 @@ pub fn notification_copy_text(notification: &InboxNotification) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn notification() -> InboxNotification {
+        InboxNotification {
+            id: "notification".into(),
+            category: InboxCategory::ForYou,
+            subject: "sender sent a coffee".into(),
+            sender_id: "7".into(),
+            clan_id: "1".into(),
+            channel_id: String::new(),
+            topic_id: None,
+            channel_type: 0,
+            avatar_url: String::new(),
+            create_time_seconds: 0,
+            code: 0,
+            message: None,
+        }
+    }
 
-    fn utf16_offset(text: &str, byte: usize) -> usize {
-        text[..byte].encode_utf16().count()
+    fn profile(name: &str, avatar: &str) -> UserProfileView {
+        UserProfileView {
+            user_id: UserId(7),
+            username: "sender".into(),
+            display_name: name.into(),
+            avatar_url: avatar.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn semantic_tokens_after_formatting_never_become_external_links() {
-        let theme = Theme::dark();
-        for (prefix, kind) in [
-            ("", ""),
-            ("**x**", "b"),
-            ("`x`", "c"),
-            ("__x__", "b"),
-            ("```rust\nx\n```", "t"),
-            ("**📎 tài**", "b"),
+    fn for_you_resolves_clan_fallbacks_and_tracks_late_updates() {
+        let item = notification();
+        let profiles = CachedUserProfiles::from_iter([profile("Global", "global.png")]);
+        for (original, panel, expected_name, expected_avatar, expected_clans) in [
+            (
+                Some(profile("Original", "original.png")),
+                Some(profile("Panel", "panel.png")),
+                "Original",
+                "original.png",
+                [Some(ClanId(1)), None],
+            ),
+            (
+                None,
+                Some(profile("Panel", "panel.png")),
+                "Panel",
+                "panel.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
+            (
+                Some(profile("Empty", "")),
+                Some(profile("Panel", "panel.png")),
+                "Panel",
+                "panel.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
+            (
+                None,
+                None,
+                "Global",
+                "global.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
         ] {
-            for encoding in ["lk", "vk", "lky", "mk"] {
-                for canvas in [false, true] {
-                    let target = if canvas {
-                        "https://mezon.ai/chat/clans/123/channels/456/canvas/abc"
-                    } else {
-                        "https://mezon.ai/chat/clans/123/channels/456"
-                    };
-                    for label in ["doc", target] {
-                        let outside = "https://example.com/plain";
-                        let text = format!("{prefix}{label} {outside}");
-                        let start = prefix.encode_utf16().count();
-                        let end = start + label.encode_utf16().count();
-                        let mut raw = serde_json::json!({"t":text,"cvtt":{"abc":"Canvas title"}});
-                        if !prefix.is_empty() {
-                            raw["mk"] = serde_json::json!([{"s":0,"e":start,"type":kind}]);
-                        }
-                        let token = serde_json::json!({"s":start,"e":end,"url":target,"type":"lk"});
-                        if encoding == "mk" {
-                            if raw["mk"].is_null() {
-                                raw["mk"] = serde_json::json!([]);
-                            }
-                            raw["mk"].as_array_mut().unwrap().push(token);
-                        } else {
-                            raw[encoding] = serde_json::json!([token]);
-                        }
-                        let content = inbox_content_from_raw(&raw.to_string()).unwrap();
-                        assert_eq!(
-                            content.spans,
-                            mezon_store::inbox_spans_from_raw(&raw.to_string()).unwrap()
-                        );
-                        assert!(content.source_spans.iter().any(|source| matches!(
-                            source.span,
-                            MessageSpan::Hashtag { .. } | MessageSpan::Canvas { .. }
-                        )));
-                        let actions = inbox_body_links(&theme, &text, &content.source_spans);
-                        let outside_start = text.len() - outside.len();
-                        assert_eq!(
-                            actions,
-                            vec![(outside_start..text.len(), outside.to_string())],
-                            "prefix={prefix:?}, encoding={encoding}, canvas={canvas}, label={label}"
-                        );
+            let (name, avatar, suffix, deps) =
+                resolve_for_you_profile(&item, "7", Some(ClanId(2)), &profiles, |clan, uid| {
+                    assert_eq!(uid, UserId(7));
+                    match clan {
+                        ClanId(1) => original.clone(),
+                        ClanId(2) => panel.clone(),
+                        _ => panic!("unexpected clan"),
                     }
-                }
-            }
+                });
+            assert_eq!(name, expected_name);
+            assert_eq!(avatar.as_deref(), Some(expected_avatar));
+            assert_eq!(suffix, " sent a coffee");
+            assert_eq!(deps.clans, expected_clans);
+            assert_eq!(deps.global, expected_name == "Global");
         }
     }
 
     #[test]
-    fn source_ranges_preserve_duplicate_labels_and_code_wrapping() {
-        let theme = Theme::dark();
-        let label = "tài liệu";
-        let text = format!("`https://code.example` 📎 {label} {label}");
-        let first = text.find(label).unwrap();
-        let second = text.rfind(label).unwrap();
-        let raw = serde_json::json!({"t":text,"mk":[{"s":0,"e":22,"type":"c"}],"lk":[
-            {"s":utf16_offset(&text,first),"e":utf16_offset(&text,first+label.len()),"url":"https://example.com/a"},
-            {"s":utf16_offset(&text,second),"e":utf16_offset(&text,text.len()),"url":"https://example.com/b"}
-        ]});
-        let content = inbox_content_from_raw(&raw.to_string()).unwrap();
-        let highlights = vec![(0..text.len(), link_highlight_style(&theme))];
-        let mut links = inbox_body_links(&theme, &text, &content.source_spans);
-        let (text, highlights) = strip_inline_code_markers(
-            &text,
-            highlights,
-            inline_code_highlight_style(&theme),
-            &mut links,
-        );
-        let (display, _) = inject_link_word_joiners(&text, highlights, &mut links);
-        assert_eq!(links.len(), 2);
-        for ((range, url), expected) in links
-            .iter()
-            .zip(["https://example.com/a", "https://example.com/b"])
-        {
-            assert_eq!(url, expected);
-            assert_eq!(display[range.clone()].replace(LINK_WORD_JOINER, ""), label);
+    fn for_you_preserves_payload_avatar_across_panel_contexts() {
+        let mut item = notification();
+        item.avatar_url = "notification.png".into();
+        let profiles = CachedUserProfiles::from_iter([profile("Global", "global.png")]);
+        for clan in [None, Some(ClanId(1)), Some(ClanId(2))] {
+            let (name, avatar, _, deps) =
+                resolve_for_you_profile(&item, "7", clan, &profiles, |_, _| {
+                    panic!("payload must not resolve clan")
+                });
+            assert_eq!(name, "Global");
+            assert_eq!(avatar.as_deref(), Some("notification.png"));
+            assert_eq!(deps.clans, [None, None]);
         }
     }
 
     #[test]
-    fn same_label_keeps_plain_internal_and_explicit_actions_distinct() {
-        let label = "https://example.com/same";
-        let text = format!("{label} {label} {label}");
-        let last = text.len() - label.len();
-        let raw = serde_json::json!({"t":text,"lk":[
-            {"s":0,"e":label.len(),"url":"https://mezon.ai/chat/clans/123/channels/456"},
-            {"s":last,"e":text.len(),"url":"https://example.com/target"}
-        ]});
-        let content = inbox_content_from_raw(&raw.to_string()).unwrap();
-        assert_eq!(
-            inbox_body_links(&Theme::dark(), &text, &content.source_spans),
-            vec![
-                (label.len() + 1..last - 1, label.to_string()),
-                (last..text.len(), "https://example.com/target".to_string())
-            ]
-        );
-        for text in ["here", "doc", "", "https://", "javascript:alert(1)"] {
-            assert!(inbox_body_links(&Theme::dark(), text, &[]).is_empty());
+    fn for_you_deduplicates_clan_and_rejects_invalid_sender() {
+        let item = notification();
+        let profiles = CachedUserProfiles::default();
+        let mut lookups = 0;
+        let (_, avatar, _, _) =
+            resolve_for_you_profile(&item, "7", Some(ClanId(1)), &profiles, |_, _| {
+                lookups += 1;
+                None
+            });
+        assert_eq!(lookups, 1);
+        assert!(avatar.is_none());
+        for sender in ["", "0", "invalid"] {
+            let (name, avatar, suffix, _) =
+                resolve_for_you_profile(&item, sender, Some(ClanId(2)), &profiles, |_, _| {
+                    panic!("invalid sender lookup")
+                });
+            assert!(name.is_empty());
+            assert!(avatar.is_none());
+            assert_eq!(suffix, item.subject);
         }
     }
 
-    struct LinkHost(Box<dyn Fn() -> gpui::AnyElement>);
-
-    impl gpui::Render for LinkHost {
-        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            (self.0)()
+    #[test]
+    fn for_you_global_updates_preserve_nonempty_fallback_fields() {
+        let item = notification();
+        let mut sources = Vec::new();
+        for (incoming, expected_name, expected_avatar) in [
+            (profile("DM", "dm.png"), "DM", "dm.png"),
+            (profile("Friend", "friend.png"), "Friend", "friend.png"),
+            (profile("User", ""), "User", "friend.png"),
+            (profile("User", "user.png"), "User", "user.png"),
+        ] {
+            sources.push(incoming);
+            let profiles = CachedUserProfiles::from_iter(sources.clone());
+            let (name, avatar, _, deps) =
+                resolve_for_you_profile(&item, "7", None, &profiles, |_, _| None);
+            assert_eq!(name, expected_name);
+            assert_eq!(avatar.as_deref(), Some(expected_avatar));
+            assert!(deps.global);
         }
+        let profiles = CachedUserProfiles::from_iter(sources);
+        let (_, avatar, _, _) = resolve_for_you_profile(&item, "8", None, &profiles, |_, _| None);
+        assert!(avatar.is_none());
     }
 
     #[gpui::test]
-    fn formatted_canvas_never_calls_the_external_opener(cx: &mut gpui::TestAppContext) {
-        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn notification_builder_preserves_message_identity_in_all_tabs(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let store = mezon_store::PlatformStore::init(cx);
-            let opened = opened.clone();
-            mezon_store::PlatformStore::set_open_url(
-                &store,
-                std::sync::Arc::new(move |url| {
-                    opened.lock().unwrap().push(url.to_string());
-                    Ok(())
-                }),
-                cx,
-            );
-        });
-        let cx = cx.add_empty_window();
-        for (prefix, kind) in [("**x**", "b"), ("`x`", "c"), ("", "")] {
-            let target = if prefix.is_empty() {
-                "https://example.com/control"
-            } else {
-                "https://mezon.ai/chat/clans/123/channels/456/canvas/abc"
-            };
-            let text = format!("{prefix}{target}");
-            let raw = serde_json::json!({"t":text,"mk":[{"s":0,"e":prefix.len(),"type":kind}],"lk":[{"s":prefix.len(),"e":text.len(),"url":target}],"cvtt":{"abc":"Title"}}).to_string();
-            let content = inbox_content_from_raw(&raw).unwrap();
-            cx.draw(
-                gpui::point(px(0.), px(0.)),
-                gpui::size(px(400.), px(160.)),
-                |_, cx| {
-                    cx.new(|_| {
-                        LinkHost(Box::new(move || {
-                            render_message_content(
-                                &Theme::dark(),
-                                &SharedString::from(text.clone()),
-                                &[],
-                                &inbox_link_ranges(&text, &raw),
-                                &inbox_inline_span_ranges(&content.source_spans),
-                                &content,
-                                "canvas-notification",
-                            )
-                            .into_any_element()
-                        }))
-                    })
-                    .into_any_element()
-                },
-            );
-            cx.simulate_click(gpui::point(px(80.), px(8.)), gpui::Modifiers::none());
-            if !prefix.is_empty() {
-                assert!(opened.lock().unwrap().is_empty());
+            let mut item = notification();
+            item.clan_id.clear();
+            item.avatar_url = "notification.png".into();
+            item.message = Some(mezon_store::InboxMessagePreview {
+                message_id: String::new(),
+                channel_id: String::new(),
+                clan_id: String::new(),
+                sender_id: "7".into(),
+                content: String::new(),
+                raw_content: String::new(),
+                avatar: "message.png".into(),
+                display_name: "Payload".into(),
+                username: "sender".into(),
+                create_time_seconds: 0,
+                attachment_link: String::new(),
+                attachment_type: String::new(),
+                attachment_filename: String::new(),
+                attachment_size: 0,
+                attachment_thumbnail: String::new(),
+                has_more_attachment: false,
+                mention_spans: Vec::new(),
+                topic_id: None,
+            });
+            for category in [
+                InboxCategory::ForYou,
+                InboxCategory::Messages,
+                InboxCategory::Mentions,
+            ] {
+                item.category = category;
+                let view = build_notification_row_view(
+                    &item,
+                    &"en".into(),
+                    Some(ClanId(2)),
+                    &CachedUserProfiles::default(),
+                    cx,
+                );
+                assert_eq!(view.avatar_url.as_deref(), Some("message.png"));
+                assert_eq!(view.sender_name.as_ref(), "Payload");
             }
-        }
-        assert_eq!(*opened.lock().unwrap(), vec!["https://example.com/control"]);
-    }
-
-    #[gpui::test]
-    fn inbox_message_links_open_original_urls_after_wrapping(cx: &mut gpui::TestAppContext) {
-        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        cx.update(|cx| {
-            let store = mezon_store::PlatformStore::init(cx);
-            let opened = opened.clone();
-            mezon_store::PlatformStore::set_open_url(
-                &store,
-                std::sync::Arc::new(move |url| {
-                    opened.lock().unwrap().push(url.to_string());
-                    Ok(())
-                }),
-                cx,
-            );
         });
-        let cx = cx.add_empty_window();
-        let text: SharedString =
-            "https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuvwxyz".into();
-        cx.draw(
-            gpui::point(px(0.), px(0.)),
-            gpui::size(px(140.), px(160.)),
-            |_, cx| {
-                let text = text.clone();
-                cx.new(|_| {
-                    LinkHost(Box::new(move || {
-                        render_message_content(
-                            &Theme::dark(),
-                            &text,
-                            &[],
-                            &[],
-                            &[],
-                            &InboxMessageContent::default(),
-                            "notification",
-                        )
-                        .into_any_element()
-                    }))
-                })
-                .into_any_element()
-            },
-        );
-        cx.simulate_click(gpui::point(px(5.), px(8.)), gpui::Modifiers::none());
-        assert_eq!(*opened.lock().unwrap(), vec![text.to_string()]);
-        let label: SharedString = "Tài liệu 📎".into();
-        let content = inbox_content_from_raw(&serde_json::json!({"t":label.to_string(),"lk":[{"s":0,"e":label.encode_utf16().count(),"url":"https://example.com/document"}]}).to_string()).unwrap();
-        cx.draw(
-            gpui::point(px(0.), px(0.)),
-            gpui::size(px(300.), px(80.)),
-            |_, cx| {
-                cx.new(|_| {
-                    LinkHost(Box::new(move || {
-                        render_message_content(
-                            &Theme::dark(),
-                            &label,
-                            &[],
-                            &[],
-                            &inbox_inline_span_ranges(&content.source_spans),
-                            &content,
-                            "notification",
-                        )
-                        .into_any_element()
-                    }))
-                })
-                .into_any_element()
-            },
-        );
-        cx.simulate_click(gpui::point(px(5.), px(8.)), gpui::Modifiers::none());
-        assert_eq!(
-            opened.lock().unwrap().last().unwrap(),
-            "https://example.com/document"
-        );
-    }
-
-    #[test]
-    fn invalid_source_ranges_are_not_clickable() {
-        let source = MessageSourceSpan {
-            range: 0..1,
-            span: MessageSpan::Link {
-                text: "é".into(),
-                url: "https://example.com".into(),
-                kind: Default::default(),
-            },
-        };
-        assert!(inbox_body_links(&Theme::dark(), "é", &[source]).is_empty());
     }
 
     #[test]
@@ -2314,7 +2240,7 @@ mod tests {
         let code_style = inline_code_highlight_style(&theme);
         let highlights = vec![(0..text.len(), body_style)];
         let (display_text, display_highlights) =
-            strip_inline_code_markers(text, highlights, code_style, &mut Vec::new());
+            strip_inline_code_markers(text, highlights, code_style);
         assert_eq!(display_text, "Bạn đã đặt Matcha latte xoài !!!");
         assert!(!display_text.contains('`'));
         let code_range = display_text.find("Matcha latte xoài").unwrap();
@@ -2330,7 +2256,7 @@ mod tests {
         let text = "before ```block``` after";
         let highlights = vec![(0..text.len(), HighlightStyle::default())];
         let (display_text, _) =
-            strip_inline_code_markers(text, highlights, HighlightStyle::default(), &mut Vec::new());
+            strip_inline_code_markers(text, highlights, HighlightStyle::default());
         assert_eq!(display_text, text);
     }
 
@@ -2338,12 +2264,8 @@ mod tests {
     fn strip_inline_code_markers_leaves_plain_text_unchanged() {
         let text = "no backticks here";
         let highlights = vec![(0..text.len(), HighlightStyle::default())];
-        let (display_text, display_highlights) = strip_inline_code_markers(
-            text,
-            highlights.clone(),
-            HighlightStyle::default(),
-            &mut Vec::new(),
-        );
+        let (display_text, display_highlights) =
+            strip_inline_code_markers(text, highlights.clone(), HighlightStyle::default());
         assert_eq!(display_text, text);
         assert_eq!(display_highlights, highlights);
     }
@@ -2361,13 +2283,18 @@ mod tests {
     }
 
     #[test]
-    fn inbox_inline_span_ranges_use_source_ranges() {
-        let content = inbox_content_from_raw(
-            &serde_json::json!({"t":"hello @user world","mentions":[{"s":6,"e":11,"user_id":"1"}]})
-                .to_string(),
-        )
-        .unwrap();
-        let ranges = inbox_inline_span_ranges(&content.source_spans);
+    fn inbox_inline_span_ranges_use_sequential_alignment() {
+        let text = "hello @user world";
+        let spans = vec![
+            MessageSpan::Text("hello ".into()),
+            MessageSpan::Mention {
+                display: "@user".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" world".into()),
+        ];
+        let ranges = inbox_inline_span_ranges(text, &spans);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].0, 6..11);
         assert_eq!(
