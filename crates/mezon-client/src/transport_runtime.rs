@@ -3512,6 +3512,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn upload_oauth_file(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+        let filename = filename.to_string();
+        let filetype = filetype.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .upload_oauth_file(&filename, &filetype, size)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn multipart_upload_attachment_file_start(
         &self,
         req: mezon_proto::api::UploadAttachmentRequest,
