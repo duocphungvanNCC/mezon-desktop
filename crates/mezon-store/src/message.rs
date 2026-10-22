@@ -38,21 +38,32 @@ pub struct MessageAttachment {
 
 pub const STICKER_FILETYPE: &str = "sticker";
 
-const TRANSCODED_CONTAINERS: [&str; 4] = ["avi", "flv", "mkv", "wmv"];
+const TRANSCODED_CONTAINERS: [&str; 3] = ["avi", "flv", "wmv"];
+const MATROSKA_CONTAINERS: [&str; 1] = ["mkv"];
 
-fn has_transcoded_container_extension(url: &str) -> bool {
+fn has_container_extension(url: &str, containers: &[&str]) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let name = path.rsplit('/').next().unwrap_or(path);
     name.rsplit_once('.').is_some_and(|(_, ext)| {
-        TRANSCODED_CONTAINERS
+        containers
             .iter()
             .any(|container| ext.eq_ignore_ascii_case(container))
     })
 }
 
 fn is_transcoded_container(filename: &str, url: &str) -> bool {
-    (has_transcoded_container_extension(filename) || has_transcoded_container_extension(url))
+    (has_container_extension(filename, &TRANSCODED_CONTAINERS)
+        || has_container_extension(url, &TRANSCODED_CONTAINERS))
         && crate::platform::may_be_transcoded(url)
+}
+
+fn is_matroska_container(filename: &str, url: &str) -> bool {
+    has_container_extension(filename, &MATROSKA_CONTAINERS)
+        || has_container_extension(url, &MATROSKA_CONTAINERS)
+}
+
+fn plays_in_app(filename: &str, url: &str) -> bool {
+    is_matroska_container(filename, url) || is_transcoded_container(filename, url)
 }
 
 pub fn url_extension(url: &str) -> Option<String> {
@@ -114,7 +125,7 @@ impl MessageAttachment {
     }
 
     pub fn plays_as_video(filetype: &str, filename: &str, url: &str) -> bool {
-        Self::media_is_video(filetype, url) || is_transcoded_container(filename, url)
+        Self::media_is_video(filetype, url) || plays_in_app(filename, url)
     }
 
     pub fn is_video(&self) -> bool {
@@ -122,7 +133,7 @@ impl MessageAttachment {
     }
 
     pub fn is_unsupported_media(&self) -> bool {
-        if is_transcoded_container(&self.filename, &self.url) {
+        if plays_in_app(&self.filename, &self.url) {
             return false;
         }
         if matches!(
@@ -131,7 +142,6 @@ impl MessageAttachment {
                 | "video/wmv"
                 | "video/avi"
                 | "video/flv"
-                | "video/mkv"
                 | "video/rmvb"
                 | "audio/wma"
                 | "audio/ra"
@@ -145,19 +155,7 @@ impl MessageAttachment {
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
         matches!(
             ext.as_deref(),
-            Some(
-                "wmv"
-                    | "avi"
-                    | "flv"
-                    | "mkv"
-                    | "rmvb"
-                    | "wma"
-                    | "ra"
-                    | "tiff"
-                    | "tif"
-                    | "bmp"
-                    | "psd"
-            )
+            Some("wmv" | "avi" | "flv" | "rmvb" | "wma" | "ra" | "tiff" | "tif" | "bmp" | "psd")
         )
     }
 }
@@ -3554,12 +3552,31 @@ mod tests {
                 "image/bmp",
                 "https://cdn.mezon.ai/1cf93b197d401000/2081_pic.bmp",
             ),
-            (
-                "application/octet-stream",
-                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
-            ),
         ] {
             assert!(attachment(filetype, url).is_unsupported_media(), "{url}");
+        }
+    }
+
+    #[test]
+    fn matroska_files_play_from_any_origin() {
+        for (filetype, filename, url) in [
+            (
+                "application/octet-stream",
+                "movie.mkv",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
+            ),
+            (
+                "doc",
+                "Mkv.mkv",
+                "https://cdn-dev.nccsoft.vn/1d4bd2a126c01000/2113199456017977344_Mkv.mkv",
+            ),
+            ("video/mkv", "clip.MKV", "https://cdn.example/clip.MKV"),
+        ] {
+            let mut att = attachment(filetype, url);
+            att.filename = filename.to_string();
+            assert!(!att.is_unsupported_media(), "{url}");
+            assert!(att.is_video(), "{url}");
+            assert!(att.is_visual_media(), "{url}");
         }
     }
 

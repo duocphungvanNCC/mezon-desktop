@@ -13583,7 +13583,8 @@ mod tests {
             ),
             None,
         );
-        assert!(on_r2.is_unsupported_media());
+        assert!(on_r2.is_video());
+        assert!(!on_r2.is_unsupported_media());
     }
 
     #[test]
