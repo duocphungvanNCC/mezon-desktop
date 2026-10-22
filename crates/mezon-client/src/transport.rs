@@ -74,6 +74,50 @@ impl ApiStatusError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EveryoneExcludeType {
+    User,
+    Role,
+}
+
+impl EveryoneExcludeType {
+    pub fn from_lists(user_ids: &[i64], role_ids: &[i64]) -> Self {
+        if user_ids.is_empty() && !role_ids.is_empty() {
+            Self::Role
+        } else {
+            Self::User
+        }
+    }
+
+    fn to_api(self) -> i32 {
+        match self {
+            Self::User => api::EveryoneChannelExcludeType::User as i32,
+            Self::Role => api::EveryoneChannelExcludeType::Role as i32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideEveryoneChannel {
+    pub enabled: bool,
+    pub user_ids: Vec<i64>,
+    pub role_ids: Vec<i64>,
+}
+
+impl OverrideEveryoneChannel {
+    pub fn exclude_type(&self) -> EveryoneExcludeType {
+        EveryoneExcludeType::from_lists(&self.user_ids, &self.role_ids)
+    }
+
+    fn from_api(resp: api::GetOverrideEveryoneChannelResponse) -> Self {
+        Self {
+            enabled: resp.r#override,
+            user_ids: resp.user_ids,
+            role_ids: resp.role_ids,
+        }
+    }
+}
+
 fn grpc_code_from_envelope_status(http_like_code: i32) -> u32 {
     match http_like_code {
         400 => ApiStatusError::INVALID_ARGUMENT,
@@ -4998,6 +5042,8 @@ impl MezonTransport {
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
             "LinkCDNFile" => 214,
+            "SetOverrideEveryoneChannel" => 217,
+            "GetOverrideEveryoneChannel" => 218,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -7699,6 +7745,54 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+
+    pub async fn set_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        enabled: bool,
+        exclude_type: EveryoneExcludeType,
+        exclude_ids: Vec<i64>,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::SetOverrideEveryoneChannelRequest {
+            clan_id,
+            channel_id,
+            r#override: enabled,
+            exclude_type: exclude_type.to_api(),
+            exclude_ids,
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "SetOverrideEveryoneChannel", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    pub async fn get_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<OverrideEveryoneChannel> {
+        let cid = self.generate_cid();
+        let body = api::GetOverrideEveryoneChannelRequest {
+            clan_id,
+            channel_id,
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "GetOverrideEveryoneChannel", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(OverrideEveryoneChannel::from_api(
+            api::GetOverrideEveryoneChannelResponse::decode(response.as_slice())?,
+        ))
     }
 
     /// Change channel category.
@@ -12836,7 +12930,29 @@ mod tests {
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
         assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
+        assert_eq!(t.get_api_index("SetOverrideEveryoneChannel"), Some(217));
+        assert_eq!(t.get_api_index("GetOverrideEveryoneChannel"), Some(218));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
+    }
+
+    #[test]
+    fn everyone_exclude_type_prefers_roles_only_when_users_are_empty() {
+        assert_eq!(
+            EveryoneExcludeType::from_lists(&[], &[1]),
+            EveryoneExcludeType::Role
+        );
+        assert_eq!(
+            EveryoneExcludeType::from_lists(&[1], &[]),
+            EveryoneExcludeType::User
+        );
+        assert_eq!(
+            EveryoneExcludeType::from_lists(&[1], &[2]),
+            EveryoneExcludeType::User
+        );
+        assert_eq!(
+            EveryoneExcludeType::from_lists(&[], &[]),
+            EveryoneExcludeType::User
+        );
     }
 
     #[test]

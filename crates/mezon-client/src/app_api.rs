@@ -1870,6 +1870,29 @@ impl AppApi {
             .await
     }
 
+    pub async fn set_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        enabled: bool,
+        exclude_type: crate::EveryoneExcludeType,
+        exclude_ids: Vec<i64>,
+    ) -> Result<()> {
+        self.transport
+            .set_override_everyone_channel(clan_id, channel_id, enabled, exclude_type, exclude_ids)
+            .await
+    }
+
+    pub async fn get_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<crate::OverrideEveryoneChannel> {
+        self.transport
+            .get_override_everyone_channel(clan_id, channel_id)
+            .await
+    }
+
     pub async fn change_channel_category(
         &self,
         clan_id: i64,

@@ -27,7 +27,7 @@ use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
 use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
-use permissions_tab::{PermissionsTab, render_channel_permissions_save_bar};
+use permissions_tab::PermissionsTab;
 use quick_actions_tab::QuickActionsTab;
 use stream_thumbnail_tab::StreamThumbnailTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
@@ -798,9 +798,11 @@ impl Render for ChannelSettingScreen {
                         )))
                     })
                     .when_some(permissions_save_bar, |panel, tab| {
-                        panel.child(deferred(render_channel_permissions_save_bar(
-                            tab, &locale, &theme, cx,
-                        )))
+                        panel.child(deferred(
+                            PermissionsTab::render_channel_permissions_save_bar(
+                                tab, &locale, &theme, cx,
+                            ),
+                        ))
                     }),
             )
     }

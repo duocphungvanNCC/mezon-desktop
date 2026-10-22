@@ -288,6 +288,22 @@ impl ChannelPermissionsStore {
             .and_then(|perms| perms.get(slug).copied())
     }
 
+    pub fn reload_channel(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let key = ChannelPermissionKey {
+            clan_id,
+            channel_id,
+        };
+        self.cache.mark_stale(&key);
+        self.failed_at.remove(&key);
+        self.loading.remove(&key);
+        self.fetch(clan_id, channel_id, cx);
+    }
+
     pub fn ensure_loaded(
         &mut self,
         clan_id: ClanId,
