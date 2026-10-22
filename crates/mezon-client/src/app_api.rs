@@ -707,6 +707,17 @@ impl AppApi {
         self.transport.generate_cdn_signature(channel_id).await
     }
 
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        self.transport.sfu_breakout_room(request).await
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        self.transport.sfu_breakout_merge(breakout_id).await
+    }
+
     pub async fn link_attachments_into_channel(
         &self,
         attachments: Vec<ApiAttachment>,

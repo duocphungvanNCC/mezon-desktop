@@ -57,7 +57,7 @@ pub struct RootView {
 
 fn surface_voice_toast(
     root: &mut RootView,
-    _voice: gpui::Entity<mezon_store::VoiceStore>,
+    voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
     cx: &mut Context<RootView>,
 ) {
@@ -111,6 +111,23 @@ fn surface_voice_toast(
                     cx,
                 )
             });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::Breakout(notice) => {
+            if matches!(notice, mezon_store::BreakoutNotice::Invited) {
+                crate::chat::voice_breakout::BreakoutInviteModal::show(voice, cx);
+                return;
+            }
+            let Some(message) = crate::chat::voice_breakout::notice_text(&locale, notice) else {
+                return;
+            };
+            let kind = if matches!(notice, mezon_store::BreakoutNotice::Failed(_)) {
+                crate::components::primitives::ToastKind::Error
+            } else {
+                crate::components::primitives::ToastKind::Success
+            };
+            crate::app::shell::Shell::global(cx)
+                .update(cx, |shell, cx| shell.toast(kind, message, cx));
             return;
         }
         mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),

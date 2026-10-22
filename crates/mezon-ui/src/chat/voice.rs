@@ -3792,6 +3792,56 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
     };
 
+    let hosted_breakout = store
+        .connection()
+        .connected_channel()
+        .and_then(|(channel_id, _)| store.hosted_breakout(channel_id))
+        .is_some();
+    let breakout_button = (channel_tools
+        && crate::chat::voice_breakout::can_open_breakout_rooms(store, cx))
+    .then(|| {
+        let voice = voice.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if hosted_breakout {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        let tooltip = mezon_i18n::t(
+            locale,
+            if hosted_breakout {
+                "channelVoice.breakout.close"
+            } else {
+                "channelVoice.breakout.title"
+            },
+        );
+        circle_button("voice-breakout-btn", bg, hover, IconName::People, color)
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(move |_, window, cx| {
+                crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
+            })
+    });
+    let return_to_main_button = store.breakout_room_id().is_some().then(|| {
+        let voice = voice.clone();
+        circle_button(
+            "voice-breakout-return-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::ArrowLeftCircle,
+            theme.text_primary,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.breakout.returnToMain",
+        )))
+        .on_click(move |_, window, cx| {
+            voice.update(cx, |store, cx| store.return_to_main_room(window, cx))
+        })
+    });
+
     let agent_active = store.agent_active();
     let agent_clan_id = store
         .connection()
@@ -4063,6 +4113,8 @@ fn control_bar(
         .children((!is_audience).then_some(camera_button))
         .children((!is_audience).then_some(screen_button))
         .children(agent_button)
+        .children(breakout_button)
+        .children(return_to_main_button)
         .when(channel_tools, |center| center.child(raise_hand_button))
         .child(leave_button);
 
