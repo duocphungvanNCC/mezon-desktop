@@ -251,11 +251,18 @@ fn breakout_error_message(err: &anyhow::Error, locale: &str) -> String {
     }
 }
 
-fn breakout_invite_from_event(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BreakoutSignal {
+    Invite(BreakoutInvite),
+    Closed,
+}
+
+fn breakout_signal_from_event(
     event: &mezon_proto::realtime::SfuBreakoutRoomEvent,
     parent_channel_id: &str,
     in_breakout: bool,
-) -> Option<BreakoutInvite> {
+    known_parents: &HashSet<String>,
+) -> Option<BreakoutSignal> {
     let rooms: Vec<String> = event
         .self_select_ids
         .iter()
@@ -263,22 +270,26 @@ fn breakout_invite_from_event(
         .map(i64::to_string)
         .collect();
     if !rooms.is_empty() {
-        return Some(BreakoutInvite::Choose { rooms });
+        return Some(BreakoutSignal::Invite(BreakoutInvite::Choose { rooms }));
     }
     if event.channel_id == 0 {
         return None;
     }
     let room_id = event.channel_id.to_string();
     if room_id == parent_channel_id {
-        return in_breakout.then_some(BreakoutInvite::Return);
+        return Some(if in_breakout {
+            BreakoutSignal::Invite(BreakoutInvite::Return)
+        } else {
+            BreakoutSignal::Closed
+        });
     }
-    if event.token.is_empty() {
+    if event.token.is_empty() || known_parents.contains(&room_id) {
         return None;
     }
-    Some(BreakoutInvite::Assigned {
+    Some(BreakoutSignal::Invite(BreakoutInvite::Assigned {
         room_id,
         token: event.token.clone(),
-    })
+    }))
 }
 
 fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> String {
@@ -412,7 +423,8 @@ pub enum BreakoutNotice {
 struct BreakoutRoom {
     parent_channel_id: String,
     room_id: String,
-    token: mezon_proto::api::GenerateMeetTokenResponse,
+    sfu_url: String,
+    fallback_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -427,7 +439,12 @@ enum MeetTokenSource {
         code: String,
         username: String,
     },
-    Fixed(mezon_proto::api::GenerateMeetTokenResponse),
+    Breakout {
+        api: Arc<AppApi>,
+        room_id: String,
+        sfu_url: String,
+        fallback_token: Option<String>,
+    },
 }
 
 impl MeetTokenSource {
@@ -454,7 +471,35 @@ impl MeetTokenSource {
                     url: String::new(),
                 })
             }
-            Self::Fixed(token) => Ok(token.clone()),
+            Self::Breakout {
+                api,
+                room_id,
+                sfu_url,
+                fallback_token,
+            } => match api
+                .generate_meet_token(room_id, SFU_TOKEN_ROOM_NAME, metadata)
+                .await
+            {
+                Ok(mut token) => {
+                    if token.url.is_empty() {
+                        token.url = sfu_url.clone();
+                    }
+                    Ok(token)
+                }
+                Err(e) => match fallback_token {
+                    Some(token) => {
+                        tracing::warn!(
+                            room_id,
+                            "breakout room token mint failed, using the invite token: {e:#}"
+                        );
+                        Ok(mezon_proto::api::GenerateMeetTokenResponse {
+                            token: token.clone(),
+                            url: sfu_url.clone(),
+                        })
+                    }
+                    None => Err(e),
+                },
+            },
         }
     }
 }
@@ -655,7 +700,8 @@ pub struct VoiceStore {
     external_meeting: Option<(ExternalMeeting, MeetTokenSource)>,
     breakout_room: Option<BreakoutRoom>,
     breakout_invite: Option<(String, BreakoutInvite)>,
-    hosted_breakout: Option<HostedBreakout>,
+    hosted_breakouts: HashMap<String, HostedBreakout>,
+    breakout_parents: HashSet<String>,
     breakout_pending: bool,
     session_sfu_url: String,
     meeting_chat: Vec<MeetingChatMessage>,
@@ -1059,7 +1105,8 @@ impl VoiceStore {
             external_meeting: None,
             breakout_room: None,
             breakout_invite: None,
-            hosted_breakout: None,
+            hosted_breakouts: HashMap::new(),
+            breakout_parents: HashSet::new(),
             breakout_pending: false,
             session_sfu_url: String::new(),
             meeting_chat: Vec::new(),
@@ -1274,7 +1321,12 @@ impl VoiceStore {
             .as_ref()
             .filter(|room| room.parent_channel_id == channel_id)
         {
-            return MeetTokenSource::Fixed(room.token.clone());
+            return MeetTokenSource::Breakout {
+                api: self.api.clone(),
+                room_id: room.room_id.clone(),
+                sfu_url: room.sfu_url.clone(),
+                fallback_token: room.fallback_token.clone(),
+            };
         }
         match &self.external_meeting {
             Some((meeting, source)) if meeting.room_id == channel_id => source.clone(),
@@ -1746,9 +1798,7 @@ impl VoiceStore {
     }
 
     pub fn hosted_breakout(&self, channel_id: &str) -> Option<&HostedBreakout> {
-        self.hosted_breakout
-            .as_ref()
-            .filter(|hosted| hosted.parent_channel_id == channel_id)
+        self.hosted_breakouts.get(channel_id)
     }
 
     pub fn breakout_pending(&self) -> bool {
@@ -1772,13 +1822,22 @@ impl VoiceStore {
         let Some(parent) = self.connection.active_channel_id().map(str::to_owned) else {
             return;
         };
-        let Some(invite) = breakout_invite_from_event(event, &parent, self.breakout_room.is_some())
-        else {
-            return;
-        };
-        self.breakout_invite = Some((parent, invite));
-        cx.emit(VoiceStoreEvent::Breakout(BreakoutNotice::Invited));
-        cx.notify();
+        let signal = breakout_signal_from_event(
+            event,
+            &parent,
+            self.breakout_room.is_some(),
+            &self.breakout_parents,
+        );
+        match signal {
+            Some(BreakoutSignal::Invite(invite)) => {
+                self.breakout_parents.insert(parent.clone());
+                self.breakout_invite = Some((parent, invite));
+                cx.emit(VoiceStoreEvent::Breakout(BreakoutNotice::Invited));
+                cx.notify();
+            }
+            Some(BreakoutSignal::Closed) => self.dismiss_breakout_invite(cx),
+            None => {}
+        }
     }
 
     pub fn dismiss_breakout_invite(&mut self, cx: &mut Context<Self>) {
@@ -1802,24 +1861,12 @@ impl VoiceStore {
         }
         match invite {
             BreakoutInvite::Assigned { room_id, token } => {
-                let token = mezon_proto::api::GenerateMeetTokenResponse {
-                    token,
-                    url: self.session_sfu_url.clone(),
-                };
-                self.switch_sfu_room(
-                    Some(BreakoutRoom {
-                        parent_channel_id: parent,
-                        room_id,
-                        token,
-                    }),
-                    window,
-                    cx,
-                );
+                self.enter_breakout_room(parent, room_id, Some(token), window, cx);
             }
             BreakoutInvite::Return => self.switch_sfu_room(None, window, cx),
             BreakoutInvite::Choose { rooms } => {
                 if let Some(room_id) = room_id.filter(|id| rooms.contains(id)) {
-                    self.choose_breakout_room(parent, room_id, window, cx);
+                    self.enter_breakout_room(parent, room_id, None, window, cx);
                 }
             }
         }
@@ -1860,48 +1907,48 @@ impl VoiceStore {
         );
     }
 
-    fn choose_breakout_room(
+    fn enter_breakout_room(
         &mut self,
         parent: String,
         room_id: String,
+        fallback_token: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((_, clan_id)) = self.active_connection_ids() else {
             return;
         };
-        let api = self.api.clone();
+        let room = BreakoutRoom {
+            parent_channel_id: parent.clone(),
+            room_id,
+            sfu_url: self.session_sfu_url.clone(),
+            fallback_token,
+        };
+        let source = MeetTokenSource::Breakout {
+            api: self.api.clone(),
+            room_id: room.room_id.clone(),
+            sfu_url: room.sfu_url.clone(),
+            fallback_token: room.fallback_token.clone(),
+        };
         let metadata = Self::meet_token_metadata(&clan_id, cx);
-        let sfu_url = self.session_sfu_url.clone();
         self.breakout_pending = true;
         cx.spawn_in(window, async move |this, cx| {
-            let token = api
-                .generate_meet_token(&room_id, SFU_TOKEN_ROOM_NAME, &metadata)
-                .await;
+            let token = source.fetch(&metadata).await;
             let _ = cx.update(|window, cx| {
                 this.update(cx, |this, cx| {
                     this.breakout_pending = false;
                     cx.notify();
                     match token {
-                        Ok(mut token) => {
-                            if this.connection.active_channel_id() != Some(parent.as_str()) {
-                                return;
+                        Ok(_) => {
+                            if this.connection.active_channel_id() == Some(parent.as_str()) {
+                                this.switch_sfu_room(Some(room), window, cx);
                             }
-                            if token.url.is_empty() {
-                                token.url = sfu_url;
-                            }
-                            this.switch_sfu_room(
-                                Some(BreakoutRoom {
-                                    parent_channel_id: parent,
-                                    room_id,
-                                    token,
-                                }),
-                                window,
-                                cx,
-                            );
                         }
                         Err(e) => {
-                            tracing::warn!(room_id, "breakout room token failed: {e:#}");
+                            tracing::warn!(
+                                room_id = room.room_id,
+                                "breakout room token failed: {e:#}"
+                            );
                             let locale = current_locale(cx);
                             cx.emit(VoiceStoreEvent::Breakout(BreakoutNotice::Failed(
                                 breakout_error_message(&e, &locale),
@@ -1931,6 +1978,9 @@ impl VoiceStore {
         else {
             return;
         };
+        if self.hosted_breakouts.contains_key(&parent) {
+            return;
+        }
         let Ok(parent_channel_id) = parent.parse::<i64>() else {
             return;
         };
@@ -1961,11 +2011,14 @@ impl VoiceStore {
                 let notice = match result {
                     Ok(response) => {
                         let opened = response.list_child_rooms.len();
-                        this.hosted_breakout = Some(HostedBreakout {
-                            breakout_id: response.breakout_id,
-                            parent_channel_id: parent,
-                            rooms: response.list_child_rooms,
-                        });
+                        this.hosted_breakouts.insert(
+                            parent.clone(),
+                            HostedBreakout {
+                                breakout_id: response.breakout_id,
+                                parent_channel_id: parent,
+                                rooms: response.list_child_rooms,
+                            },
+                        );
                         BreakoutNotice::Opened(opened)
                     }
                     Err(e) => {
@@ -1984,7 +2037,12 @@ impl VoiceStore {
         if self.breakout_pending {
             return;
         }
-        let Some(breakout_id) = self.hosted_breakout.as_ref().map(|h| h.breakout_id) else {
+        let Some((parent, breakout_id)) = self
+            .connection
+            .connected_channel()
+            .and_then(|(channel_id, _)| self.hosted_breakouts.get(channel_id))
+            .map(|hosted| (hosted.parent_channel_id.clone(), hosted.breakout_id))
+        else {
             return;
         };
         self.breakout_pending = true;
@@ -2002,11 +2060,11 @@ impl VoiceStore {
                 };
                 let notice = if gone {
                     if this
-                        .hosted_breakout
-                        .as_ref()
-                        .is_some_and(|h| h.breakout_id == breakout_id)
+                        .hosted_breakouts
+                        .get(&parent)
+                        .is_some_and(|hosted| hosted.breakout_id == breakout_id)
                     {
-                        this.hosted_breakout = None;
+                        this.hosted_breakouts.remove(&parent);
                     }
                     BreakoutNotice::Closed
                 } else {
@@ -2027,6 +2085,9 @@ impl VoiceStore {
         let RealtimeEvent::VoiceInteractive(event) = event else {
             return;
         };
+        if self.breakout_room.is_some() {
+            return;
+        }
         if event.event_type == VoiceInteractiveEventType::Gift as i32 {
             let Some((channel_id, _)) = self.connection.connected_channel() else {
                 return;
@@ -2211,6 +2272,9 @@ impl VoiceStore {
         let RealtimeEvent::VoiceReaction(msg) = event else {
             return;
         };
+        if self.breakout_room.is_some() {
+            return;
+        }
         if self
             .connection
             .active_channel_id()
@@ -2444,6 +2508,9 @@ impl VoiceStore {
     }
 
     fn can_send_reaction(&mut self) -> bool {
+        if self.breakout_room.is_some() {
+            return false;
+        }
         let now = Instant::now();
         if let Some(last) = self.last_reaction_send
             && now.duration_since(last) < REACTION_THROTTLE
@@ -3340,6 +3407,9 @@ impl VoiceStore {
 
     pub fn give_flower(&mut self, identity: String, cx: &mut Context<Self>) {
         self.close_participant_menu(cx);
+        if self.breakout_room.is_some() {
+            return;
+        }
         let Some(local_id) = self.local_user_id() else {
             return;
         };
@@ -4495,7 +4565,8 @@ impl VoiceStore {
 
     pub fn logout_teardown(&mut self, cx: &mut Context<Self>) {
         self.teardown(None, cx);
-        self.hosted_breakout = None;
+        self.hosted_breakouts.clear();
+        self.breakout_parents.clear();
         cx.notify();
     }
 
@@ -5648,12 +5719,12 @@ fn validate_sound_bytes(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use super::parse_raise_token;
-    use super::{BreakoutInvite, breakout_invite_from_event};
+    use super::{BreakoutInvite, BreakoutSignal, breakout_signal_from_event};
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
@@ -5678,45 +5749,61 @@ mod tests {
         }
     }
 
+    fn signal(
+        channel_id: i64,
+        token: &str,
+        self_select_ids: Vec<i64>,
+        in_breakout: bool,
+        known_parents: &[&str],
+    ) -> Option<BreakoutSignal> {
+        let known: HashSet<String> = known_parents.iter().map(|id| id.to_string()).collect();
+        breakout_signal_from_event(
+            &breakout_event(channel_id, token, self_select_ids),
+            "1",
+            in_breakout,
+            &known,
+        )
+    }
+
     #[test]
     fn breakout_event_assigns_a_room_with_its_token() {
         assert_eq!(
-            breakout_invite_from_event(&breakout_event(7, "jwt", vec![]), "1", false),
-            Some(BreakoutInvite::Assigned {
+            signal(7, "jwt", vec![], false, &[]),
+            Some(BreakoutSignal::Invite(BreakoutInvite::Assigned {
                 room_id: "7".into(),
                 token: "jwt".into(),
-            })
+            }))
+        );
+        assert_eq!(signal(7, "", vec![], false, &[]), None);
+    }
+
+    #[test]
+    fn breakout_event_for_the_parent_channel_returns_or_closes() {
+        assert_eq!(
+            signal(1, "jwt", vec![], true, &[]),
+            Some(BreakoutSignal::Invite(BreakoutInvite::Return))
         );
         assert_eq!(
-            breakout_invite_from_event(&breakout_event(7, "", vec![]), "1", false),
-            None
+            signal(1, "", vec![], false, &[]),
+            Some(BreakoutSignal::Closed)
         );
     }
 
     #[test]
-    fn breakout_event_for_the_parent_channel_returns_only_from_a_breakout_room() {
-        assert_eq!(
-            breakout_invite_from_event(&breakout_event(1, "jwt", vec![]), "1", true),
-            Some(BreakoutInvite::Return)
-        );
-        assert_eq!(
-            breakout_invite_from_event(&breakout_event(1, "jwt", vec![]), "1", false),
-            None
-        );
+    fn breakout_event_for_another_breakout_parent_is_not_an_assignment() {
+        assert_eq!(signal(9, "jwt", vec![], false, &["9"]), None);
+        assert_eq!(signal(9, "jwt", vec![], true, &["9"]), None);
     }
 
     #[test]
     fn breakout_event_with_rooms_to_pick_lists_them() {
         assert_eq!(
-            breakout_invite_from_event(&breakout_event(0, "", vec![5, 0, 6]), "1", false),
-            Some(BreakoutInvite::Choose {
+            signal(0, "", vec![5, 0, 6], false, &[]),
+            Some(BreakoutSignal::Invite(BreakoutInvite::Choose {
                 rooms: vec!["5".into(), "6".into()],
-            })
+            }))
         );
-        assert_eq!(
-            breakout_invite_from_event(&breakout_event(0, "", vec![0]), "1", false),
-            None
-        );
+        assert_eq!(signal(0, "", vec![0], false, &[]), None);
     }
 
     #[test]

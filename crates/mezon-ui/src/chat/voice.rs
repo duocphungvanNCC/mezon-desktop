@@ -3824,7 +3824,8 @@ fn control_bar(
                 crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
             })
     });
-    let return_to_main_button = store.breakout_room_id().is_some().then(|| {
+    let in_breakout = store.breakout_room_id().is_some();
+    let return_to_main_button = in_breakout.then(|| {
         let voice = voice.clone();
         circle_button(
             "voice-breakout-return-btn",
@@ -4094,9 +4095,10 @@ fn control_bar(
         .flex_1()
         .items_center()
         .gap_3()
-        .children(emoji_button)
-        .children(sound_button)
-        .when(channel_tools, |left| {
+        .when(!in_breakout, |left| {
+            left.children(emoji_button).children(sound_button)
+        })
+        .when(channel_tools && !in_breakout, |left| {
             left.children(interactive_app_button)
                 .children(record_button)
                 .children(record_badge)
@@ -4115,7 +4117,9 @@ fn control_bar(
         .children(agent_button)
         .children(breakout_button)
         .children(return_to_main_button)
-        .when(channel_tools, |center| center.child(raise_hand_button))
+        .when(channel_tools && !in_breakout, |center| {
+            center.child(raise_hand_button)
+        })
         .child(leave_button);
 
     div()
