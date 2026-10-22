@@ -1812,6 +1812,27 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_room(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_merge(breakout_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
         let transport = self.inner.clone();
         let src = src.to_string();
