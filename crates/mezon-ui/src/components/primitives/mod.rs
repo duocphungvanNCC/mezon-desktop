@@ -66,7 +66,9 @@ pub use date_picker::{DatePicker, DatePickerEvent, DatePickerPopupMode};
 pub use divider::Divider;
 pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
 pub use label::Label;
-pub use mention_count_badge::{mention_count_badge, mention_count_badge_on_channel_row};
+pub use mention_count_badge::{
+    mention_count_badge, mention_count_badge_on_channel_row, unread_dot,
+};
 pub(crate) use mention_float_button::{MentionLabels, mention_float_button};
 pub use modal::Modal;
 pub use pagination::{

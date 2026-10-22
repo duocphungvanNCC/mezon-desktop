@@ -11,7 +11,7 @@ use mezon_store::{
     BadgeService, BuzzStore, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
     ClanMembersStore, EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR,
     PERMISSION_MANAGE_CLAN, PermissionStore, Settings, SidebarOrderKey, StreamMember, StreamStore,
-    VoiceMember,
+    TopicBadgeStore, VoiceMember,
 };
 
 use crate::channel_app::launch_channel_app_from_store;
@@ -152,6 +152,7 @@ pub struct ChannelSidebar {
     _events_observe: Subscription,
     _stream_observe: Subscription,
     _buzz_observe: Subscription,
+    _topic_badge_observe: Subscription,
     _permissions_observe: Subscription,
     _channel_permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
@@ -356,6 +357,11 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let topic_badge_observe = cx.observe(&TopicBadgeStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
         let onboarding_observe = cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify());
         let channel_permissions_observe = cx.subscribe(
@@ -424,6 +430,7 @@ impl ChannelSidebar {
             _events_observe: events_observe,
             _stream_observe: stream_observe,
             _buzz_observe: buzz_observe,
+            _topic_badge_observe: topic_badge_observe,
             _permissions_observe: permissions_observe,
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
@@ -725,6 +732,9 @@ impl ChannelSidebar {
 
         let cold_loading = if let Some(clan_id) = clans.active_clan_id.as_ref() {
             let categories = channels.categories_for_clan(*clan_id);
+            let topic_unread = TopicBadgeStore::global(cx)
+                .read(cx)
+                .unread_parent_ids(*clan_id);
             if categories.is_empty() {
                 !self.loaded_clans.contains(clan_id)
             } else {
@@ -834,7 +844,7 @@ impl ChannelSidebar {
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
-                                unread: ch.is_unread(),
+                                unread: ch.is_unread() || topic_unread.contains(&ch.id),
                                 buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
@@ -891,7 +901,8 @@ impl ChannelSidebar {
                             );
                             let has_members_in_voice =
                                 is_voice_or_streaming && !sidebar_members.is_empty();
-                            let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                            let should_show = ((ch.is_unread() || topic_unread.contains(&ch.id))
+                                && !is_voice_or_streaming)
                                 || buzz.has_buzz(ch.id)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
@@ -938,7 +949,7 @@ impl ChannelSidebar {
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
-                                unread: ch.is_unread(),
+                                unread: ch.is_unread() || topic_unread.contains(&ch.id),
                                 buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,

@@ -884,13 +884,17 @@ impl ClanList {
     }
 
     pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let Some(has_unread) = ChannelList::global(cx)
-            .read(cx)
-            .clan_has_any_unread(clan_id)
+        let topic_unread = crate::topic_badges::TopicBadgeStore::try_global(cx)
+            .is_some_and(|store| store.read(cx).clan_has_unread_topic(clan_id));
+        let Some(has_unread) = ChannelList::try_global(cx)
+            .and_then(|channels| channels.read(cx).clan_has_any_unread(clan_id))
         else {
+            if topic_unread {
+                self.set_has_unread(clan_id, true, cx);
+            }
             return;
         };
-        self.set_has_unread(clan_id, has_unread, cx);
+        self.set_has_unread(clan_id, has_unread || topic_unread, cx);
     }
 
     pub fn decrement_badge(&mut self, clan_id: ClanId, amount: u32, cx: &mut Context<Self>) {
@@ -1121,12 +1125,9 @@ impl ClanList {
     ) -> Task<Result<String, String>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        let base_img_url = AppConfig::global(cx).base_img_url.clone();
         cx.spawn(async move |_, cx| {
             cx.background_executor()
-                .spawn(
-                    async move { upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await },
-                )
+                .spawn(async move { upload_image_to_cdn(&api, &path, max_bytes).await })
                 .await
         })
     }
@@ -1494,20 +1495,6 @@ fn timestamped_upload_filename(original: &str) -> String {
     format!("{ms}_{sanitized}")
 }
 
-fn image_dimensions(data: &[u8]) -> (i32, i32) {
-    image::ImageReader::new(std::io::Cursor::new(data))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.into_dimensions().ok())
-        .map(|(w, h)| {
-            (
-                i32::try_from(w).unwrap_or(i32::MAX),
-                i32::try_from(h).unwrap_or(i32::MAX),
-            )
-        })
-        .unwrap_or((0, 0))
-}
-
 fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     if len == 0 {
@@ -1521,7 +1508,6 @@ fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> 
 
 pub(crate) async fn upload_image_to_cdn(
     api: &AppApi,
-    base_img_url: &str,
     path: &Path,
     max_bytes: u64,
 ) -> Result<String, String> {
@@ -1542,20 +1528,9 @@ pub(crate) async fn upload_image_to_cdn(
         .ok_or_else(|| "Unsupported image file type".to_string())?
         .as_str();
     let size = i32::try_from(data.len()).map_err(|_| "Image file is too large".to_string())?;
-    let (width, height) = image_dimensions(&data);
 
-    let upload = api
-        .upload_attachment_file(&filename, filetype, size, width, height, 0)
+    api.upload_public_image(&filename, filetype, size, data)
         .await
-        .map_err(|e| e.to_string())?;
-    mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if upload.filename.is_empty() {
-        return Err("UploadAttachmentFile returned empty filename".into());
-    }
-    mezon_client::attachment_cdn_url_for_upload(upload.type_cdn, base_img_url, &upload.filename)
         .map_err(|e| e.to_string())
 }
 

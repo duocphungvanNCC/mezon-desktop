@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 
@@ -75,11 +75,52 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
 
 pub(crate) const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
 const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
+const PROFILE_IMG_BASE: &str = "https://profile.mezon.ai";
+
+pub struct CdnReadBases {
+    pub mezon: String,
+    pub cloudflare: String,
+    pub profile: String,
+}
+
+static CDN_READ_BASES: OnceLock<CdnReadBases> = OnceLock::new();
+
+pub fn configure_cdn_read_bases(bases: CdnReadBases) {
+    let _ = CDN_READ_BASES.set(CdnReadBases {
+        mezon: bases.mezon.trim_end_matches('/').to_owned(),
+        cloudflare: bases.cloudflare.trim_end_matches('/').to_owned(),
+        profile: bases.profile.trim_end_matches('/').to_owned(),
+    });
+}
+
+fn profile_read_base(bases: Option<&CdnReadBases>) -> &str {
+    bases
+        .map(|bases| bases.profile.as_str())
+        .filter(|profile| !profile.is_empty())
+        .unwrap_or(PROFILE_IMG_BASE)
+}
+
+fn public_image_url_for_upload(bases: Option<&CdnReadBases>, filename: &str) -> Result<String> {
+    if filename.is_empty() {
+        anyhow::bail!("public image upload returned an empty filename");
+    }
+    Ok(format!("{}/{filename}", profile_read_base(bases)))
+}
+
+fn mezon_cdn_base() -> &'static str {
+    read_base_url(CDN_READ_BASES.get(), 1, "")
+}
 
 pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {
-    match type_cdn {
-        1 => CDN_MEZON_MINIO,
-        2 => CDN_R2_CLOUDFLARE,
+    read_base_url(CDN_READ_BASES.get(), type_cdn, fallback)
+}
+
+fn read_base_url<'a>(bases: Option<&'a CdnReadBases>, type_cdn: i32, fallback: &'a str) -> &'a str {
+    match (type_cdn, bases) {
+        (1, Some(bases)) => &bases.mezon,
+        (1, None) => CDN_MEZON_MINIO,
+        (2, Some(bases)) => &bases.cloudflare,
+        (2, None) => CDN_R2_CLOUDFLARE,
         _ => fallback.trim_end_matches('/'),
     }
 }
@@ -111,7 +152,8 @@ pub(crate) fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<C
     if channel_id == 0 {
         return None;
     }
-    let src = url.strip_prefix(CDN_MEZON_MINIO)?.strip_prefix('/')?;
+    let cdn_base = mezon_cdn_base();
+    let src = url.strip_prefix(cdn_base)?.strip_prefix('/')?;
     let (folder, file) = src.split_once('/')?;
     if !is_cdn_channel_folder(folder) || !is_channel_upload_name(file) {
         return None;
@@ -122,7 +164,7 @@ pub(crate) fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<C
     }
     let dst = format!("{destination}/{file}");
     Some(CdnFileLink {
-        url: format!("{CDN_MEZON_MINIO}/{dst}"),
+        url: format!("{cdn_base}/{dst}"),
         src: src.to_string(),
         dst,
     })
@@ -680,6 +722,17 @@ impl AppApi {
 
     pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
         self.transport.generate_cdn_signature(channel_id).await
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        self.transport.sfu_breakout_room(request).await
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        self.transport.sfu_breakout_merge(breakout_id).await
     }
 
     pub async fn link_attachments_into_channel(
@@ -2759,6 +2812,21 @@ impl AppApi {
         attachment_cdn_url_for_upload(upload.type_cdn, &self.base_img_url, &upload.filename)
     }
 
+    pub async fn upload_public_image(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let upload = self
+            .transport
+            .upload_oauth_file(filename, filetype, size)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        public_image_url_for_upload(CDN_READ_BASES.get(), &upload.filename)
+    }
+
     async fn upload_media_from_url(
         &self,
         url: &str,
@@ -2973,7 +3041,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, filetype, size, width, height, data, 0)
+            .upload_public_image(&filename, filetype, size, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
@@ -3370,6 +3438,10 @@ impl AppApi {
         self.transport.close_dm_by_channel_id(channel_id).await
     }
 
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        self.transport.open_dm_by_channel_id(channel_id).await
+    }
+
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
         self.transport.list_loged_device().await
     }
@@ -3422,9 +3494,10 @@ mod tests {
     use prost::Message as _;
 
     use super::{
-        AppApi, CdnFileLink, MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan,
-        attachment_cdn_url_for_upload, cdn_file_link_into_channel, cdn_read_base_url,
-        emoticon_id_from_filename, multipart_part_ranges, sanitize_upload_filename,
+        AppApi, CdnFileLink, CdnReadBases, MULTIPART_PART_SIZE, PresignedAttachment,
+        ResumableUpload, UploadPlan, attachment_cdn_url_for_upload, cdn_file_link_into_channel,
+        cdn_read_base_url, emoticon_id_from_filename, multipart_part_ranges,
+        public_image_url_for_upload, read_base_url, sanitize_upload_filename,
         upload_attachment_type,
     };
     use crate::TransportClient;
@@ -3628,6 +3701,45 @@ mod tests {
             cdn_read_base_url(0, "https://fallback/"),
             "https://fallback"
         );
+    }
+
+    #[test]
+    fn cdn_read_base_url_follows_the_configured_environment() {
+        let dev = CdnReadBases {
+            mezon: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare: "https://cdn-dev.tx8.vn".into(),
+            profile: "https://cdn-dev-profile.nccsoft.vn".into(),
+        };
+        assert_eq!(
+            read_base_url(Some(&dev), 1, "https://fallback"),
+            "https://cdn-dev.nccsoft.vn"
+        );
+        assert_eq!(
+            read_base_url(Some(&dev), 2, "https://fallback"),
+            "https://cdn-dev.tx8.vn"
+        );
+        assert_eq!(
+            read_base_url(Some(&dev), 0, "https://fallback/"),
+            "https://fallback"
+        );
+    }
+
+    #[test]
+    fn public_image_url_is_served_from_the_profile_host() {
+        let dev = CdnReadBases {
+            mezon: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare: "https://cdn-dev.tx8.vn".into(),
+            profile: "https://cdn-dev-profile.nccsoft.vn".into(),
+        };
+        assert_eq!(
+            public_image_url_for_upload(Some(&dev), "0000000000000000/1_logo.png").unwrap(),
+            "https://cdn-dev-profile.nccsoft.vn/0000000000000000/1_logo.png"
+        );
+        assert_eq!(
+            public_image_url_for_upload(None, "0000000000000000/1_logo.png").unwrap(),
+            "https://profile.mezon.ai/0000000000000000/1_logo.png"
+        );
+        assert!(public_image_url_for_upload(Some(&dev), "").is_err());
     }
 
     const FORWARD_DESTINATION: i64 = 0x1d00_0000_0000_abcd;
