@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Stanze secondarie aperte",
   "channelVoice.breakout.closed": "Stanze secondarie chiuse",
   "channelVoice.breakout.failed": "Impossibile aggiornare le stanze secondarie",
+  "channelVoice.breakout.notEnoughRooms": "Non ci sono abbastanza canali vocali pubblici vuoti per così tante stanze",
   "channelVoice.breakout.inviteAssigned": "L'host ti ha assegnato a una stanza secondaria.",
   "channelVoice.breakout.inviteChoose": "L'host ha aperto le stanze secondarie. Scegline una.",
   "channelVoice.breakout.inviteReturn": "L'host ha chiuso le stanze secondarie. Tornare alla stanza principale?",

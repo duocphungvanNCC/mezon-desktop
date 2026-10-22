@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Breakout-Räume geöffnet",
   "channelVoice.breakout.closed": "Breakout-Räume geschlossen",
   "channelVoice.breakout.failed": "Breakout-Räume konnten nicht aktualisiert werden",
+  "channelVoice.breakout.notEnoughRooms": "Nicht genug leere öffentliche Sprachkanäle für so viele Räume",
   "channelVoice.breakout.inviteAssigned": "Der Host hat dich einem Breakout-Raum zugewiesen.",
   "channelVoice.breakout.inviteChoose": "Der Host hat Breakout-Räume geöffnet. Wähle einen aus.",
   "channelVoice.breakout.inviteReturn": "Der Host hat die Breakout-Räume geschlossen. Zurück zum Hauptraum?",

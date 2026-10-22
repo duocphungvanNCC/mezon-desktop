@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "ブレイクアウトルームを開きました",
   "channelVoice.breakout.closed": "ブレイクアウトルームを閉じました",
   "channelVoice.breakout.failed": "ブレイクアウトルームを更新できませんでした",
+  "channelVoice.breakout.notEnoughRooms": "その数のルームに必要な空いている公開ボイスチャンネルが足りません",
   "channelVoice.breakout.inviteAssigned": "ホストがあなたをブレイクアウトルームに割り当てました。",
   "channelVoice.breakout.inviteChoose": "ホストがブレイクアウトルームを開きました。参加するルームを選んでください。",
   "channelVoice.breakout.inviteReturn": "ホストがブレイクアウトルームを閉じました。メインルームに戻りますか？",

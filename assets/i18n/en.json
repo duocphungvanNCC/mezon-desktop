@@ -1204,6 +1204,7 @@
   "channelVoice.breakout.opened": "Breakout rooms opened",
   "channelVoice.breakout.closed": "Breakout rooms closed",
   "channelVoice.breakout.failed": "Couldn't update breakout rooms",
+  "channelVoice.breakout.notEnoughRooms": "Not enough empty public voice channels for that many rooms",
   "channelVoice.breakout.inviteAssigned": "The host assigned you to a breakout room.",
   "channelVoice.breakout.inviteChoose": "The host opened breakout rooms. Pick one to join.",
   "channelVoice.breakout.inviteReturn": "The host closed the breakout rooms. Return to the main room?",

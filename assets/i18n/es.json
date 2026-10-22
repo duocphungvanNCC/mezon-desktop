@@ -1206,6 +1206,7 @@
   "channelVoice.breakout.opened": "Salas de grupos abiertas",
   "channelVoice.breakout.closed": "Salas de grupos cerradas",
   "channelVoice.breakout.failed": "No se pudieron actualizar las salas de grupos",
+  "channelVoice.breakout.notEnoughRooms": "No hay suficientes canales de voz públicos vacíos para tantas salas",
   "channelVoice.breakout.inviteAssigned": "El anfitrión te asignó a una sala de grupos.",
   "channelVoice.breakout.inviteChoose": "El anfitrión abrió salas de grupos. Elige una para unirte.",
   "channelVoice.breakout.inviteReturn": "El anfitrión cerró las salas de grupos. ¿Volver a la sala principal?",

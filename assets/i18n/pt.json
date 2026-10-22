@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Salas simultâneas abertas",
   "channelVoice.breakout.closed": "Salas simultâneas fechadas",
   "channelVoice.breakout.failed": "Não foi possível atualizar as salas simultâneas",
+  "channelVoice.breakout.notEnoughRooms": "Não há canais de voz públicos vazios suficientes para tantas salas",
   "channelVoice.breakout.inviteAssigned": "O anfitrião colocou você em uma sala simultânea.",
   "channelVoice.breakout.inviteChoose": "O anfitrião abriu salas simultâneas. Escolha uma para entrar.",
   "channelVoice.breakout.inviteReturn": "O anfitrião fechou as salas simultâneas. Voltar à sala principal?",

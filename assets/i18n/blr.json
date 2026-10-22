@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Асобныя пакоі адкрыты",
   "channelVoice.breakout.closed": "Асобныя пакоі закрыты",
   "channelVoice.breakout.failed": "Не ўдалося абнавіць асобныя пакоі",
+  "channelVoice.breakout.notEnoughRooms": "Недастаткова пустых публічных галасавых каналаў для такой колькасці пакояў",
   "channelVoice.breakout.inviteAssigned": "Арганізатар накіраваў вас у асобны пакой.",
   "channelVoice.breakout.inviteChoose": "Арганізатар адкрыў асобныя пакоі. Выберыце адзін.",
   "channelVoice.breakout.inviteReturn": "Арганізатар закрыў асобныя пакоі. Вярнуцца ў асноўны пакой?",

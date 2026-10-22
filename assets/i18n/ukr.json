@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Окремі кімнати відкрито",
   "channelVoice.breakout.closed": "Окремі кімнати закрито",
   "channelVoice.breakout.failed": "Не вдалося оновити окремі кімнати",
+  "channelVoice.breakout.notEnoughRooms": "Недостатньо порожніх публічних голосових каналів для такої кількості кімнат",
   "channelVoice.breakout.inviteAssigned": "Організатор направив вас до окремої кімнати.",
   "channelVoice.breakout.inviteChoose": "Організатор відкрив окремі кімнати. Оберіть одну.",
   "channelVoice.breakout.inviteReturn": "Організатор закрив окремі кімнати. Повернутися до основної кімнати?",

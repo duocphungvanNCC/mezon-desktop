@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Salles de sous-groupes ouvertes",
   "channelVoice.breakout.closed": "Salles de sous-groupes fermées",
   "channelVoice.breakout.failed": "Impossible de mettre à jour les salles de sous-groupes",
+  "channelVoice.breakout.notEnoughRooms": "Pas assez de salons vocaux publics vides pour autant de salles",
   "channelVoice.breakout.inviteAssigned": "L'hôte vous a placé dans une salle de sous-groupe.",
   "channelVoice.breakout.inviteChoose": "L'hôte a ouvert des salles de sous-groupes. Choisissez-en une.",
   "channelVoice.breakout.inviteReturn": "L'hôte a fermé les salles de sous-groupes. Revenir à la salle principale ?",

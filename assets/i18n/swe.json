@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Grupprum öppnade",
   "channelVoice.breakout.closed": "Grupprum stängda",
   "channelVoice.breakout.failed": "Det gick inte att uppdatera grupprummen",
+  "channelVoice.breakout.notEnoughRooms": "Inte tillräckligt många tomma offentliga röstkanaler för så många rum",
   "channelVoice.breakout.inviteAssigned": "Värden har placerat dig i ett grupprum.",
   "channelVoice.breakout.inviteChoose": "Värden har öppnat grupprum. Välj ett att gå med i.",
   "channelVoice.breakout.inviteReturn": "Värden har stängt grupprummen. Tillbaka till huvudrummet?",

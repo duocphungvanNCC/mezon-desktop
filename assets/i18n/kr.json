@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "소회의실을 열었습니다",
   "channelVoice.breakout.closed": "소회의실을 닫았습니다",
   "channelVoice.breakout.failed": "소회의실을 업데이트할 수 없습니다",
+  "channelVoice.breakout.notEnoughRooms": "그만큼의 회의실에 필요한 빈 공개 음성 채널이 부족합니다",
   "channelVoice.breakout.inviteAssigned": "호스트가 회원님을 소회의실에 배정했습니다.",
   "channelVoice.breakout.inviteChoose": "호스트가 소회의실을 열었습니다. 참여할 회의실을 선택하세요.",
   "channelVoice.breakout.inviteReturn": "호스트가 소회의실을 닫았습니다. 메인 회의실로 돌아갈까요?",

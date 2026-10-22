@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Pokoje podgrup otwarte",
   "channelVoice.breakout.closed": "Pokoje podgrup zamknięte",
   "channelVoice.breakout.failed": "Nie udało się zaktualizować pokoi podgrup",
+  "channelVoice.breakout.notEnoughRooms": "Za mało pustych publicznych kanałów głosowych na tyle pokoi",
   "channelVoice.breakout.inviteAssigned": "Gospodarz przydzielił cię do pokoju podgrupy.",
   "channelVoice.breakout.inviteChoose": "Gospodarz otworzył pokoje podgrup. Wybierz jeden.",
   "channelVoice.breakout.inviteReturn": "Gospodarz zamknął pokoje podgrup. Wrócić do pokoju głównego?",

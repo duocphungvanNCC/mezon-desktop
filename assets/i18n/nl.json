@@ -1203,6 +1203,7 @@
   "channelVoice.breakout.opened": "Subgroepen geopend",
   "channelVoice.breakout.closed": "Subgroepen gesloten",
   "channelVoice.breakout.failed": "Kan subgroepen niet bijwerken",
+  "channelVoice.breakout.notEnoughRooms": "Niet genoeg lege openbare spraakkanalen voor zoveel ruimtes",
   "channelVoice.breakout.inviteAssigned": "De host heeft je aan een subgroep toegewezen.",
   "channelVoice.breakout.inviteChoose": "De host heeft subgroepen geopend. Kies er een.",
   "channelVoice.breakout.inviteReturn": "De host heeft de subgroepen gesloten. Terug naar de hoofdruimte?",

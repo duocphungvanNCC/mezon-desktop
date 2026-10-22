@@ -1212,6 +1212,7 @@
   "channelVoice.breakout.opened": "Сессионные залы открыты",
   "channelVoice.breakout.closed": "Сессионные залы закрыты",
   "channelVoice.breakout.failed": "Не удалось обновить сессионные залы",
+  "channelVoice.breakout.notEnoughRooms": "Недостаточно пустых публичных голосовых каналов для такого числа залов",
   "channelVoice.breakout.inviteAssigned": "Организатор направил вас в сессионный зал.",
   "channelVoice.breakout.inviteChoose": "Организатор открыл сессионные залы. Выберите один.",
   "channelVoice.breakout.inviteReturn": "Организатор закрыл сессионные залы. Вернуться в основной зал?",

@@ -358,9 +358,10 @@ impl BreakoutInviteModal {
     }
 
     fn accept(&self, room_id: Option<String>, window: &mut Window, cx: &mut App) {
-        self.voice.update(cx, |store, cx| {
+        let target = self.voice.update(cx, |store, cx| {
             store.accept_breakout_invite(room_id, window, cx)
         });
+        open_voice_channel(target, cx);
     }
 }
 
@@ -385,6 +386,13 @@ impl Render for BreakoutInviteModal {
             Some(BreakoutInvite::Choose { rooms }) => rooms.clone(),
             _ => Vec::new(),
         };
+        let room_names: Vec<String> = rooms
+            .iter()
+            .enumerate()
+            .map(|(index, room_id)| {
+                voice_channel_name(room_id, cx).unwrap_or_else(|| room_label(&locale, index))
+            })
+            .collect();
         let voice = self.voice.clone();
 
         modal_card(theme, self.focus_handle.clone())
@@ -409,14 +417,16 @@ impl Render for BreakoutInviteModal {
                         .gap_2()
                         .max_h(px(240.))
                         .overflow_y_scroll()
-                        .children(rooms.into_iter().enumerate().map(|(index, room_id)| {
-                            Button::new(("breakout-room", index))
-                                .label(room_label(&locale, index))
-                                .disabled(pending)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.accept(Some(room_id.clone()), window, cx)
-                                }))
-                        })),
+                        .children(rooms.into_iter().zip(room_names).enumerate().map(
+                            |(index, (room_id, name))| {
+                                Button::new(("breakout-room", index))
+                                    .label(name)
+                                    .disabled(pending)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.accept(Some(room_id.clone()), window, cx)
+                                    }))
+                            },
+                        )),
                 )
             })
             .child(
@@ -457,6 +467,38 @@ fn modal_card(theme: &crate::theme::Theme, focus_handle: FocusHandle) -> gpui::D
         .border_color(theme.border)
         .bg(theme.bg_floating)
         .shadow_lg()
+}
+
+fn voice_channel_name(channel_id: &str, cx: &App) -> Option<String> {
+    let channel_id = mezon_store::ChannelId(channel_id.parse::<i64>().ok()?);
+    let channels = mezon_store::ChannelList::try_global(cx)?;
+    let name = channels
+        .read(cx)
+        .find_channel_in_active_clan(channel_id)?
+        .name
+        .clone();
+    (!name.is_empty()).then_some(name)
+}
+
+pub(crate) fn open_voice_channel(target: Option<(String, String)>, cx: &mut App) {
+    let Some((clan_id, channel_id)) = target else {
+        return;
+    };
+    let (Ok(clan_id), Ok(channel_id)) = (clan_id.parse::<i64>(), channel_id.parse::<i64>()) else {
+        return;
+    };
+    let (clan_id, channel_id) = (ClanId(clan_id), mezon_store::ChannelId(channel_id));
+    mezon_store::ChannelList::global(cx).update(cx, |list, cx| list.select_channel(channel_id, cx));
+    mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
+        store.open_channel_in_clan(clan_id, channel_id, cx)
+    });
+    crate::router::navigate(
+        cx,
+        crate::router::Route::Channel {
+            clan_id,
+            channel_id,
+        },
+    );
 }
 
 pub(crate) fn can_open_breakout_rooms(store: &VoiceStore, cx: &App) -> bool {

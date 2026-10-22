@@ -1212,6 +1212,7 @@
   "channelVoice.breakout.opened": "Аерым бүлмәләр ачылды",
   "channelVoice.breakout.closed": "Аерым бүлмәләр ябылды",
   "channelVoice.breakout.failed": "Аерым бүлмәләрне яңартып булмады",
+  "channelVoice.breakout.notEnoughRooms": "Мондый күп бүлмә өчен буш ачык тавыш каналлары җитәрлек түгел",
   "channelVoice.breakout.inviteAssigned": "Оештыручы сезне аерым бүлмәгә билгеләде.",
   "channelVoice.breakout.inviteChoose": "Оештыручы аерым бүлмәләр ачты. Берсен сайлагыз.",
   "channelVoice.breakout.inviteReturn": "Оештыручы аерым бүлмәләрне япты. Төп бүлмәгә кайтасызмы?",
