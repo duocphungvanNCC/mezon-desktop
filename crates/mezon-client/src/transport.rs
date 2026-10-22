@@ -3282,6 +3282,7 @@ pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
     }
     let channel_id = parts.next()?;
     let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
+    let channel_id = channel_id.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"']);
     (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
 }
 
@@ -11602,6 +11603,20 @@ mod tests {
         assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900?code=1"),
             Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900."),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url(
+                "https://mezon.ai/chat/clans/1779484504377790464/channels/1965677153211125760."
+            ),
+            Some("1965677153211125760")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900abc"),
+            None
         );
         assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),

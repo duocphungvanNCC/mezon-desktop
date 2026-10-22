@@ -1158,13 +1158,14 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             }),
             Kind::Link(link_kind) => {
                 let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                spans.push(resolve_link_span(
+                resolve_link_span(
+                    &mut spans,
                     inner.into(),
                     url,
                     link_kind,
                     &content.cvtt,
                     hashtag_meta(&tok),
-                ));
+                );
             }
             Kind::Markdown => {
                 let ty = tok.kind.as_deref().unwrap_or("");
@@ -1181,13 +1182,14 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                     }
                     "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" => {
                         let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                        spans.push(resolve_link_span(
+                        resolve_link_span(
+                            &mut spans,
                             inner.into(),
                             url,
                             link_kind_from_marker(ty),
                             &content.cvtt,
                             hashtag_meta(&tok),
-                        ));
+                        );
                     }
                     "lk_ogp" => {
                         let url = tok.url.clone().unwrap_or_else(|| inner.clone());
@@ -1286,6 +1288,7 @@ fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
         return None;
     }
     let channel_id = parts.next()?;
+    let channel_id = channel_id.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"']);
     if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -1335,32 +1338,54 @@ fn hashtag_meta(tok: &ContentToken) -> Option<Box<HashtagMeta>> {
 }
 
 fn resolve_link_span(
+    spans: &mut Vec<MessageSpan>,
     text: SharedString,
     url: String,
     kind: LinkKind,
     cvtt: &HashMap<String, String>,
     meta: Option<Box<HashtagMeta>>,
-) -> MessageSpan {
+) {
     if let Some(ids) = extract_channel_url_ids(&url) {
         if let Some(canvas_id) = ids.canvas_id {
             if let Some(title) = cvtt.get(&canvas_id).filter(|t| !t.is_empty()) {
-                return MessageSpan::Canvas {
+                spans.push(MessageSpan::Canvas {
                     title: title.clone().into(),
                     clan_id: ids.clan_id,
                     channel_id: ids.channel_id,
                     canvas_id,
-                };
+                });
+                return;
             }
-            return MessageSpan::Link { text, url, kind };
+            spans.push(MessageSpan::Link { text, url, kind });
+            return;
         }
         let meta = meta.filter(|meta| meta.clan_id.get().to_string() == ids.clan_id);
-        return MessageSpan::Hashtag {
-            display: text,
+        let end = if text.starts_with("http://") || text.starts_with("https://") {
+            text.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"'])
+                .len()
+        } else {
+            text.len()
+        };
+        let punct = if end < text.len() {
+            text[end..].to_string()
+        } else {
+            String::new()
+        };
+        spans.push(MessageSpan::Hashtag {
+            display: if punct.is_empty() {
+                text
+            } else {
+                text[..end].to_string().into()
+            },
             channel_id: Some(ids.channel_id),
             meta,
-        };
+        });
+        if !punct.is_empty() {
+            spans.push(MessageSpan::Text(punct.into()));
+        }
+        return;
     }
-    MessageSpan::Link { text, url, kind }
+    spans.push(MessageSpan::Link { text, url, kind });
 }
 
 fn apply_headings(spans: Vec<MessageSpan>) -> Vec<MessageSpan> {
@@ -3451,6 +3476,84 @@ mod tests {
                 channel_id: Some(id),
                 ..
             }] if id == "9876543210987654321"
+        ));
+    }
+
+    #[test]
+    fn parse_spans_channel_url_with_trailing_period_keeps_the_period() {
+        let url = "https://mezon.ai/chat/clans/1234567890123456789/channels/9876543210987654321";
+        let text = format!("{url}.");
+        let content = ApiMessageContent {
+            t: text.clone(),
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..link_token(&text, 0, text.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [
+                MessageSpan::Hashtag {
+                    channel_id: Some(id),
+                    ..
+                },
+                MessageSpan::Text(punct)
+            ] if id == "9876543210987654321" && punct == "."
+        ));
+
+        let content = ApiMessageContent {
+            t: text,
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..link_token(url, 0, url.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [
+                MessageSpan::Hashtag {
+                    channel_id: Some(id),
+                    ..
+                },
+                MessageSpan::Text(punct)
+            ] if id == "9876543210987654321" && punct == "."
+        ));
+    }
+
+    #[test]
+    fn parse_spans_plain_link_keeps_trailing_period_on_the_link() {
+        let url = "https://example.com/a.";
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..link_token(url, 0, url.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Link { text, url: href, .. }]
+                if text == "https://example.com/a." && href == "https://example.com/a."
+        ));
+    }
+
+    #[test]
+    fn parse_spans_channel_url_with_letter_suffix_stays_a_link() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900abc";
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..link_token(url, 0, url.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Link { .. }]
         ));
     }
 
