@@ -327,6 +327,7 @@ pub enum RealtimeEvent {
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
+    SfuBreakoutRoom(realtime::SfuBreakoutRoomEvent),
     ScreenShare(realtime::ScreenShareEvent),
     AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
@@ -390,6 +391,7 @@ impl RealtimeEvent {
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
+            Self::SfuBreakoutRoom(_) => "SfuBreakoutRoom",
             Self::ScreenShare(_) => "ScreenShare",
             Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
@@ -455,6 +457,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
+            realtime::envelope::Message::SfuBreakoutRoomEvent(m) => Ok(Self::SfuBreakoutRoom(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
@@ -5042,6 +5045,8 @@ impl MezonTransport {
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
             "LinkCDNFile" => 214,
+            "SfuBreakoutRoom" => 215,
+            "SfuBreakoutMerge" => 216,
             "SetOverrideEveryoneChannel" => 217,
             "GetOverrideEveryoneChannel" => 218,
             _ => {
@@ -7427,6 +7432,41 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: api::SfuBreakoutRoomRequest,
+    ) -> Result<api::SfuBreakoutRoomResponse> {
+        if request.parent_channel_id == 0 {
+            anyhow::bail!("SfuBreakoutRoom needs a parent channel id");
+        }
+        let cid = self.generate_cid();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutRoom", request.encode_to_vec())
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SfuBreakoutRoomResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        if breakout_id == 0 {
+            anyhow::bail!("SfuBreakoutMerge needs a breakout id");
+        }
+        let cid = self.generate_cid();
+        let body = api::SfuBreakoutMergeRequest {
+            target_id: breakout_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutMerge", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(())
     }
 
     pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
@@ -12930,6 +12970,8 @@ mod tests {
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
         assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
+        assert_eq!(t.get_api_index("SfuBreakoutRoom"), Some(215));
+        assert_eq!(t.get_api_index("SfuBreakoutMerge"), Some(216));
         assert_eq!(t.get_api_index("SetOverrideEveryoneChannel"), Some(217));
         assert_eq!(t.get_api_index("GetOverrideEveryoneChannel"), Some(218));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);

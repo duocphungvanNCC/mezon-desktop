@@ -49,6 +49,7 @@ pub mod threads_popover;
 pub mod user_profile_modal;
 pub mod user_profile_popover;
 pub mod voice;
+pub mod voice_breakout;
 pub mod voice_sound_picker;
 
 pub use area::ChatArea;

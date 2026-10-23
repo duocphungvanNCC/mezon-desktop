@@ -1476,9 +1476,8 @@ impl ChannelMessages {
                 memo.role_styles.clear();
             }
             this.store_identity(Self::compute_identity(cx));
-            if this.refresh_derived_state(cx) {
-                cx.notify();
-            }
+            this.refresh_derived_state(cx);
+            cx.notify();
         });
 
         let direct_messages = DirectMessageStore::global(cx);
@@ -1492,16 +1491,13 @@ impl ChannelMessages {
                 memo.display_names.clear();
                 memo.role_styles.clear();
             }
-            if this.refresh_derived_state(cx) {
-                cx.notify();
-            }
+            this.refresh_derived_state(cx);
+            cx.notify();
         });
 
         let users_by_user = UsersByUserStore::global(cx);
         let users_by_user_observe = cx.observe(&users_by_user, |this, _, cx| {
-            if MessagesStore::global(cx).read(cx).is_dm()
-                && !this.row_memo.borrow().avatars.is_empty()
-            {
+            if MessagesStore::global(cx).read(cx).is_dm() {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
@@ -1512,9 +1508,7 @@ impl ChannelMessages {
 
         let group_members = GroupMembersStore::global(cx);
         let group_members_observe = cx.observe(&group_members, |this, _, cx| {
-            if MessagesStore::global(cx).read(cx).is_dm()
-                && !this.row_memo.borrow().avatars.is_empty()
-            {
+            if MessagesStore::global(cx).read(cx).is_dm() {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
