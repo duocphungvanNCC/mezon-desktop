@@ -37,6 +37,33 @@ pub use mezon_voice::{
 
 use crate::AppConfig;
 use crate::Settings;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+static HEAP_TRIM_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+pub(crate) fn trim_freed_heap_memory(cx: &mut App) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        if HEAP_TRIM_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        cx.background_executor()
+            .spawn(async {
+                unsafe {
+                    malloc_trim(0);
+                }
+                HEAP_TRIM_IN_FLIGHT.store(false, Ordering::Release);
+            })
+            .detach();
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = cx;
+}
 use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::desktop_draw::DesktopDraw;
@@ -1585,17 +1612,30 @@ impl VoiceStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        let had_drops = !drops.is_empty();
         let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
+        if !dropped.is_empty() {
+            self.pending_texture_replaces
+                .lock()
+                .retain(|image| !dropped.contains(&image.id));
+        }
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
+        if window.is_some() {
+            let replaces: Vec<Arc<RenderImage>> =
+                std::mem::take(&mut *self.pending_texture_replaces.lock());
+            for image in replaces {
+                if dropped.contains(&image.id) {
+                    continue;
+                }
+                cx.update_render_image(&image, window.as_deref_mut());
             }
-            cx.update_render_image(&image, window.as_deref_mut());
+        } else if !self.pending_texture_replaces.lock().is_empty() {
+            self.pending_texture_work.store(true, Ordering::Release);
+        }
+        if had_drops {
+            trim_freed_heap_memory(cx);
         }
     }
 
@@ -4174,10 +4214,15 @@ impl VoiceStore {
                 })
                 .collect()
         };
+        self.pending_texture_replaces.lock().clear();
+        let had_stale = !stale.is_empty();
         for image in stale {
             cx.drop_image(image, window.as_deref_mut());
         }
         self.flush_texture_drops(window, cx);
+        if had_stale {
+            trim_freed_heap_memory(cx);
+        }
     }
 
     fn restart_sfu_session(

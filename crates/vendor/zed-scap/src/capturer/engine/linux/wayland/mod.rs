@@ -2,7 +2,7 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU8},
-        mpsc::{sync_channel, RecvError, SendError, Sender, SyncSender},
+        mpsc::{sync_channel, RecvError, SyncSender, TrySendError},
         Arc,
     },
     thread::JoinHandle,
@@ -48,7 +48,7 @@ static LOGGED_FIRST_FRAME: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct ListenerUserData {
-    pub tx: Sender<Result<Frame>>,
+    pub tx: SyncSender<Result<Frame>>,
     pub format: spa::param::video::VideoInfoRaw,
     pub stream_error: Arc<AtomicBool>,
 }
@@ -216,9 +216,9 @@ fn process_callback(stream: &StreamRef, user_data: &mut ListenerUserData) {
         Err(err) => Some(Err(err)),
     };
     if let Some(frame_result) = frame_result {
-        match user_data.tx.send(frame_result) {
-            Ok(()) => {}
-            Err(SendError(_)) => {
+        match user_data.tx.try_send(frame_result) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => {
                 log::debug!("Frame receiver was dropped.")
             }
         }
@@ -346,7 +346,7 @@ struct PipewireCapture {
 
 fn start_pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: SyncSender<Result<Frame>>,
     stream_id: u32,
     stream_error: Arc<AtomicBool>,
 ) -> Result<PipewireCapture> {
@@ -468,7 +468,7 @@ fn start_pipewire_capturer(
 // TODO: Format negotiation
 fn pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: SyncSender<Result<Frame>>,
     ready_sender: &SyncSender<Result<()>>,
     stream_id: u32,
     capturer_state: Arc<AtomicU8>,
@@ -511,7 +511,7 @@ pub struct WaylandCapturer {
 
 impl WaylandCapturer {
     // TODO: Error handling
-    pub fn new(options: &Options, tx: Sender<Result<Frame>>) -> Result<Self> {
+    pub fn new(options: &Options, tx: SyncSender<Result<Frame>>) -> Result<Self> {
         let connection = dbus::blocking::Connection::new_session()
             .context("Failed to create dbus connection")?;
         let stream = ScreenCastPortal::new(&connection)

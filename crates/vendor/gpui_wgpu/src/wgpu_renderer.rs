@@ -1179,12 +1179,22 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
+    fn poll_device(&self) {
+        if let Some(resources) = self.resources.as_ref() {
+            let _ = resources.device.poll(wgpu::PollType::Poll);
+        }
+    }
+
+    fn flush_pending_work(&self) {
+        if let Some(resources) = self.resources.as_ref() {
+            resources.queue.submit(std::iter::empty());
+            let _ = resources.device.poll(wgpu::PollType::Poll);
+        }
+    }
+
     pub fn draw(&mut self, scene: &Scene) -> bool {
-        // Bail out early if the surface has been unconfigured (e.g. during
-        // Android background/rotation transitions).  Attempting to acquire
-        // a texture from an unconfigured surface can block indefinitely on
-        // some drivers (Adreno).
         if !self.surface_configured {
+            self.poll_device();
             return false;
         }
 
@@ -1196,7 +1206,6 @@ impl WgpuRenderer {
                 self.failed_frame_count
             );
 
-            // TBD. Does retrying more actually help?
             if self.failed_frame_count > 10 {
                 panic!("Too many consecutive GPU errors. Last error: {error}");
             } else if self.failed_frame_count > 5 {
@@ -1204,6 +1213,7 @@ impl WgpuRenderer {
                     res.invalidate_intermediate_textures();
                 }
                 self.atlas.clear();
+                self.flush_pending_work();
                 self.needs_redraw = true;
                 self.failed_frame_count = 0;
                 return false;
@@ -1212,18 +1222,16 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
-        self.atlas.before_frame();
-
         let frame = match self.resources().surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // Textures must be destroyed before the surface can be reconfigured.
                 drop(frame);
                 let surface_config = self.surface_config.clone();
                 let resources = self.resources_mut();
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
+                self.poll_device();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
@@ -1232,19 +1240,22 @@ impl WgpuRenderer {
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
+                self.poll_device();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.poll_device();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 *self.last_error.lock().unwrap() =
                     Some("Surface texture validation error".to_string());
+                self.poll_device();
                 return false;
             }
         };
 
-        // Now that we know the surface is healthy, ensure intermediate textures exist
+        self.atlas.before_frame();
         self.ensure_intermediate_textures();
 
         let frame_view = frame
@@ -1319,7 +1330,7 @@ impl WgpuRenderer {
 
         if let Err(error) = self.record_frame(scene, &frame_view) {
             log::error!("{error:#}");
-            self.resources().queue.submit(std::iter::empty());
+            self.flush_pending_work();
             return false;
         }
 
@@ -1460,6 +1471,7 @@ impl WgpuRenderer {
         self.resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
+        let _ = self.resources().device.poll(wgpu::PollType::Poll);
         self.maybe_shrink_instance_buffer(self.instance_bytes_this_frame);
         Ok(())
     }
@@ -1842,9 +1854,12 @@ impl WgpuRenderer {
     }
 
     pub fn destroy(&mut self) {
-        // Release surface-bound GPU resources eagerly so the underlying native
-        // window can be destroyed before the renderer itself is dropped.
-        self.resources.take();
+        self.atlas.clear();
+        if let Some(mut resources) = self.resources.take() {
+            resources.invalidate_intermediate_textures();
+            resources.queue.submit(std::iter::empty());
+            let _ = resources.device.poll(wgpu::PollType::Poll);
+        }
     }
 
     /// Returns true if the GPU device was lost and recovery is needed.

@@ -388,17 +388,30 @@ impl CallStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        let had_drops = !drops.is_empty();
         let dropped: std::collections::HashSet<_> = drops.iter().map(|image| image.id).collect();
+        if !dropped.is_empty() {
+            self.pending_texture_replaces
+                .lock()
+                .retain(|image| !dropped.contains(&image.id));
+        }
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
+        if window.is_some() {
+            let replaces: Vec<Arc<RenderImage>> =
+                std::mem::take(&mut *self.pending_texture_replaces.lock());
+            for image in replaces {
+                if dropped.contains(&image.id) {
+                    continue;
+                }
+                cx.update_render_image(&image, window.as_deref_mut());
             }
-            cx.update_render_image(&image, window.as_deref_mut());
+        } else if !self.pending_texture_replaces.lock().is_empty() {
+            self.pending_texture_work.store(true, Ordering::Release);
+        }
+        if had_drops {
+            crate::voice::trim_freed_heap_memory(cx);
         }
     }
 
@@ -567,6 +580,12 @@ impl CallStore {
         self.local.cam_on = !self.local.cam_on;
         if self.local.cam_on {
             self.media = MediaKind::Video;
+        } else {
+            let self_key = self.self_frame_key();
+            if let Some(store) = &self.frame_store {
+                store.remove(self_key);
+            }
+            self.evict_render_cache_key(self_key);
         }
         if let Some(engine) = &self.engine {
             engine.send(EngineCommand::SetCameraEnabled(self.local.cam_on));
@@ -1152,9 +1171,7 @@ impl CallStore {
                 if let Some(store) = &self.frame_store {
                     store.remove(mezon_call::REMOTE_FRAME_KEY);
                 }
-                self.render_cache
-                    .lock()
-                    .remove(&mezon_call::REMOTE_FRAME_KEY);
+                self.evict_render_cache_key(mezon_call::REMOTE_FRAME_KEY);
             }
         }
         if let Some(mic) = value.get("micEnabled").and_then(|v| v.as_bool()) {
@@ -1224,6 +1241,7 @@ impl CallStore {
         self._timeout_task = None;
         self._ice_grace_task = None;
         self.tones.stop_dial_ring();
+        self.pending_texture_replaces.lock().clear();
         let mut cache = self.render_cache.lock();
         if !cache.is_empty() {
             let mut drops = self.pending_texture_drops.lock();
@@ -1235,6 +1253,19 @@ impl CallStore {
                 }
             }
             self.pending_texture_work.store(true, Ordering::Release);
+        }
+    }
+
+    fn evict_render_cache_key(&self, key: u64) {
+        if let Some(entry) = self.render_cache.lock().remove(&key) {
+            match entry.frame {
+                VoiceRenderFrame::Image(image) => {
+                    self.pending_texture_drops.lock().push(image);
+                    self.pending_texture_work.store(true, Ordering::Release);
+                }
+                #[cfg(target_os = "macos")]
+                VoiceRenderFrame::Surface(_) => {}
+            }
         }
     }
 
