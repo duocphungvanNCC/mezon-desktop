@@ -72,8 +72,6 @@ pub fn everyone_exclude_ids(
 pub fn everyone_is_dirty(
     enabled: bool,
     initial_enabled: bool,
-    kind: EveryoneExcludeType,
-    initial_kind: EveryoneExcludeType,
     user_ids: &[UserId],
     initial_user_ids: &[UserId],
     role_ids: &[RoleId],
@@ -85,7 +83,7 @@ pub fn everyone_is_dirty(
     if !enabled {
         return false;
     }
-    kind != initial_kind || user_ids != initial_user_ids || role_ids != initial_role_ids
+    user_ids != initial_user_ids || role_ids != initial_role_ids
 }
 
 pub fn everyone_set_calls(
@@ -293,42 +291,32 @@ mod tests {
         assert!(!everyone_is_dirty(
             false,
             false,
-            EveryoneExcludeType::User,
-            EveryoneExcludeType::User,
             &[UserId(1)],
             &[],
             &[],
             &[],
         ));
-        assert!(everyone_is_dirty(
-            true,
-            false,
-            EveryoneExcludeType::User,
-            EveryoneExcludeType::User,
-            &[],
-            &[],
-            &[],
-            &[],
-        ));
-        assert!(everyone_is_dirty(
-            true,
-            true,
-            EveryoneExcludeType::Role,
-            EveryoneExcludeType::User,
-            &[],
-            &[],
-            &[RoleId(1)],
-            &[],
-        ));
+        assert!(everyone_is_dirty(true, false, &[], &[], &[], &[]));
+        assert!(everyone_is_dirty(true, true, &[], &[], &[RoleId(1)], &[],));
         assert!(!everyone_is_dirty(
             true,
             true,
-            EveryoneExcludeType::User,
-            EveryoneExcludeType::User,
             &[UserId(1)],
             &[UserId(1)],
             &[],
             &[],
+        ));
+    }
+
+    #[test]
+    fn everyone_dirty_ignores_tab_kind_when_lists_are_unchanged() {
+        assert!(!everyone_is_dirty(
+            true,
+            true,
+            &[UserId(1)],
+            &[UserId(1)],
+            &[RoleId(8)],
+            &[RoleId(8)],
         ));
     }
 

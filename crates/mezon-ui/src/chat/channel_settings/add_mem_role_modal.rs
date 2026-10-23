@@ -230,12 +230,7 @@ impl AddMemRoleModal {
 
         let (excluded_user_ids, excluded_role_ids, selected_user_ids, selected_role_ids) =
             match everyone_kind {
-                Some(EveryoneExcludeType::User) => {
-                    (Vec::new(), Vec::new(), staged_user_ids, Vec::new())
-                }
-                Some(EveryoneExcludeType::Role) => {
-                    (Vec::new(), Vec::new(), Vec::new(), staged_role_ids)
-                }
+                Some(_) => (Vec::new(), Vec::new(), staged_user_ids, staged_role_ids),
                 None if private => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
                 None => (staged_user_ids, staged_role_ids, Vec::new(), Vec::new()),
             };
@@ -454,10 +449,6 @@ impl AddMemRoleModal {
             return;
         }
         self.everyone_kind = Some(kind);
-        match kind {
-            EveryoneExcludeType::User => self.selected_role_ids.clear(),
-            EveryoneExcludeType::Role => self.selected_user_ids.clear(),
-        }
         self.refresh_candidates(cx);
     }
 

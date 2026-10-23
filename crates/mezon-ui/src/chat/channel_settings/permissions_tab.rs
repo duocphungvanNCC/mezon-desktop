@@ -185,6 +185,15 @@ pub(super) fn role_row_from(role_id: RoleId, role: &mezon_store::ClanRoleDetail)
     }
 }
 
+fn fallback_role_row(role_id: RoleId) -> RoleRow {
+    RoleRow {
+        role_id,
+        title: role_id.to_string().into(),
+        icon: SharedString::default(),
+        color: role_fallback_color(),
+    }
+}
+
 pub struct PermissionsTab {
     clan_id: ClanId,
     channel_id: ChannelId,
@@ -215,6 +224,7 @@ pub struct PermissionsTab {
     everyone_role_ids_initial: Vec<RoleId>,
     everyone_staged_members: HashMap<UserId, ClanMember>,
     everyone_seeded: bool,
+    everyone_load_generation: u64,
     everyone_saving: bool,
     everyone_modal_sub: Option<Subscription>,
     channel_fingerprint_seen: Option<(bool, UserId, ChannelType)>,
@@ -258,8 +268,13 @@ impl PermissionsTab {
                     this.rebuild_rows(cx);
                     this.sync_overrides(cx);
                     this.reload_access_lists(cx);
-                    this.everyone_seeded = false;
-                    this.load_everyone(cx);
+                    if this.everyone_dirty() {
+                        this.everyone_load_generation =
+                            this.everyone_load_generation.wrapping_add(1);
+                    } else {
+                        this.everyone_seeded = false;
+                        this.load_everyone(cx);
+                    }
                 }
                 cx.notify();
             }),
@@ -319,6 +334,7 @@ impl PermissionsTab {
             everyone_role_ids_initial: Vec::new(),
             everyone_staged_members: HashMap::new(),
             everyone_seeded: false,
+            everyone_load_generation: 0,
             everyone_saving: false,
             everyone_modal_sub: None,
             channel_fingerprint_seen: None,
@@ -384,8 +400,6 @@ impl PermissionsTab {
         channel_acl::everyone_is_dirty(
             self.everyone_enabled,
             self.everyone_initial,
-            self.everyone_type,
-            self.everyone_type_initial,
             &self.everyone_user_ids,
             &self.everyone_user_ids_initial,
             &self.everyone_role_ids,
@@ -407,12 +421,14 @@ impl PermissionsTab {
     }
 
     fn load_everyone(&mut self, cx: &mut Context<Self>) {
-        if self.everyone_seeded || !self.shows_everyone_override(cx) {
+        if self.everyone_seeded || self.everyone_dirty() || !self.shows_everyone_override(cx) {
             return;
         }
         let Some(api) = channel_acl::api(cx) else {
             return;
         };
+        self.everyone_load_generation = self.everyone_load_generation.wrapping_add(1);
+        let generation = self.everyone_load_generation;
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         cx.spawn(async move |this, cx| {
@@ -421,7 +437,12 @@ impl PermissionsTab {
                 .await
             {
                 Ok(data) => {
-                    let _ = this.update(cx, |this, cx| this.apply_everyone(data, cx));
+                    let _ = this.update(cx, |this, cx| {
+                        if this.everyone_load_generation != generation || this.everyone_dirty() {
+                            return;
+                        }
+                        this.apply_everyone(data, cx);
+                    });
                 }
                 Err(error) => {
                     tracing::error!(
@@ -434,6 +455,9 @@ impl PermissionsTab {
     }
 
     fn apply_everyone(&mut self, data: OverrideEveryoneChannel, cx: &mut Context<Self>) {
+        if self.everyone_dirty() {
+            return;
+        }
         let kind = EveryoneExcludeType::from_lists(&data.user_ids, &data.role_ids);
         let user_ids: Vec<UserId> = data
             .user_ids
@@ -714,41 +738,70 @@ impl PermissionsTab {
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
-        if self.private_enabled != self.private_initial {
-            self.save_private(cx);
+        if self.everyone_saving {
+            return;
         }
-        if self.everyone_dirty() {
-            self.save_everyone(cx);
+        let private_changed = self.private_enabled != self.private_initial;
+        let going_private = private_changed && self.private_enabled;
+        let everyone_dirty = self.everyone_dirty() && !going_private;
+        let overrides = self.overrides.clone();
+        if !private_changed && !everyone_dirty {
+            if let Some(overrides) = overrides {
+                overrides.update(cx, |overrides, cx| overrides.save(cx));
+            }
+            return;
         }
-        if let Some(overrides) = self.overrides.clone() {
-            overrides.update(cx, |overrides, cx| overrides.save(cx));
-        }
-    }
-
-    fn save_private(&mut self, cx: &mut Context<Self>) {
         let Some(api) = channel_acl::api(cx) else {
             return;
         };
-        let creator_id = match self.channel_creator_id(cx) {
-            id if id.is_zero() => Self::current_user_id(cx),
-            id => id,
-        };
-        let private_enabled = self.private_enabled;
-        let user_ids =
-            channel_acl::acl_user_ids(private_enabled, &self.selected_user_ids, Some(creator_id));
-        let role_ids = channel_acl::acl_role_ids(private_enabled, &self.selected_role_ids);
+        let locale = self.settings.read(cx).language.clone();
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
-        let granted_roles = if private_enabled {
-            self.selected_role_ids.clone()
-        } else {
-            Vec::new()
-        };
-        let clear_everyone = private_enabled && self.everyone_initial;
-
+        let private_payload = private_changed.then(|| {
+            let creator_id = match self.channel_creator_id(cx) {
+                id if id.is_zero() => Self::current_user_id(cx),
+                id => id,
+            };
+            let private_enabled = self.private_enabled;
+            let user_ids = channel_acl::acl_user_ids(
+                private_enabled,
+                &self.selected_user_ids,
+                Some(creator_id),
+            );
+            let role_ids = channel_acl::acl_role_ids(private_enabled, &self.selected_role_ids);
+            let granted_roles = if private_enabled {
+                self.selected_role_ids.clone()
+            } else {
+                Vec::new()
+            };
+            (
+                private_enabled,
+                channel_acl::channel_private_payload(private_enabled),
+                user_ids,
+                role_ids,
+                granted_roles,
+            )
+        });
+        let everyone_payload = everyone_dirty.then(|| {
+            let enabled = self.everyone_enabled;
+            let kind = self.everyone_type;
+            let user_snapshot = self.everyone_user_ids.clone();
+            let role_snapshot = self.everyone_role_ids.clone();
+            let calls = channel_acl::everyone_set_calls(
+                enabled,
+                kind,
+                &self.everyone_user_ids,
+                &self.everyone_user_ids_initial,
+                &self.everyone_role_ids,
+                &self.everyone_role_ids_initial,
+            );
+            (enabled, kind, user_snapshot, role_snapshot, calls)
+        });
+        self.everyone_saving = true;
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            if clear_everyone
-                && let Err(error) = api
+            if going_private {
+                if let Err(error) = api
                     .set_override_everyone_channel(
                         clan_id.get(),
                         channel_id.get(),
@@ -757,133 +810,149 @@ impl PermissionsTab {
                         Vec::new(),
                     )
                     .await
-            {
-                tracing::error!(
-                    "set_override_everyone_channel failed while making {channel_id} private: {error}"
-                );
-            }
-            let result = api
-                .update_channel_private(
-                    clan_id.get(),
-                    channel_id.get(),
-                    channel_acl::channel_private_payload(private_enabled),
-                    user_ids,
-                    role_ids,
-                )
-                .await;
-            if let Err(error) = result {
-                tracing::error!("update_channel_private failed for {channel_id}: {error}");
-                return;
-            }
-            let _ = this.update(cx, |this, cx| {
-                this.private_initial = private_enabled;
-                this.selected_user_ids.clear();
-                this.staged_members.clear();
-                this.selected_role_ids.clear();
-                if clear_everyone {
-                    this.everyone_enabled = false;
-                    this.everyone_initial = false;
-                    this.everyone_user_ids.clear();
-                    this.everyone_user_ids_initial.clear();
-                    this.everyone_role_ids.clear();
-                    this.everyone_role_ids_initial.clear();
-                    this.everyone_type = EveryoneExcludeType::User;
-                    this.everyone_type_initial = EveryoneExcludeType::User;
-                }
-                ChannelUsersStore::global(cx).update(cx, |store, cx| {
-                    store.apply_privacy_change(channel_id, private_enabled, cx);
-                });
-                RolesStore::global(cx).update(cx, |store, cx| {
-                    store.set_channel_roles(clan_id, channel_id, &granted_roles, cx);
-                });
-                this.refresh(cx);
-            });
-        })
-        .detach();
-    }
-
-    fn save_everyone(&mut self, cx: &mut Context<Self>) {
-        if self.everyone_saving {
-            return;
-        }
-        let Some(api) = channel_acl::api(cx) else {
-            return;
-        };
-        let enabled = self.everyone_enabled;
-        let kind = self.everyone_type;
-        let user_snapshot = self.everyone_user_ids.clone();
-        let role_snapshot = self.everyone_role_ids.clone();
-        let calls = channel_acl::everyone_set_calls(
-            enabled,
-            kind,
-            &self.everyone_user_ids,
-            &self.everyone_user_ids_initial,
-            &self.everyone_role_ids,
-            &self.everyone_role_ids_initial,
-        );
-        let clan_id = self.clan_id;
-        let channel_id = self.channel_id;
-        self.everyone_saving = true;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let mut failed = false;
-            let mut saved_users = false;
-            let mut saved_roles = false;
-            for (call_kind, exclude_ids) in calls {
-                if let Err(error) = api
-                    .set_override_everyone_channel(
-                        clan_id.get(),
-                        channel_id.get(),
-                        enabled,
-                        call_kind,
-                        exclude_ids,
-                    )
-                    .await
                 {
                     tracing::error!(
                         "set_override_everyone_channel failed for {channel_id}: {error}"
                     );
-                    failed = true;
-                    break;
+                    let _ = this.update(cx, |this, cx| {
+                        this.everyone_saving = false;
+                        super::permission_overrides::report_acl_failure(&locale, cx);
+                        cx.notify();
+                    });
+                    return;
                 }
-                match call_kind {
-                    EveryoneExcludeType::User => saved_users = true,
-                    EveryoneExcludeType::Role => saved_roles = true,
+            }
+            if let Some((private_enabled, payload, user_ids, role_ids, granted_roles)) =
+                private_payload
+            {
+                if let Err(error) = api
+                    .update_channel_private(
+                        clan_id.get(),
+                        channel_id.get(),
+                        payload,
+                        user_ids,
+                        role_ids,
+                    )
+                    .await
+                {
+                    tracing::error!("update_channel_private failed for {channel_id}: {error}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.everyone_saving = false;
+                        super::permission_overrides::report_acl_failure(&locale, cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_private_saved(private_enabled, granted_roles, cx);
+                });
+            }
+            if let Some((enabled, kind, user_snapshot, role_snapshot, calls)) = everyone_payload {
+                let mut failed = false;
+                let mut saved_users = false;
+                let mut saved_roles = false;
+                for (call_kind, exclude_ids) in calls {
+                    if let Err(error) = api
+                        .set_override_everyone_channel(
+                            clan_id.get(),
+                            channel_id.get(),
+                            enabled,
+                            call_kind,
+                            exclude_ids,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            "set_override_everyone_channel failed for {channel_id}: {error}"
+                        );
+                        failed = true;
+                        break;
+                    }
+                    match call_kind {
+                        EveryoneExcludeType::User => saved_users = true,
+                        EveryoneExcludeType::Role => saved_roles = true,
+                    }
+                }
+                let _ = this.update(cx, |this, cx| {
+                    if !enabled && !failed {
+                        this.everyone_initial = false;
+                        this.everyone_user_ids.clear();
+                        this.everyone_role_ids.clear();
+                        this.everyone_user_ids_initial.clear();
+                        this.everyone_role_ids_initial.clear();
+                        this.everyone_type = EveryoneExcludeType::User;
+                        this.everyone_type_initial = EveryoneExcludeType::User;
+                    } else if enabled {
+                        if saved_users || saved_roles {
+                            this.everyone_initial = true;
+                        }
+                        if saved_users {
+                            this.everyone_user_ids_initial.clone_from(&user_snapshot);
+                        }
+                        if saved_roles {
+                            this.everyone_role_ids_initial.clone_from(&role_snapshot);
+                        }
+                        if !failed {
+                            this.everyone_type_initial = kind;
+                        }
+                    }
+                    if !failed && let Some(store) = ChannelPermissionsStore::try_global(cx) {
+                        store.update(cx, |store, cx| {
+                            store.reload_channel(clan_id, channel_id, cx);
+                        });
+                    }
+                    if failed {
+                        super::permission_overrides::report_acl_failure(&locale, cx);
+                    }
+                });
+                if failed {
+                    let _ = this.update(cx, |this, cx| {
+                        this.everyone_saving = false;
+                        cx.notify();
+                    });
+                    return;
                 }
             }
             let _ = this.update(cx, |this, cx| {
                 this.everyone_saving = false;
-                if !enabled && !failed {
-                    this.everyone_initial = false;
-                    this.everyone_user_ids.clear();
-                    this.everyone_role_ids.clear();
-                    this.everyone_user_ids_initial.clear();
-                    this.everyone_role_ids_initial.clear();
-                    this.everyone_type = EveryoneExcludeType::User;
-                    this.everyone_type_initial = EveryoneExcludeType::User;
-                } else if enabled {
-                    if saved_users || saved_roles {
-                        this.everyone_initial = true;
-                    }
-                    if saved_users {
-                        this.everyone_user_ids_initial.clone_from(&user_snapshot);
-                    }
-                    if saved_roles {
-                        this.everyone_role_ids_initial.clone_from(&role_snapshot);
-                    }
-                    if !failed {
-                        this.everyone_type_initial = kind;
-                    }
-                }
-                if !failed && let Some(store) = ChannelPermissionsStore::try_global(cx) {
-                    store.update(cx, |store, cx| {
-                        store.reload_channel(clan_id, channel_id, cx);
-                    });
+                if let Some(overrides) = overrides {
+                    overrides.update(cx, |overrides, cx| overrides.save(cx));
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn apply_private_saved(
+        &mut self,
+        private_enabled: bool,
+        granted_roles: Vec<RoleId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.private_initial = private_enabled;
+        self.selected_user_ids.clear();
+        self.staged_members.clear();
+        self.selected_role_ids.clear();
+        if private_enabled {
+            self.everyone_enabled = false;
+            self.everyone_initial = false;
+            self.everyone_user_ids.clear();
+            self.everyone_user_ids_initial.clear();
+            self.everyone_role_ids.clear();
+            self.everyone_role_ids_initial.clear();
+            self.everyone_type = EveryoneExcludeType::User;
+            self.everyone_type_initial = EveryoneExcludeType::User;
+            self.everyone_seeded = true;
+            self.everyone_load_generation = self.everyone_load_generation.wrapping_add(1);
+        }
+        ChannelUsersStore::global(cx).update(cx, |store, cx| {
+            store.apply_privacy_change(self.channel_id, private_enabled, cx);
+        });
+        RolesStore::global(cx).update(cx, |store, cx| {
+            store.set_channel_roles(self.clan_id, self.channel_id, &granted_roles, cx);
+        });
+        self.refresh(cx);
     }
 
     fn remove_everyone_role(&mut self, role_id: RoleId, cx: &mut Context<Self>) {
@@ -1486,8 +1555,19 @@ impl PermissionsTab {
                 range
                     .map(|ix| match rows.get(ix) {
                         Some(row) => {
-                            Self::render_role_row(row, role_label, &theme, tab.clone(), cx)
-                                .into_any_element()
+                            let tab = tab.clone();
+                            let role_id = row.role_id;
+                            render_acl_role_row(
+                                row,
+                                Some(role_label),
+                                &theme,
+                                Rc::new(move |cx| {
+                                    tab.update(cx, |this, cx| this.remove_role(role_id, cx));
+                                }),
+                                "channel-permission-role-remove",
+                                cx,
+                            )
+                            .into_any_element()
                         }
                         None => div().h(px(ROLE_ROW_HEIGHT)).into_any_element(),
                     })
@@ -1535,72 +1615,25 @@ impl PermissionsTab {
                     .iter()
                     .map(|user_id| {
                         let row = self.listed_member_row(*user_id, cx);
-                        Self::render_member_row(
+                        let tab = tab.clone();
+                        let user_id = *user_id;
+                        let on_remove = (creator_id != user_id).then(|| {
+                            Rc::new(move |cx: &mut App| {
+                                tab.update(cx, |this, cx| this.remove_member(user_id, cx));
+                            }) as Rc<dyn Fn(&mut App)>
+                        });
+                        render_acl_member_row(
                             &row,
-                            creator_id == *user_id,
+                            creator_id == user_id,
                             creator_label,
                             theme,
-                            tab.clone(),
                             locale,
+                            on_remove,
+                            "channel-permission-member-remove",
                         )
                     }),
             )
             .into_any_element()
-    }
-
-    fn render_role_row(
-        row: &RoleRow,
-        role_label: &'static str,
-        theme: &Theme,
-        tab: Entity<PermissionsTab>,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let role_id = row.role_id;
-        let group_name = SharedString::from(format!("channel-permission-role-{}", role_id.get()));
-        h_flex()
-            .group(group_name.clone())
-            .h(px(ROLE_ROW_HEIGHT))
-            .w_full()
-            .py_2()
-            .items_center()
-            .justify_between()
-            .rounded(px(4.0))
-            .text_color(theme.tokens.text_theme_primary)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_x_2()
-                    .items_center()
-                    .child(role_glyph(row, cx))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .child(row.title.clone()),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap_x_2()
-                    .items_center()
-                    .child(div().text_xs().child(role_label))
-                    .child(
-                        div()
-                            .id(("channel-permission-role-remove", role_id.get() as u64))
-                            .cursor_pointer()
-                            .child(
-                                Icon::new(IconName::EscIcon)
-                                    .size(px(REMOVE_ICON_SIZE))
-                                    .text_color(theme.tokens.text_theme_primary),
-                            )
-                            .on_click(move |_, _, cx| {
-                                tab.update(cx, |this, cx| this.remove_role(role_id, cx));
-                            }),
-                    ),
-            )
     }
 
     /// Floating save bar for the permissions tab, rendered by the settings shell outside the
@@ -1687,92 +1720,6 @@ impl PermissionsTab {
                                     ),
                             ),
                     ),
-            )
-    }
-
-    fn render_member_row(
-        row: &MemberRow,
-        is_creator: bool,
-        creator_label: &'static str,
-        theme: &Theme,
-        tab: Entity<PermissionsTab>,
-        locale: &str,
-    ) -> impl IntoElement + use<> {
-        let user_id = row.user_id;
-        let group_name = SharedString::from(format!("channel-permission-member-{}", user_id.get()));
-        let remove_label = mezon_i18n::t(locale, "channelSetting.channelPermission.removeMember");
-        h_flex()
-            .group(group_name.clone())
-            .h(px(MEMBER_ROW_HEIGHT))
-            .w_full()
-            .py_2()
-            .items_center()
-            .justify_between()
-            .rounded(px(4.0))
-            .text_color(theme.tokens.text_theme_primary)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_x_2()
-                    .items_center()
-                    .child(member_avatar(row, px(32.0)))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(row.name.clone()),
-                            )
-                            .when(!row.username.is_empty() && row.username != row.name, |el| {
-                                el.child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.tokens.text_secondary)
-                                        .child(row.username.clone()),
-                                )
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap_x_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .child(if is_creator { creator_label } else { "" }),
-                    )
-                    .when(!is_creator, |el| {
-                        el.child(
-                            div()
-                                .id(("channel-permission-member-remove", user_id.get() as u64))
-                                .size(px(32.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .tooltip(move |_, cx| Tooltip::build(remove_label, cx))
-                                .cursor_pointer()
-                                .on_click(move |_, _, cx| {
-                                    tab.update(cx, |this, cx| this.remove_member(user_id, cx));
-                                })
-                                .child(
-                                    Icon::new(IconName::EscIcon)
-                                        .size(px(REMOVE_ICON_SIZE))
-                                        .text_color(theme.tokens.text_theme_primary)
-                                        .group_hover(group_name.clone(), |style| {
-                                            style.text_color(rgb(REMOVE_HOVER_COLOR))
-                                        }),
-                                ),
-                        )
-                    }),
             )
     }
 
@@ -1886,11 +1833,11 @@ impl PermissionsTab {
             .into_any_element(),
         ];
         if has_roles {
-            children.push(self.render_everyone_role_list(theme, cx).into_any_element());
+            children.push(self.render_everyone_role_list(cx).into_any_element());
         }
         if has_members {
             children.push(
-                self.render_everyone_member_list(theme, cx)
+                self.render_everyone_member_list(locale, cx)
                     .into_any_element(),
             );
         }
@@ -1902,10 +1849,11 @@ impl PermissionsTab {
         let store = store.read(cx);
         self.everyone_role_ids
             .iter()
-            .filter_map(|role_id| {
+            .map(|role_id| {
                 store
                     .clan_role(self.clan_id, *role_id)
                     .map(|role| role_row_from(*role_id, role))
+                    .unwrap_or_else(|| fallback_role_row(*role_id))
             })
             .collect()
     }
@@ -1913,51 +1861,111 @@ impl PermissionsTab {
     fn everyone_member_row(&self, user_id: UserId, cx: &App) -> MemberRow {
         match self.everyone_staged_members.get(&user_id) {
             Some(member) => member_row_from_clan_member(member),
-            None => member_row(self.clan_id, user_id, cx),
+            None => channel_member_row(self.clan_id, self.channel_id, user_id, cx),
         }
     }
 
-    fn render_everyone_role_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_everyone_role_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = cx.entity();
-        let rows = self.everyone_role_rows(cx);
-        let items: Vec<_> = rows
-            .iter()
-            .map(|row| render_everyone_role_row(row, theme, tab.clone(), cx).into_any_element())
-            .collect();
-        v_flex().w_full().children(items)
+        let rows = Rc::new(self.everyone_role_rows(cx));
+        let count = rows.len();
+        let height = px((count.min(MEMBER_PAGE_SIZE) as f32) * ROLE_ROW_HEIGHT);
+        uniform_list(
+            "channel-everyone-roles",
+            count,
+            move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                range
+                    .map(|ix| match rows.get(ix) {
+                        Some(row) => {
+                            let tab = tab.clone();
+                            let role_id = row.role_id;
+                            render_acl_role_row(
+                                row,
+                                None,
+                                &theme,
+                                Rc::new(move |cx| {
+                                    tab.update(cx, |this, cx| {
+                                        this.remove_everyone_role(role_id, cx)
+                                    });
+                                }),
+                                "channel-everyone-role-remove",
+                                cx,
+                            )
+                            .into_any_element()
+                        }
+                        None => div().h(px(ROLE_ROW_HEIGHT)).into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_item_size(size(px(0.0), px(ROLE_ROW_HEIGHT)))
+        .h(height)
+        .w_full()
     }
 
     fn render_everyone_member_list(
         &self,
-        theme: &Theme,
+        locale: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = cx.entity();
-        let items: Vec<_> = self
-            .everyone_user_ids
-            .iter()
-            .copied()
-            .map(|user_id| {
-                render_everyone_member_row(
-                    &self.everyone_member_row(user_id, cx),
-                    theme,
-                    tab.clone(),
-                )
-                .into_any_element()
-            })
-            .collect();
-        v_flex().w_full().children(items)
+        let locale = locale.to_string();
+        let rows = Rc::new(
+            self.everyone_user_ids
+                .iter()
+                .copied()
+                .map(|user_id| self.everyone_member_row(user_id, cx))
+                .collect::<Vec<_>>(),
+        );
+        let count = rows.len();
+        let height = px((count.min(MEMBER_PAGE_SIZE) as f32) * MEMBER_ROW_HEIGHT);
+        uniform_list(
+            "channel-everyone-members",
+            count,
+            move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                range
+                    .map(|ix| match rows.get(ix) {
+                        Some(row) => {
+                            let tab = tab.clone();
+                            let user_id = row.user_id;
+                            render_acl_member_row(
+                                row,
+                                false,
+                                "",
+                                &theme,
+                                &locale,
+                                Some(Rc::new(move |cx: &mut App| {
+                                    tab.update(cx, |this, cx| {
+                                        this.remove_everyone_member(user_id, cx)
+                                    });
+                                })),
+                                "channel-everyone-member-remove",
+                            )
+                            .into_any_element()
+                        }
+                        None => div().h(px(MEMBER_ROW_HEIGHT)).into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_item_size(size(px(0.0), px(MEMBER_ROW_HEIGHT)))
+        .h(height)
+        .w_full()
     }
 }
 
-fn render_everyone_role_row(
+fn render_acl_role_row(
     row: &RoleRow,
+    role_label: Option<&'static str>,
     theme: &Theme,
-    tab: Entity<PermissionsTab>,
+    on_remove: Rc<dyn Fn(&mut App)>,
+    remove_id: &'static str,
     cx: &mut App,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let role_id = row.role_id;
-    let group_name = SharedString::from(format!("channel-everyone-role-{}", role_id.get()));
+    let group_name = SharedString::from(format!("{remove_id}-{}", role_id.get()));
     h_flex()
         .group(group_name.clone())
         .h(px(ROLE_ROW_HEIGHT))
@@ -1983,35 +1991,50 @@ fn render_everyone_role_row(
                 ),
         )
         .child(
-            div()
-                .id(("channel-everyone-role-remove", role_id.get() as u64))
-                .size(px(32.0))
-                .flex()
+            h_flex()
+                .flex_shrink_0()
+                .gap_x_2()
                 .items_center()
-                .justify_center()
-                .rounded_md()
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    tab.update(cx, |this, cx| this.remove_everyone_role(role_id, cx));
+                .when_some(role_label, |el, label| {
+                    el.child(div().text_xs().child(label))
                 })
                 .child(
-                    Icon::new(IconName::EscIcon)
-                        .size(px(REMOVE_ICON_SIZE))
-                        .text_color(theme.tokens.text_theme_primary)
-                        .group_hover(group_name, |style| {
-                            style.text_color(rgb(REMOVE_HOVER_COLOR))
-                        }),
+                    div()
+                        .id((remove_id, role_id.get() as u64))
+                        .size(px(32.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .on_click({
+                            let on_remove = on_remove.clone();
+                            move |_, _, cx| on_remove(cx)
+                        })
+                        .child(
+                            Icon::new(IconName::EscIcon)
+                                .size(px(REMOVE_ICON_SIZE))
+                                .text_color(theme.tokens.text_theme_primary)
+                                .group_hover(group_name, |style| {
+                                    style.text_color(rgb(REMOVE_HOVER_COLOR))
+                                }),
+                        ),
                 ),
         )
 }
 
-fn render_everyone_member_row(
+fn render_acl_member_row(
     row: &MemberRow,
+    is_creator: bool,
+    creator_label: &'static str,
     theme: &Theme,
-    tab: Entity<PermissionsTab>,
-) -> impl IntoElement {
+    locale: &str,
+    on_remove: Option<Rc<dyn Fn(&mut App)>>,
+    remove_id: &'static str,
+) -> impl IntoElement + use<> {
     let user_id = row.user_id;
-    let group_name = SharedString::from(format!("channel-everyone-member-{}", user_id.get()));
+    let group_name = SharedString::from(format!("{remove_id}-{}", user_id.get()));
+    let remove_label = mezon_i18n::t(locale, "channelSetting.channelPermission.removeMember");
     h_flex()
         .group(group_name.clone())
         .h(px(MEMBER_ROW_HEIGHT))
@@ -2027,36 +2050,64 @@ fn render_everyone_member_row(
                 .min_w_0()
                 .gap_x_2()
                 .items_center()
-                .child(member_avatar(row, px(24.0)))
-                .child(div().min_w_0().truncate().text_sm().child(row.name.clone()))
+                .child(member_avatar(row, px(32.0)))
                 .child(
-                    div()
+                    v_flex()
+                        .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .font_weight(FontWeight::LIGHT)
-                        .child(row.username.clone()),
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(row.name.clone()),
+                        )
+                        .when(!row.username.is_empty() && row.username != row.name, |el| {
+                            el.child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(row.username.clone()),
+                            )
+                        }),
                 ),
         )
         .child(
-            div()
-                .id(("channel-everyone-member-remove", user_id.get() as u64))
-                .size(px(32.0))
-                .flex()
+            h_flex()
+                .flex_shrink_0()
+                .gap_x_2()
                 .items_center()
-                .justify_center()
-                .rounded_md()
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    tab.update(cx, |this, cx| this.remove_everyone_member(user_id, cx));
-                })
                 .child(
-                    Icon::new(IconName::EscIcon)
-                        .size(px(REMOVE_ICON_SIZE))
-                        .text_color(theme.tokens.text_theme_primary)
-                        .group_hover(group_name, |style| {
-                            style.text_color(rgb(REMOVE_HOVER_COLOR))
-                        }),
-                ),
+                    div()
+                        .text_xs()
+                        .child(if is_creator { creator_label } else { "" }),
+                )
+                .when_some(on_remove, |el, on_remove| {
+                    el.child(
+                        div()
+                            .id((remove_id, user_id.get() as u64))
+                            .size(px(32.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .tooltip(move |_, cx| Tooltip::build(remove_label, cx))
+                            .cursor_pointer()
+                            .on_click({
+                                let on_remove = on_remove.clone();
+                                move |_, _, cx| on_remove(cx)
+                            })
+                            .child(
+                                Icon::new(IconName::EscIcon)
+                                    .size(px(REMOVE_ICON_SIZE))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .group_hover(group_name.clone(), |style| {
+                                        style.text_color(rgb(REMOVE_HOVER_COLOR))
+                                    }),
+                            ),
+                    )
+                }),
         )
 }
 
@@ -2217,6 +2268,14 @@ mod tests {
         let row = member_row_from_profile(UserId(9), &ChannelUserProfile::default());
         assert_eq!(row.name, "9");
         assert!(row.username.is_empty());
+    }
+
+    #[test]
+    fn a_missing_role_still_renders_a_removable_row() {
+        let row = fallback_role_row(RoleId(42));
+        assert_eq!(row.role_id, RoleId(42));
+        assert_eq!(row.title.as_ref(), "42");
+        assert!(row.icon.is_empty());
     }
 
     #[test]
