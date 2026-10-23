@@ -8755,11 +8755,14 @@ impl MezonTransport {
                 }
                 Ok(ack)
             }
-            Some(realtime::envelope::Message::Error(error)) => Err(anyhow::anyhow!(
-                "API error: code={} {}",
-                error.code,
-                error.message.trim()
-            )),
+            Some(realtime::envelope::Message::Error(error)) => Err(api_status_error(
+                grpc_code_from_envelope_status(error.code),
+            ))
+            .context(EnvelopeStatus {
+                api_name: "ChannelMessageSend".to_string(),
+                message: error.message.trim().to_string(),
+                code: error.code,
+            }),
             _ => Err(anyhow::anyhow!(
                 "unexpected writeChatMessage reply (missing channel_message_ack)"
             )),
@@ -12771,9 +12774,13 @@ mod tests {
         let err =
             MezonTransport::channel_message_ack_from_write_response(&envelope.encode_to_vec())
                 .expect_err("a refusal must not read as a successful send");
-        let err = err.to_string();
-        assert!(err.contains("403"), "unexpected error: {err}");
-        assert!(err.contains("permission"), "unexpected error: {err}");
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        let message = err.to_string();
+        assert!(message.contains("403"), "unexpected error: {message}");
+        assert!(
+            message.contains("permission"),
+            "unexpected error: {message}"
+        );
     }
 
     /// The two decoders are asymmetric on purpose — envelope on the socket, bare message over
