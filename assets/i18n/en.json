@@ -2050,6 +2050,7 @@
   "common.modalUnknowChannel.okayGotIt": "Okay, Got It",
   "common.modalUnknowChannel.permissionError": "You don't have the necessary permissions to access this content. Please contact an administrator if you believe this is an error.",
   "common.muteNotification": "Mute",
+  "common.new": "New",
   "common.newMention": "New mention",
   "common.newMessage": "New",
   "common.newUpdateAvailable": "New update available",

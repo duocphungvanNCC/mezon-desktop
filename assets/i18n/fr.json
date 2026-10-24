@@ -2051,6 +2051,7 @@
   "common.modalUnknowChannel.okayGotIt": "D'accord",
   "common.modalUnknowChannel.permissionError": "Vous n'avez pas les permissions nécessaires pour accéder à ce contenu. Veuillez contacter l'administrateur si vous pensez qu'il s'agit d'une erreur.",
   "common.muteNotification": "Couper les notifications",
+  "common.new": "Nouveau",
   "common.newMention": "Nouvelle mention",
   "common.newMessage": "Nouveau message",
   "common.newUpdateAvailable": "Nouvelle mise à jour disponible",

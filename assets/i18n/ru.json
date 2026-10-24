@@ -2290,6 +2290,7 @@
   "common.modalUnknowChannel.okayGotIt": "Ладно, я понял",
   "common.modalUnknowChannel.permissionError": "Вы не имеете необходимых полномочий для доступа к этому содержимому. Если Вы считаете, что это ошибка, обратитесь к администратору.",
   "common.muteNotification": "Заглушить",
+  "common.new": "Новое",
   "common.newMention": "Новое упоминание",
   "common.newMessage": "Новое сообщение",
   "common.newUpdateAvailable": "Доступно новое обновление",

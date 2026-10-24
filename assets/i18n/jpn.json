@@ -2052,6 +2052,7 @@
   "common.modalUnknowChannel.okayGotIt": "わかりました",
   "common.modalUnknowChannel.permissionError": "このコンテンツにアクセスするために必要な権限がありません。これがエラーであると考える場合は、管理者にお問い合わせください。",
   "common.muteNotification": "通知をミュート",
+  "common.new": "新着",
   "common.newMention": "新しいメンション",
   "common.newMessage": "新しいメッセージ",
   "common.newUpdateAvailable": "新しいアップデートがあります",
