@@ -236,7 +236,7 @@ pub use onboarding::{
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SCOPE_CHANNEL,
-    PermissionDefinition, PermissionEvent, PermissionStore,
+    PERMISSION_VIEW_CHANNEL, PermissionDefinition, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{

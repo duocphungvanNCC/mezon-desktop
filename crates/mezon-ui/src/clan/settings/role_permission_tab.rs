@@ -58,6 +58,19 @@ fn localized_permission_description(locale: &str, slug: &str) -> String {
     mezon_i18n::t(locale, "clanRoles.permissionDescriptions.notAvailable").to_string()
 }
 
+fn permission_switch_state(
+    permission: &PermissionDefinition,
+    checked: bool,
+    can_edit: bool,
+    is_clan_owner: bool,
+    user_permission_level: i32,
+) -> (bool, bool) {
+    let hide_admin = !is_clan_owner && permission.slug == PERMISSION_ADMINISTRATOR;
+    let lock_hierarchy = !is_clan_owner && permission.level >= user_permission_level;
+    let locked = is_required_role_permission(&permission.slug) && checked;
+    (checked, !can_edit || hide_admin || lock_hierarchy || locked)
+}
+
 impl RoleSettingPage {
     pub(super) fn render_permissions_tab(
         &mut self,
@@ -141,11 +154,13 @@ impl RoleSettingPage {
         user_permission_level: i32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let required = is_required_role_permission(&perm.slug);
-        let checked = required || self.draft_permission_ids.contains(&perm.id);
-        let hide_admin = !is_clan_owner && can_edit && perm.slug == PERMISSION_ADMINISTRATOR;
-        let lock_hierarchy = !is_clan_owner && can_edit && perm.level >= user_permission_level;
-        let disabled = !can_edit || hide_admin || required || lock_hierarchy;
+        let (checked, disabled) = permission_switch_state(
+            perm,
+            self.draft_permission_ids.contains(&perm.id),
+            can_edit,
+            is_clan_owner,
+            user_permission_level,
+        );
         let title = localized_permission_title(locale, perm);
         let description = localized_permission_description(locale, &perm.slug);
         let perm_id = perm.id;
@@ -223,5 +238,66 @@ impl RoleSettingPage {
         });
         self.permission_search_input = Some(input);
         self._permission_search_sub = Some(sub);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permission(slug: &str) -> PermissionDefinition {
+        PermissionDefinition {
+            id: 41,
+            slug: slug.into(),
+            title: String::new(),
+            description: String::new(),
+            level: 1,
+            scope: 2,
+        }
+    }
+
+    #[test]
+    fn required_switches_show_confirmed_state_and_only_allow_enabling() {
+        for slug in [
+            mezon_store::PERMISSION_SEND_MESSAGE,
+            mezon_store::PERMISSION_VIEW_CHANNEL,
+        ] {
+            let permission = permission(slug);
+            assert_eq!(
+                permission_switch_state(&permission, true, true, true, 10),
+                (true, true)
+            );
+            assert_eq!(
+                permission_switch_state(&permission, false, true, true, 10),
+                (false, false)
+            );
+            assert_eq!(
+                permission_switch_state(&permission, false, false, true, 10),
+                (false, true)
+            );
+            assert_eq!(
+                permission_switch_state(&permission, false, true, false, 1),
+                (false, true)
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_permissions_keep_toggle_and_hierarchy_rules() {
+        let definition = permission("delete-message");
+        for checked in [false, true] {
+            assert_eq!(
+                permission_switch_state(&definition, checked, true, false, 10),
+                (checked, false)
+            );
+            assert_eq!(
+                permission_switch_state(&definition, checked, true, false, 1),
+                (checked, true)
+            );
+        }
+        assert_eq!(
+            permission_switch_state(&permission("administrator"), false, true, false, 10),
+            (false, true)
+        );
     }
 }
