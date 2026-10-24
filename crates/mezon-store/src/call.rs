@@ -388,7 +388,7 @@ impl CallStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let had_drops = !drops.is_empty();
+        let freed_bytes = crate::voice::render_image_bytes(&drops);
         let dropped: std::collections::HashSet<_> = drops.iter().map(|image| image.id).collect();
         if !dropped.is_empty() {
             self.pending_texture_replaces
@@ -402,17 +402,12 @@ impl CallStore {
             let replaces: Vec<Arc<RenderImage>> =
                 std::mem::take(&mut *self.pending_texture_replaces.lock());
             for image in replaces {
-                if dropped.contains(&image.id) {
-                    continue;
-                }
                 cx.update_render_image(&image, window.as_deref_mut());
             }
         } else if !self.pending_texture_replaces.lock().is_empty() {
             self.pending_texture_work.store(true, Ordering::Release);
         }
-        if had_drops {
-            crate::voice::trim_freed_heap_memory(cx);
-        }
+        crate::voice::trim_freed_heap_memory(freed_bytes, cx);
     }
 
     pub fn start_call(&mut self, peer: CallPeer, video: bool, cx: &mut Context<Self>) {
@@ -581,11 +576,7 @@ impl CallStore {
         if self.local.cam_on {
             self.media = MediaKind::Video;
         } else {
-            let self_key = self.self_frame_key();
-            if let Some(store) = &self.frame_store {
-                store.remove(self_key);
-            }
-            self.evict_render_cache_key(self_key);
+            self.evict_render_cache_key(self.self_frame_key());
         }
         if let Some(engine) = &self.engine {
             engine.send(EngineCommand::SetCameraEnabled(self.local.cam_on));

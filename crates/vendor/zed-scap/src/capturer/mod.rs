@@ -177,6 +177,7 @@ impl Capturer {
     }
 }
 
+// mezon vendor edit: Linux capture is bounded like macOS so a slow consumer cannot queue frames without limit.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 fn capture_channel() -> (
     ChannelSender,
