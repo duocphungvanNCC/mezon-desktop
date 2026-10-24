@@ -3816,11 +3816,17 @@ fn control_bar(
                 "channelVoice.breakout.title"
             },
         );
-        circle_button("voice-breakout-btn", bg, hover, IconName::People, color)
-            .tooltip(Tooltip::text(tooltip))
-            .on_click(move |_, window, cx| {
-                crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
-            })
+        circle_button(
+            "voice-breakout-btn",
+            bg,
+            hover,
+            IconName::VoiceBreakoutIcon,
+            color,
+        )
+        .tooltip(Tooltip::text(tooltip))
+        .on_click(move |_, window, cx| {
+            crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
+        })
     });
     let return_to_main_button = store.breakout_room_id().is_some().then(|| {
         let voice = voice.clone();
