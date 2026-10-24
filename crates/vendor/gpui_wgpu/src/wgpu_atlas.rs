@@ -31,6 +31,7 @@ struct PendingUpload {
 
 const POOLED_UPLOAD_MIN_BYTES: usize = 64 * 1024;
 const MAX_POOLED_UPLOAD_BUFFERS: usize = 4;
+const UPLOAD_POOL_IDLE_FLUSHES: u32 = 120;
 
 struct WgpuAtlasState {
     device: Arc<wgpu::Device>,
@@ -41,6 +42,7 @@ struct WgpuAtlasState {
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     pending_uploads: Vec<PendingUpload>,
     upload_buffer_pool: Vec<Vec<u8>>,
+    upload_pool_idle_flushes: u32,
 }
 
 pub struct WgpuTextureInfo {
@@ -63,6 +65,7 @@ impl WgpuAtlas {
             tiles_by_key: Default::default(),
             pending_uploads: Vec::new(),
             upload_buffer_pool: Vec::new(),
+            upload_pool_idle_flushes: 0,
         }))
     }
 
@@ -174,9 +177,6 @@ impl PlatformAtlas for WgpuAtlas {
             if texture.is_unreferenced() {
                 lock.pending_uploads
                     .retain(|upload| upload.id != texture.id);
-                if id.kind == AtlasTextureKind::Image {
-                    lock.upload_buffer_pool.clear();
-                }
                 texture.texture.destroy();
                 lock.storage[id.kind]
                     .free_list
@@ -380,6 +380,7 @@ impl WgpuAtlasState {
 
     fn flush_uploads(&mut self) {
         let mut pending = std::mem::take(&mut self.pending_uploads);
+        self.release_idle_upload_pool(&pending);
         for upload in pending.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
@@ -412,6 +413,20 @@ impl WgpuAtlasState {
             self.recycle_upload_buffer(upload.data);
         }
         self.pending_uploads = pending;
+    }
+
+    fn release_idle_upload_pool(&mut self, pending: &[PendingUpload]) {
+        if pending
+            .iter()
+            .any(|upload| upload.data.capacity() >= POOLED_UPLOAD_MIN_BYTES)
+        {
+            self.upload_pool_idle_flushes = 0;
+            return;
+        }
+        self.upload_pool_idle_flushes = self.upload_pool_idle_flushes.saturating_add(1);
+        if self.upload_pool_idle_flushes >= UPLOAD_POOL_IDLE_FLUSHES {
+            self.upload_buffer_pool.clear();
+        }
     }
 
     fn recycle_upload_buffer(&mut self, mut buffer: Vec<u8>) {
@@ -729,6 +744,33 @@ mod tests {
         let state = atlas.0.lock();
         assert!(state.upload_buffer_pool.is_empty());
         assert_eq!(state.pending_uploads.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_flushes_release_the_upload_pool() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(98),
+            frame_index: 0,
+        });
+        let size = Size {
+            width: DevicePixels(640),
+            height: DevicePixels(360),
+        };
+        let frame = vec![0x42u8; (size.width.0 * size.height.0 * 4) as usize];
+        atlas
+            .get_or_insert_with(&key, &mut || Ok(Some((size, Cow::Borrowed(&frame)))))?
+            .expect("video tile should be allocated");
+        atlas.replace(&key, size, &frame)?;
+        atlas.before_frame();
+        for _ in 1..UPLOAD_POOL_IDLE_FLUSHES {
+            atlas.before_frame();
+        }
+        assert_eq!(atlas.0.lock().upload_buffer_pool.len(), 1);
+        atlas.before_frame();
+        assert!(atlas.0.lock().upload_buffer_pool.is_empty());
         Ok(())
     }
 }

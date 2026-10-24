@@ -81,13 +81,6 @@ pub fn record_file_extension() -> &'static str {
     mezon_record::file_extension()
 }
 
-pub fn release_freed_heap_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
 pub use screen_mode::ScreenShareMode;
 pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
@@ -579,7 +572,7 @@ async fn session_main(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            release_freed_heap_memory();
+            unsafe { libc::malloc_trim(0) };
         }
     });
 

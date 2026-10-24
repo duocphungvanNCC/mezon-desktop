@@ -388,7 +388,6 @@ impl CallStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let freed_bytes = crate::voice::render_image_bytes(&drops);
         let dropped: std::collections::HashSet<_> = drops.iter().map(|image| image.id).collect();
         if !dropped.is_empty() {
             self.pending_texture_replaces
@@ -407,7 +406,6 @@ impl CallStore {
         } else if !self.pending_texture_replaces.lock().is_empty() {
             self.pending_texture_work.store(true, Ordering::Release);
         }
-        crate::voice::trim_freed_heap_memory(freed_bytes, cx);
     }
 
     pub fn start_call(&mut self, peer: CallPeer, video: bool, cx: &mut Context<Self>) {

@@ -1179,12 +1179,6 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
-    fn poll_device(&self) {
-        if let Some(resources) = self.resources.as_ref() {
-            let _ = resources.device.poll(wgpu::PollType::Poll);
-        }
-    }
-
     fn flush_pending_work(&self) {
         if let Some(resources) = self.resources.as_ref() {
             resources.queue.submit(std::iter::empty());
@@ -1197,7 +1191,7 @@ impl WgpuRenderer {
         // a texture from an unconfigured surface can block indefinitely on
         // some drivers (Adreno).
         if !self.surface_configured {
-            self.poll_device();
+            self.flush_pending_work();
             return false;
         }
 
@@ -1236,7 +1230,7 @@ impl WgpuRenderer {
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
-                self.poll_device();
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
@@ -1245,22 +1239,22 @@ impl WgpuRenderer {
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
-                self.poll_device();
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                self.poll_device();
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 *self.last_error.lock().unwrap() =
                     Some("Surface texture validation error".to_string());
-                self.poll_device();
+                self.flush_pending_work();
                 return false;
             }
         };
 
-        // mezon vendor edit: atlas uploads flush only once a frame will be submitted, so an unpresented surface queues nothing in wgpu.
+        // mezon vendor edit: replaces flush only once a frame will be submitted, and every failed present submits the writes already queued, so an unpresented surface cannot grow wgpu staging.
         self.atlas.before_frame();
         // Now that we know the surface is healthy, ensure intermediate textures exist
         self.ensure_intermediate_textures();
