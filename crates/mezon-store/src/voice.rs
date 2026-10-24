@@ -1585,17 +1585,23 @@ impl VoiceStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
         let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
+        if !dropped.is_empty() {
+            self.pending_texture_replaces
+                .lock()
+                .retain(|image| !dropped.contains(&image.id));
+        }
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
+        if window.is_some() {
+            let replaces: Vec<Arc<RenderImage>> =
+                std::mem::take(&mut *self.pending_texture_replaces.lock());
+            for image in replaces {
+                cx.update_render_image(&image, window.as_deref_mut());
             }
-            cx.update_render_image(&image, window.as_deref_mut());
+        } else if !self.pending_texture_replaces.lock().is_empty() {
+            self.pending_texture_work.store(true, Ordering::Release);
         }
     }
 
@@ -4174,6 +4180,7 @@ impl VoiceStore {
                 })
                 .collect()
         };
+        self.pending_texture_replaces.lock().clear();
         for image in stale {
             cx.drop_image(image, window.as_deref_mut());
         }
