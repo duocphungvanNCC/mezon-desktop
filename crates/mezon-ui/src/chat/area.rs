@@ -29,7 +29,7 @@ use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
-use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::chat::pinned_popover::{PinnedPopoverPanel, resolve_pin_avatar_urls};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
@@ -1060,19 +1060,17 @@ fn latest_activity_strip(
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| pin.sender_name.clone());
         let mut avatar = Avatar::new().name(display_name).size_px(px(26.));
-        let raw_source = pin_profile
-            .as_ref()
-            .map(|profile| profile.avatar_url.as_str())
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .or_else(|| (!pin.avatar_url.is_empty()).then(|| pin.avatar_url.clone()));
-        if let Some(raw_source) = raw_source {
-            avatar = avatar
-                .src(crate::util::imgproxy::avatar_url(cx, &raw_source))
-                .fallback_src(raw_source);
-        } else if !pin.avatar_proxied.is_empty() {
-            avatar = avatar.src(pin.avatar_proxied.clone());
-        } else {
+        let (avatar_src, avatar_fallback) =
+            resolve_pin_avatar_urls(pin, active_clan_id, Some(context.channel_id), cx);
+        if let Some(src) = avatar_src {
+            avatar = avatar.src(src);
+        }
+        if let Some(fallback) = avatar_fallback {
+            avatar = avatar.fallback_src(fallback);
+        }
+        if pin.has_authoritative_empty_avatar(cx) {
+            avatar = avatar.anonymous(true);
+        } else if pin_profile.is_none() && pin.avatar_url.is_empty() {
             avatar = avatar.anonymous(mezon_store::is_anonymous_sender_id(&pin.sender_id, cx));
         }
         avatar.into_any_element()
