@@ -58,7 +58,7 @@ struct ThreadsScrollBody {
     list_dirty: bool,
     cached_rows: Option<Rc<Vec<ThreadRowIndex>>>,
     cached_locale: String,
-    _store_sub: Subscription,
+    _store_subs: [Subscription; 3],
 }
 
 impl ThreadsScrollBody {
@@ -68,6 +68,14 @@ impl ThreadsScrollBody {
         cx: &mut Context<Self>,
     ) -> Self {
         let store_sub = cx.observe(&ThreadsStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        });
+        let profile_sub = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        });
+        let messages_sub = cx.observe(&MessagesStore::global(cx), |this, _, cx| {
             this.list_dirty = true;
             cx.notify();
         });
@@ -85,7 +93,7 @@ impl ThreadsScrollBody {
             list_dirty: true,
             cached_rows: None,
             cached_locale: String::new(),
-            _store_sub: store_sub,
+            _store_subs: [store_sub, profile_sub, messages_sub],
         }
     }
 
@@ -933,11 +941,7 @@ fn resolve_thread_sender(
         return (profile.display_name, profile.avatar_url);
     }
 
-    if !preview.sender_name.is_empty() {
-        return (preview.sender_name.clone(), preview.sender_avatar.clone());
-    }
-
-    (String::new(), String::new())
+    (preview.sender_name.clone(), preview.sender_avatar.clone())
 }
 
 fn format_thread_time(timestamp_sec: i64, locale: &str) -> String {

@@ -35,6 +35,7 @@ const LOAD_MORE_THRESHOLD: usize = 6;
 const MESSAGE_CODE_CHAT: i32 = 0;
 const MESSAGE_CODE_CHAT_UPDATE: i32 = 1;
 const STREAM_MODE_THREAD: i32 = 6;
+const THREAD_SENDER_LOOKUP_LIMIT: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct ThreadSummary {
@@ -912,6 +913,7 @@ impl ThreadsStore {
                         let results: Vec<ThreadSummary> =
                             list.into_iter().map(thread_from_api).collect();
                         this.ensure_clan_members_for_threads(&results, cx);
+                        this.load_missing_thread_senders(&results, cx);
                         this.search_results = Some(results);
                     }
                     Err(e) => tracing::error!("search_thread failed: {e}"),
@@ -934,6 +936,84 @@ impl ThreadsStore {
                 });
             }
         }
+    }
+
+    fn load_missing_thread_senders(&self, threads: &[ThreadSummary], cx: &mut Context<Self>) {
+        let members = ClanMembersStore::global(cx);
+        let pending: Vec<_> = threads
+            .iter()
+            .filter(|thread| {
+                let (Ok(clan_id), Ok(user_id)) = (
+                    thread.clan_id.parse::<ClanId>(),
+                    thread.last_message_sender_id.parse::<UserId>(),
+                ) else {
+                    return false;
+                };
+                !user_id.is_zero()
+                    && thread.last_sent_timestamp > 0
+                    && thread.last_message_sender_avatar.is_empty()
+                    && members.read(cx).member(clan_id, user_id).is_none()
+            })
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let api = self.api.clone();
+        let scope = self.list_channel_id.clone();
+        cx.spawn(async move |this, cx| {
+            for snapshot in pending {
+                if this
+                    .update(cx, |this, _| this.list_channel_id != scope)
+                    .unwrap_or(true)
+                {
+                    break;
+                }
+                let (Ok(clan_id), Ok(channel_id)) = (
+                    snapshot.clan_id.parse::<ClanId>(),
+                    snapshot.channel_id.parse::<ChannelId>(),
+                ) else {
+                    continue;
+                };
+                let result = api
+                    .list_channel_messages(
+                        clan_id.get(),
+                        channel_id.get(),
+                        0,
+                        0,
+                        THREAD_SENDER_LOOKUP_LIMIT,
+                    )
+                    .await;
+                let Ok(page) = result else {
+                    tracing::warn!(target: "mezon.threads", "thread sender lookup failed");
+                    continue;
+                };
+                if this
+                    .update(cx, |this, cx| {
+                        if this.list_channel_id != scope {
+                            return;
+                        }
+                        let mut changed = false;
+                        for thread in this
+                            .threads
+                            .iter_mut()
+                            .chain(this.search_results.iter_mut().flatten())
+                        {
+                            for message in &page.messages {
+                                changed |= apply_thread_sender(thread, &snapshot, message);
+                            }
+                        }
+                        if changed {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -987,6 +1067,7 @@ impl ThreadsStore {
                         let page_full = page_has_more(list.len());
                         let batch = filter_threads(list.into_iter().map(thread_from_api).collect());
                         this.ensure_clan_members_for_threads(&batch, cx);
+                        this.load_missing_thread_senders(&batch, cx);
                         if append {
                             merge_threads(&mut this.threads, batch);
                         } else {
@@ -1416,6 +1497,33 @@ fn filter_threads(threads: Vec<ThreadSummary>) -> Vec<ThreadSummary> {
         .collect()
 }
 
+fn apply_thread_sender(
+    thread: &mut ThreadSummary,
+    snapshot: &ThreadSummary,
+    message: &mezon_client::transport::ApiMessage,
+) -> bool {
+    if thread.channel_id != snapshot.channel_id
+        || thread.clan_id != snapshot.clan_id
+        || thread.last_message_sender_id != message.sender_id.to_string()
+        || thread.last_sent_timestamp != message.create_time
+        || thread.last_message_content != snapshot.last_message_content
+        || snapshot.last_message_content != message.content
+        || thread.last_sent_timestamp != snapshot.last_sent_timestamp
+        || thread.last_message_sender_id != snapshot.last_message_sender_id
+    {
+        return false;
+    }
+    let changed = thread.last_message_sender_name != message.sender_name
+        || thread.last_message_sender_avatar != message.avatar;
+    thread
+        .last_message_sender_name
+        .clone_from(&message.sender_name);
+    thread
+        .last_message_sender_avatar
+        .clone_from(&message.avatar);
+    changed
+}
+
 fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
     ThreadSummary {
         channel_id: t.channel_id,
@@ -1578,6 +1686,69 @@ mod tests {
             last_sent_timestamp: 0,
             member_count: 0,
         }
+    }
+
+    #[test]
+    fn thread_sender_metadata_updates_summary_without_cached_messages() {
+        let mut thread = summary("10", 0);
+        thread.last_message_sender_id = "42".into();
+        thread.last_message_content = "hello".into();
+        thread.last_sent_timestamp = 99;
+        let snapshot = thread.clone();
+        let message = MezonTransport::message_from_proto(&api::ChannelMessage {
+            sender_id: 42,
+            username: "ozu".into(),
+            display_name: "Ozu".into(),
+            avatar: "ozu.png".into(),
+            content: r#"{"t":"hello"}"#.into(),
+            create_time_seconds: 99,
+            ..Default::default()
+        });
+        assert!(apply_thread_sender(&mut thread, &snapshot, &message));
+        assert_eq!(thread.last_message_sender_name, "Ozu");
+        assert_eq!(thread.last_message_sender_avatar, "ozu.png");
+        assert_eq!(thread.last_message_content, "hello");
+        assert!(!apply_thread_sender(&mut thread, &snapshot, &message));
+
+        let mut avatar_only = message.clone();
+        avatar_only.sender_name.clear();
+        assert!(apply_thread_sender(&mut thread, &snapshot, &avatar_only));
+        assert_eq!(thread.last_message_sender_avatar, "ozu.png");
+    }
+
+    #[test]
+    fn thread_sender_lookup_rejects_stale_or_unrelated_messages() {
+        let mut snapshot = summary("10", 0);
+        snapshot.last_message_sender_id = "42".into();
+        snapshot.last_sent_timestamp = 99;
+        snapshot.last_message_content = "hello".into();
+        let message = MezonTransport::message_from_proto(&api::ChannelMessage {
+            sender_id: 42,
+            avatar: "ozu.png".into(),
+            content: r#"{"t":"hello"}"#.into(),
+            create_time_seconds: 99,
+            ..Default::default()
+        });
+        for field in ["channel", "clan", "sender", "time", "content"] {
+            let mut thread = snapshot.clone();
+            match field {
+                "channel" => thread.channel_id = "11".into(),
+                "clan" => thread.clan_id = "other".into(),
+                "sender" => thread.last_message_sender_id = "43".into(),
+                "time" => thread.last_sent_timestamp = 100,
+                "content" => thread.last_message_content = "edited".into(),
+                _ => unreachable!(),
+            }
+            assert!(!apply_thread_sender(&mut thread, &snapshot, &message));
+            assert!(thread.last_message_sender_avatar.is_empty());
+        }
+        let mut thread = snapshot.clone();
+        let mut unrelated = message.clone();
+        unrelated.sender_id = 43;
+        assert!(!apply_thread_sender(&mut thread, &snapshot, &unrelated));
+        unrelated = message;
+        unrelated.create_time = 98;
+        assert!(!apply_thread_sender(&mut thread, &snapshot, &unrelated));
     }
 
     #[test]
