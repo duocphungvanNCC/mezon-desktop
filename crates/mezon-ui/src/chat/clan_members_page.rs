@@ -602,7 +602,8 @@ impl ClanMembersPage {
                     .min_w_0()
                     .child(
                         Avatar::new()
-                            .src(row.avatar.clone())
+                            .src(crate::util::imgproxy::avatar_url(cx, &row.avatar))
+                            .fallback_src(row.avatar.clone())
                             .name(row.name.clone())
                             .size_px(px(36.)),
                     )

@@ -1,9 +1,6 @@
 use super::context::RowCtx;
-use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
-use crate::components::primitives::{
-    Icon, IconName, avatar_color, avatar_text_color, initials_tile, name_initials, unread_dot,
-};
+use crate::components::primitives::{Icon, IconName, unread_dot};
 use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};
 use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
 
@@ -14,8 +11,7 @@ const MIN_WIDTH: f32 = 250.0;
 pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
 
-    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
-    let (creator_name, creator_avatar) = msg
+    let creator_avatar = msg
         .topic_creator_id
         .zip(ctx.clan_id)
         .and_then(|(user_id, clan_id)| {
@@ -23,14 +19,9 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
             let store = store.read(ctx.app);
             store
                 .member(clan_id, user_id)
-                .map(|member| (member.name().to_string(), member.avatar().to_string()))
+                .map(|member| member.avatar().to_string())
         })
         .unwrap_or_default();
-    let creator_name = if creator_name.is_empty() {
-        display_name.to_string()
-    } else {
-        creator_name
-    };
     let creator_avatar = if creator_avatar.is_empty() {
         msg.avatar_url.to_string()
     } else {
@@ -81,13 +72,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .flex_1()
         .min_w_0()
         .text_size(px(14.))
-        .child(creator_avatar_element(
-            &creator_name,
-            &creator_avatar,
-            msg,
-            ctx,
-            ctx.app,
-        ))
+        .child(creator_avatar_element(&creator_avatar, msg, ctx, ctx.app))
         .child(meta);
 
     let message_id = msg.id;
@@ -135,13 +120,7 @@ fn format_topic_reply_count(rpl: i32, locale: &str) -> String {
     mezon_i18n::t(locale, key).replace("{{number}}", &number)
 }
 
-fn creator_avatar_element(
-    name: &str,
-    avatar_url: &str,
-    msg: &Message,
-    ctx: &RowCtx,
-    cx: &App,
-) -> AnyElement {
+fn creator_avatar_element(avatar_url: &str, msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let size = px(AVATAR_SIZE);
     let base = div()
         .size(size)
@@ -167,14 +146,6 @@ fn creator_avatar_element(
             )
             .into_any_element()
     } else {
-        let bg = avatar_color(name);
-        base.child(initials_tile(
-            size,
-            Some(px(AVATAR_ROUNDING)),
-            bg,
-            avatar_text_color(bg),
-            name_initials(name),
-        ))
-        .into_any_element()
+        base.into_any_element()
     }
 }

@@ -6,7 +6,6 @@ use crate::theme::ActiveTheme;
 #[derive(IntoElement)]
 pub struct Avatar {
     src: Option<SharedString>,
-    name: Option<SharedString>,
     size: Size,
     custom_size: Option<Pixels>,
     border_color: Option<Hsla>,
@@ -25,7 +24,6 @@ impl Avatar {
     pub fn new() -> Self {
         Self {
             src: None,
-            name: None,
             size: Size::Medium,
             custom_size: None,
             border_color: None,
@@ -80,8 +78,7 @@ impl Avatar {
         self
     }
 
-    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
-        self.name = Some(name.into());
+    pub fn name(self, _name: impl Into<SharedString>) -> Self {
         self
     }
 
@@ -235,10 +232,6 @@ pub(crate) fn clipped_initials_tile(
         .into_any_element()
 }
 
-fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> AnyElement {
-    initials_tile(d, None, bg, text_color, initials)
-}
-
 fn anonymous_circle(d: Pixels) -> AnyElement {
     div()
         .flex()
@@ -322,18 +315,15 @@ impl RenderOnce for Avatar {
             }
         });
 
-        let name = self.name.clone().unwrap_or_default();
-        let bg = avatar_color(name.as_ref());
-        let text_color = avatar_text_color(bg);
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
-        let initials = name_initials(name.as_ref());
         let is_anonymous = self.is_anonymous;
         let group_default = self.group_default;
-        let skeleton_bg = self.skeleton.then(|| Hsla::from(cx.theme().bg_hover));
-        let loading_circle = move |initials: String| match skeleton_bg {
-            Some(fill) => skeleton_circle(image_size, fill),
-            None => initials_circle(image_size, bg, text_color, initials),
+        let placeholder_bg = if self.skeleton {
+            Hsla::from(cx.theme().bg_hover)
+        } else {
+            element_bg
         };
+        let placeholder = move || skeleton_circle(image_size, placeholder_bg);
 
         div()
             .size(container_size)
@@ -346,8 +336,6 @@ impl RenderOnce for Avatar {
             .child(match self.src {
                 _ if is_anonymous => anonymous_circle(image_size),
                 Some(src) => {
-                    let loading_initials = initials.clone();
-                    let fallback_initials = initials.clone();
                     let raw_fallback = self.fallback_src.clone();
                     let proxied = src.clone();
                     let grayscale = self.grayscale;
@@ -356,7 +344,7 @@ impl RenderOnce for Avatar {
                         src,
                         grayscale,
                         element_bg,
-                        move || loading_circle(loading_initials.clone()),
+                        placeholder,
                         move || {
                             if let Some(raw) = raw_fallback.clone()
                                 && !raw.is_empty()
@@ -367,29 +355,16 @@ impl RenderOnce for Avatar {
                                     raw,
                                     grayscale,
                                     element_bg,
-                                    {
-                                        let retry_loading = fallback_initials.clone();
-                                        move || loading_circle(retry_loading.clone())
-                                    },
-                                    {
-                                        let final_initials = fallback_initials.clone();
-                                        move || {
-                                            initials_circle(
-                                                image_size,
-                                                bg,
-                                                text_color,
-                                                final_initials.clone(),
-                                            )
-                                        }
-                                    },
+                                    placeholder,
+                                    placeholder,
                                 );
                             }
-                            initials_circle(image_size, bg, text_color, fallback_initials.clone())
+                            placeholder()
                         },
                     )
                 }
                 None if group_default => group_default_circle(image_size),
-                None => loading_circle(initials),
+                None => placeholder(),
             })
             .children(self.indicator.map(|indicator| div().child(indicator)))
     }
