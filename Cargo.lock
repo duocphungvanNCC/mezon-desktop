@@ -5804,8 +5804,8 @@ dependencies = [
  "mezon-client",
  "mezon-i18n",
  "mezon-proto",
- "mezon-stream",
  "mezon-updater",
+ "mezon-video",
  "mezon-voice",
  "mmn-client",
  "parking_lot",
@@ -5817,23 +5817,6 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
- "url",
-]
-
-[[package]]
-name = "mezon-stream"
-version = "2.1.14"
-dependencies = [
- "anyhow",
- "flume",
- "futures",
- "libwebrtc",
- "mezon-voice",
- "parking_lot",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
  "url",
 ]
 

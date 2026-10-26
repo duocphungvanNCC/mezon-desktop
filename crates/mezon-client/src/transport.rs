@@ -5097,6 +5097,7 @@ impl MezonTransport {
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
+            "GetStreamPlayback" => 213,
             "LinkCDNFile" => 214,
             "SfuBreakoutRoom" => 215,
             "SfuBreakoutMerge" => 216,
@@ -5461,6 +5462,27 @@ impl MezonTransport {
             )),
         };
         self.send_realtime_control(cid, "write_voice_reaction", envelope)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn write_streaming_watch(&self, channel_id: i64, watching: bool) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=StreamingWatch cid={} channel_id={channel_id} watching={watching}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::StreamingWatch(
+                realtime::StreamingWatch {
+                    channel_id,
+                    watching,
+                },
+            )),
+        };
+        self.send_realtime_control(cid, "write_streaming_watch", envelope)
             .await
             .map(|_| ())
     }
@@ -7485,6 +7507,29 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn get_stream_playback(
+        &self,
+        channel_id: i64,
+        publish: bool,
+    ) -> Result<api::GetStreamPlaybackResponse> {
+        if channel_id == 0 {
+            anyhow::bail!("GetStreamPlayback needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GetStreamPlaybackRequest {
+            channel_id,
+            publish,
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "GetStreamPlayback", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GetStreamPlaybackResponse::decode(response.as_slice())?)
     }
 
     pub async fn sfu_breakout_room(
@@ -13656,5 +13701,70 @@ mod tests {
             MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
             r#"{"t":123}"#
         );
+    }
+
+    #[tokio::test]
+    async fn stream_playback_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .get_stream_playback(0, false)
+            .await
+            .expect_err("channel 0 has no playback");
+        assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn stream_playback_goes_over_the_socket_without_http_fallback() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        assert_eq!(t.get_api_index("GetStreamPlayback"), Some(213));
+        let body = api::GetStreamPlaybackResponse {
+            token: "tok".to_string(),
+            hls_url: "https://cdn-dev.nccsoft.vn/live/99/index.m3u8".to_string(),
+            expires_at: 1000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let answered = answer_next_socket_request(&t, 0, body);
+
+        let resp = t
+            .get_stream_playback(99, false)
+            .await
+            .expect("playback request should succeed");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(resp.token, "tok");
+        assert_eq!(
+            resp.hls_url,
+            "https://cdn-dev.nccsoft.vn/live/99/index.m3u8"
+        );
+        assert!(hits.lock().is_empty());
+    }
+
+    #[test]
+    fn streaming_viewer_count_watch_echo_and_metrics_stay_unhandled() {
+        let count_event =
+            RealtimeEvent::try_from(realtime::envelope::Message::StreamingViewerCountEvent(
+                realtime::StreamingViewerCountEvent {
+                    clan_id: 1,
+                    channel_id: 2,
+                    viewer_count: 15,
+                },
+            ))
+            .unwrap();
+        assert!(matches!(count_event, RealtimeEvent::Unhandled(_)));
+
+        let watch_echo = RealtimeEvent::try_from(realtime::envelope::Message::StreamingWatch(
+            realtime::StreamingWatch {
+                channel_id: 2,
+                watching: true,
+            },
+        ))
+        .unwrap();
+        assert!(matches!(watch_echo, RealtimeEvent::Unhandled(_)));
+
+        let metric = RealtimeEvent::try_from(realtime::envelope::Message::MetricMessageEvent(
+            realtime::MetricMessageEvent::default(),
+        ))
+        .unwrap();
+        assert!(matches!(metric, RealtimeEvent::Unhandled(_)));
     }
 }
