@@ -687,22 +687,26 @@ pub fn resolve_pronoun_pair(
     }
     let mut addr = resolved_addr.unwrap_or_else(|| "bạn".to_string());
 
-    let is_junior_proposal = !trimmed.is_empty() && {
-        static RE_JUNIOR_PROP: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b").unwrap()
-        });
-        static RE_EM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(em|e)\b").unwrap());
-        static RE_POLITE_A: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(a|ah|ạ)\b").unwrap());
-        static RE_POLITE_DA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(da|dạ)\b").unwrap());
-        static RE_ELDER_OI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap());
+    let is_junior_proposal = !trimmed.is_empty()
+        && {
+            static RE_JUNIOR_PROP: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b").unwrap()
+            });
+            static RE_EM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(em|e)\b").unwrap());
+            static RE_POLITE_A: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(a|ah|ạ)\b").unwrap());
+            static RE_POLITE_DA: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(da|dạ)\b").unwrap());
+            static RE_ELDER_OI: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap());
 
-        let clean = strip_accents(&trimmed.to_lowercase());
-        let norm_text = trimmed.to_lowercase();
-        RE_JUNIOR_PROP.is_match(&clean)
-            || (RE_EM.is_match(&clean)
-                && (RE_POLITE_A.is_match(&norm_text) || RE_POLITE_DA.is_match(&norm_text))
-                && !RE_ELDER_OI.is_match(&clean))
-    };
+            let clean = strip_accents(&trimmed.to_lowercase());
+            let norm_text = trimmed.to_lowercase();
+            RE_JUNIOR_PROP.is_match(&clean)
+                || (RE_EM.is_match(&clean)
+                    && (RE_POLITE_A.is_match(&norm_text) || RE_POLITE_DA.is_match(&norm_text))
+                    && !RE_ELDER_OI.is_match(&clean))
+        };
 
     if is_junior_proposal && speaker.is_none() {
         let target_persona = addr.as_str();
@@ -1015,7 +1019,10 @@ fn augment_quick_replies(
     speaker: &str,
     clean: &str,
 ) {
-    if action == "action_task_accept" && RE_TASK_CODE.is_match(clean) && matches!(speaker, "em" | "cháu") {
+    if action == "action_task_accept"
+        && RE_TASK_CODE.is_match(clean)
+        && matches!(speaker, "em" | "cháu")
+    {
         let insert = match role {
             "anh" => "Để em add và test luôn.",
             "chị" => "Để em add và test luôn chị nhé.",

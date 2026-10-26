@@ -283,10 +283,8 @@ impl PinnedPopoverPanel {
             || self.pin_cards.iter().zip(&cards).any(|(old, new)| {
                 old.message_id != new.message_id || old.selectable_text != new.selectable_text
             });
-        if selection_stale {
-            if let Ok(mut selection) = self.selection.try_borrow_mut() {
-                selection.clear();
-            }
+        if selection_stale && let Ok(mut selection) = self.selection.try_borrow_mut() {
+            selection.clear();
         }
         let changed_items = self
             .pin_cards

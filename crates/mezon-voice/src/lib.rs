@@ -1335,7 +1335,7 @@ impl NoiseOverload {
             self.window_drops = 0;
         }
         self.window_drops += 1;
-        if self.total_drops == 1 || self.total_drops % 20 == 0 {
+        if self.total_drops == 1 || self.total_drops.is_multiple_of(20) {
             tracing::warn!(
                 generation,
                 stage,
@@ -1367,7 +1367,7 @@ fn queue_uplink_frame(
 ) -> bool {
     if tx.try_send(frame).is_err() {
         *overruns += 1;
-        if *overruns == 1 || *overruns % 20 == 0 {
+        if *overruns == 1 || (*overruns).is_multiple_of(20) {
             tracing::warn!(
                 uplink_overruns = *overruns,
                 queued_uplink_frames = tx.len(),
