@@ -7,8 +7,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelMembersStore, ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore,
-    MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary, ThreadsStore, UserId,
-    group_threads, resolve_user_profile, thread_preview_display,
+    MessagesEvent, MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary,
+    ThreadsStore, UserId, group_threads, resolve_user_profile, thread_preview_display,
 };
 use ui::utils::{DateTimeType, format_distance_from_now};
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -71,13 +71,45 @@ impl ThreadsScrollBody {
             this.list_dirty = true;
             cx.notify();
         });
-        let profile_sub = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-            this.list_dirty = true;
-            cx.notify();
+        let profile_sub = cx.subscribe(&ClanMembersStore::global(cx), |_, _, event, cx| {
+            let store = ThreadsStore::global(cx).read(cx);
+            if store
+                .threads()
+                .iter()
+                .chain(store.search_results().into_iter().flatten())
+                .any(|thread| thread.clan_id == event.clan_id().to_string())
+            {
+                cx.notify();
+            }
         });
-        let messages_sub = cx.observe(&MessagesStore::global(cx), |this, _, cx| {
-            this.list_dirty = true;
-            cx.notify();
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |_, messages, event, cx| {
+            let store = ThreadsStore::global(cx).read(cx);
+            let relevant = store
+                .threads()
+                .iter()
+                .chain(store.search_results().into_iter().flatten())
+                .any(|thread| match event {
+                    MessagesEvent::Updated {
+                        message_id: Some(id),
+                    }
+                    | MessagesEvent::RemovedAt { message_id: id, .. } => {
+                        thread.last_message_id == id.to_string()
+                    }
+                    MessagesEvent::TopicUpdated { topic_id } => {
+                        thread.channel_id == topic_id.to_string()
+                    }
+                    MessagesEvent::Reset { .. }
+                    | MessagesEvent::Resized { .. }
+                    | MessagesEvent::Shifted { .. }
+                    | MessagesEvent::Updated { message_id: None } => messages
+                        .read(cx)
+                        .active_channel_id()
+                        .is_some_and(|id| thread.channel_id == id.to_string()),
+                    _ => false,
+                });
+            if relevant {
+                cx.notify();
+            }
         });
         let list_state = ListState::new(0, ListAlignment::Top, px(400.));
         list_state.set_scroll_handler(move |event, _window, cx| {
@@ -99,14 +131,10 @@ impl ThreadsScrollBody {
 
     fn sync_list(&mut self, row_count: usize) {
         let current = self.list_state.item_count();
-        if row_count == current {
-            if self.list_dirty {
-                self.list_state.remeasure();
-            }
-        } else if row_count > current {
+        if row_count > current {
             self.list_state
                 .splice(current..current, row_count - current);
-        } else {
+        } else if row_count < current {
             self.list_state.reset(row_count);
         }
         self.list_dirty = false;

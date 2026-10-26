@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,17 +12,21 @@ use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
+use crate::cache::KeyedCache;
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType, validate_channel_name};
 use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::messages::{
     MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
     OutgoingMention, mentioned_thread_candidates, plan_thread_membership, upload_attachments_now,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::users_by_user::message_avatar::{
+    AVATAR_NOTIFY_COALESCE, MessageAvatarKey, avatar_request_permits, fetch_avatar_message,
+};
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
 pub const THREAD_STATUS_JOINED: i32 = 1;
@@ -35,7 +40,7 @@ const LOAD_MORE_THRESHOLD: usize = 6;
 const MESSAGE_CODE_CHAT: i32 = 0;
 const MESSAGE_CODE_CHAT_UPDATE: i32 = 1;
 const STREAM_MODE_THREAD: i32 = 6;
-const THREAD_SENDER_LOOKUP_LIMIT: u32 = 1;
+const THREAD_SENDER_CACHE_CAPACITY: usize = THREAD_LIST_LIMIT as usize * 4;
 
 #[derive(Debug, Clone)]
 pub struct ThreadSummary {
@@ -46,6 +51,7 @@ pub struct ThreadSummary {
     pub channel_private: i32,
     pub active: i32,
     pub creator_id: String,
+    pub last_message_id: String,
     pub last_message_content: String,
     pub last_message_preview: String,
     pub last_message_sender_id: String,
@@ -121,6 +127,11 @@ pub struct ThreadsStore {
     /// The name currently in the form fails the character rule — shown under the field as the
     /// user types, before any submit, the way web's `ThreadNameTextField` does.
     name_live_invalid: bool,
+    sender_queue: VecDeque<ThreadSummary>,
+    sender_cache: KeyedCache<MessageAvatarKey, Result<Option<(String, String)>, ()>>,
+    sender_task: Option<Task<()>>,
+    sender_notify_task: Option<Task<()>>,
+    sender_generation: u64,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -176,6 +187,11 @@ impl ThreadsStore {
             create_private: 0,
             name_error: None,
             name_live_invalid: false,
+            sender_queue: VecDeque::new(),
+            sender_cache: KeyedCache::new(Some(THREAD_SENDER_CACHE_CAPACITY)),
+            sender_task: None,
+            sender_notify_task: None,
+            sender_generation: 0,
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -306,6 +322,7 @@ impl ThreadsStore {
             channel_private: desc.channel_private,
             active: THREAD_STATUS_JOINED,
             creator_id: desc.creator_id.to_string(),
+            last_message_id: String::new(),
             last_message_content: String::new(),
             last_message_preview: String::new(),
             last_message_sender_id: String::new(),
@@ -744,6 +761,13 @@ impl ThreadsStore {
                 }
             }
         }
+        self.sender_generation = self.sender_generation.wrapping_add(1);
+        self.sender_task = None;
+        self.sender_notify_task = None;
+        self.sender_queue.clear();
+        if channel_id.is_none() {
+            self.sender_cache.clear();
+        }
         self.threads.clear();
         self.search_query.clear();
         self.search_results = None;
@@ -775,6 +799,14 @@ impl ThreadsStore {
     }
 
     pub fn open_popover(&mut self, cx: &mut Context<Self>) {
+        let failures: Vec<_> = self
+            .sender_cache
+            .iter()
+            .filter_map(|(key, value)| value.is_err().then_some(*key))
+            .collect();
+        for key in failures {
+            self.sender_cache.mark_stale(&key);
+        }
         self.sync_list_scope(cx);
         self.ensure_create_permissions(cx);
         self.refresh(cx);
@@ -913,8 +945,8 @@ impl ThreadsStore {
                         let results: Vec<ThreadSummary> =
                             list.into_iter().map(thread_from_api).collect();
                         this.ensure_clan_members_for_threads(&results, cx);
+                        this.search_results = Some(results.clone());
                         this.load_missing_thread_senders(&results, cx);
-                        this.search_results = Some(results);
                     }
                     Err(e) => tracing::error!("search_thread failed: {e}"),
                 }
@@ -938,82 +970,192 @@ impl ThreadsStore {
         }
     }
 
-    fn load_missing_thread_senders(&self, threads: &[ThreadSummary], cx: &mut Context<Self>) {
-        let members = ClanMembersStore::global(cx);
-        let pending: Vec<_> = threads
-            .iter()
-            .filter(|thread| {
-                let (Ok(clan_id), Ok(user_id)) = (
-                    thread.clan_id.parse::<ClanId>(),
-                    thread.last_message_sender_id.parse::<UserId>(),
-                ) else {
-                    return false;
-                };
-                !user_id.is_zero()
-                    && thread.last_sent_timestamp > 0
-                    && thread.last_message_sender_avatar.is_empty()
-                    && members.read(cx).member(clan_id, user_id).is_none()
-            })
-            .cloned()
-            .collect();
-        if pending.is_empty() {
+    fn load_missing_thread_senders(&mut self, threads: &[ThreadSummary], cx: &mut Context<Self>) {
+        for thread in threads {
+            let Some(key) = thread_sender_key(thread) else {
+                continue;
+            };
+            if self.sender_cache.is_fresh(&key, crate::CACHE_TTL) {
+                if let Some(Ok(Some((name, avatar)))) = self.sender_cache.get(&key) {
+                    let name = name.clone();
+                    let avatar = avatar.clone();
+                    self.apply_sender_identity(key, &name, &avatar);
+                }
+                continue;
+            }
+            if !self
+                .sender_queue
+                .iter()
+                .any(|queued| thread_sender_key(queued) == Some(key))
+            {
+                self.sender_queue.push_back(thread.clone());
+            }
+        }
+        if self.sender_task.is_some() || self.sender_queue.is_empty() {
             return;
         }
+        let generation = self.sender_generation;
+        let permits = avatar_request_permits(cx);
         let api = self.api.clone();
-        let scope = self.list_channel_id.clone();
-        cx.spawn(async move |this, cx| {
-            for snapshot in pending {
-                if this
-                    .update(cx, |this, _| this.list_channel_id != scope)
-                    .unwrap_or(true)
-                {
+        self.sender_task = Some(cx.spawn(async move |this, cx| {
+            let mut rosters = std::collections::HashMap::new();
+            loop {
+                let snapshot = this
+                    .update(cx, |this, _| this.sender_queue.pop_front())
+                    .ok()
+                    .flatten();
+                let Some(snapshot) = snapshot else {
+                    break;
+                };
+                let Some(key) = thread_sender_key(&snapshot) else {
+                    continue;
+                };
+                let current = this
+                    .update(cx, |this, _| {
+                        this.sender_generation == generation
+                            && this
+                                .threads
+                                .iter()
+                                .chain(this.search_results.iter().flatten())
+                                .any(|thread| thread_sender_key(thread) == Some(key))
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    continue;
+                }
+                let loaded = if let Some(loaded) = rosters.get(&key.clan_id) {
+                    *loaded
+                } else {
+                    let roster = cx.update(|cx| {
+                        ClanMembersStore::global(cx).update(cx, |members, cx| {
+                            members.ensure_loaded_task(key.clan_id, cx)
+                        })
+                    });
+                    let loaded = roster.await;
+                    rosters.insert(key.clan_id, loaded);
+                    loaded
+                };
+                let cached = this
+                    .update(cx, |this, cx| {
+                        if this.sender_generation != generation {
+                            return None;
+                        }
+                        if this.sender_cache.is_fresh(&key, crate::CACHE_TTL) {
+                            return Some(false);
+                        }
+                        let members = ClanMembersStore::global(cx);
+                        let members = members.read(cx);
+                        if let Ok(user_id) = snapshot.last_message_sender_id.parse::<UserId>()
+                            && let Some(member) = members.member(key.clan_id, user_id)
+                        {
+                            let name = member.name().to_string();
+                            let avatar = member.avatar().to_string();
+                            if this.apply_sender_identity(key, &name, &avatar) {
+                                this.schedule_sender_notify(cx);
+                            }
+                            return Some(false);
+                        }
+                        if let Some(message) = MessagesStore::global(cx)
+                            .read(cx)
+                            .message_in_channel(key.channel_id, key.message_id)
+                        {
+                            let name = message.sender_name.to_string();
+                            let avatar = message.avatar_url.to_string();
+                            this.sender_cache.insert(
+                                key,
+                                Ok(Some((name.clone(), avatar.clone()))),
+                                None,
+                            );
+                            if this.apply_sender_identity(key, &name, &avatar) {
+                                this.schedule_sender_notify(cx);
+                            }
+                            return Some(false);
+                        }
+                        Some(loaded)
+                    })
+                    .ok()
+                    .flatten();
+                if cached.is_none() {
                     break;
                 }
-                let (Ok(clan_id), Ok(channel_id)) = (
-                    snapshot.clan_id.parse::<ClanId>(),
-                    snapshot.channel_id.parse::<ChannelId>(),
-                ) else {
+                if cached == Some(false) {
                     continue;
+                }
+                let Ok(_permit) = permits.clone().acquire_owned().await else {
+                    break;
                 };
-                let result = api
-                    .list_channel_messages(
-                        clan_id.get(),
-                        channel_id.get(),
-                        0,
-                        0,
-                        THREAD_SENDER_LOOKUP_LIMIT,
-                    )
-                    .await;
-                let Ok(page) = result else {
-                    tracing::warn!(target: "mezon.threads", "thread sender lookup failed");
-                    continue;
-                };
-                if this
-                    .update(cx, |this, cx| {
-                        if this.list_channel_id != scope {
-                            return;
-                        }
-                        let mut changed = false;
-                        for thread in this
-                            .threads
-                            .iter_mut()
-                            .chain(this.search_results.iter_mut().flatten())
-                        {
-                            for message in &page.messages {
-                                changed |= apply_thread_sender(thread, &snapshot, message);
+                let result = fetch_avatar_message(&api, key).await;
+                let throttled = result
+                    .as_ref()
+                    .err()
+                    .and_then(api_status_from_error)
+                    .is_some_and(|status| {
+                        status.code == mezon_client::ApiStatusError::RESOURCE_EXHAUSTED
+                    });
+                let _ = this.update(cx, |this, cx| {
+                    if this.sender_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(message) => {
+                            let identity = message
+                                .filter(|message| {
+                                    message.sender_id.to_string() == snapshot.last_message_sender_id
+                                })
+                                .map(|message| (message.sender_name, message.avatar));
+                            if let Some((name, avatar)) = &identity
+                                && this.apply_sender_identity(key, name, avatar)
+                            {
+                                this.schedule_sender_notify(cx);
                             }
+                            this.sender_cache.insert(key, Ok(identity), None);
                         }
-                        if changed {
-                            cx.notify();
+                        Err(error) => {
+                            tracing::warn!(%error, "thread sender lookup failed");
+                            this.sender_cache.insert(key, Err(()), None);
                         }
-                    })
-                    .is_err()
-                {
+                    }
+                });
+                if throttled {
+                    let _ = this.update(cx, |this, _| {
+                        if this.sender_generation == generation {
+                            this.sender_queue.clear();
+                        }
+                    });
                     break;
                 }
             }
-        })
-        .detach();
+            let _ = this.update(cx, |this, _| {
+                if this.sender_generation == generation {
+                    this.sender_task = None;
+                }
+            });
+        }));
+    }
+
+    fn apply_sender_identity(&mut self, key: MessageAvatarKey, name: &str, avatar: &str) -> bool {
+        let mut changed = false;
+        for thread in self
+            .threads
+            .iter_mut()
+            .chain(self.search_results.iter_mut().flatten())
+        {
+            changed |= apply_thread_sender(thread, key, name, avatar);
+        }
+        changed
+    }
+
+    fn schedule_sender_notify(&mut self, cx: &mut Context<Self>) {
+        if self.sender_notify_task.is_some() {
+            return;
+        }
+        self.sender_notify_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AVATAR_NOTIFY_COALESCE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.sender_notify_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -1067,7 +1209,7 @@ impl ThreadsStore {
                         let page_full = page_has_more(list.len());
                         let batch = filter_threads(list.into_iter().map(thread_from_api).collect());
                         this.ensure_clan_members_for_threads(&batch, cx);
-                        this.load_missing_thread_senders(&batch, cx);
+                        let pending = batch.clone();
                         if append {
                             merge_threads(&mut this.threads, batch);
                         } else {
@@ -1075,6 +1217,7 @@ impl ThreadsStore {
                             this.loaded_channel = Some(channel_id);
                             this.fetch_error = false;
                         }
+                        this.load_missing_thread_senders(&pending, cx);
                         this.current_page = page;
                         this.has_more = page_full;
                     }
@@ -1497,30 +1640,43 @@ fn filter_threads(threads: Vec<ThreadSummary>) -> Vec<ThreadSummary> {
         .collect()
 }
 
+fn thread_sender_key(thread: &ThreadSummary) -> Option<MessageAvatarKey> {
+    let clan_id = thread
+        .clan_id
+        .parse::<ClanId>()
+        .ok()
+        .filter(|id| id.get() > 0)?;
+    let channel_id = thread
+        .channel_id
+        .parse::<ChannelId>()
+        .ok()
+        .filter(|id| id.get() > 0)?;
+    let message_id = thread
+        .last_message_id
+        .parse::<MessageId>()
+        .ok()
+        .filter(|id| id.get() > 0)?;
+    Some(MessageAvatarKey {
+        clan_id,
+        parent_id: channel_id,
+        channel_id,
+        message_id,
+    })
+}
+
 fn apply_thread_sender(
     thread: &mut ThreadSummary,
-    snapshot: &ThreadSummary,
-    message: &mezon_client::transport::ApiMessage,
+    key: MessageAvatarKey,
+    name: &str,
+    avatar: &str,
 ) -> bool {
-    if thread.channel_id != snapshot.channel_id
-        || thread.clan_id != snapshot.clan_id
-        || thread.last_message_sender_id != message.sender_id.to_string()
-        || thread.last_sent_timestamp != message.create_time
-        || thread.last_message_content != snapshot.last_message_content
-        || snapshot.last_message_content != message.content
-        || thread.last_sent_timestamp != snapshot.last_sent_timestamp
-        || thread.last_message_sender_id != snapshot.last_message_sender_id
-    {
+    if thread_sender_key(thread) != Some(key) {
         return false;
     }
-    let changed = thread.last_message_sender_name != message.sender_name
-        || thread.last_message_sender_avatar != message.avatar;
-    thread
-        .last_message_sender_name
-        .clone_from(&message.sender_name);
-    thread
-        .last_message_sender_avatar
-        .clone_from(&message.avatar);
+    let changed =
+        thread.last_message_sender_name != name || thread.last_message_sender_avatar != avatar;
+    thread.last_message_sender_name = name.to_string();
+    thread.last_message_sender_avatar = avatar.to_string();
     changed
 }
 
@@ -1533,6 +1689,7 @@ fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
         channel_private: t.channel_private,
         active: t.active,
         creator_id: t.creator_id,
+        last_message_id: t.last_message_id,
         last_message_content: t.last_message_content.clone(),
         last_message_preview: thread_preview_display(&t.last_message_content),
         last_message_sender_id: t.last_message_sender_id,
@@ -1552,6 +1709,7 @@ fn thread_from_created_event(ev: &realtime::ChannelCreatedEvent) -> ThreadSummar
         channel_private: ev.channel_private,
         active: ev.status,
         creator_id: ev.creator_id.to_string(),
+        last_message_id: String::new(),
         last_message_content: String::new(),
         last_message_preview: String::new(),
         last_message_sender_id: ev.creator_id.to_string(),
@@ -1574,6 +1732,7 @@ fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessa
     thread.last_sent_timestamp = i64::from(msg.create_time_seconds);
     if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
         let api_msg = MezonTransport::message_from_proto(msg);
+        thread.last_message_id = api_msg.message_id.to_string();
         thread.last_message_content = api_msg.content.clone();
         thread.last_message_preview = thread_preview_display(&api_msg.content);
         thread.last_message_sender_id = api_msg.sender_id.to_string();
@@ -1631,6 +1790,49 @@ pub fn group_threads(threads: &[ThreadSummary]) -> GroupedThreadIndexes {
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn sender_cache_survives_list_replacement_and_scope_change_cancels_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = ThreadsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                let mut thread = summary("10", 0);
+                thread.clan_id = "1".into();
+                thread.last_message_id = "99".into();
+                let key = thread_sender_key(&thread).unwrap();
+                store
+                    .sender_cache
+                    .insert(key, Ok(Some(("Ozu".into(), "ozu.png".into()))), None);
+                store.threads = vec![thread.clone()];
+                store.search_results = Some(vec![thread.clone()]);
+                store.load_missing_thread_senders(&[thread.clone(), thread.clone()], cx);
+                assert_eq!(store.threads[0].last_message_sender_avatar, "ozu.png");
+                assert_eq!(
+                    store.search_results.as_ref().unwrap()[0].last_message_sender_avatar,
+                    "ozu.png"
+                );
+                assert!(store.sender_queue.is_empty());
+                assert!(store.sender_task.is_none());
+                thread.last_message_id = "100".into();
+                store.load_missing_thread_senders(&[thread], cx);
+                assert!(store.sender_task.is_some());
+                store.on_active_channel_changed(None, cx);
+                assert!(store.sender_task.is_none());
+                assert!(store.sender_notify_task.is_none());
+                assert!(store.sender_queue.is_empty());
+                assert!(store.sender_cache.is_empty());
+            });
+        });
+    }
+
     #[test]
     fn thread_creation_scope_is_none_in_a_dm() {
         assert_eq!(thread_creation_scope(true, Some("77"), Some("5")), None);
@@ -1678,6 +1880,7 @@ mod tests {
             channel_private,
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
+            last_message_id: String::new(),
             last_message_content: String::new(),
             last_message_preview: String::new(),
             last_message_sender_id: String::new(),
@@ -1689,66 +1892,55 @@ mod tests {
     }
 
     #[test]
-    fn thread_sender_metadata_updates_summary_without_cached_messages() {
+    fn thread_sender_uses_message_identity_instead_of_truncated_preview() {
         let mut thread = summary("10", 0);
-        thread.last_message_sender_id = "42".into();
-        thread.last_message_content = "hello".into();
-        thread.last_sent_timestamp = 99;
-        let snapshot = thread.clone();
-        let message = MezonTransport::message_from_proto(&api::ChannelMessage {
-            sender_id: 42,
-            username: "ozu".into(),
-            display_name: "Ozu".into(),
-            avatar: "ozu.png".into(),
-            content: r#"{"t":"hello"}"#.into(),
-            create_time_seconds: 99,
-            ..Default::default()
-        });
-        assert!(apply_thread_sender(&mut thread, &snapshot, &message));
-        assert_eq!(thread.last_message_sender_name, "Ozu");
+        thread.clan_id = "1".into();
+        thread.last_message_id = "99".into();
+        thread.last_message_content = "a truncated preview".into();
+        let key = thread_sender_key(&thread).unwrap();
+        assert!(apply_thread_sender(&mut thread, key, "Ozu", "ozu.png"));
         assert_eq!(thread.last_message_sender_avatar, "ozu.png");
-        assert_eq!(thread.last_message_content, "hello");
-        assert!(!apply_thread_sender(&mut thread, &snapshot, &message));
-
-        let mut avatar_only = message.clone();
-        avatar_only.sender_name.clear();
-        assert!(apply_thread_sender(&mut thread, &snapshot, &avatar_only));
+        assert!(!apply_thread_sender(&mut thread, key, "Ozu", "ozu.png"));
+        thread.last_message_id = "100".into();
+        assert!(!apply_thread_sender(
+            &mut thread,
+            key,
+            "Old sender",
+            "old.png"
+        ));
         assert_eq!(thread.last_message_sender_avatar, "ozu.png");
     }
 
     #[test]
-    fn thread_sender_lookup_rejects_stale_or_unrelated_messages() {
-        let mut snapshot = summary("10", 0);
-        snapshot.last_message_sender_id = "42".into();
-        snapshot.last_sent_timestamp = 99;
-        snapshot.last_message_content = "hello".into();
-        let message = MezonTransport::message_from_proto(&api::ChannelMessage {
-            sender_id: 42,
-            avatar: "ozu.png".into(),
-            content: r#"{"t":"hello"}"#.into(),
-            create_time_seconds: 99,
-            ..Default::default()
-        });
-        for field in ["channel", "clan", "sender", "time", "content"] {
-            let mut thread = snapshot.clone();
-            match field {
-                "channel" => thread.channel_id = "11".into(),
-                "clan" => thread.clan_id = "other".into(),
-                "sender" => thread.last_message_sender_id = "43".into(),
-                "time" => thread.last_sent_timestamp = 100,
-                "content" => thread.last_message_content = "edited".into(),
-                _ => unreachable!(),
-            }
-            assert!(!apply_thread_sender(&mut thread, &snapshot, &message));
+    fn thread_sender_rejects_another_clan_or_message() {
+        let mut thread = summary("10", 0);
+        thread.clan_id = "1".into();
+        thread.last_message_id = "99".into();
+        let key = thread_sender_key(&thread).unwrap();
+        for unrelated in [
+            MessageAvatarKey {
+                clan_id: ClanId(2),
+                ..key
+            },
+            MessageAvatarKey {
+                channel_id: ChannelId(11),
+                ..key
+            },
+            MessageAvatarKey {
+                message_id: MessageId(100),
+                ..key
+            },
+        ] {
+            assert!(!apply_thread_sender(
+                &mut thread,
+                unrelated,
+                "Wrong",
+                "wrong.png"
+            ));
             assert!(thread.last_message_sender_avatar.is_empty());
         }
-        let mut thread = snapshot.clone();
-        let mut unrelated = message.clone();
-        unrelated.sender_id = 43;
-        assert!(!apply_thread_sender(&mut thread, &snapshot, &unrelated));
-        unrelated = message;
-        unrelated.create_time = 98;
-        assert!(!apply_thread_sender(&mut thread, &snapshot, &unrelated));
+        assert!(apply_thread_sender(&mut thread, key, "No avatar", ""));
+        assert_eq!(thread.last_message_sender_name, "No avatar");
     }
 
     #[test]
@@ -1833,6 +2025,7 @@ mod tests {
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
+            last_message_id: String::new(),
             last_message_content: String::new(),
             last_message_preview: String::new(),
             last_message_sender_id: String::new(),
@@ -1852,6 +2045,7 @@ mod tests {
                     channel_private: 0,
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
+                    last_message_id: String::new(),
                     last_message_content: String::new(),
                     last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
@@ -1868,6 +2062,7 @@ mod tests {
                     channel_private: 0,
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
+                    last_message_id: String::new(),
                     last_message_content: String::new(),
                     last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
@@ -1892,6 +2087,7 @@ mod tests {
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
+            last_message_id: String::new(),
             last_message_content: "old".into(),
             last_message_preview: "old".into(),
             last_message_sender_id: "9".into(),
@@ -1925,6 +2121,7 @@ mod tests {
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
+            last_message_id: String::new(),
             last_message_content: "keep".into(),
             last_message_preview: "keep".into(),
             last_message_sender_id: "9".into(),
@@ -1956,6 +2153,7 @@ mod tests {
                 channel_private: 0,
                 active: THREAD_STATUS_JOINED,
                 creator_id: String::new(),
+                last_message_id: String::new(),
                 last_message_content: String::new(),
                 last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
@@ -1972,6 +2170,7 @@ mod tests {
                 channel_private: 0,
                 active: THREAD_STATUS_ARCHIVED,
                 creator_id: String::new(),
+                last_message_id: String::new(),
                 last_message_content: String::new(),
                 last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
@@ -1988,6 +2187,7 @@ mod tests {
                 channel_private: 0,
                 active: THREAD_STATUS_ACTIVE_PUBLIC,
                 creator_id: String::new(),
+                last_message_id: String::new(),
                 last_message_content: String::new(),
                 last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
@@ -2077,6 +2277,7 @@ mod tests {
                         channel_private: 0,
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
+                        last_message_id: String::new(),
                         last_message_content: String::new(),
                         last_message_preview: String::new(),
                         last_message_sender_id: String::new(),
@@ -2093,6 +2294,7 @@ mod tests {
                         channel_private: 0,
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
+                        last_message_id: String::new(),
                         last_message_content: String::new(),
                         last_message_preview: String::new(),
                         last_message_sender_id: String::new(),
@@ -2109,6 +2311,7 @@ mod tests {
                         channel_private: 0,
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
+                        last_message_id: String::new(),
                         last_message_content: String::new(),
                         last_message_preview: String::new(),
                         last_message_sender_id: String::new(),

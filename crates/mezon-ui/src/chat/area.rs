@@ -1062,17 +1062,15 @@ fn latest_activity_strip(
         let mut avatar = Avatar::new().name(display_name).size_px(px(26.));
         let (avatar_src, avatar_fallback) =
             resolve_pin_avatar_urls(pin, active_clan_id, Some(context.channel_id), cx);
+        let is_anonymous =
+            mezon_store::is_anonymous_sender_id(&pin.sender_id, cx) && avatar_src.is_none();
         if let Some(src) = avatar_src {
             avatar = avatar.src(src);
         }
         if let Some(fallback) = avatar_fallback {
             avatar = avatar.fallback_src(fallback);
         }
-        if pin.has_authoritative_empty_avatar(cx) {
-            avatar = avatar.anonymous(true);
-        } else if pin_profile.is_none() && pin.avatar_url.is_empty() {
-            avatar = avatar.anonymous(mezon_store::is_anonymous_sender_id(&pin.sender_id, cx));
-        }
+        avatar = avatar.anonymous(is_anonymous);
         avatar.into_any_element()
     });
     let has_pin_time = !pin_time.is_empty();

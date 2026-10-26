@@ -7,10 +7,10 @@ use gpui::{
 };
 use mezon_store::user_profile::CachedUserProfiles;
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectEvent, DirectMessageStore,
-    FriendEvent, FriendStore, InboxCategory, InboxEvent, InboxNotification, InboxStore, MessageId,
-    MessagesStore, RolesStore, TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent,
-    TopicsStore, UsersByUserEvent, UsersByUserStore,
+    ChannelId, ChannelList, ClanEvent, ClanId, ClanList, ClanMembersStore, DirectEvent,
+    DirectMessageStore, FriendEvent, FriendStore, InboxCategory, InboxEvent, InboxNotification,
+    InboxStore, MessageId, MessagesStore, RolesStore, TopicBadgeEvent, TopicBadgeStore,
+    TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -167,8 +167,10 @@ impl InboxPopoverPanel {
             }
             cx.notify();
         });
-        let _clans_sub = cx.observe(&ClanList::global(cx), |this, _, cx| {
-            this.load_missing_sender_profiles(cx);
+        let _clans_sub = cx.subscribe(&ClanList::global(cx), |this, _, event, cx| {
+            if matches!(event, ClanEvent::Joined(_) | ClanEvent::Deleted(_)) {
+                this.load_missing_sender_profiles(cx);
+            }
         });
         let _users_sub = cx.subscribe(&users_store, |this, _, event, cx| {
             if matches!(event, UsersByUserEvent::Changed) {
@@ -268,6 +270,7 @@ impl InboxPopoverPanel {
 
     fn prefetch_context_for_tab(&self, cx: &mut Context<Self>) {
         if self.tab == InboxTab::ForYou {
+            UsersByUserStore::global(cx).update(cx, |store, _| store.retry_missing_profiles());
             FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         }
         if let Ok(clan) = self.clan_id.parse::<ClanId>() {
