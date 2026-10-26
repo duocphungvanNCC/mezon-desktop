@@ -246,9 +246,10 @@ fn render_message_content_with_options(
 
 fn spans_need_chip_path(spans: &[MessageSpan]) -> bool {
     spans.iter().any(|s| match s {
-        MessageSpan::Canvas { .. } | MessageSpan::Heading { .. } | MessageSpan::Hashtag { .. } => {
-            true
-        }
+        MessageSpan::Canvas { .. }
+        | MessageSpan::Heading { .. }
+        | MessageSpan::Hashtag { .. }
+        | MessageSpan::Code(_) => true,
         MessageSpan::Link { kind, .. } => *kind != LinkKind::Plain,
         _ => false,
     })
@@ -313,7 +314,7 @@ impl RichRunPalette {
             mention_bg: theme.tokens.mention_primary.into(),
             role: theme.tokens.color_mention_evryone.into(),
             role_bg: theme.tokens.bg_mention_evryone.into(),
-            code_bg: theme.tokens.bg_markdown_code.into(),
+            code_bg: theme.tokens.bg_active_member_channel.into(),
             link: theme.tokens.mention_color.into(),
         }
     }
@@ -420,14 +421,10 @@ pub(crate) fn render_rich_layout(
         _ => {
             let mut highlights: Vec<(Range<usize>, HighlightStyle)> =
                 Vec::with_capacity(layout.runs.len());
-            let mut font_overrides: Vec<(Range<usize>, SharedString)> = Vec::new();
             let mut click_ranges: Vec<Range<usize>> = Vec::new();
             let mut actions: Vec<RichClick> = Vec::new();
             for run in layout.runs.iter() {
                 highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
-                if run.kind == RichRunKind::Code {
-                    font_overrides.push((run.range.clone(), "monospace".into()));
-                }
                 if let Some(click) = run.click.clone() {
                     click_ranges.push(run.range.clone());
                     actions.push(click);
@@ -440,7 +437,6 @@ pub(crate) fn render_rich_layout(
                 edited: msg.is_edited,
                 text: layout.text.clone(),
                 highlights: highlights.into(),
-                font_overrides: font_overrides.into(),
                 click_ranges: click_ranges.into(),
                 actions: actions.into(),
                 locale: SharedString::from(ctx.locale),
@@ -466,7 +462,7 @@ pub(crate) fn render_rich_layout(
     let highlights = hovered_link.as_ref().map(|hovered| {
         rich_highlights_with_link_hover(&plan.highlights, Some(hovered), palette.link)
     });
-    let mut styled = if let Some(range) = selection_range {
+    let styled = if let Some(range) = selection_range {
         let base = highlights
             .as_ref()
             .map_or(plan.highlights.as_ref(), |h| h.as_slice());
@@ -477,9 +473,6 @@ pub(crate) fn render_rich_layout(
     } else {
         StyledText::new(plan.text.clone()).with_shared_highlights(plan.highlights.clone())
     };
-    if !plan.font_overrides.is_empty() {
-        styled = styled.with_shared_font_family_overrides(plan.font_overrides.clone());
-    }
 
     ctx.selection
         .borrow_mut()
@@ -814,17 +807,7 @@ fn render_selectable_segmented_spans(
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
-                row = row.child(
-                    div()
-                        .max_w_full()
-                        .min_w_0()
-                        .px_2()
-                        .rounded_md()
-                        .bg(ctx.theme.tokens.bg_active_member_channel)
-                        .text_size(px(14.))
-                        .text_color(ctx.theme.tokens.text_secondary)
-                        .child(styled),
-                );
+                row = row.child(inline_code_chip(ctx.theme).child(styled));
                 base = end;
             }
             MessageSpan::CodeBlock {
@@ -1796,6 +1779,15 @@ pub fn append_selectable_system_mention_spans(
     row
 }
 
+pub(crate) fn inline_code_chip(theme: &Theme) -> gpui::Div {
+    div()
+        .max_w_full()
+        .px(px(10.))
+        .rounded_lg()
+        .bg(theme.tokens.bg_active_member_channel)
+        .text_color(theme.tokens.text_secondary)
+}
+
 fn append_span(
     mut row: gpui::Div,
     span: &MessageSpan,
@@ -1820,17 +1812,7 @@ fn append_span(
                 .text_color(body_color)
                 .child(text.clone()),
         ),
-        MessageSpan::Code(text) => row.child(
-            div()
-                .max_w_full()
-                .min_w_0()
-                .px_2()
-                .rounded_md()
-                .bg(theme.tokens.bg_active_member_channel)
-                .text_size(px(14.))
-                .text_color(theme.tokens.text_secondary)
-                .child(text.clone()),
-        ),
+        MessageSpan::Code(text) => row.child(inline_code_chip(theme).child(text.clone())),
         MessageSpan::CodeBlock { text, .. } => row.child(
             div()
                 .flex_basis(relative(1.))
@@ -3203,7 +3185,7 @@ mod tests {
         INLINE_ICON_PLACEHOLDER, INLINE_ICON_RESERVE, RichRunPalette, RichTextRenderPlan,
         SelectableSectionCursor, parse_channel_id, rich_highlights_with_link_hover,
         rich_run_highlight, rich_run_highlight_with_link_underline, rich_text_plan_matches,
-        selectable_message_layout_identity, selectable_text_chunks,
+        selectable_message_layout_identity, selectable_text_chunks, spans_need_chip_path,
     };
     use gpui::{Hsla, SharedString};
 
@@ -3280,6 +3262,24 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_uses_the_item_theme_background() {
+        let theme = crate::theme::Theme::dark();
+        let palette = RichRunPalette::from_theme(&theme);
+        let item_theme: Hsla = theme.tokens.bg_active_member_channel.into();
+        let markdown: Hsla = theme.tokens.bg_markdown_code.into();
+        assert_eq!(palette.code_bg, item_theme);
+        assert_ne!(palette.code_bg, markdown);
+        let code = rich_run_highlight(RichRunKind::Code, &palette);
+        assert_eq!(code.background_color, Some(item_theme));
+    }
+
+    #[test]
+    fn inline_code_uses_the_chip_path() {
+        assert!(spans_need_chip_path(&[MessageSpan::Code("hello".into())]));
+        assert!(!spans_need_chip_path(&[MessageSpan::Text("hello".into())]));
+    }
+
+    #[test]
     fn role_and_user_mention_runs_never_share_a_colour() {
         let palette = test_palette();
         let role = rich_run_highlight(RichRunKind::RoleMention, &palette);
@@ -3311,7 +3311,6 @@ mod tests {
             edited: false,
             text: SharedString::from("hello"),
             highlights: Vec::new().into(),
-            font_overrides: Vec::new().into(),
             click_ranges: Vec::new().into(),
             actions: Vec::new().into(),
             locale: SharedString::from("en"),
