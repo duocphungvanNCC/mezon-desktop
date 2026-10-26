@@ -19,7 +19,7 @@ const HIDDEN_AFTER: Duration = Duration::from_secs(2);
 struct SharedPlayback {
     frame: Option<VideoFrame>,
     pending: Option<(u64, VideoFrame)>,
-    rendered_at: Option<Instant>,
+    pending_since: Option<Instant>,
     #[cfg(not(target_os = "macos"))]
     stream_image_id: Option<gpui::ImageId>,
 }
@@ -59,7 +59,9 @@ impl StreamVideoView {
         let has_player = self.stream.read(cx).player().is_some();
         if !has_player {
             self._frame_pump = None;
-            self.shared.borrow_mut().pending = None;
+            let mut shared = self.shared.borrow_mut();
+            shared.pending = None;
+            shared.pending_since = None;
         } else if self._frame_pump.is_none() {
             self._frame_pump = Some(cx.spawn(async move |this, cx| {
                 loop {
@@ -73,12 +75,12 @@ impl StreamVideoView {
     }
 
     fn pull_frame(&mut self, cx: &mut Context<Self>) -> Duration {
-        let visible = self
+        let hidden = self
             .shared
             .borrow()
-            .rendered_at
-            .is_some_and(|at| at.elapsed() < HIDDEN_AFTER);
-        if !visible {
+            .pending_since
+            .is_some_and(|at| at.elapsed() >= HIDDEN_AFTER);
+        if hidden {
             return HIDDEN_POLL;
         }
         let (player, generation) = {
@@ -89,7 +91,10 @@ impl StreamVideoView {
             return HIDDEN_POLL;
         };
         if let Some(frame) = player.copy_frame() {
-            self.shared.borrow_mut().pending = Some((generation, frame));
+            let mut shared = self.shared.borrow_mut();
+            shared.pending_since.get_or_insert_with(Instant::now);
+            shared.pending = Some((generation, frame));
+            drop(shared);
             cx.notify();
         }
         FRAME_POLL
@@ -113,7 +118,9 @@ impl StreamVideoView {
             Self::release_frame(old, Some(window), cx);
         }
         if !has_player {
-            self.shared.borrow_mut().pending = None;
+            let mut shared = self.shared.borrow_mut();
+            shared.pending = None;
+            shared.pending_since = None;
             return false;
         }
         let pending = self.shared.borrow_mut().pending.take();
@@ -220,16 +227,6 @@ impl StreamVideoView {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn release_textures(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn release_textures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(frame) = self.shared.borrow_mut().frame.take() {
-            cx.drop_image(frame, Some(window));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
     fn frame_child(&self) -> Option<AnyElement> {
         self.shared.borrow().frame.clone().map(|frame| {
             gpui::surface(frame)
@@ -256,7 +253,7 @@ impl StreamVideoView {
 
 impl Render for StreamVideoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.shared.borrow_mut().rendered_at = Some(Instant::now());
+        self.shared.borrow_mut().pending_since = None;
         let has_player = self.take_frame(window, cx);
         let has_frame = self.has_frame();
         let root = div()

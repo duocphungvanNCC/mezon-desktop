@@ -15,6 +15,8 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const STREAMING_CHANNEL_TYPE: i32 = 6;
 const STREAM_MEMBER_STATE_ACTIVE: i32 = 1;
 const STREAM_FETCH_LIMIT: i32 = 100;
+const STREAM_FETCH_ATTEMPTS: u32 = 3;
+const STREAM_FETCH_RETRY_BASE: Duration = Duration::from_secs(1);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROLS_HIDE_DELAY: Duration = Duration::from_secs(3);
 const WATCH_RENEW_INTERVAL: Duration = Duration::from_secs(30);
@@ -27,11 +29,12 @@ const STREAM_LIVE_OFFSET_SECS: f64 = 2.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamQuality {
-    #[default]
-    Auto,
     High,
     Mid,
     Low,
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 pub const STREAM_QUALITIES: [StreamQuality; 4] = [
@@ -183,9 +186,24 @@ pub enum StreamPhase {
     Joined {
         channel_id: ChannelId,
         clan_id: ClanId,
-        is_live: bool,
     },
     Error(String),
+}
+
+struct FetchGuard {
+    clan_id: ClanId,
+    touched: HashSet<(ChannelId, UserId)>,
+    ended: HashSet<ChannelId>,
+}
+
+impl FetchGuard {
+    fn new(clan_id: ClanId) -> Self {
+        Self {
+            clan_id,
+            touched: HashSet::new(),
+            ended: HashSet::new(),
+        }
+    }
 }
 
 pub struct StreamStore {
@@ -195,7 +213,10 @@ pub struct StreamStore {
     members_by_channel: HashMap<ChannelId, Arc<[StreamMember]>>,
     empty_members: Arc<[StreamMember]>,
     channel_clans: HashMap<ChannelId, ClanId>,
-    presence_revision: HashMap<ClanId, u64>,
+    members_revision: u64,
+    fetch_guard: Option<FetchGuard>,
+    pending_unwatch: HashSet<ChannelId>,
+    reset_generation: u64,
     next_seq: u64,
     active_clan: Option<ClanId>,
     last_viewed_stream_channel: Option<ChannelId>,
@@ -209,7 +230,6 @@ pub struct StreamStore {
     muted: bool,
     fullscreen: bool,
     error_message: Option<String>,
-    playback: Option<mezon_proto::api::GetStreamPlaybackResponse>,
     variants: Vec<HlsVariant>,
     player: Option<Rc<mezon_video::VideoPlayer>>,
     playing_url: Option<String>,
@@ -221,8 +241,6 @@ pub struct StreamStore {
     session_generation: u64,
     session_channel_label: String,
     session_clan_name: String,
-    session_user_id: Option<UserId>,
-    join_started: Option<Instant>,
     _fetch_task: Option<Task<()>>,
     _playback_task: Option<Task<()>>,
     _health_task: Option<Task<()>>,
@@ -285,7 +303,10 @@ impl StreamStore {
             members_by_channel: HashMap::new(),
             empty_members: Arc::from([]),
             channel_clans: HashMap::new(),
-            presence_revision: HashMap::new(),
+            members_revision: 0,
+            fetch_guard: None,
+            pending_unwatch: HashSet::new(),
+            reset_generation: 0,
             next_seq: 0,
             active_clan: None,
             last_viewed_stream_channel: None,
@@ -299,7 +320,6 @@ impl StreamStore {
             muted: false,
             fullscreen: false,
             error_message: None,
-            playback: None,
             variants: Vec::new(),
             player: None,
             playing_url: None,
@@ -311,8 +331,6 @@ impl StreamStore {
             session_generation: 0,
             session_channel_label: String::new(),
             session_clan_name: String::new(),
-            session_user_id: None,
-            join_started: None,
             _fetch_task: None,
             _playback_task: None,
             _health_task: None,
@@ -333,11 +351,6 @@ impl StreamStore {
             dispatch.on(RealtimeKind::StreamingLeaved, &entity, |this, event, cx| {
                 this.handle_streaming_leaved(event, cx)
             });
-            dispatch.on(
-                RealtimeKind::StreamingStarted,
-                &entity,
-                |this, event, cx| this.handle_streaming_started(event, cx),
-            );
             dispatch.on(RealtimeKind::StreamingEnded, &entity, |this, event, cx| {
                 this.handle_streaming_ended(event, cx)
             });
@@ -367,6 +380,10 @@ impl StreamStore {
     fn on_reconnected(&mut self, cx: &mut Context<Self>) {
         if let StreamPhase::Joined { channel_id, .. } = self.phase {
             self.send_streaming_watch(channel_id, true, cx);
+        }
+        let left: Vec<ChannelId> = self.pending_unwatch.iter().copied().collect();
+        for channel_id in left {
+            self.send_streaming_watch(channel_id, false, cx);
         }
         if let Some(clan_id) = self.active_clan {
             self.fetch_members(clan_id, cx);
@@ -508,6 +525,10 @@ impl StreamStore {
             Some((ChannelType::Stream, channel_id)) => Some(channel_id),
             _ => None,
         };
+        if viewed.is_none() || viewed != self.session_channel_id() {
+            self.stage_hovered = false;
+            self.controls_hovered = false;
+        }
         if self.last_viewed_stream_channel == viewed {
             return;
         }
@@ -560,35 +581,35 @@ impl StreamStore {
         self.quality
     }
 
-    pub fn playback(&self) -> Option<&mezon_proto::api::GetStreamPlaybackResponse> {
-        self.playback.as_ref()
-    }
-
-    pub fn variants(&self) -> &[HlsVariant] {
-        &self.variants
-    }
-
     pub fn set_quality(&mut self, quality: StreamQuality, cx: &mut Context<Self>) {
-        if self.quality == quality {
+        if self.quality == quality && self.auto_cap.is_none() {
             return;
         }
         self.quality = quality;
+        self.auto_cap = None;
         if self.is_joined()
             && let Some(index) = variant_index(self.quality, self.variants.len(), self.auto_cap)
             && self.playing_url.as_deref() != Some(self.variants[index].url.as_str())
         {
-            if !self.open_current_variant(cx)
-                && let StreamPhase::Joined {
-                    channel_id,
-                    clan_id,
-                    ..
-                } = self.phase
+            if self.open_current_variant(cx) {
+                self.cancel_reconnect();
+            } else if let StreamPhase::Joined {
+                channel_id,
+                clan_id,
+            } = self.phase
             {
                 self.reconnect_playback(self.session_generation, clan_id, channel_id, cx);
             }
             return;
         }
         cx.notify();
+    }
+
+    fn cancel_reconnect(&mut self) {
+        if self.reconnecting {
+            self._playback_task = None;
+            self.reconnecting = false;
+        }
     }
 
     pub fn set_output_device(&mut self, id: Option<String>, cx: &mut Context<Self>) {
@@ -599,6 +620,7 @@ impl StreamStore {
     }
 
     fn rebuild_channel_members(&mut self, channel_id: ChannelId) {
+        self.members_revision = self.members_revision.wrapping_add(1);
         let mut list: Vec<StreamMember> = self
             .members
             .values()
@@ -620,14 +642,45 @@ impl StreamStore {
             .unwrap_or_else(|| self.empty_members.clone())
     }
 
+    pub fn members_revision(&self) -> u64 {
+        self.members_revision
+    }
+
     pub fn stream_publisher(&self, channel_id: ChannelId) -> Option<&StreamMember> {
-        self.members_by_channel.get(&channel_id)?.first()
+        self.members_by_channel
+            .get(&channel_id)?
+            .first()
+            .filter(|m| m.is_publisher)
     }
 
     pub fn viewer_count(&self, channel_id: ChannelId) -> u32 {
         self.members_by_channel
             .get(&channel_id)
-            .map_or(0, |members| members.len().saturating_sub(1) as u32)
+            .map_or(0, |members| {
+                let publishers = usize::from(members.first().is_some_and(|m| m.is_publisher));
+                (members.len() - publishers) as u32
+            })
+    }
+
+    fn clear_channel_members(&mut self, channel_id: ChannelId) {
+        self.members.retain(|(cid, _), _| *cid != channel_id);
+        if self.members_by_channel.remove(&channel_id).is_some() {
+            self.members_revision = self.members_revision.wrapping_add(1);
+        }
+    }
+
+    fn note_member_event(&mut self, clan_id: ClanId, channel_id: ChannelId, user: Option<UserId>) {
+        let Some(guard) = self.fetch_guard.as_mut().filter(|g| g.clan_id == clan_id) else {
+            return;
+        };
+        match user {
+            Some(user_id) => {
+                guard.touched.insert((channel_id, user_id));
+            }
+            None => {
+                guard.ended.insert(channel_id);
+            }
+        }
     }
 
     pub fn set_active_clan(&mut self, clan_id: Option<ClanId>, cx: &mut Context<Self>) {
@@ -643,12 +696,20 @@ impl StreamStore {
     pub fn fetch_members(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let api = self.api.clone();
         self._fetch_task = Some(cx.spawn(async move |this, cx| {
-            for _ in 0..3 {
-                let Ok(revision) = this.update(cx, |this, _| {
-                    this.presence_revision.get(&clan_id).copied().unwrap_or(0)
-                }) else {
+            for attempt in 0..STREAM_FETCH_ATTEMPTS {
+                if attempt > 0 {
+                    cx.background_executor()
+                        .timer(STREAM_FETCH_RETRY_BASE * (1 << (attempt - 1)))
+                        .await;
+                }
+                if this
+                    .update(cx, |this, _| {
+                        this.fetch_guard = Some(FetchGuard::new(clan_id));
+                    })
+                    .is_err()
+                {
                     return;
-                };
+                }
                 let result = api
                     .list_streaming_channel_users(
                         clan_id.get(),
@@ -658,32 +719,33 @@ impl StreamStore {
                         STREAM_FETCH_LIMIT,
                     )
                     .await;
-                let Ok(retry) = this.update(cx, |this, cx| match result {
-                    Ok(list) => {
-                        if !this.apply_fetched_members(
-                            clan_id,
-                            revision,
-                            list.streaming_channel_users,
-                        ) {
-                            return true;
+                let Ok(done) = this.update(cx, |this, cx| {
+                    let guard = this
+                        .fetch_guard
+                        .take()
+                        .filter(|g| g.clan_id == clan_id)
+                        .unwrap_or_else(|| FetchGuard::new(clan_id));
+                    match result {
+                        Ok(list) => {
+                            this.apply_fetched_members(&guard, list.streaming_channel_users);
+                            if let Some(store) = crate::ClanMembersStore::try_global(cx) {
+                                store.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                            }
+                            if let Some(store) = crate::UsersByUserStore::try_global(cx) {
+                                store.update(cx, |store, cx| store.ensure_loaded(cx));
+                            }
+                            cx.notify();
+                            true
                         }
-                        if let Some(store) = crate::ClanMembersStore::try_global(cx) {
-                            store.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                        Err(err) => {
+                            tracing::warn!("list_streaming_channel_users failed: {err:#}");
+                            false
                         }
-                        if let Some(store) = crate::UsersByUserStore::try_global(cx) {
-                            store.update(cx, |store, cx| store.ensure_loaded(cx));
-                        }
-                        cx.notify();
-                        false
-                    }
-                    Err(err) => {
-                        tracing::warn!("list_streaming_channel_users failed: {err:#}");
-                        false
                     }
                 }) else {
                     return;
                 };
-                if !retry {
+                if done {
                     return;
                 }
             }
@@ -692,14 +754,10 @@ impl StreamStore {
 
     fn apply_fetched_members(
         &mut self,
-        clan_id: ClanId,
-        revision: u64,
+        guard: &FetchGuard,
         users: Vec<mezon_proto::api::StreamingChannelUser>,
-    ) -> bool {
-        let current_revision = self.presence_revision.get(&clan_id).copied().unwrap_or(0);
-        if revision != current_revision {
-            return false;
-        }
+    ) {
+        let clan_id = guard.clan_id;
         let mut changed_channels = HashSet::new();
         let live_keys: HashSet<(ChannelId, UserId)> = users
             .iter()
@@ -709,9 +767,10 @@ impl StreamStore {
             .members
             .keys()
             .copied()
-            .filter(|(ch_id, uid)| {
-                self.channel_clans.get(ch_id) == Some(&clan_id)
-                    && !live_keys.contains(&(*ch_id, *uid))
+            .filter(|key| {
+                self.channel_clans.get(&key.0) == Some(&clan_id)
+                    && !live_keys.contains(key)
+                    && !guard.touched.contains(key)
             })
             .collect();
         for (ch_id, uid) in stale_keys {
@@ -721,6 +780,9 @@ impl StreamStore {
         for user in users {
             let user_id = UserId(user.user_id);
             let channel_id = ChannelId(user.channel_id);
+            if guard.touched.contains(&(channel_id, user_id)) || guard.ended.contains(&channel_id) {
+                continue;
+            }
             self.channel_clans.insert(channel_id, clan_id);
             let existing = self.members.get(&(channel_id, user_id));
             let display_name = if !user.participant.is_empty() {
@@ -752,7 +814,6 @@ impl StreamStore {
         for ch_id in changed_channels {
             self.rebuild_channel_members(ch_id);
         }
-        true
     }
 
     pub fn toggle_chat(&mut self, cx: &mut Context<Self>) {
@@ -803,18 +864,41 @@ impl StreamStore {
         }
     }
 
-    fn send_streaming_watch(&self, channel_id: ChannelId, watching: bool, cx: &mut Context<Self>) {
+    fn send_streaming_watch(
+        &mut self,
+        channel_id: ChannelId,
+        watching: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if watching {
+            self.pending_unwatch.remove(&channel_id);
+        }
         let api = self.api.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(err) = api.write_streaming_watch(channel_id.get(), watching).await {
-                    tracing::warn!(
-                        "write_streaming_watch({}, {watching}) failed: {err:#}",
-                        channel_id.get()
-                    );
+        let reset_generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.write_streaming_watch(channel_id.get(), watching).await;
+            if let Err(err) = &result {
+                tracing::warn!(
+                    "write_streaming_watch({}, {watching}) failed: {err:#}",
+                    channel_id.get()
+                );
+            }
+            if watching {
+                return;
+            }
+            this.update(cx, |this, _| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
+                if result.is_ok() {
+                    this.pending_unwatch.remove(&channel_id);
+                } else if !this.is_session_channel(channel_id) {
+                    this.pending_unwatch.insert(channel_id);
                 }
             })
-            .detach();
+            .ok();
+        })
+        .detach();
     }
 
     pub fn join_stream(
@@ -826,7 +910,7 @@ impl StreamStore {
         auth: &AuthState,
         cx: &mut Context<Self>,
     ) {
-        let AuthState::Authenticated(session) = auth else {
+        let AuthState::Authenticated(_) = auth else {
             self.fail_stream("Not authenticated".into(), cx);
             return;
         };
@@ -851,9 +935,7 @@ impl StreamStore {
             channel_id,
             clan_id,
         };
-        self.join_started = Some(Instant::now());
         self.error_message = None;
-        self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
         cx.notify();
 
         let api = self.api.clone();
@@ -869,9 +951,7 @@ impl StreamStore {
                     }
                     match playback {
                         Ok(pb) if !pb.token.is_empty() && !pb.hls_url.is_empty() => {
-                            let url = pb.hls_url.clone();
-                            this.playback = Some(pb);
-                            Some(url)
+                            Some(pb.hls_url)
                         }
                         _ => {
                             let msg = video_error_text(cx);
@@ -966,7 +1046,6 @@ impl StreamStore {
         self.phase = StreamPhase::Joined {
             channel_id,
             clan_id,
-            is_live: true,
         };
         if was_joining {
             self.bump_controls_visible(cx);
@@ -1024,6 +1103,7 @@ impl StreamStore {
             let mut tracked_player_gen: Option<u64> = None;
             let mut last_time: Option<f64> = None;
             let mut last_advance_at = Instant::now();
+            let mut started = false;
             loop {
                 cx.background_executor().timer(HEALTH_POLL_INTERVAL).await;
                 let cont = this
@@ -1045,6 +1125,7 @@ impl StreamStore {
                             tracked_player_gen = Some(this.player_generation);
                             last_time = None;
                             last_advance_at = Instant::now();
+                            started = false;
                         }
                         let failed = player.failed();
                         let current_time = player.current_time();
@@ -1052,6 +1133,7 @@ impl StreamStore {
                             if current_time > prev {
                                 last_time = Some(current_time);
                                 last_advance_at = Instant::now();
+                                started = true;
                                 this.reconnects = 0;
                             }
                         } else {
@@ -1060,12 +1142,14 @@ impl StreamStore {
                         }
                         let current_index =
                             variant_index(this.quality, this.variants.len(), this.auto_cap);
-                        if let Some(new_cap) = auto_step_down_target(
-                            this.quality,
-                            failed,
-                            last_advance_at.elapsed(),
-                            current_index,
-                        ) {
+                        let stalled = if started {
+                            last_advance_at.elapsed()
+                        } else {
+                            Duration::ZERO
+                        };
+                        if let Some(new_cap) =
+                            auto_step_down_target(this.quality, failed, stalled, current_index)
+                        {
                             this.auto_cap = Some(new_cap);
                             last_time = None;
                             last_advance_at = Instant::now();
@@ -1164,7 +1248,6 @@ impl StreamStore {
                         {
                             return true;
                         }
-                        this.playback = Some(playback);
                         this.variants = variants;
                         if this.open_current_variant(cx) {
                             this.reconnecting = false;
@@ -1202,7 +1285,6 @@ impl StreamStore {
         self.show_chat = false;
         self.session_channel_label.clear();
         self.session_clan_name.clear();
-        self.session_user_id = None;
         cx.notify();
     }
 
@@ -1216,12 +1298,10 @@ impl StreamStore {
             self.player_generation = self.player_generation.wrapping_add(1);
         }
         self.playing_url = None;
-        self.playback = None;
         self.variants.clear();
         self.auto_cap = None;
         self.reconnects = 0;
         self.reconnecting = false;
-        self.join_started = None;
     }
 
     fn fail_stream(&mut self, message: String, cx: &mut Context<Self>) {
@@ -1242,8 +1322,7 @@ impl StreamStore {
         let channel_id = ChannelId(e.streaming_channel_id);
         let user_id = UserId(e.user_id);
         self.channel_clans.insert(channel_id, clan_id);
-        let entry_rev = self.presence_revision.entry(clan_id).or_insert(0);
-        *entry_rev = entry_rev.wrapping_add(1);
+        self.note_member_event(clan_id, channel_id, Some(user_id));
 
         if let Some(existing) = self.members.get(&(channel_id, user_id))
             && existing.is_publisher
@@ -1290,17 +1369,18 @@ impl StreamStore {
         };
         let user_id = UserId(user_id);
         let clan_id = ClanId(e.clan_id);
-        let entry_rev = self.presence_revision.entry(clan_id).or_insert(0);
-        *entry_rev = entry_rev.wrapping_add(1);
 
         if self
             .stream_publisher(channel_id)
             .is_some_and(|pub_member| pub_member.user_id == user_id)
         {
-            self.members.retain(|(cid, _), _| *cid != channel_id);
-            self.members_by_channel.remove(&channel_id);
-        } else if self.members.remove(&(channel_id, user_id)).is_some() {
-            self.rebuild_channel_members(channel_id);
+            self.note_member_event(clan_id, channel_id, None);
+            self.clear_channel_members(channel_id);
+        } else {
+            self.note_member_event(clan_id, channel_id, Some(user_id));
+            if self.members.remove(&(channel_id, user_id)).is_some() {
+                self.rebuild_channel_members(channel_id);
+            }
         }
 
         if self.is_session_channel(channel_id)
@@ -1313,51 +1393,26 @@ impl StreamStore {
         cx.notify();
     }
 
-    fn handle_streaming_started(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::StreamingStarted(e) = event else {
-            return;
-        };
-        let channel_id = ChannelId(e.channel_id);
-        if let StreamPhase::Joined {
-            channel_id: active,
-            is_live,
-            ..
-        } = &mut self.phase
-            && *active == channel_id
-        {
-            *is_live = e.is_streaming;
-            cx.notify();
-        }
-    }
-
     fn handle_streaming_ended(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::StreamingEnded(e) = event else {
             return;
         };
         let channel_id = ChannelId(e.channel_id);
-        self.members.retain(|(cid, _), _| *cid != channel_id);
-        self.members_by_channel.remove(&channel_id);
-        if let StreamPhase::Joined {
-            channel_id: active,
-            is_live,
-            ..
-        } = &mut self.phase
-            && *active == channel_id
-        {
-            *is_live = false;
-            cx.notify();
-        } else {
-            cx.notify();
-        }
+        self.note_member_event(ClanId(e.clan_id), channel_id, None);
+        self.clear_channel_members(channel_id);
+        cx.notify();
     }
 
     pub fn on_logout(&mut self, cx: &mut Context<Self>) {
         self._fetch_task = None;
+        self.fetch_guard = None;
         self.leave_stream(cx);
+        self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.pending_unwatch.clear();
         self.members.clear();
         self.members_by_channel.clear();
+        self.members_revision = self.members_revision.wrapping_add(1);
         self.channel_clans.clear();
-        self.presence_revision.clear();
         self.next_seq = 0;
         self.active_clan = None;
         self.last_viewed_stream_channel = None;
@@ -1560,7 +1615,6 @@ mod tests {
                 store.phase = StreamPhase::Joined {
                     channel_id: joined,
                     clan_id: ClanId(9),
-                    is_live: true,
                 };
                 store.show_chat = true;
                 store.sync_chat_for_active_channel(Some((ChannelType::Stream, other)), cx);
@@ -1586,7 +1640,6 @@ mod tests {
                 store.phase = StreamPhase::Joined {
                     channel_id: joined,
                     clan_id: ClanId(9),
-                    is_live: true,
                 };
                 store.show_chat = true;
                 store.sync_chat_for_active_channel(Some((ChannelType::Stream, joined)), cx);
@@ -1708,7 +1761,6 @@ mod tests {
                 store.phase = StreamPhase::Joined {
                     channel_id: ch,
                     clan_id,
-                    is_live: true,
                 };
                 store.show_chat = true;
                 store.handle_streaming_joined(
@@ -1772,8 +1824,23 @@ mod tests {
         });
     }
 
+    fn fetched_user(
+        user_id: i64,
+        channel_id: ChannelId,
+        name: &str,
+        is_publisher: bool,
+    ) -> mezon_proto::api::StreamingChannelUser {
+        mezon_proto::api::StreamingChannelUser {
+            id: user_id,
+            user_id,
+            channel_id: channel_id.get(),
+            participant: name.into(),
+            is_publisher,
+        }
+    }
+
     #[gpui::test]
-    fn apply_fetched_members_replaces_clan_when_revision_matches_and_ignores_stale_revision(
+    fn fetched_members_replace_the_clan_but_events_during_the_fetch_win(
         cx: &mut gpui::TestAppContext,
     ) {
         let clan_a = ClanId(1);
@@ -1785,61 +1852,23 @@ mod tests {
 
         cx.update(|cx| {
             store.update(cx, |store, cx| {
-                store.handle_streaming_joined(
-                    &joined_event(
-                        clan_a,
-                        ch_a1,
-                        UserId(100),
-                        "Pub A1",
-                        "https://avatar/a1",
-                        true,
-                    ),
-                    cx,
-                );
-                store.handle_streaming_joined(
-                    &joined_event(
-                        clan_a,
-                        ch_a2,
-                        UserId(101),
-                        "Pub A2",
-                        "https://avatar/a2",
-                        true,
-                    ),
-                    cx,
-                );
-                store.handle_streaming_joined(
-                    &joined_event(
-                        clan_b,
-                        ch_b1,
-                        UserId(200),
-                        "Pub B1",
-                        "https://avatar/b1",
-                        true,
-                    ),
-                    cx,
-                );
-
-                let rev = store.presence_revision.get(&clan_a).copied().unwrap_or(0);
-                assert!(store.apply_fetched_members(
-                    clan_a,
-                    rev,
+                for (clan, channel, user, name) in [
+                    (clan_a, ch_a1, 100, "Pub A1"),
+                    (clan_a, ch_a2, 101, "Pub A2"),
+                    (clan_b, ch_b1, 200, "Pub B1"),
+                ] {
+                    store.handle_streaming_joined(
+                        &joined_event(clan, channel, UserId(user), name, "https://avatar/x", true),
+                        cx,
+                    );
+                }
+                store.apply_fetched_members(
+                    &FetchGuard::new(clan_a),
                     vec![
-                        mezon_proto::api::StreamingChannelUser {
-                            id: 1,
-                            user_id: 100,
-                            channel_id: ch_a1.get(),
-                            participant: "Pub A1 Updated".into(),
-                            is_publisher: true,
-                        },
-                        mezon_proto::api::StreamingChannelUser {
-                            id: 2,
-                            user_id: 105,
-                            channel_id: ch_a1.get(),
-                            participant: "Viewer A1".into(),
-                            is_publisher: false,
-                        },
+                        fetched_user(100, ch_a1, "Pub A1 Updated", true),
+                        fetched_user(105, ch_a1, "Viewer A1", false),
                     ],
-                ));
+                );
             });
         });
 
@@ -1848,49 +1877,98 @@ mod tests {
             let a1 = store.members_for_channel(ch_a1);
             assert_eq!(a1.len(), 2);
             assert_eq!(a1[0].display_name, "Pub A1 Updated");
-            assert_eq!(a1[0].avatar, "https://avatar/a1");
+            assert_eq!(a1[0].avatar, "https://avatar/x");
             assert_eq!(a1[1].user_id, UserId(105));
             assert!(store.members_for_channel(ch_a2).is_empty());
             assert_eq!(store.viewer_count(ch_a1), 1);
-            assert_eq!(store.viewer_count(ch_a2), 0);
             assert_eq!(store.members_for_channel(ch_b1).len(), 1);
         });
 
         cx.update(|cx| {
             store.update(cx, |store, cx| {
-                let stale_rev = store.presence_revision.get(&clan_a).copied().unwrap_or(0);
+                store.fetch_guard = Some(FetchGuard::new(clan_a));
                 store.handle_streaming_joined(
-                    &joined_event(
-                        clan_a,
-                        ch_a2,
-                        UserId(102),
-                        "Concurrent Join",
-                        "https://avatar/a2-new",
-                        true,
-                    ),
+                    &joined_event(clan_a, ch_a2, UserId(102), "Joined Mid-Fetch", "", true),
                     cx,
                 );
-                assert!(!store.apply_fetched_members(
-                    clan_a,
-                    stale_rev,
-                    vec![mezon_proto::api::StreamingChannelUser {
-                        id: 3,
-                        user_id: 103,
-                        channel_id: ch_a1.get(),
-                        participant: "Viewer Stale".into(),
-                        is_publisher: false,
-                    }],
-                ));
+                store.handle_streaming_leaved(&leaved_event(clan_a, ch_a1, UserId(105)), cx);
+                let guard = store.fetch_guard.take().unwrap();
+                store.apply_fetched_members(
+                    &guard,
+                    vec![
+                        fetched_user(100, ch_a1, "Pub A1 Updated", true),
+                        fetched_user(105, ch_a1, "Viewer A1", false),
+                        fetched_user(106, ch_a1, "Viewer New", false),
+                    ],
+                );
             });
         });
 
         cx.update(|cx| {
             let store = store.read(cx);
-            assert_eq!(store.members_for_channel(ch_a1).len(), 2);
-            assert_eq!(store.viewer_count(ch_a1), 1);
-            assert_eq!(store.members_for_channel(ch_a2).len(), 1);
+            let a1 = store.members_for_channel(ch_a1);
+            assert_eq!(
+                a1.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+                vec![UserId(100), UserId(106)]
+            );
+            let a2 = store.members_for_channel(ch_a2);
+            assert_eq!(a2.len(), 1);
+            assert_eq!(a2[0].user_id, UserId(102));
             assert_eq!(store.members_for_channel(ch_b1).len(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn a_roster_without_its_publisher_has_no_publisher_and_counts_every_viewer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan = ClanId(1);
+        let channel = ChannelId(10);
+        let store = init_store(cx);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.handle_streaming_joined(
+                    &joined_event(clan, channel, UserId(5), "Viewer 5", "", false),
+                    cx,
+                );
+                store.handle_streaming_joined(
+                    &joined_event(clan, channel, UserId(6), "Viewer 6", "", false),
+                    cx,
+                );
+                store.handle_streaming_leaved(&leaved_event(clan, channel, UserId(5)), cx);
+            });
+        });
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert!(store.stream_publisher(channel).is_none());
+            assert_eq!(store.viewer_count(channel), 1);
+            assert_eq!(store.members_for_channel(channel)[0].user_id, UserId(6));
+        });
+    }
+
+    #[gpui::test]
+    fn picking_auto_again_clears_the_step_down_cap(cx: &mut gpui::TestAppContext) {
+        let store = init_store(cx);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.quality = StreamQuality::Auto;
+                store.auto_cap = Some(0);
+                store.set_quality(StreamQuality::Auto, cx);
+                assert_eq!(store.auto_cap, None);
+                store.auto_cap = Some(1);
+                store.set_quality(StreamQuality::Low, cx);
+                assert_eq!(store.auto_cap, None);
+                assert_eq!(store.quality(), StreamQuality::Low);
+            });
+        });
+    }
+
+    #[test]
+    fn unknown_stored_quality_falls_back_to_auto() {
+        let quality: StreamQuality = serde_json::from_str("\"source\"").unwrap();
+        assert_eq!(quality, StreamQuality::Auto);
+        let quality: StreamQuality = serde_json::from_str("\"low\"").unwrap();
+        assert_eq!(quality, StreamQuality::Low);
     }
 
     #[gpui::test]

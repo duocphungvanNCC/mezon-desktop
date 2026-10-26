@@ -6,7 +6,6 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, STREAM_QUALITIES, Settings,
-    StreamQuality,
 };
 
 use crate::components::primitives::{
@@ -862,7 +861,7 @@ impl Render for StreamingPage {
                     .gap_3()
                     .children(STREAM_QUALITIES.iter().enumerate().map(|(idx, &quality)| {
                         let is_selected = default_quality == quality;
-                        let label_key = quality_label_key(quality);
+                        let label_key = quality.i18n_key();
                         h_flex()
                             .id(("stream-default-quality", idx))
                             .w_full()
@@ -916,15 +915,6 @@ impl Render for StreamingPage {
             .child(key_section)
             .child(obs_section)
             .child(quality_section)
-    }
-}
-
-fn quality_label_key(quality: StreamQuality) -> &'static str {
-    match quality {
-        StreamQuality::Auto => "channelStream.qualityAuto",
-        StreamQuality::High => "channelStream.qualityHigh",
-        StreamQuality::Mid => "channelStream.qualityMid",
-        StreamQuality::Low => "channelStream.qualityLow",
     }
 }
 

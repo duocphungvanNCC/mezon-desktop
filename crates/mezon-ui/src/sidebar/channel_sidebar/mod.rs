@@ -36,6 +36,7 @@ const AUTOSCROLL_MAX_STEP: f32 = 18.;
 const AUTOSCROLL_TICK_MS: u64 = 16;
 
 const SORT_LINGER: Duration = Duration::from_secs(3);
+const STREAM_REBUILD_COALESCE: Duration = Duration::from_millis(16);
 
 mod app_list_popover;
 mod drag;
@@ -179,6 +180,8 @@ pub struct ChannelSidebar {
     _members_observe: Subscription,
     _events_observe: Subscription,
     _stream_observe: Subscription,
+    stream_members_revision: u64,
+    _stream_rebuild: Option<Task<()>>,
     _buzz_observe: Subscription,
     _topic_badge_observe: Subscription,
     _permissions_observe: Subscription,
@@ -377,10 +380,28 @@ impl ChannelSidebar {
             }
         });
         let events_observe = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
-        let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
-            if this.rebuild_items(cx) {
-                cx.notify();
+        let stream_members_revision = StreamStore::global(cx).read(cx).members_revision();
+        let stream_observe = cx.observe(&StreamStore::global(cx), |this, store, cx| {
+            let revision = store.read(cx).members_revision();
+            if revision == this.stream_members_revision {
+                return;
             }
+            this.stream_members_revision = revision;
+            if this._stream_rebuild.is_some() {
+                return;
+            }
+            this._stream_rebuild = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(STREAM_REBUILD_COALESCE)
+                    .await;
+                this.update(cx, |this, cx| {
+                    this._stream_rebuild = None;
+                    if this.rebuild_items(cx) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
         });
         let buzz_observe = cx.observe(&BuzzStore::global(cx), |this, _, cx| {
             if this.rebuild_items(cx) {
@@ -459,6 +480,8 @@ impl ChannelSidebar {
             _members_observe: members_observe,
             _events_observe: events_observe,
             _stream_observe: stream_observe,
+            stream_members_revision,
+            _stream_rebuild: None,
             _buzz_observe: buzz_observe,
             _topic_badge_observe: topic_badge_observe,
             _permissions_observe: permissions_observe,

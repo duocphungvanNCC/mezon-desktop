@@ -321,7 +321,6 @@ pub enum RealtimeEvent {
     StreamingLeaved(realtime::StreamingLeavedEvent),
     StreamingStarted(realtime::StreamingStartedEvent),
     StreamingEnded(realtime::StreamingEndedEvent),
-    StreamingViewerCount(realtime::StreamingViewerCountEvent),
     VoiceStarted(realtime::VoiceStartedEvent),
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
@@ -386,7 +385,6 @@ impl RealtimeEvent {
             Self::StreamingLeaved(_) => "StreamingLeaved",
             Self::StreamingStarted(_) => "StreamingStarted",
             Self::StreamingEnded(_) => "StreamingEnded",
-            Self::StreamingViewerCount(_) => "StreamingViewerCount",
             Self::VoiceStarted(_) => "VoiceStarted",
             Self::VoiceEnded(_) => "VoiceEnded",
             Self::VoiceJoined(_) => "VoiceJoined",
@@ -453,9 +451,6 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::StreamingLeavedEvent(m) => Ok(Self::StreamingLeaved(m)),
             realtime::envelope::Message::StreamingStartedEvent(m) => Ok(Self::StreamingStarted(m)),
             realtime::envelope::Message::StreamingEndedEvent(m) => Ok(Self::StreamingEnded(m)),
-            realtime::envelope::Message::StreamingViewerCountEvent(m) => {
-                Ok(Self::StreamingViewerCount(m))
-            }
             realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
@@ -13664,7 +13659,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_viewer_count_maps_while_watch_echo_and_metrics_stay_unhandled() {
+    fn streaming_viewer_count_watch_echo_and_metrics_stay_unhandled() {
         let count_event =
             RealtimeEvent::try_from(realtime::envelope::Message::StreamingViewerCountEvent(
                 realtime::StreamingViewerCountEvent {
@@ -13674,7 +13669,7 @@ mod tests {
                 },
             ))
             .unwrap();
-        assert_eq!(count_event.kind_name(), "StreamingViewerCount");
+        assert!(matches!(count_event, RealtimeEvent::Unhandled(_)));
 
         let watch_echo = RealtimeEvent::try_from(realtime::envelope::Message::StreamingWatch(
             realtime::StreamingWatch {
