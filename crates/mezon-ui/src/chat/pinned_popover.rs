@@ -31,7 +31,7 @@ use crate::chat::message::selection::{
 };
 use crate::chat::message::{
     ConfirmUnpinMessageModal, SELECTION_BG, code_block_copy_overlay, heading_line_height,
-    heading_size, open_message_link, pin_link_element, render_ogp_preview,
+    heading_size, inline_code_chip, open_message_link, pin_link_element, render_ogp_preview,
     render_pin_rich_layout_element, render_poll_card_readonly, resolve_message_link_url,
 };
 use crate::components::primitives::text_actions::Copy;
@@ -1867,14 +1867,11 @@ fn render_pin_spans(
                 let styled = pin_selectable_segment(text, base, selected.as_ref());
                 push_pin_text_segment(&mut segments, &styled, base..end);
                 row = row.child(
-                    div()
+                    inline_code_chip(theme)
+                        .flex_none()
+                        .whitespace_nowrap()
                         .text_sm()
                         .line_height(rems(1.25))
-                        .px(px(10.))
-                        .py(px(2.))
-                        .rounded_lg()
-                        .bg(theme.tokens.bg_active_member_channel)
-                        .text_color(theme.tokens.text_secondary)
                         .child(styled),
                 );
                 base = end;

@@ -998,7 +998,7 @@ fn render_search_message_content(
     if hit
         .spans
         .iter()
-        .any(|span| matches!(span, MessageSpan::CodeBlock { .. }))
+        .any(|span| matches!(span, MessageSpan::Code(_) | MessageSpan::CodeBlock { .. }))
     {
         return render_search_spans(&hit.spans, hit.message_id, theme);
     }

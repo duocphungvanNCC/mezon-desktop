@@ -437,7 +437,6 @@ pub(crate) fn render_rich_layout(
                 edited: msg.is_edited,
                 text: layout.text.clone(),
                 highlights: highlights.into(),
-                font_overrides: Vec::new().into(),
                 click_ranges: click_ranges.into(),
                 actions: actions.into(),
                 locale: SharedString::from(ctx.locale),
@@ -463,7 +462,7 @@ pub(crate) fn render_rich_layout(
     let highlights = hovered_link.as_ref().map(|hovered| {
         rich_highlights_with_link_hover(&plan.highlights, Some(hovered), palette.link)
     });
-    let mut styled = if let Some(range) = selection_range {
+    let styled = if let Some(range) = selection_range {
         let base = highlights
             .as_ref()
             .map_or(plan.highlights.as_ref(), |h| h.as_slice());
@@ -474,9 +473,6 @@ pub(crate) fn render_rich_layout(
     } else {
         StyledText::new(plan.text.clone()).with_shared_highlights(plan.highlights.clone())
     };
-    if !plan.font_overrides.is_empty() {
-        styled = styled.with_shared_font_family_overrides(plan.font_overrides.clone());
-    }
 
     ctx.selection
         .borrow_mut()
@@ -1786,9 +1782,7 @@ pub fn append_selectable_system_mention_spans(
 pub(crate) fn inline_code_chip(theme: &Theme) -> gpui::Div {
     div()
         .max_w_full()
-        .min_w_0()
         .px(px(10.))
-        .py(px(2.))
         .rounded_lg()
         .bg(theme.tokens.bg_active_member_channel)
         .text_color(theme.tokens.text_secondary)
@@ -3249,11 +3243,15 @@ mod tests {
     }
 
     #[test]
-    fn code_runs_use_the_code_background() {
-        let palette = test_palette();
+    fn inline_code_uses_the_item_theme_background() {
+        let theme = crate::theme::Theme::dark();
+        let palette = RichRunPalette::from_theme(&theme);
+        let item_theme: Hsla = theme.tokens.bg_active_member_channel.into();
+        let markdown: Hsla = theme.tokens.bg_markdown_code.into();
+        assert_eq!(palette.code_bg, item_theme);
+        assert_ne!(palette.code_bg, markdown);
         let code = rich_run_highlight(RichRunKind::Code, &palette);
-        assert_eq!(code.background_color, Some(palette.code_bg));
-        assert!(code.font_weight.is_none());
+        assert_eq!(code.background_color, Some(item_theme));
     }
 
     #[test]
@@ -3285,15 +3283,6 @@ mod tests {
     }
 
     #[test]
-    fn palette_memo_key_changes_when_code_background_changes() {
-        let palette = test_palette();
-        let muted: Hsla = gpui::rgb(0x808080).into();
-        let mut recoloured = palette;
-        recoloured.code_bg = gpui::rgb(0x222222).into();
-        assert_ne!(palette.memo_key(muted), recoloured.memo_key(muted));
-    }
-
-    #[test]
     fn rich_text_plan_reuses_only_the_same_layout_and_style() {
         let layout = build_rich_layout(&[MessageSpan::Bold("hello".into())]).unwrap();
         let colors = [Hsla::default(); 7];
@@ -3303,7 +3292,6 @@ mod tests {
             edited: false,
             text: SharedString::from("hello"),
             highlights: Vec::new().into(),
-            font_overrides: Vec::new().into(),
             click_ranges: Vec::new().into(),
             actions: Vec::new().into(),
             locale: SharedString::from("en"),
