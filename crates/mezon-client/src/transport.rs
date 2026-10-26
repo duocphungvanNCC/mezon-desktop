@@ -3562,15 +3562,19 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             let j =
                 i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
-                let url: String = chars[i..j].iter().collect();
-                out.push(MarkdownMatch {
-                    kind: link_markdown_kind(&url),
-                    start: i,
-                    end: j,
-                    marker: 0,
-                });
-                i = j;
-                continue;
+                let raw: String = chars[i..j].iter().collect();
+                let url = trim_trailing_url_punctuation(&raw);
+                let j = i + url.chars().count();
+                if j > i + scheme {
+                    out.push(MarkdownMatch {
+                        kind: link_markdown_kind(url),
+                        start: i,
+                        end: j,
+                        marker: 0,
+                    });
+                    i = j;
+                    continue;
+                }
             }
         }
 
@@ -11888,8 +11892,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_markdown_link_has_no_trailing_punctuation_trim() {
-        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    fn detect_markdown_link_trims_trailing_punctuation() {
+        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 17)]);
+        assert_eq!(detect_markdown("https://a.com..."), vec![md("lk", 0, 13)]);
     }
 
     #[test]
@@ -11916,7 +11921,7 @@ mod tests {
     fn detect_markdown_link_keeps_a_close_paren_it_opened() {
         let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
         assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
-        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 57)]);
         assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
     }
 

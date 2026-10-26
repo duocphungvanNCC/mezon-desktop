@@ -1316,22 +1316,22 @@ fn hashtag_meta(tok: &ContentToken) -> Option<Box<HashtagMeta>> {
     }))
 }
 
-fn split_trailing_url_punct(s: &str) -> (&str, &str) {
-    s.split_at(trim_trailing_url_punctuation(s).len())
-}
-
 fn resolve_link_span(
     spans: &mut Vec<MessageSpan>,
     text: SharedString,
-    url: String,
+    mut url: String,
     kind: LinkKind,
     cvtt: &HashMap<String, String>,
     meta: Option<Box<HashtagMeta>>,
 ) {
-    let url = trim_trailing_url_punctuation(&url).to_string();
-    let (display, punct) = split_trailing_url_punct(&text);
-    let display: SharedString = display.to_string().into();
-    let punct = punct.to_string();
+    url.truncate(trim_trailing_url_punctuation(&url).len());
+    let punct_at = trim_trailing_url_punctuation(&text).len();
+    let punct = (punct_at < text.len()).then(|| text[punct_at..].to_string());
+    let display = if punct.is_none() {
+        text
+    } else {
+        text[..punct_at].to_string().into()
+    };
     let span = if let Some(ids) = extract_channel_url_ids(&url) {
         if let Some(canvas_id) = ids.canvas_id {
             if let Some(title) = cvtt.get(&canvas_id).filter(|t| !t.is_empty()) {
@@ -1364,7 +1364,7 @@ fn resolve_link_span(
         }
     };
     spans.push(span);
-    if !punct.is_empty() {
+    if let Some(punct) = punct {
         spans.push(MessageSpan::Text(punct.into()));
     }
 }
