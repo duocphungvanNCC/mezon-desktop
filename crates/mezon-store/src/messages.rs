@@ -14566,6 +14566,7 @@ mod tests {
     fn komu_base_config() -> AppConfig {
         AppConfig {
             base_img_url: "https://cdn.komu.vn".into(),
+            mezon_cdn_url: "https://cdn.mezon.ai".into(),
             ..AppConfig::dev_defaults()
         }
     }
@@ -14604,11 +14605,11 @@ mod tests {
     #[test]
     fn an_emoji_stored_on_a_new_cdn_renders_from_its_source_once_the_catalog_arrives() {
         let cfg = komu_base_config();
-        let source = "https://cdn.mezon.ai/emojis/990011.webp";
+        let source = "https://cdn.komu.vn/emojis/990011.webp";
         let mut message = emoji_message(1, "990011", &cfg);
         assert_eq!(
             first_emoji_src(&message).as_ref(),
-            cfg.imgproxy_url("https://cdn.komu.vn/emojis/990011.webp", 96, 96, "fit")
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990011.webp", 96, 96, "fit")
         );
 
         let changed = crate::emoji::publish_emoji_sources(&[catalog_emoji("990011", source)]);
@@ -14664,13 +14665,13 @@ mod tests {
                 store.active_channel_id = Some(shown);
 
                 let changed = crate::emoji::publish_emoji_sources(&[
-                    catalog_emoji("990031", "https://cdn.mezon.ai/emojis/990031.webp"),
-                    catalog_emoji("990032", "https://cdn.komu.vn/emojis/990032.webp"),
+                    catalog_emoji("990031", "https://cdn.komu.vn/emojis/990031.webp"),
+                    catalog_emoji("990032", "https://cdn.mezon.ai/emojis/990032.webp"),
                 ]);
                 store.refresh_emoji_sources(&changed, cx);
 
                 let moved =
-                    cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990031.webp", 96, 96, "fit");
+                    cfg.imgproxy_url("https://cdn.komu.vn/emojis/990031.webp", 96, 96, "fit");
                 for (bucket, id) in [(shown, 5), (hidden, 7)] {
                     let message = store.message_in_channel(bucket, MessageId(id)).unwrap();
                     assert_eq!(first_emoji_src(message).as_ref(), moved);
