@@ -22,7 +22,6 @@ mod screen_previews;
 pub mod screen_recovery;
 mod screen_targets;
 mod sfu;
-mod stream_playback;
 mod video;
 
 use std::collections::HashMap;
@@ -67,7 +66,6 @@ pub use record::{
 pub use sfu::messages::MEDIA_POOL_VERSION;
 pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
-pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
     media_permission(MediaDevice::Microphone) == MediaPermission::Denied

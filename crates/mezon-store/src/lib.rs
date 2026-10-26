@@ -270,7 +270,10 @@ pub use screen_draw::{
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
-pub use stream::{StreamMember, StreamPhase, StreamStore};
+pub use stream::{
+    HlsVariant, STREAM_QUALITIES, StreamMember, StreamPhase, StreamQuality, StreamStore,
+    auto_step_down_target, coreaudio_device_uid, parse_hls_variants, variant_index,
+};
 pub use threads::{
     GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
     ThreadSummary, ThreadsEvent, ThreadsStore, group_threads, thread_preview_display,
@@ -389,6 +392,23 @@ pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
         stream.update(cx, |stream, cx| {
             stream.set_output_device(output_device_id, cx)
         });
+    }
+}
+
+pub fn set_stream_default_quality(quality: StreamQuality, cx: &mut gpui::App) {
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, cx| {
+        if settings.stream_default_quality == quality {
+            return false;
+        }
+        settings.stream_default_quality = quality;
+        cx.notify();
+        true
+    });
+    if changed {
+        schedule_settings_save(&settings, cx);
     }
 }
 
@@ -529,6 +549,8 @@ pub struct Settings {
     pub quick_replies_enabled: bool,
     #[serde(default)]
     pub grammar_correction_enabled: bool,
+    #[serde(default)]
+    pub stream_default_quality: StreamQuality,
 }
 
 impl Default for Settings {
@@ -565,6 +587,7 @@ impl Default for Settings {
             agent_hint_dismissed: false,
             quick_replies_enabled: false,
             grammar_correction_enabled: false,
+            stream_default_quality: StreamQuality::default(),
         }
     }
 }
