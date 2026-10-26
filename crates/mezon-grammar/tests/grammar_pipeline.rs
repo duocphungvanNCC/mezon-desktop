@@ -61,13 +61,21 @@ fn test_junior_workplace_proposal_senior_response() {
     let replies = client.suggest_quick_replies_with_model(msg, None, 4);
     assert!(!replies.is_empty());
     assert!(!replies.iter().any(|r| r.starts_with("Dạ")));
-    assert!(replies.iter().any(|r| r.contains("Anh thấy") || r.contains("anh")));
+    assert!(
+        replies
+            .iter()
+            .any(|r| r.contains("Anh thấy") || r.contains("anh"))
+    );
     assert!(replies.iter().any(|r| r.contains("em")));
 
     let replies_chi = client.suggest_quick_replies_with_model(msg, Some("chị"), 4);
     assert!(!replies_chi.is_empty());
     assert!(!replies_chi.iter().any(|r| r.starts_with("Dạ")));
-    assert!(replies_chi.iter().any(|r| r.contains("Chị thấy") || r.contains("chị")));
+    assert!(
+        replies_chi
+            .iter()
+            .any(|r| r.contains("Chị thấy") || r.contains("chị"))
+    );
     assert!(replies_chi.iter().any(|r| r.contains("em")));
 }
 
