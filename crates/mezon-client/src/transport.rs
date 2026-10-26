@@ -3316,7 +3316,42 @@ impl std::ops::Deref for OutgoingHashtags {
     }
 }
 
-pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+const TRAILING_URL_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
+
+pub fn trim_trailing_url_punctuation(token: &str) -> &str {
+    let mut unmatched_close = token
+        .matches(')')
+        .count()
+        .saturating_sub(token.matches('(').count());
+    let mut end = token.len();
+    while let Some(ch) = token[..end].chars().next_back() {
+        if !TRAILING_URL_PUNCTUATION.contains(&ch) || (ch == ')' && unmatched_close == 0) {
+            break;
+        }
+        if ch == ')' {
+            unmatched_close -= 1;
+        }
+        end -= ch.len_utf8();
+    }
+    &token[..end]
+}
+
+fn url_path_segment(seg: &str) -> &str {
+    trim_trailing_url_punctuation(seg.split(['?', '#']).next().unwrap_or(seg))
+}
+
+fn numeric_url_path_id(seg: &str) -> Option<&str> {
+    let seg = url_path_segment(seg);
+    (!seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())).then_some(seg)
+}
+
+pub struct ChannelUrlParts<'a> {
+    pub clan_id: &'a str,
+    pub channel_id: &'a str,
+    pub canvas_id: Option<&'a str>,
+}
+
+pub fn channel_url_parts(url: &str) -> Option<ChannelUrlParts<'_>> {
     let marker = "/chat/clans/";
     let rest = &url[url.find(marker)? + marker.len()..];
     let mut parts = rest.split('/');
@@ -3327,9 +3362,23 @@ pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
     if parts.next()? != "channels" {
         return None;
     }
-    let channel_id = parts.next()?;
-    let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
-    (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
+    let channel_id = numeric_url_path_id(parts.next()?)?;
+    let canvas_id = match parts.next() {
+        Some("canvas") => parts
+            .next()
+            .map(url_path_segment)
+            .filter(|id| !id.is_empty()),
+        _ => None,
+    };
+    Some(ChannelUrlParts {
+        clan_id,
+        channel_id,
+        canvas_id,
+    })
+}
+
+pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+    channel_url_parts(url).map(|parts| parts.channel_id)
 }
 
 fn insert_channel_link_meta(
@@ -3560,15 +3609,19 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             let j =
                 i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
-                let url: String = chars[i..j].iter().collect();
-                out.push(MarkdownMatch {
-                    kind: link_markdown_kind(&url),
-                    start: i,
-                    end: j,
-                    marker: 0,
-                });
-                i = j;
-                continue;
+                let raw: String = chars[i..j].iter().collect();
+                let url = trim_trailing_url_punctuation(&raw);
+                let j = i + url.chars().count();
+                if j > i + scheme {
+                    out.push(MarkdownMatch {
+                        kind: link_markdown_kind(url),
+                        start: i,
+                        end: j,
+                        marker: 0,
+                    });
+                    i = j;
+                    continue;
+                }
             }
         }
 
@@ -11741,12 +11794,39 @@ mod tests {
             Some("900")
         );
         assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900."),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url(
+                "https://mezon.ai/chat/clans/1779484504377790464/channels/1965677153211125760."
+            ),
+            Some("1965677153211125760")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900)"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900]"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900abc"),
+            None
+        );
+        assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),
             None
         );
         assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
             None
+        );
+        assert_eq!(
+            channel_url_parts("https://mezon.ai/chat/clans/5/channels/900/canvas/abc.?x=1")
+                .map(|parts| (parts.clan_id, parts.channel_id, parts.canvas_id)),
+            Some(("5", "900", Some("abc")))
         );
     }
 
@@ -11949,8 +12029,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_markdown_link_has_no_trailing_punctuation_trim() {
-        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    fn detect_markdown_link_trims_trailing_punctuation() {
+        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 17)]);
+        assert_eq!(detect_markdown("https://a.com..."), vec![md("lk", 0, 13)]);
     }
 
     #[test]
@@ -11977,7 +12058,7 @@ mod tests {
     fn detect_markdown_link_keeps_a_close_paren_it_opened() {
         let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
         assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
-        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 57)]);
         assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
     }
 
