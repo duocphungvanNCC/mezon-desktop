@@ -946,6 +946,7 @@ impl App {
         self.platform.is_cursor_visible()
     }
 
+    #[allow(missing_docs)]
     pub fn hide_cursor_until_mouse_moves(&self) {
         self.platform.hide_cursor_until_mouse_moves();
     }
