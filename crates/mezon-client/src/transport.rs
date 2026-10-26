@@ -1699,8 +1699,15 @@ fn entity_mention_targets_user(m: &ApiEntityMention, user_id: i64, role_ids: &[i
 }
 
 pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[ApiEntityMention]) {
+    if entity_mentions.is_empty() {
+        return;
+    }
+    let units: Vec<u16> = tokens.t.encode_utf16().collect();
     for m in entity_mentions {
         if m.e <= m.s {
+            continue;
+        }
+        if !utf16_range_starts_with_at(&units, m.s, m.e) {
             continue;
         }
         let user_id = (m.user_id != 0).then(|| m.user_id.to_string());
@@ -1722,6 +1729,16 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
         });
     }
     tokens.mentions.sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
+}
+
+fn utf16_range_starts_with_at(units: &[u16], start: i32, end: i32) -> bool {
+    let Ok(start) = usize::try_from(start) else {
+        return false;
+    };
+    let Ok(end) = usize::try_from(end) else {
+        return false;
+    };
+    end > start && end <= units.len() && units.get(start).copied() == Some(u16::from(b'@'))
 }
 
 /// Some producers (the web client and certain server pushes) fill the binary
@@ -11618,6 +11635,33 @@ mod tests {
         assert_eq!(tokens.mentions.len(), 1);
         assert_eq!(tokens.mentions[0].role_id.as_deref(), Some("9"));
         assert_eq!(tokens.mentions[0].username.as_deref(), None);
+    }
+
+    #[test]
+    fn enrich_skips_a_proto_mention_that_no_longer_starts_with_at() {
+        let mut tokens = ApiMessageContent {
+            t: "@STAFF\nLink form:".into(),
+            mentions: vec![ContentToken {
+                s: Some(0),
+                e: Some(6),
+                role_id: Some("9".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        enrich_content_tokens(
+            &mut tokens,
+            &[ApiEntityMention {
+                user_id: 0,
+                role_id: 9,
+                username: "@STAFF".into(),
+                s: 7,
+                e: 13,
+            }],
+        );
+        assert_eq!(tokens.mentions.len(), 1);
+        assert_eq!(tokens.mentions[0].s, Some(0));
+        assert_eq!(tokens.mentions[0].e, Some(6));
     }
 
     #[test]

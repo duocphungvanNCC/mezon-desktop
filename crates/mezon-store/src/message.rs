@@ -1114,6 +1114,7 @@ fn parse_spans_with_source(
     }
     collect(&content.vk, Kind::Link(LinkKind::Plain), &mut toks);
     collect(&content.lky, Kind::Link(LinkKind::YouTube), &mut toks);
+    toks.retain(|(s, e, kind, _)| !matches!(kind, Kind::Mention) || slice(*s, *e).starts_with('@'));
     toks.sort_by_key(|t| t.0);
 
     let mut spans: Vec<MessageSpan> = Vec::new();
@@ -2741,6 +2742,11 @@ mod tests {
         }
     }
 
+    fn utf16_pos(text: &str, needle: &str) -> i64 {
+        let byte = text.find(needle).expect("needle");
+        text[..byte].encode_utf16().count() as i64
+    }
+
     #[test]
     fn edit_source_restores_stripped_markers_for_the_plain_text_composer() {
         let content = ApiMessageContent {
@@ -3046,6 +3052,58 @@ mod tests {
                     role_id: Some("9".into()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_drops_a_role_mention_that_no_longer_starts_with_at() {
+        let t = "Đối tượng điền: @STAFF\nLink form: https://x.test";
+        let staff = utf16_pos(t, "@STAFF");
+        let link_f = utf16_pos(t, "Link f");
+        let form = utf16_pos(t, "Link form:");
+        let content = ApiMessageContent {
+            t: t.into(),
+            mentions: vec![
+                ContentToken {
+                    role_id: Some("9".into()),
+                    ..token(staff, staff + 6)
+                },
+                ContentToken {
+                    role_id: Some("9".into()),
+                    ..token(link_f, link_f + 6)
+                },
+            ],
+            mk: vec![ContentToken {
+                kind: Some("b".into()),
+                ..token(form, form + 10)
+            }],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert!(
+            spans.iter().any(|span| matches!(
+                span,
+                MessageSpan::Mention {
+                    display,
+                    role_id: Some(role_id),
+                    ..
+                } if display.as_ref() == "@STAFF" && role_id == "9"
+            )),
+            "the real role mention must stay on @STAFF: {spans:?}"
+        );
+        assert!(
+            spans.iter().all(|span| !matches!(
+                span,
+                MessageSpan::Mention { display, .. } if display.as_ref() == "Link f"
+            )),
+            "a shifted mention must not steal Link f: {spans:?}"
+        );
+        assert!(
+            spans.iter().any(|span| matches!(
+                span,
+                MessageSpan::Bold(text) if text.as_ref() == "Link form:"
+            )),
+            "Link form: must stay bold after dropping the shifted mention: {spans:?}"
         );
     }
 
