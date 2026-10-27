@@ -496,6 +496,7 @@ impl RootView {
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+            Route::SettingsStreaming => crate::settings::SettingsPage::Streaming,
             Route::SettingsServer if mezon_store::RealtimeServer::is_offered(cx) => {
                 crate::settings::SettingsPage::Server
             }
@@ -628,6 +629,7 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
+                    | Route::SettingsStreaming
                     | Route::SettingsServer
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),

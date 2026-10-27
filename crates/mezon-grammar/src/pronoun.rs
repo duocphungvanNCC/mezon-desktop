@@ -79,12 +79,81 @@ fn strip_accents(s: &str) -> String {
     out
 }
 
+static RE_UNREPLYABLE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    let raw = [
+        // 1. Standalone laughter / emoji / emoticons
+        r"(?i)^(:[\s\)]+|:\(+|:-?\)|:-?D|:v|:3|:<|😁|😀|😂|🤣|👍|🙏|❤️|🎉|:da:|:like:|:ok:|:clown:)+$",
+        r"(?i)^(ha(ha)+|hi(hi)+|ka(ka)+|he(he)+|hu(hu)+|hic|lol|cười)(\s+(ha(ha)+|hi(hi)+|ka(ka)+|he(he)+|hu(hu)+|hic|lol))*$",
+        // 2. Pure user tags / mentions
+        r"^(@[a-zA-Z0-9_.-]+(\s+@[a-zA-Z0-9_.-]+)*)$",
+        // 3. Standalone acknowledgements / closing phrases
+        r"(?i)^(ok|okie|oke|okay)(\s+(nhe|nhé|nha|anh|em|ban|bạn|sep|sếp|chi|chị|chu|chú|bac|bác|ca\s+nha|cả\s+nhà))?(\s+(nhe|nhé|nha|a|ah|ạ))?$",
+        r"(?i)^(vang|vâng|da|dạ|da\s+vang|dạ\s+vâng)(\s+(a|ah|ạ|anh|em|chi|chị|sep|sếp|bac|bác|chu|chú|co|cô|thay|thầy))?(\s+(a|ah|ạ))?$",
+        r"(?i)^(yep|yeah|yes|ukm|um|ừm|uhm|uh|ừ|u|roi|rồi|roi\s+nhe|rồi\s+nhé|done|xong\s+roi|xong\s+rồi|the\s+nhe|thế\s+nhé|vay\s+nhe|vậy\s+nhé|nhat\s+tri|nhất\s+trí|chuan|chuẩn)(\s+(nhe|nhé|nha|a|ah|ạ))?$",
+        // 4. Code / URLs / OTP / technical noise
+        r"(?i)^(https?://|git\s+|npm\s+|curl\s+|docker\s+|error:|select\s+\*|const\s+|let\s+|var\s+)\b",
+        r"(?i)^(thông báo:|thong bao:)",
+        r"^(\d+[\s,.\d]*|\.\.\.|\?\?\?|[a-z0-9_./-]{30,})$",
+    ];
+    raw.into_iter().map(|p| Regex::new(p).unwrap()).collect()
+});
+
+static RE_SENSITIVE_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(so tai khoan|ma otp|so dien thoai|cccd)\b").unwrap());
+
+pub fn is_unreplyable_or_ack_message(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    for re in RE_UNREPLYABLE_PATTERNS.iter() {
+        if re.is_match(trimmed) {
+            return true;
+        }
+    }
+    let stripped = strip_accents(&trimmed.to_lowercase());
+    if RE_SENSITIVE_PREFIX.is_match(&stripped) {
+        return true;
+    }
+    false
+}
+
+static RE_NON_PRONOUNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    let raw = [
+        r"(?i)\b(dia\s+chi|ho\s+chi\s+minh|chi\s+(co|la|can|dao|tieu|so|phi|nhanh|tiet|tieu))\b",
+        r"(?i)\b(tieng\s+anh|(hinh|buc|file|chup)\s+anh|anh\s+chup)\b",
+        r"(?i)\b((dong|tay|mien|phia)\s+bac|bac\s+(ninh|giang|kan|si|bo|ai))\b",
+        r"(?i)\b(chu\s+y|cham\s+chu)\b",
+        r"(?i)\b(cong\s+ty|co\s+gang|su\s+co|co\s+hoi)\b",
+        r"(?i)\b((khong|ko|k|chua|se|da|dang|cung|van|neu)\s+co|co\s+(the|ve|phai|hay|chua|khong|ko|k|san|it|nhieu|the|gi|sao|dau))\b",
+        r"(?i)\b(o\s+to|(nang|mua|noi|to)\s+to|to\s+(lon|qua))\b",
+        r"(?i)\b(cau\s+(long|thu|nguyen|hoi|chuyen)|(yeu|nhu)\s+cau)\b",
+        r"(?i)\b(ba\s+con|ban\s+bac|ban\s+ghe|ba\s+me|thu\s+ba)\b",
+        r"(?i)\b(cong\s+cong|ong\s+ba)\b",
+    ];
+    raw.into_iter().map(|p| Regex::new(p).unwrap()).collect()
+});
+
+pub fn mask_non_pronouns(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut res = text.to_string();
+    for re in RE_NON_PRONOUNS.iter() {
+        res = re.replace_all(&res, " ").into_owned();
+    }
+    static RE_MULTI_SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+    RE_MULTI_SPACE.replace_all(&res, " ").trim().to_string()
+}
+
 /// Context-aware reciprocal personal pronoun extraction.
 pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
-    let clean = strip_accents(&previous_message.to_lowercase());
+    let clean_raw = strip_accents(&previous_message.to_lowercase());
+    let clean = mask_non_pronouns(&clean_raw);
+    let norm_lower = previous_message.to_lowercase();
+    let has_polite_a = Regex::new(r"\b(ạ|ah)\b").unwrap().is_match(&norm_lower);
 
     // 0. Junior proposal check (e.g. "Chỗ assign manually, em thấy bên zoom đang như thế này ạ...")
-    let norm_lower = previous_message.to_lowercase();
     if Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b")
         .unwrap()
         .is_match(&clean)
@@ -93,6 +162,14 @@ pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
                 || Regex::new(r"\b(da|dạ)\b").unwrap().is_match(&norm_lower))
             && !Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap().is_match(&clean))
     {
+        if Regex::new(r"\b(chi oi|c oi)\b").unwrap().is_match(&clean)
+            || (clean.contains("chi") && !clean.contains("anh"))
+        {
+            return "chị";
+        }
+        if Regex::new(r"\b(sep oi|boss oi|leader oi)\b").unwrap().is_match(&clean) {
+            return "sếp";
+        }
         return "anh";
     }
 
@@ -132,7 +209,13 @@ pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
     if Regex::new(r"\b(chu|chu oi)\b").unwrap().is_match(&clean) {
         return "chú";
     }
-    if Regex::new(r"\b(co|co oi)\b").unwrap().is_match(&clean) {
+    if (norm_lower.contains("cô")
+        || norm_lower.contains("co giao")
+        || Regex::new(r"\b(co oi|thua co|chao co|gui co|hoi co)\b")
+            .unwrap()
+            .is_match(&clean))
+        && Regex::new(r"\b(co|co oi)\b").unwrap().is_match(&clean)
+    {
         return "cô";
     }
     if Regex::new(r"\b(ong|ong oi)\b").unwrap().is_match(&clean) {
@@ -175,7 +258,11 @@ pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
     }
 
     // 4. Single vocatives
-    if Regex::new(r"\b(anh oi|a oi)\b").unwrap().is_match(&clean) {
+    if has_polite_a {
+        if Regex::new(r"\b(anh oi)\b").unwrap().is_match(&clean) {
+            return "em";
+        }
+    } else if Regex::new(r"\b(anh oi|a oi)\b").unwrap().is_match(&clean) {
         return "em";
     }
     if Regex::new(r"\b(chi oi|c oi)\b").unwrap().is_match(&clean) {
@@ -189,7 +276,11 @@ pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
         .is_match(&clean)
     {
         let calls_em = Regex::new(r"\b(em|e)\b").unwrap().is_match(&clean);
-        let calls_anh = Regex::new(r"\b(anh|a)\b").unwrap().is_match(&clean);
+        let calls_anh = if has_polite_a {
+            Regex::new(r"\b(anh)\b").unwrap().is_match(&clean)
+        } else {
+            Regex::new(r"\b(anh|a)\b").unwrap().is_match(&clean)
+        };
         let calls_chi = Regex::new(r"\b(chi|c)\b").unwrap().is_match(&clean);
         if calls_em && !calls_anh && !calls_chi {
             return "anh";
@@ -201,7 +292,11 @@ pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
             return "em";
         }
     }
-    if Regex::new(r"\b(anh|a)\b").unwrap().is_match(&clean) {
+    if has_polite_a {
+        if Regex::new(r"\b(anh)\b").unwrap().is_match(&clean) {
+            return "anh";
+        }
+    } else if Regex::new(r"\b(anh|a)\b").unwrap().is_match(&clean) {
         return "anh";
     }
     if Regex::new(r"\b(chi|c)\b").unwrap().is_match(&clean) {
@@ -687,22 +782,26 @@ pub fn resolve_pronoun_pair(
     }
     let mut addr = resolved_addr.unwrap_or_else(|| "bạn".to_string());
 
-    let is_junior_proposal = !trimmed.is_empty() && {
-        static RE_JUNIOR_PROP: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b").unwrap()
-        });
-        static RE_EM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(em|e)\b").unwrap());
-        static RE_POLITE_A: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(a|ah|ạ)\b").unwrap());
-        static RE_POLITE_DA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(da|dạ)\b").unwrap());
-        static RE_ELDER_OI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap());
+    let is_junior_proposal = !trimmed.is_empty()
+        && {
+            static RE_JUNIOR_PROP: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b").unwrap()
+            });
+            static RE_EM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(em|e)\b").unwrap());
+            static RE_POLITE_A: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(a|ah|ạ)\b").unwrap());
+            static RE_POLITE_DA: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(da|dạ)\b").unwrap());
+            static RE_ELDER_OI: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap());
 
-        let clean = strip_accents(&trimmed.to_lowercase());
-        let norm_text = trimmed.to_lowercase();
-        RE_JUNIOR_PROP.is_match(&clean)
-            || (RE_EM.is_match(&clean)
-                && (RE_POLITE_A.is_match(&norm_text) || RE_POLITE_DA.is_match(&norm_text))
-                && !RE_ELDER_OI.is_match(&clean))
-    };
+            let clean = strip_accents(&trimmed.to_lowercase());
+            let norm_text = trimmed.to_lowercase();
+            RE_JUNIOR_PROP.is_match(&clean)
+                || (RE_EM.is_match(&clean)
+                    && (RE_POLITE_A.is_match(&norm_text) || RE_POLITE_DA.is_match(&norm_text))
+                    && !RE_ELDER_OI.is_match(&clean))
+        };
 
     if is_junior_proposal && speaker.is_none() {
         let target_persona = addr.as_str();
@@ -1015,7 +1114,10 @@ fn augment_quick_replies(
     speaker: &str,
     clean: &str,
 ) {
-    if action == "action_task_accept" && RE_TASK_CODE.is_match(clean) && matches!(speaker, "em" | "cháu") {
+    if action == "action_task_accept"
+        && RE_TASK_CODE.is_match(clean)
+        && matches!(speaker, "em" | "cháu")
+    {
         let insert = match role {
             "anh" => "Để em add và test luôn.",
             "chị" => "Để em add và test luôn chị nhé.",
@@ -1053,9 +1155,13 @@ pub fn suggest_quick_replies(
     top_k: usize,
     override_intent: Option<&str>,
 ) -> Vec<String> {
+    if is_unreplyable_or_ack_message(previous_message) {
+        return Vec::new();
+    }
+
     if matches!(
         override_intent,
-        Some("other" | "action_no_reply_needed" | "reply_none")
+        Some("other" | "action_no_reply_needed" | "action_general_ack" | "reply_none" | "general")
     ) {
         return Vec::new();
     }
@@ -1063,28 +1169,39 @@ pub fn suggest_quick_replies(
     let role = if let Some(r) = normalize_pronoun(pronoun_override) {
         r
     } else if previous_message.trim().is_empty() {
-        "bạn"
+        return Vec::new();
     } else {
         extract_target_pronoun(previous_message)
     };
 
     if previous_message.trim().is_empty() {
-        let empty_map = HashMap::new();
-        let role_templates = PRONOUN_TEMPLATES
-            .get(role)
-            .or_else(|| PRONOUN_TEMPLATES.get("bạn"))
-            .unwrap_or(&empty_map);
-        return role_templates
-            .get("general")
-            .map(|list| list.iter().take(top_k).map(|s| (*s).to_string()).collect())
-            .unwrap_or_else(|| vec!["OK bạn.".to_string()]);
+        return Vec::new();
     }
 
     let clean = strip_accents(&previous_message.to_lowercase());
     let intent =
         override_intent.unwrap_or_else(|| detect_intent_heuristic(previous_message, &clean));
     let action = legacy_to_action(intent);
-    if action == "action_no_reply_needed" {
+    if action == "action_no_reply_needed" || action == "action_general_ack" {
+        return Vec::new();
+    }
+
+    let is_junior_proposal = {
+        let norm_lower = previous_message.to_lowercase();
+        Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b")
+            .unwrap()
+            .is_match(&clean)
+            || (Regex::new(r"\b(em|e)\b").unwrap().is_match(&clean)
+                && (Regex::new(r"\b(a|ah|ạ)\b").unwrap().is_match(&norm_lower)
+                    || Regex::new(r"\b(da|dạ)\b").unwrap().is_match(&norm_lower))
+                && !Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap().is_match(&clean))
+    };
+
+    if (action == "action_general" || intent == "general")
+        && !is_junior_proposal
+        && override_intent.is_none()
+        && pronoun_override.is_none()
+    {
         return Vec::new();
     }
 

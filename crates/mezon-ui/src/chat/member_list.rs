@@ -1980,7 +1980,7 @@ mod permission_tests {
             cx,
         );
         assert!(!items.is_empty());
-        assert!(!items.iter().any(|item| item == &profile));
+        assert!(!items.iter().any(|item| item == profile));
     }
 
     #[gpui::test]
@@ -1994,7 +1994,7 @@ mod permission_tests {
             },
             cx,
         );
-        assert!(items.iter().any(|item| item == &profile));
+        assert!(items.iter().any(|item| item == profile));
     }
 
     #[gpui::test]

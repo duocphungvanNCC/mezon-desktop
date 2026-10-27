@@ -61,13 +61,21 @@ fn test_junior_workplace_proposal_senior_response() {
     let replies = client.suggest_quick_replies_with_model(msg, None, 4);
     assert!(!replies.is_empty());
     assert!(!replies.iter().any(|r| r.starts_with("Dạ")));
-    assert!(replies.iter().any(|r| r.contains("Anh thấy") || r.contains("anh")));
+    assert!(
+        replies
+            .iter()
+            .any(|r| r.contains("Anh thấy") || r.contains("anh"))
+    );
     assert!(replies.iter().any(|r| r.contains("em")));
 
     let replies_chi = client.suggest_quick_replies_with_model(msg, Some("chị"), 4);
     assert!(!replies_chi.is_empty());
     assert!(!replies_chi.iter().any(|r| r.starts_with("Dạ")));
-    assert!(replies_chi.iter().any(|r| r.contains("Chị thấy") || r.contains("chị")));
+    assert!(
+        replies_chi
+            .iter()
+            .any(|r| r.contains("Chị thấy") || r.contains("chị"))
+    );
     assert!(replies_chi.iter().any(|r| r.contains("em")));
 }
 
@@ -264,4 +272,88 @@ fn test_keeps_dotted_and_at_tokens() {
     let corrected = client.correct("hoi @huy.lexuan di").corrected;
     assert!(corrected.contains("@huy.lexuan"), "{corrected}");
     assert!(!corrected.contains("@huy. Lexuan"), "{corrected}");
+}
+
+#[test]
+fn test_model1_100_percent_correct_rule_and_noise_suppression() {
+    let client = MezonGrammarClient::new();
+
+    // 1. Standalone acknowledgements / closing phrases -> empty
+    assert!(
+        client
+            .suggest_quick_replies_with_model("OK bạn nhé", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("vâng ạ", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("vâng ah", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("dạ vâng anh", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("yep", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("done", None, 4)
+            .is_empty()
+    );
+
+    // 2. Emojis, laughter, mentions -> empty
+    assert!(
+        client
+            .suggest_quick_replies_with_model(": ))", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("😁", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("haha", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("@phong.nguyennam", None, 4)
+            .is_empty()
+    );
+
+    // 3. Arbitrary chatter without directive/question -> empty
+    assert!(
+        client
+            .suggest_quick_replies_with_model("Hôm nay trời đẹp quá", None, 4)
+            .is_empty()
+    );
+    assert!(
+        client
+            .suggest_quick_replies_with_model("CPU đang ở mức 80%", None, 4)
+            .is_empty()
+    );
+
+    // 4. Confident prompts with verified pronouns -> suggest replies
+    let r1 = client.suggest_quick_replies_with_model("Sáng mai anh nghỉ làm nhé", None, 4);
+    assert!(!r1.is_empty());
+    assert!(r1.iter().any(|r| r == "Dạ vâng anh."));
+
+    let r2 = client.suggest_quick_replies_with_model(
+        "cai mezon grammar cung xong model roi. Anh em add vao suggest luon. Mode nay 447kb.",
+        None,
+        4,
+    );
+    assert!(!r2.is_empty());
+    assert!(r2.iter().any(|r| r.contains("anh") || r.contains("Anh")));
 }

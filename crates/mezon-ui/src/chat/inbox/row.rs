@@ -82,6 +82,12 @@ pub(crate) struct NotificationRowView {
     pub(crate) profile_dependencies: ProfileDependencies,
 }
 
+impl NotificationRowView {
+    pub(crate) fn needs_sender_profile(&self) -> bool {
+        self.avatar_url.is_none() && self.profile_dependencies.global
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ProfileDependencies {
     pub(crate) clans: [Option<ClanId>; 2],
