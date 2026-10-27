@@ -4,7 +4,7 @@
 
 # Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
 # some of their test targets don't even compile against our pinned deps).
-pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-pdf -p mezon-proto -p mezon-i18n -p mezon-theme -p mezon-widgets -p mezon-canvas -p mezon-video -p mezon-updater -p mezon-audio -p mezon-cli -p mezon-mcp -p mezon-voice -p mezon-stream -p mezon-record -p mezon-call -p mezon-active-windows -p mezon-grammar -p mmn-client"
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-pdf -p mezon-proto -p mezon-i18n -p mezon-theme -p mezon-widgets -p mezon-canvas -p mezon-video -p mezon-updater -p mezon-audio -p mezon-cli -p mezon-mcp -p mezon-voice -p mezon-record -p mezon-call -p mezon-active-windows -p mezon-grammar -p mmn-client"
 
 # Formatting scope lives in scripts/fmt.sh — the one place the justfile, the
 # pre-commit hook and CI all read it from, so they cannot drift apart.
@@ -95,20 +95,16 @@ check:
     cargo clippy {{pkgs}} -- -D warnings
 
 # Formatting gate — the single source of truth for the fmt scope.
-# CI / just lint: all mezon-*; pre-commit: staged only (see .githooks/pre-commit).
+# The pre-commit hook and CI both call this, so they can never drift apart.
 fmt-check:
     ./scripts/fmt.sh check
-
-# Format only staged mezon-* .rs files (preferred for agents / task finish).
-fmt-fix-staged:
-    ./scripts/fmt.sh fix staged
 
 # Strict linting (Use before commit/push)
 lint: _ensure-hooks
     cargo clippy {{pkgs}} --all-targets --all-features --locked -- -D warnings
     @just fmt-check
 
-# Auto-fix formatting and clippy suggestions (full mezon-* pass — not for routine task finish)
+# Auto-fix formatting and clippy suggestions
 fix:
     ./scripts/fmt.sh fix
     cargo clippy {{pkgs}} --fix --allow-dirty --allow-staged
@@ -117,7 +113,7 @@ fix:
 # pre-commit gate without having to remember to install anything.
 setup-hooks:
     git config core.hooksPath .githooks
-    @echo "git hooks -> .githooks (pre-commit runs 'scripts/fmt.sh check staged')"
+    @echo "git hooks -> .githooks (pre-commit runs 'just fmt-check')"
 
 # Installs the hooks on first use of any common recipe, so a fresh clone is
 # formatted-by-default rather than only caught in CI.
@@ -212,5 +208,3 @@ clean:
     cargo clean
     @echo "Cleaned target directory."
     
-
-
