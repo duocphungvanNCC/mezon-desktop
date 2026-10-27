@@ -1,4 +1,4 @@
-use gpui::{AnyView, App, Context, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyView, App, Context, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use crate::theme::ActiveTheme;
 
@@ -31,7 +31,8 @@ impl Render for Tooltip {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().tokens.bg_tooltip_app)
-            .text_xs()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
             .text_color(cx.theme().tokens.text_tooltip_app)
             .child(self.text.clone())
     }
