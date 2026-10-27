@@ -1666,6 +1666,69 @@ impl MessagesStore {
         self.set_pending_last_seen(pending, cx);
     }
 
+    fn mark_parent_topics_seen(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if clan_id.is_zero() {
+            return;
+        }
+        if let Some(store) = TopicBadgeStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.mark_parent_seen(clan_id, channel_id, cx)
+            });
+        }
+        let topic_badge = ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_parent_topics_seen(clan_id, channel_id, cx)
+        });
+        if topic_badge > 0 {
+            self.clear_parent_topic_badge(clan_id, channel_id, topic_badge, cx);
+        }
+    }
+
+    fn clear_parent_topic_badge(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic_badge: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let channels = ChannelList::global(cx).read(cx);
+        if channels
+            .own_unread(clan_id, channel_id)
+            .is_none_or(|(_, unread)| unread)
+        {
+            return;
+        }
+        let Some((message_id, create_time)) = channels
+            .channel(clan_id, channel_id)
+            .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+        else {
+            return;
+        };
+        self.last_seen_fingerprint.remove(&channel_id);
+        self.set_pending_last_seen(
+            PendingLastSeen {
+                clan_id,
+                channel_id,
+                message_id,
+                create_time,
+                mode: self.mode,
+                badge_count: topic_badge,
+            },
+            cx,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_last_seen_message(&self, channel_id: ChannelId) -> Option<MessageId> {
+        self.pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.message_id)
+    }
+
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
         self.last_read_message_by_channel
             .get(&channel_id)
@@ -6877,6 +6940,9 @@ impl MessagesStore {
         }
 
         self.seed_last_read_from_channel(channel_id, cx);
+        if !is_dm {
+            self.mark_parent_topics_seen(clan_id, channel_id, cx);
+        }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);
