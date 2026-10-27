@@ -4295,7 +4295,7 @@
   "setting.supportSettings.title": "Support",
   "setting.supportSettings.uploadLog": "Upload debug logs to Mezon Support",
   "setting.update.available": "Update available — click to install",
-  "setting.update.check": "Check for Updates",
+  "setting.update.check": "Check for updates",
   "setting.update.checking": "Checking for updates…",
   "setting.update.copiedHint": "Copied ✓ — paste in a terminal to finish",
   "setting.update.copyHint": "Click to copy the install command",
