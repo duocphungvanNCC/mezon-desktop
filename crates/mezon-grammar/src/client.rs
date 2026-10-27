@@ -228,6 +228,10 @@ impl MezonGrammarClient {
         quick_replies_with_intent(&self.tokenizer, previous_message, pronoun_override, top_k)
     }
 
+    pub fn is_unreplyable_or_ack_message(&self, text: &str) -> bool {
+        crate::pronoun::is_unreplyable_or_ack_message(text)
+    }
+
     pub fn on_keystroke(
         &self,
         text: &str,
