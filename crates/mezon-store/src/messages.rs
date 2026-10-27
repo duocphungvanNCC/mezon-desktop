@@ -800,6 +800,18 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
     }
 }
 
+fn inbox_content_object(content_json: &str, fallback_text: &str) -> serde_json::Value {
+    let parsed = serde_json::from_str::<serde_json::Value>(content_json).ok();
+    match parsed {
+        Some(value) if value.is_object() => value,
+        Some(serde_json::Value::String(inner)) => serde_json::from_str(&inner)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({ "t": fallback_text })),
+        _ => serde_json::json!({ "t": fallback_text }),
+    }
+}
+
 fn inbox_content_with_attachment_preview(
     content_json: &str,
     fallback_text: &str,
@@ -808,18 +820,28 @@ fn inbox_content_with_attachment_preview(
     let Some(first) = attachments.first() else {
         return content_json.to_string();
     };
-    let parsed = serde_json::from_str::<serde_json::Value>(content_json).ok();
-    let mut content = match parsed {
-        Some(value) if value.is_object() => value,
-        Some(serde_json::Value::String(inner)) => serde_json::from_str(&inner)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({ "t": fallback_text })),
-        _ => serde_json::json!({ "t": fallback_text }),
-    };
-    // The desktop inbox renders only the first attachment. Keep its metadata in
-    // content because persisted notifications otherwise retain only URL/type.
+    let mut content = inbox_content_object(content_json, fallback_text);
     content["attachments"] = serde_json::json!([first]);
+    content.to_string()
+}
+
+fn inbox_content_with_sender(
+    content_json: &str,
+    fallback_text: &str,
+    sender_id: i64,
+    display_name: &str,
+    username: &str,
+) -> String {
+    let mut content = inbox_content_object(content_json, fallback_text);
+    if sender_id != 0 {
+        content["sender_id"] = serde_json::Value::String(sender_id.to_string());
+    }
+    if !display_name.is_empty() {
+        content["display_name"] = serde_json::Value::String(display_name.to_string());
+    }
+    if !username.is_empty() {
+        content["username"] = serde_json::Value::String(username.to_string());
+    }
     content.to_string()
 }
 
@@ -3740,6 +3762,15 @@ impl MessagesStore {
             msg.attachments.iter().map(attachment_to_api).collect();
         let content_json =
             inbox_content_with_attachment_preview(&content_json, &msg.content, &inbox_attachments);
+        let sender_id = msg.sender_id.parse().unwrap_or(0);
+        let display_name = msg.sender_name.to_string();
+        let content_json = inbox_content_with_sender(
+            &content_json,
+            &msg.content,
+            sender_id,
+            &display_name,
+            &display_name,
+        );
         let attachments: Vec<mezon_proto::api::MessageAttachment> = inbox_attachments
             .iter()
             .map(|att| mezon_proto::api::MessageAttachment {
@@ -3771,8 +3802,6 @@ impl MessagesStore {
             .unwrap_or_default();
         let has_more_attachment = attachments.len() > 1;
         let avatar = msg.avatar_url.to_string();
-        let sender_id = msg.sender_id.parse().unwrap_or(0);
-        let display_name = msg.sender_name.to_string();
         let create_time_seconds = u32::try_from(msg.create_time.max(0))
             .ok()
             .filter(|ts| *ts > 0)
@@ -11292,6 +11321,22 @@ mod tests {
             size: 512,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn inbox_content_embeds_original_sender() {
+        let content = inbox_content_with_sender(
+            r#"{"t":"cái này là phải làm realtime ạ"}"#,
+            "fallback",
+            7,
+            "huy.buidoanquang",
+            "huy.buidoanquang",
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["t"], "cái này là phải làm realtime ạ");
+        assert_eq!(value["sender_id"], "7");
+        assert_eq!(value["display_name"], "huy.buidoanquang");
+        assert_eq!(value["username"], "huy.buidoanquang");
     }
 
     #[test]
