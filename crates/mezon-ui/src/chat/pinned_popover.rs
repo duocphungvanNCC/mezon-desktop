@@ -1095,7 +1095,6 @@ fn pin_card(
     let avatar_fallback = vm.avatar_fallback.clone();
 
     let mut avatar = Avatar::new()
-        .name(&sender_label)
         .with_size(Size::Small)
         .anonymous(vm.is_anonymous && avatar_src.is_none())
         .image_cache(avatar_cache.clone());

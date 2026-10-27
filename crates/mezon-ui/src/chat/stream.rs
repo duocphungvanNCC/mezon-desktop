@@ -1262,7 +1262,7 @@ fn member_row(
 
 fn stream_member_avatar(display: &MemberDisplay) -> AnyElement {
     let size = px(MEMBER_AVATAR_SIZE);
-    let mut avatar = Avatar::new().name(display.name.clone()).size_px(size);
+    let mut avatar = Avatar::new().size_px(size);
     if !display.avatar_src.is_empty() {
         avatar = avatar.src(display.avatar_src.clone());
         if !display.avatar_raw.is_empty() && display.avatar_raw != display.avatar_src {
@@ -1277,14 +1277,12 @@ fn stream_member_avatar(display: &MemberDisplay) -> AnyElement {
 fn resolve_member_display(cx: &App, clan_id: ClanId, member: &StreamMember) -> MemberDisplay {
     let resolved = crate::util::voice_member::resolve_stream_display(cx, Some(clan_id), member);
     MemberDisplay {
-        name: SharedString::from(resolved.name),
         avatar_src: SharedString::from(resolved.avatar_src),
         avatar_raw: SharedString::from(resolved.avatar_raw),
     }
 }
 
 struct MemberDisplay {
-    name: SharedString,
     avatar_src: SharedString,
     avatar_raw: SharedString,
 }

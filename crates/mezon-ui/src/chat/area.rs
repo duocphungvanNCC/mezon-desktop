@@ -1054,12 +1054,7 @@ fn latest_activity_strip(
             .into_any_element()
     });
     let pin_avatar = latest_pin.as_ref().map(|pin| {
-        let display_name = pin_profile
-            .as_ref()
-            .map(|profile| profile.display_name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| pin.sender_name.clone());
-        let mut avatar = Avatar::new().name(display_name).size_px(px(26.));
+        let mut avatar = Avatar::new().size_px(px(26.));
         let raw_source = pin_profile
             .as_ref()
             .map(|profile| profile.avatar_url.as_str())

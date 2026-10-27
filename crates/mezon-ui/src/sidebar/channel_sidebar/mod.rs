@@ -3010,8 +3010,7 @@ fn render_sidebar_item(
                         .pl(px(32.))
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
-                        let name_text = m.display_name.clone();
-                        let mut avatar = Avatar::new().name(name_text);
+                        let mut avatar = Avatar::new();
                         if !m.avatar_url.is_empty() {
                             avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
                             if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
@@ -3049,7 +3048,7 @@ fn render_sidebar_item(
                         .children(voice_members.iter().map(|m| {
                             let name_text = m.display_name.clone();
                             let sharing_screen = m.sharing_screen;
-                            let mut avatar = Avatar::new().name(name_text.clone());
+                            let mut avatar = Avatar::new();
                             if !m.avatar_url.is_empty() {
                                 avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
                                 if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {

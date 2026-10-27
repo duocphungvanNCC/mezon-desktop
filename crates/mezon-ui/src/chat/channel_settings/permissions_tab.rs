@@ -133,7 +133,7 @@ fn member_row_from_profile(user_id: UserId, profile: &ChannelUserProfile) -> Mem
 }
 
 pub(super) fn member_avatar(row: &MemberRow, size: gpui::Pixels) -> Avatar {
-    let mut avatar = Avatar::new().name(row.name.clone()).size_px(size);
+    let mut avatar = Avatar::new().size_px(size);
     if !row.avatar.is_empty() {
         avatar = avatar.src(row.avatar.clone());
     }

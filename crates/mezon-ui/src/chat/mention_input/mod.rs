@@ -3654,7 +3654,6 @@ impl MentionInput {
                 ),
                 Suggestion::Member(member, avatar_src) => {
                     let mut avatar = Avatar::new()
-                        .name(member.display.clone())
                         .size_px(px(20.))
                         .image_cache(self.avatar_cache.clone());
                     if !avatar_src.is_empty() {
