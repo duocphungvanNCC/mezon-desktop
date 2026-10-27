@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Пароль має містити щонайменше 1 цифру",
   "accountSetting.setPasswordAccount.error.samePass": "Новий пароль не може збігатися зі старим",
   "accountSetting.setPasswordAccount.error.symbol": "Пароль має містити щонайменше 1 спеціальний символ",
+  "accountSetting.setPasswordAccount.error.tooLong": "Пароль має містити не більше 64 символів",
   "accountSetting.setPasswordAccount.error.updateFail": "Помилка оновлення акаунту.",
   "accountSetting.setPasswordAccount.error.uppercase": "Пароль має містити щонайменше 1 велику літеру",
   "accountSetting.setPasswordAccount.goTo": "Перейти до",

@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "비밀번호에 숫자 1 자 이상 포함되어야 합니다",
   "accountSetting.setPasswordAccount.error.samePass": "새 비밀번호가 이전 비밀번호와 동일할 수 없습니다",
   "accountSetting.setPasswordAccount.error.symbol": "비밀번호에 특수 문자 1 자 이상 포함되어야 합니다",
+  "accountSetting.setPasswordAccount.error.tooLong": "비밀번호는 최대 64자까지 가능합니다",
   "accountSetting.setPasswordAccount.error.updateFail": "계정 업데이트 실패",
   "accountSetting.setPasswordAccount.error.uppercase": "비밀번호에 대문자 1 자 이상 포함되어야 합니다",
   "accountSetting.setPasswordAccount.goTo": "이동",

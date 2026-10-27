@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "パスワードは少なくとも1つの数字を含める必要があります",
   "accountSetting.setPasswordAccount.error.samePass": "新しいパスワードは古いパスワードと同じにすることはできません",
   "accountSetting.setPasswordAccount.error.symbol": "パスワードは少なくとも1つの特殊文字を含める必要があります",
+  "accountSetting.setPasswordAccount.error.tooLong": "パスワードは最大64文字までです",
   "accountSetting.setPasswordAccount.error.updateFail": "アカウントの更新に失敗しました。",
   "accountSetting.setPasswordAccount.error.uppercase": "パスワードは少なくとも1つの大文字を含める必要があります",
   "accountSetting.setPasswordAccount.goTo": "移動",

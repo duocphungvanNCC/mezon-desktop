@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "La contraseña debe contener al menos 1 número",
   "accountSetting.setPasswordAccount.error.samePass": "La nueva contraseña no puede ser igual a la anterior",
   "accountSetting.setPasswordAccount.error.symbol": "La contraseña debe contener al menos 1 carácter especial",
+  "accountSetting.setPasswordAccount.error.tooLong": "La contraseña debe tener como máximo 64 caracteres",
   "accountSetting.setPasswordAccount.error.updateFail": "No se pudo actualizar tu cuenta.",
   "accountSetting.setPasswordAccount.error.uppercase": "La contraseña debe contener al menos 1 letra mayúscula",
   "accountSetting.setPasswordAccount.goTo": "Ir a",

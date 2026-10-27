@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Wachtwoord moet ten minste 1 cijfer bevatten",
   "accountSetting.setPasswordAccount.error.samePass": "Nieuw wachtwoord kan hetzelfde zijn als het oude wachtwoord",
   "accountSetting.setPasswordAccount.error.symbol": "Wachtwoord moet ten minste 1 speciaal teken bevatten",
+  "accountSetting.setPasswordAccount.error.tooLong": "Wachtwoord mag maximaal 64 tekens bevatten",
   "accountSetting.setPasswordAccount.error.updateFail": "Account bijwerken mislukt.",
   "accountSetting.setPasswordAccount.error.uppercase": "Wachtwoord moet ten minste 1 hoofdletter bevatten",
   "accountSetting.setPasswordAccount.goTo": "Ga naar",

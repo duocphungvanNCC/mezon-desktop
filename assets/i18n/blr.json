@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Пароль павінен утрымліваць прынамсі 1 лічбу",
   "accountSetting.setPasswordAccount.error.samePass": "Новы пароль не можа супадаць са старым",
   "accountSetting.setPasswordAccount.error.symbol": "Пароль павінен утрымліваць прынамсі 1 спецыяльны сімвал",
+  "accountSetting.setPasswordAccount.error.tooLong": "Пароль павінен утрымліваць не больш за 64 сімвалы",
   "accountSetting.setPasswordAccount.error.updateFail": "Памылка абнаўлення рахунку.",
   "accountSetting.setPasswordAccount.error.uppercase": "Пароль павінен утрымліваць прынамсі 1 вялікую літару",
   "accountSetting.setPasswordAccount.goTo": "Перайсці да",

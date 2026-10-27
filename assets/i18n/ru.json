@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Пароль должен содержать как минимум 1 цифру",
   "accountSetting.setPasswordAccount.error.samePass": "Новый пароль не может быть таким же, как и старый",
   "accountSetting.setPasswordAccount.error.symbol": "Пароль должен содержать как минимум 1 специальный символ",
+  "accountSetting.setPasswordAccount.error.tooLong": "Пароль должен содержать не более 64 символов",
   "accountSetting.setPasswordAccount.error.updateFail": "Невозможно обновить учётную запись.",
   "accountSetting.setPasswordAccount.error.uppercase": "Пароль должен содержать как минимум 1 заглавную букву",
   "accountSetting.setPasswordAccount.goTo": "Выйти",

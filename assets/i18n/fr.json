@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Le mot de passe doit contenir au moins 1 chiffre",
   "accountSetting.setPasswordAccount.error.samePass": "Le nouveau mot de passe ne peut pas être identique à l'ancien",
   "accountSetting.setPasswordAccount.error.symbol": "Le mot de passe doit contenir au moins 1 caractère spécial",
+  "accountSetting.setPasswordAccount.error.tooLong": "Le mot de passe doit contenir au plus 64 caractères",
   "accountSetting.setPasswordAccount.error.updateFail": "Échec de la mise à jour du compte.",
   "accountSetting.setPasswordAccount.error.uppercase": "Le mot de passe doit contenir au moins 1 lettre majuscule",
   "accountSetting.setPasswordAccount.goTo": "Aller à",
