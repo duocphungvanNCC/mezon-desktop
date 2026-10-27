@@ -42,9 +42,7 @@ const IN_APP_TOOLS: &[DrawTool] = &[
 #[derive(Clone)]
 pub(crate) enum DrawTarget {
     InApp(Entity<VoiceStore>),
-    Desktop {
-        draw: Entity<DesktopDraw>,
-    },
+    Desktop { draw: Entity<DesktopDraw> },
 }
 
 impl DrawTarget {

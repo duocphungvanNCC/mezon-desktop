@@ -794,6 +794,8 @@ mod tests {
             channel_id: channel_id.into(),
             creator_id: String::new(),
             last_sender_id: String::new(),
+            last_sender_is_authoritative: false,
+            last_message_id: String::new(),
             content: String::new(),
             last_message_content: String::new(),
             last_message_attachments: Vec::new(),

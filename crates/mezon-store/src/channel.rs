@@ -949,7 +949,7 @@ impl ChannelList {
                 },
                 ClanEvent::Deleted(clan_id) => this.forget_clan(*clan_id, cx),
                 ClanEvent::Joined(clan_id) => this.on_rejoined_clan(*clan_id, cx),
-                ClanEvent::OwnerChanged { .. } => {}
+                ClanEvent::Updated(_) | ClanEvent::OwnerChanged { .. } => {}
             },
         );
 
@@ -10720,6 +10720,7 @@ mod tests {
                                 channel_private: 0,
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
+                                last_message_id: String::new(),
                                 last_message_content: String::new(),
                                 last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
@@ -10736,6 +10737,7 @@ mod tests {
                                 channel_private: 0,
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
+                                last_message_id: String::new(),
                                 last_message_content: String::new(),
                                 last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
@@ -10752,6 +10754,7 @@ mod tests {
                                 channel_private: 0,
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
+                                last_message_id: String::new(),
                                 last_message_content: String::new(),
                                 last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
@@ -15273,6 +15276,7 @@ mod tests {
             channel_private,
             active: crate::threads::THREAD_STATUS_ARCHIVED,
             creator_id: String::new(),
+            last_message_id: String::new(),
             last_message_content: String::new(),
             last_message_preview: String::new(),
             last_message_sender_id: String::new(),

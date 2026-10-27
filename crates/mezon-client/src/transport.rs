@@ -3333,7 +3333,42 @@ impl std::ops::Deref for OutgoingHashtags {
     }
 }
 
-pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+const TRAILING_URL_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
+
+pub fn trim_trailing_url_punctuation(token: &str) -> &str {
+    let mut unmatched_close = token
+        .matches(')')
+        .count()
+        .saturating_sub(token.matches('(').count());
+    let mut end = token.len();
+    while let Some(ch) = token[..end].chars().next_back() {
+        if !TRAILING_URL_PUNCTUATION.contains(&ch) || (ch == ')' && unmatched_close == 0) {
+            break;
+        }
+        if ch == ')' {
+            unmatched_close -= 1;
+        }
+        end -= ch.len_utf8();
+    }
+    &token[..end]
+}
+
+fn url_path_segment(seg: &str) -> &str {
+    trim_trailing_url_punctuation(seg.split(['?', '#']).next().unwrap_or(seg))
+}
+
+fn numeric_url_path_id(seg: &str) -> Option<&str> {
+    let seg = url_path_segment(seg);
+    (!seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())).then_some(seg)
+}
+
+pub struct ChannelUrlParts<'a> {
+    pub clan_id: &'a str,
+    pub channel_id: &'a str,
+    pub canvas_id: Option<&'a str>,
+}
+
+pub fn channel_url_parts(url: &str) -> Option<ChannelUrlParts<'_>> {
     let marker = "/chat/clans/";
     let rest = &url[url.find(marker)? + marker.len()..];
     let mut parts = rest.split('/');
@@ -3344,9 +3379,23 @@ pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
     if parts.next()? != "channels" {
         return None;
     }
-    let channel_id = parts.next()?;
-    let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
-    (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
+    let channel_id = numeric_url_path_id(parts.next()?)?;
+    let canvas_id = match parts.next() {
+        Some("canvas") => parts
+            .next()
+            .map(url_path_segment)
+            .filter(|id| !id.is_empty()),
+        _ => None,
+    };
+    Some(ChannelUrlParts {
+        clan_id,
+        channel_id,
+        canvas_id,
+    })
+}
+
+pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+    channel_url_parts(url).map(|parts| parts.channel_id)
 }
 
 fn insert_channel_link_meta(
@@ -3577,15 +3626,19 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             let j =
                 i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
-                let url: String = chars[i..j].iter().collect();
-                out.push(MarkdownMatch {
-                    kind: link_markdown_kind(&url),
-                    start: i,
-                    end: j,
-                    marker: 0,
-                });
-                i = j;
-                continue;
+                let raw: String = chars[i..j].iter().collect();
+                let url = trim_trailing_url_punctuation(&raw);
+                let j = i + url.chars().count();
+                if j > i + scheme {
+                    out.push(MarkdownMatch {
+                        kind: link_markdown_kind(url),
+                        start: i,
+                        end: j,
+                        marker: 0,
+                    });
+                    i = j;
+                    continue;
+                }
             }
         }
 
@@ -4198,6 +4251,8 @@ pub struct ApiMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiThreadDesc {
+    #[serde(default)]
+    pub last_message_id: String,
     pub channel_id: String,
     pub channel_label: String,
     pub clan_id: String,
@@ -4215,6 +4270,29 @@ pub struct ApiThreadDesc {
 }
 
 pub const THREAD_LIST_LIMIT: i32 = 50;
+
+#[cfg(test)]
+mod thread_identity_tests {
+    use super::*;
+
+    #[test]
+    fn thread_descriptor_keeps_the_message_id_with_a_truncated_preview() {
+        let descriptor = MezonTransport::thread_desc_from_proto(api::ChannelDescription {
+            channel_id: 10,
+            clan_id: 1,
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 99,
+                sender_id: 7,
+                content: "a truncated preview".into(),
+                timestamp_seconds: 123,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(descriptor.last_message_id, "99");
+        assert_eq!(descriptor.last_message_sender_id, "7");
+        assert_eq!(descriptor.last_sent_timestamp, 123);
+    }
+}
 
 pub const CHECK_NAME_TYPE_THREAD: i32 = 3;
 
@@ -4801,6 +4879,11 @@ impl MezonTransport {
             };
 
         ApiThreadDesc {
+            last_message_id: channel
+                .last_sent_message
+                .as_ref()
+                .map(|message| message.id.to_string())
+                .unwrap_or_default(),
             channel_id: channel.channel_id.to_string(),
             channel_label: channel.channel_label,
             clan_id: channel.clan_id.to_string(),
@@ -5061,6 +5144,7 @@ impl MezonTransport {
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
+            "GetStreamPlayback" => 213,
             "LinkCDNFile" => 214,
             "SfuBreakoutRoom" => 215,
             "SfuBreakoutMerge" => 216,
@@ -5425,6 +5509,27 @@ impl MezonTransport {
             )),
         };
         self.send_realtime_control(cid, "write_voice_reaction", envelope)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn write_streaming_watch(&self, channel_id: i64, watching: bool) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=StreamingWatch cid={} channel_id={channel_id} watching={watching}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::StreamingWatch(
+                realtime::StreamingWatch {
+                    channel_id,
+                    watching,
+                },
+            )),
+        };
+        self.send_realtime_control(cid, "write_streaming_watch", envelope)
             .await
             .map(|_| ())
     }
@@ -7449,6 +7554,29 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn get_stream_playback(
+        &self,
+        channel_id: i64,
+        publish: bool,
+    ) -> Result<api::GetStreamPlaybackResponse> {
+        if channel_id == 0 {
+            anyhow::bail!("GetStreamPlayback needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GetStreamPlaybackRequest {
+            channel_id,
+            publish,
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "GetStreamPlayback", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GetStreamPlaybackResponse::decode(response.as_slice())?)
     }
 
     pub async fn sfu_breakout_room(
@@ -11785,12 +11913,39 @@ mod tests {
             Some("900")
         );
         assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900."),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url(
+                "https://mezon.ai/chat/clans/1779484504377790464/channels/1965677153211125760."
+            ),
+            Some("1965677153211125760")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900)"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900]"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900abc"),
+            None
+        );
+        assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),
             None
         );
         assert_eq!(
             channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
             None
+        );
+        assert_eq!(
+            channel_url_parts("https://mezon.ai/chat/clans/5/channels/900/canvas/abc.?x=1")
+                .map(|parts| (parts.clan_id, parts.channel_id, parts.canvas_id)),
+            Some(("5", "900", Some("abc")))
         );
     }
 
@@ -11993,8 +12148,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_markdown_link_has_no_trailing_punctuation_trim() {
-        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    fn detect_markdown_link_trims_trailing_punctuation() {
+        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 17)]);
+        assert_eq!(detect_markdown("https://a.com..."), vec![md("lk", 0, 13)]);
     }
 
     #[test]
@@ -12021,7 +12177,7 @@ mod tests {
     fn detect_markdown_link_keeps_a_close_paren_it_opened() {
         let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
         assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
-        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 57)]);
         assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
     }
 
@@ -13619,5 +13775,70 @@ mod tests {
             MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
             r#"{"t":123}"#
         );
+    }
+
+    #[tokio::test]
+    async fn stream_playback_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .get_stream_playback(0, false)
+            .await
+            .expect_err("channel 0 has no playback");
+        assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn stream_playback_goes_over_the_socket_without_http_fallback() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        assert_eq!(t.get_api_index("GetStreamPlayback"), Some(213));
+        let body = api::GetStreamPlaybackResponse {
+            token: "tok".to_string(),
+            hls_url: "https://cdn-dev.nccsoft.vn/live/99/index.m3u8".to_string(),
+            expires_at: 1000,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let answered = answer_next_socket_request(&t, 0, body);
+
+        let resp = t
+            .get_stream_playback(99, false)
+            .await
+            .expect("playback request should succeed");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(resp.token, "tok");
+        assert_eq!(
+            resp.hls_url,
+            "https://cdn-dev.nccsoft.vn/live/99/index.m3u8"
+        );
+        assert!(hits.lock().is_empty());
+    }
+
+    #[test]
+    fn streaming_viewer_count_watch_echo_and_metrics_stay_unhandled() {
+        let count_event =
+            RealtimeEvent::try_from(realtime::envelope::Message::StreamingViewerCountEvent(
+                realtime::StreamingViewerCountEvent {
+                    clan_id: 1,
+                    channel_id: 2,
+                    viewer_count: 15,
+                },
+            ))
+            .unwrap();
+        assert!(matches!(count_event, RealtimeEvent::Unhandled(_)));
+
+        let watch_echo = RealtimeEvent::try_from(realtime::envelope::Message::StreamingWatch(
+            realtime::StreamingWatch {
+                channel_id: 2,
+                watching: true,
+            },
+        ))
+        .unwrap();
+        assert!(matches!(watch_echo, RealtimeEvent::Unhandled(_)));
+
+        let metric = RealtimeEvent::try_from(realtime::envelope::Message::MetricMessageEvent(
+            realtime::MetricMessageEvent::default(),
+        ))
+        .unwrap();
+        assert!(matches!(metric, RealtimeEvent::Unhandled(_)));
     }
 }
