@@ -2893,6 +2893,9 @@ impl MessagesStore {
             edit_content_spans(&content, content_tokens, message_code, |tokens| {
                 channel_link_metas(&content, tokens, cx)
             });
+        let display_text = serde_json::from_str::<ApiMessageContent>(&raw_content)
+            .map(|parsed| parsed.t)
+            .unwrap_or_else(|_| content.clone());
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -2902,14 +2905,14 @@ impl MessagesStore {
         patch_reply_previews_after_update(
             &mut channel.messages,
             message_id,
-            &content,
+            &display_text,
             &spans,
             AppConfig::try_global(cx),
         );
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
-        msg.content = content.clone();
+        msg.content = display_text;
         msg.rich_layout = crate::message::build_rich_layout(&spans);
         msg.is_only_emoji = crate::message::spans_only_emoji(&spans);
         msg.spans = spans;
@@ -10481,15 +10484,14 @@ fn edit_content_spans(
         &transport_emojis,
         message_code,
     );
-    let transport_hashtags = transport_hashtags.tokens;
     let raw_content = sent.json;
     let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
     (
         spans,
-        transport_mentions,
-        transport_hashtags,
-        transport_emojis,
+        sent.mentions,
+        sent.hashtags,
+        sent.emojis,
         raw_content,
     )
 }
@@ -14000,6 +14002,51 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].user_id.as_deref(), Some("42"));
         assert_eq!(targets[0].role_id, None);
+    }
+
+    #[test]
+    fn edit_remaps_a_role_mention_after_stripping_bold_markers() {
+        let content = "hi **bold** @STAFF\n**Link form:** https://x.test";
+        let mention_start = content[..content.find("@STAFF").expect("@STAFF")]
+            .encode_utf16()
+            .count() as i32;
+        let content_tokens = OutgoingContent {
+            mentions: vec![OutgoingMention {
+                user_id: String::new(),
+                role_id: "9".into(),
+                display: "@STAFF".into(),
+                s: mention_start,
+                e: mention_start + 6,
+            }],
+            hashtags: Vec::new(),
+            emojis: Vec::new(),
+        };
+        let (spans, transport_mentions, _, _, raw_content) =
+            edit_content_spans(content, content_tokens, 0, |_| Vec::new());
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
+        let staff = parsed.t.find("@STAFF").expect("stripped @STAFF");
+        let expected_s = parsed.t[..staff].encode_utf16().count() as i32;
+        assert_eq!(parsed.mentions.len(), 1);
+        assert_eq!(parsed.mentions[0].s, Some(i64::from(expected_s)));
+        assert_eq!(parsed.mentions[0].e, Some(i64::from(expected_s + 6)));
+        assert_eq!(transport_mentions[0].s, expected_s);
+        assert_eq!(transport_mentions[0].e, expected_s + 6);
+        assert_eq!(transport_mentions[0].role_id, "9");
+        let mention_display = spans.iter().find_map(|span| match span {
+            MessageSpan::Mention {
+                display, role_id, ..
+            } if role_id.as_deref() == Some("9") => Some(display.as_ref()),
+            _ => None,
+        });
+        assert_eq!(mention_display, Some("@STAFF"));
+        assert!(
+            spans.iter().all(|span| !matches!(
+                span,
+                MessageSpan::Mention { display, .. } if display.as_ref() == "Link f"
+            )),
+            "edit must not slide the role mention onto Link f: {spans:?}"
+        );
     }
 
     #[test]
