@@ -4234,6 +4234,8 @@ pub struct ApiMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiThreadDesc {
+    #[serde(default)]
+    pub last_message_id: String,
     pub channel_id: String,
     pub channel_label: String,
     pub clan_id: String,
@@ -4251,6 +4253,29 @@ pub struct ApiThreadDesc {
 }
 
 pub const THREAD_LIST_LIMIT: i32 = 50;
+
+#[cfg(test)]
+mod thread_identity_tests {
+    use super::*;
+
+    #[test]
+    fn thread_descriptor_keeps_the_message_id_with_a_truncated_preview() {
+        let descriptor = MezonTransport::thread_desc_from_proto(api::ChannelDescription {
+            channel_id: 10,
+            clan_id: 1,
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 99,
+                sender_id: 7,
+                content: "a truncated preview".into(),
+                timestamp_seconds: 123,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(descriptor.last_message_id, "99");
+        assert_eq!(descriptor.last_message_sender_id, "7");
+        assert_eq!(descriptor.last_sent_timestamp, 123);
+    }
+}
 
 pub const CHECK_NAME_TYPE_THREAD: i32 = 3;
 
@@ -4837,6 +4862,11 @@ impl MezonTransport {
             };
 
         ApiThreadDesc {
+            last_message_id: channel
+                .last_sent_message
+                .as_ref()
+                .map(|message| message.id.to_string())
+                .unwrap_or_default(),
             channel_id: channel.channel_id.to_string(),
             channel_label: channel.channel_label,
             clan_id: channel.clan_id.to_string(),

@@ -1033,7 +1033,7 @@ fn render_body(
         .child(body)
 }
 
-fn resolve_pin_avatar_urls(
+pub(crate) fn resolve_pin_avatar_urls(
     pin: &PinnedMessage,
     clan_id: Option<mezon_store::ClanId>,
     channel_id: Option<ChannelId>,
