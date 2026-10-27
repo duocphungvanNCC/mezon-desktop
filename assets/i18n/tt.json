@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Серсүз ким дигәндә 1 саннан торырга тиеш",
   "accountSetting.setPasswordAccount.error.samePass": "Яңа серсүз искесе белән бер төрле була алмый",
   "accountSetting.setPasswordAccount.error.symbol": "Серсүз ким дигәндә 1 махсус символдан торырга тиеш",
+  "accountSetting.setPasswordAccount.error.tooLong": "Серсүз 64 символдан артык булмаска тиеш",
   "accountSetting.setPasswordAccount.error.updateFail": "Аккаунтны яңарту мөмкин түгел.",
   "accountSetting.setPasswordAccount.error.uppercase": "Серсүз ким дигәндә 1 баш хәрефтән торырга тиеш",
   "accountSetting.setPasswordAccount.goTo": "Чыгу",

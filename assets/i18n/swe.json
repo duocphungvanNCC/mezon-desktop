@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Lösenordet måste innehålla minst 1 siffra",
   "accountSetting.setPasswordAccount.error.samePass": "Nytt lösenord får inte vara samma som det gamla",
   "accountSetting.setPasswordAccount.error.symbol": "Lösenordet måste innehålla minst 1 specialtecken",
+  "accountSetting.setPasswordAccount.error.tooLong": "Lösenordet får ha högst 64 tecken",
   "accountSetting.setPasswordAccount.error.updateFail": "Misslyckades uppdatera konto.",
   "accountSetting.setPasswordAccount.error.uppercase": "Lösenordet måste innehålla minst 1 stor bokstav",
   "accountSetting.setPasswordAccount.goTo": "Gå till",

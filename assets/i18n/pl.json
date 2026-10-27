@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Hasło musi zawierać co najmniej 1 cyfrę",
   "accountSetting.setPasswordAccount.error.samePass": "Nowe hasło nie może być takie samo jak stare",
   "accountSetting.setPasswordAccount.error.symbol": "Hasło musi zawierać co najmniej 1 znak specjalny",
+  "accountSetting.setPasswordAccount.error.tooLong": "Hasło może mieć co najwyżej 64 znaki",
   "accountSetting.setPasswordAccount.error.updateFail": "Aktualizacja konta nie powiodła się.",
   "accountSetting.setPasswordAccount.error.uppercase": "Hasło musi zawierać co najmniej 1 wielką literę",
   "accountSetting.setPasswordAccount.goTo": "Idź do",

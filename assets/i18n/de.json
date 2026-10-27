@@ -66,6 +66,7 @@
   "accountSetting.setPasswordAccount.error.number": "Das Passwort muss mindestens eine Zahl enthalten",
   "accountSetting.setPasswordAccount.error.samePass": "Das neue Passwort darf nicht dasselbe wie das alte sein",
   "accountSetting.setPasswordAccount.error.symbol": "Das Passwort muss mindestens ein Sonderzeichen enthalten",
+  "accountSetting.setPasswordAccount.error.tooLong": "Das Passwort darf höchstens 64 Zeichen lang sein",
   "accountSetting.setPasswordAccount.error.updateFail": "Kontobearbeitung fehlgeschlagen.",
   "accountSetting.setPasswordAccount.error.uppercase": "Das Passwort muss mindestens einen Großbuchstaben enthalten",
   "accountSetting.setPasswordAccount.goTo": "Gehe zu",
