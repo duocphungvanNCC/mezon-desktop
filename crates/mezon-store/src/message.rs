@@ -1512,6 +1512,10 @@ pub fn spans_only_emoji(spans: &[MessageSpan]) -> bool {
     has_emoji
 }
 
+pub fn composer_edit_source(content: &str, spans: &[MessageSpan]) -> String {
+    markdown_edit_source(content, spans).unwrap_or_else(|| content.to_string())
+}
+
 pub fn markdown_edit_source(content: &str, spans: &[MessageSpan]) -> Option<String> {
     let has_markdown = spans.iter().any(|span| {
         matches!(
@@ -2745,6 +2749,17 @@ mod tests {
     fn utf16_pos(text: &str, needle: &str) -> i64 {
         let byte = text.find(needle).expect("needle");
         text[..byte].encode_utf16().count() as i64
+    }
+
+    #[test]
+    fn composer_edit_source_keeps_an_untouched_bold_edit_unchanged() {
+        let raw = "hello **bold** world";
+        let sent = mezon_client::transport::build_send_content(raw, &[], &Default::default(), &[]);
+        let content: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("send content json");
+        let spans = parse_spans(&content);
+        assert_ne!(content.t.as_str(), raw);
+        assert_eq!(composer_edit_source(&content.t, &spans), raw);
     }
 
     #[test]
