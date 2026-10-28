@@ -2416,6 +2416,14 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
+fn hashtag_meta_visible(meta: &HashtagMeta, clan_loaded: bool, parent_visible: bool) -> bool {
+    if meta.channel_type == ChannelType::Thread {
+        parent_visible && !meta.private
+    } else {
+        !clan_loaded
+    }
+}
+
 pub(super) fn hashtag_chip(
     display: &str,
     channel_id: Option<&str>,
@@ -2427,7 +2435,13 @@ pub(super) fn hashtag_chip(
     let resolved = parsed_channel
         .and_then(|cid| hashtag_channel(cid, cx))
         .or_else(|| {
-            meta.map(|meta| ResolvedHashtag {
+            let meta = meta?;
+            let store = ChannelList::global(cx).read(cx);
+            let clan_loaded = store.is_clan_cache_loaded(meta.clan_id);
+            let parent_visible = meta
+                .parent_id
+                .is_some_and(|parent| store.linkable_channel(parent).is_some());
+            hashtag_meta_visible(meta, clan_loaded, parent_visible).then(|| ResolvedHashtag {
                 name: Some(meta.label.clone()),
                 icon: mention_channel_icon(meta.channel_type, meta.private, 0),
             })
@@ -3400,7 +3414,10 @@ mod tests {
 
 #[cfg(test)]
 mod hashtag_label_tests {
-    use super::{ChannelId, HashtagChip, IconName, ResolvedHashtag, hashtag_chip_for};
+    use super::{
+        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
+        hashtag_chip_for, hashtag_meta_visible,
+    };
     use gpui::SharedString;
 
     const LINK: &str = "https://mezon.ai/chat/clans/1/channels/2";
@@ -3468,6 +3485,46 @@ mod hashtag_label_tests {
             chip("#g", Some(2), resolved(Some("g"))).channel_id,
             Some(ChannelId(2))
         );
+    }
+
+    fn meta(channel_type: ChannelType, parent_id: Option<i64>, private: bool) -> HashtagMeta {
+        HashtagMeta {
+            label: SharedString::from("general"),
+            clan_id: ClanId(1),
+            parent_id: parent_id.map(ChannelId),
+            channel_type,
+            private,
+        }
+    }
+
+    #[test]
+    fn thread_meta_with_visible_parent_is_visible() {
+        let meta = meta(ChannelType::Thread, Some(10), false);
+        assert!(hashtag_meta_visible(&meta, true, true));
+    }
+
+    #[test]
+    fn thread_meta_without_parent_is_hidden() {
+        let meta = meta(ChannelType::Thread, None, false);
+        assert!(!hashtag_meta_visible(&meta, true, false));
+    }
+
+    #[test]
+    fn private_thread_meta_with_visible_parent_is_hidden() {
+        let meta = meta(ChannelType::Thread, Some(10), true);
+        assert!(!hashtag_meta_visible(&meta, true, true));
+    }
+
+    #[test]
+    fn channel_meta_in_loaded_clan_is_hidden() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(!hashtag_meta_visible(&meta, true, false));
+    }
+
+    #[test]
+    fn channel_meta_in_unloaded_clan_is_visible() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(hashtag_meta_visible(&meta, false, false));
     }
 }
 
