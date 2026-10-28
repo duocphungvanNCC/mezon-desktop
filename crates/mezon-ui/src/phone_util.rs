@@ -1,11 +1,6 @@
-pub const COUNTRIES: [(&str, &str); 3] = [("Vietnam", "+84"), ("Japan", "+81"), ("US", "+1")];
+pub const LOGIN_COUNTRIES: [(&str, &str); 1] = [("Vietnam", "+84")];
 
-pub fn country_dial_code(country_index: usize) -> &'static str {
-    COUNTRIES
-        .get(country_index)
-        .map(|(_, dial)| *dial)
-        .unwrap_or("+84")
-}
+pub const COUNTRIES: [(&str, &str); 3] = [("Vietnam", "+84"), ("Japan", "+81"), ("US", "+1")];
 
 pub fn parse_phone_vn(phone: &str) -> String {
     if let Some(rest) = phone.strip_prefix('0') {
@@ -33,38 +28,18 @@ pub fn is_valid_phone_vn(phone: &str) -> bool {
     rest.len() == 8 && rest.iter().all(|c| c.is_ascii_digit())
 }
 
-fn is_valid_phone_international(raw: &str) -> bool {
-    let cleaned = raw.trim();
-    cleaned.len() >= 7 && cleaned.chars().all(|c| c.is_ascii_digit())
-}
-
-pub fn build_login_phone(country_index: usize, raw: &str) -> Option<String> {
+pub fn build_login_phone(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || !is_valid_phone_vn(trimmed) {
         return None;
     }
-    let dial = country_dial_code(country_index);
-    if dial == "+84" {
-        if !is_valid_phone_vn(trimmed) {
-            return None;
-        }
-        return Some(parse_phone_vn(trimmed));
-    }
-    if !is_valid_phone_international(trimmed) {
-        return None;
-    }
-    let national = if trimmed.starts_with('0') {
-        trimmed.trim_start_matches('0')
-    } else {
-        trimmed
-    };
-    Some(format!("{dial}{national}"))
+    Some(parse_phone_vn(trimmed))
 }
 
-pub fn phone_error_key(country_index: usize, raw: &str) -> Option<&'static str> {
+pub fn phone_error_key(raw: &str) -> Option<&'static str> {
     if raw.trim().is_empty() {
         Some("common.login.enterPhoneToLogin")
-    } else if build_login_phone(country_index, raw).is_none() {
+    } else if build_login_phone(raw).is_none() {
         Some("common.login.invalidPhoneNumber")
     } else {
         None
@@ -95,15 +70,12 @@ mod tests {
     }
 
     #[test]
-    fn build_login_phone_vn_and_japan() {
+    fn build_login_phone_accepts_only_vietnam_numbers() {
         assert_eq!(
-            build_login_phone(0, "0912345678").as_deref(),
+            build_login_phone("0912345678").as_deref(),
             Some("+84912345678")
         );
-        assert_eq!(
-            build_login_phone(1, "9012345678").as_deref(),
-            Some("+819012345678")
-        );
-        assert!(build_login_phone(0, "123").is_none());
+        assert!(build_login_phone("123").is_none());
+        assert!(build_login_phone("+819012345678").is_none());
     }
 }

@@ -13,7 +13,7 @@ use crate::components::compositions::OtpInput;
 use crate::components::primitives::{
     Dropdown, DropdownTriggerStyle, FocusCycle, Input, InputEvent, InputState, Spinner,
 };
-use crate::phone_util::{COUNTRIES, build_login_phone, mask_phone, phone_error_key};
+use crate::phone_util::{LOGIN_COUNTRIES, build_login_phone, mask_phone, phone_error_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OtpKind {
@@ -36,7 +36,6 @@ pub struct LoginView {
     email_input: Option<Entity<InputState>>,
     password_input: Option<Entity<InputState>>,
     phone_input: Option<Entity<InputState>>,
-    country_index: usize,
     country_open: bool,
     otp_input: Option<Entity<OtpInput>>,
 
@@ -104,7 +103,6 @@ impl LoginView {
             email_input: None,
             password_input: None,
             phone_input: None,
-            country_index: 0,
             country_open: false,
             otp_input: None,
             loading: false,
@@ -139,7 +137,6 @@ impl LoginView {
         self.otp_req_id.clear();
         self.otp_email.clear();
         self.otp_phone.clear();
-        self.country_index = 0;
         self.country_open = false;
         self.error = None;
         self.countdown = 0;
@@ -438,8 +435,8 @@ impl LoginView {
     }
 
     fn handle_send_sms_otp(entity: &Entity<LoginView>, _window: &mut Window, cx: &mut App) {
-        let (country_index, raw) = entity.read(cx).phone_form_values(cx);
-        if let Some(err_key) = phone_error_key(country_index, &raw) {
+        let raw = entity.read(cx).phone_form_values(cx);
+        if let Some(err_key) = phone_error_key(&raw) {
             entity.update(cx, |this, cx| {
                 let locale = this.settings.read(cx).language.clone();
                 this.error = Some(mezon_i18n::t(&locale, err_key).to_string());
@@ -447,7 +444,7 @@ impl LoginView {
             });
             return;
         }
-        let Some(full_phone) = build_login_phone(country_index, &raw) else {
+        let Some(full_phone) = build_login_phone(&raw) else {
             return;
         };
 
@@ -501,13 +498,11 @@ impl LoginView {
         .detach();
     }
 
-    fn phone_form_values(&self, cx: &App) -> (usize, String) {
-        let raw = self
-            .phone_input
+    fn phone_form_values(&self, cx: &App) -> String {
+        self.phone_input
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
-            .unwrap_or_default();
-        (self.country_index, raw)
+            .unwrap_or_default()
     }
 
     fn handle_confirm_otp(entity: &Entity<LoginView>, otp_code: String, cx: &mut App) {
@@ -755,7 +750,7 @@ impl LoginView {
         let mut col = div().flex().flex_col();
 
         if self.otp_step == 0 {
-            let country_items: Vec<SharedString> = COUNTRIES
+            let country_items: Vec<SharedString> = LOGIN_COUNTRIES
                 .iter()
                 .map(|(name, dial)| SharedString::from(format!("{name} ({dial})")))
                 .collect();
@@ -776,7 +771,7 @@ impl LoginView {
                                     div().w(px(150.)).child(
                                         Dropdown::new("login-phone-country")
                                             .items(country_items)
-                                            .selected(Some(self.country_index))
+                                            .selected(Some(0))
                                             .open(self.country_open)
                                             .trigger_style(DropdownTriggerStyle::InputPrimary)
                                             .on_toggle({
@@ -790,9 +785,8 @@ impl LoginView {
                                             })
                                             .on_select({
                                                 let entity = cx.entity().clone();
-                                                move |index, _, cx| {
+                                                move |_, _, cx| {
                                                     entity.update(cx, |this, cx| {
-                                                        this.country_index = index;
                                                         this.country_open = false;
                                                         cx.notify();
                                                     })
@@ -804,9 +798,9 @@ impl LoginView {
                         ),
                 );
             }
-            let (country_index, raw) = self.phone_form_values(cx);
+            let raw = self.phone_form_values(cx);
             let countdown = self.countdown;
-            let phone_ok = build_login_phone(country_index, &raw).is_some();
+            let phone_ok = build_login_phone(&raw).is_some();
             let send_disabled = show_loading || !phone_ok || countdown > 0;
             let send_label = if countdown > 0 {
                 format!(
@@ -988,9 +982,7 @@ impl LoginView {
         }
 
         col = col.child(error_slot(self.error.as_deref()));
-        if self.otp_step == 0 {
-            col = col.child(self.render_alternative_links(locale, cx));
-        }
+        col = col.child(self.render_alternative_links(locale, cx));
 
         div()
             .flex()

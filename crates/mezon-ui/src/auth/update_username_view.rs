@@ -265,13 +265,18 @@ impl Render for UpdateUsernameView {
     }
 }
 
+const MAX_USERNAME_LEN: usize = 32;
+
 pub(crate) fn sanitize_username(raw: &str) -> String {
     raw.trim()
         .nfd()
         .filter(|c| !is_combining_mark(*c))
         .map(|c| if matches!(c, 'đ' | 'Đ') { 'd' } else { c })
         .flat_map(char::to_lowercase)
-        .filter(|c| c.is_alphanumeric() || *c == '.')
+        .filter(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '+' | '-')
+        })
+        .take(MAX_USERNAME_LEN)
         .collect()
 }
 
@@ -285,8 +290,14 @@ mod tests {
     }
 
     #[test]
-    fn keeps_dots_and_digits_and_drops_other_symbols() {
-        assert_eq!(sanitize_username("  A.b-c_1! "), "a.bc1");
+    fn keeps_server_allowed_symbols_and_drops_others() {
+        assert_eq!(sanitize_username("  A.b-c_1+! "), "a.b-c_1+");
+    }
+
+    #[test]
+    fn drops_non_latin_letters_and_caps_length() {
+        assert_eq!(sanitize_username("日本abc"), "abc");
+        assert_eq!(sanitize_username(&"a".repeat(40)).len(), 32);
     }
 
     #[test]

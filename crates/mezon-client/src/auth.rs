@@ -603,56 +603,94 @@ impl MezonClient {
     pub async fn update_username(&self, previous: &Session, username: &str) -> Result<Session> {
         use prost::Message;
 
-        let api_base = previous
+        let session = self.session_for_authenticated_call(previous).await?;
+        let body = mezon_proto::api::UpdateUsernameRequest {
+            username: username.to_owned(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let bytes = self
+            .post_proto(
+                &session,
+                "UpdateUsername",
+                format!("Bearer {}", session.token),
+                body,
+            )
+            .await?;
+        let updated = mezon_proto::api::Session::decode(bytes.as_slice())
+            .context("Failed to decode update username response")?;
+        session_after_username_update(&session, updated, username)
+    }
+
+    async fn session_for_authenticated_call(&self, previous: &Session) -> Result<Session> {
+        if !token_needs_refresh(previous.expires_at, unix_now_secs()) {
+            return Ok(previous.clone());
+        }
+        use prost::Message;
+
+        let body = mezon_proto::api::SessionRefreshRequest {
+            token: previous.refresh_token.clone(),
+            is_remember: previous.is_remember,
+            vars: std::collections::HashMap::from([("m".to_owned(), "true".to_owned())]),
+        }
+        .encode_to_vec();
+        let bytes = self
+            .post_proto(previous, "SessionRefresh", self.basic_auth_header(), body)
+            .await?;
+        let refreshed = mezon_proto::api::Session::decode(bytes.as_slice())
+            .context("Failed to decode session refresh response")?;
+        refreshed_session(previous, refreshed)
+    }
+
+    async fn post_proto(
+        &self,
+        session: &Session,
+        method: &str,
+        authorization: String,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let api_base = session
             .api_url
             .as_deref()
             .filter(|url| !url.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| self.base_url());
         let url = format!(
-            "{}/mezon.api.Mezon/UpdateUsername",
+            "{}/mezon.api.Mezon/{method}",
             api_base.trim_end_matches('/')
         );
-        let body = mezon_proto::api::UpdateUsernameRequest {
-            username: username.to_owned(),
-            ..Default::default()
-        }
-        .encode_to_vec();
         let request = http::Request::builder()
             .method(http::Method::POST)
             .uri(&url)
-            .header("Authorization", format!("Bearer {}", previous.token))
+            .header("Authorization", authorization)
             .header("Content-Type", PROTO_CONTENT_TYPE)
             .header("Accept", PROTO_CONTENT_TYPE)
             .body(AsyncBody::from(body))
-            .context("Failed to build update username request")?;
+            .with_context(|| format!("Failed to build {method} request"))?;
 
         let mut response = self
             .http
             .send(request)
             .await
-            .context("Network error updating username")?;
+            .with_context(|| format!("Network error on {method}"))?;
         observe_date_header(response.headers());
         let status = response.status();
 
-        const MAX_UPDATE_USERNAME_RESPONSE_BYTES: u64 = 64 * 1024;
+        const MAX_PROTO_RESPONSE_BYTES: u64 = 64 * 1024;
         let mut bytes: Vec<u8> = Vec::new();
         response
             .body_mut()
-            .take(MAX_UPDATE_USERNAME_RESPONSE_BYTES + 1)
+            .take(MAX_PROTO_RESPONSE_BYTES + 1)
             .read_to_end(&mut bytes)
             .await
-            .context("Failed to read update username response")?;
-        if bytes.len() as u64 > MAX_UPDATE_USERNAME_RESPONSE_BYTES {
-            bail!("update username response exceeds {MAX_UPDATE_USERNAME_RESPONSE_BYTES} bytes");
+            .with_context(|| format!("Failed to read {method} response"))?;
+        if bytes.len() as u64 > MAX_PROTO_RESPONSE_BYTES {
+            bail!("{method} response exceeds {MAX_PROTO_RESPONSE_BYTES} bytes");
         }
         if !status.is_success() {
-            bail!("HTTP {} updating username", status.as_u16());
+            bail!("HTTP {} on {method}", status.as_u16());
         }
-
-        let updated = mezon_proto::api::Session::decode(bytes.as_slice())
-            .context("Failed to decode update username response")?;
-        session_after_username_update(previous, updated, username)
+        Ok(bytes)
     }
 
     pub async fn create_qr_login(&self) -> Result<QrLoginId> {
@@ -673,6 +711,37 @@ impl MezonClient {
             .await?;
         Ok(self.parse_session(api))
     }
+}
+
+const TOKEN_REFRESH_MARGIN_SECS: u64 = 60;
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn token_needs_refresh(expires_at: u64, now: u64) -> bool {
+    expires_at == 0 || now + TOKEN_REFRESH_MARGIN_SECS >= expires_at
+}
+
+fn refreshed_session(previous: &Session, refreshed: mezon_proto::api::Session) -> Result<Session> {
+    if refreshed.token.is_empty() {
+        bail!("session refresh response carried no token");
+    }
+    let (_, _, expires_at) = decode_jwt_claims(&refreshed.token);
+    let refresh_token = if refreshed.refresh_token.is_empty() {
+        previous.refresh_token.clone()
+    } else {
+        refreshed.refresh_token
+    };
+    Ok(Session {
+        token: refreshed.token,
+        refresh_token,
+        expires_at: expires_at.unwrap_or(0),
+        ..previous.clone()
+    })
 }
 
 fn session_after_username_update(
@@ -1006,6 +1075,33 @@ mod tests {
             username_pending: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn token_refresh_is_needed_when_expired_unknown_or_about_to_expire() {
+        assert!(token_needs_refresh(0, 1_000));
+        assert!(token_needs_refresh(900, 1_000));
+        assert!(token_needs_refresh(1_030, 1_000));
+        assert!(!token_needs_refresh(1_600, 1_000));
+    }
+
+    #[test]
+    fn refreshed_session_keeps_previous_refresh_token_when_none_is_returned() {
+        let previous = Session {
+            token: "old".into(),
+            refresh_token: "keep".into(),
+            username_pending: true,
+            ..Default::default()
+        };
+        let refreshed = mezon_proto::api::Session {
+            token: "new".into(),
+            ..Default::default()
+        };
+        let session = refreshed_session(&previous, refreshed).unwrap();
+        assert_eq!(session.token, "new");
+        assert_eq!(session.refresh_token, "keep");
+        assert!(session.username_pending);
+        assert!(refreshed_session(&previous, Default::default()).is_err());
     }
 
     #[test]
