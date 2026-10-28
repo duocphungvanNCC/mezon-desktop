@@ -1181,7 +1181,6 @@ pub static COMMON_CANDIDATES: LazyLock<HashMap<&'static str, &'static str>> = La
     let pairs = [
         ("noi", "nói"),
         ("tieng", "tiếng"),
-        ("viet", "Việt"),
         ("dau", "dấu"),
         ("co", "có"),
         ("hieu", "hiểu"),

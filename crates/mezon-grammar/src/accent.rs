@@ -116,6 +116,7 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("xong", "ngay", "xong", "ngay"),
         ("den", "ngay", "đến", "ngay"),
         ("ve", "ngay", "về", "ngay"),
+        ("mong", "cai", "mong", "cái"),
     ];
     for (u1, u2, w1, w2) in priority_bigrams {
         bigram.insert(pair_key(u1, u2, None), (w1.to_string(), w2.to_string()));

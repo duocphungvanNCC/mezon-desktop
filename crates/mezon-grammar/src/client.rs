@@ -232,6 +232,10 @@ impl MezonGrammarClient {
         crate::pronoun::is_unreplyable_or_ack_message(text)
     }
 
+    pub fn extract_mentioned_pronoun(&self, text: &str) -> &'static str {
+        crate::pronoun::extract_mentioned_pronoun(text)
+    }
+
     pub fn on_keystroke(
         &self,
         text: &str,
