@@ -6094,12 +6094,12 @@ impl MezonTransport {
     ) -> Result<ApiMessage> {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let mentions = if flags.anonymous_message {
             Vec::new()
         } else {
             mentions
         };
+        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
         let sent = if content_is_json {
             let text = serde_json::from_str::<ApiMessageContent>(content)
@@ -13840,5 +13840,113 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(metric, RealtimeEvent::Unhandled(_)));
+    }
+
+    #[tokio::test]
+    async fn anonymous_send_clears_mention_everyone_and_mentions() {
+        struct RecordingAdapter(Arc<Mutex<Vec<Vec<u8>>>>);
+
+        #[async_trait::async_trait]
+        impl TransportAdapter for RecordingAdapter {
+            async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send(&self, message: Vec<u8>) -> Result<()> {
+                self.0.lock().push(message);
+                Ok(())
+            }
+            async fn send_ping(&self, _cid: u16) -> Result<()> {
+                Ok(())
+            }
+            fn is_open(&self) -> bool {
+                true
+            }
+            async fn close(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn set_on_message(&self, _handler: crate::transport_adapter::MessageHandler) {}
+            async fn set_on_open(&self, _handler: crate::transport_adapter::OpenHandler) {}
+            async fn set_on_close(&self, _handler: crate::transport_adapter::CloseHandler) {}
+            async fn set_on_error(&self, _handler: crate::transport_adapter::ErrorHandler) {}
+        }
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let t = MezonTransport::new(Box::new(RecordingAdapter(sent.clone())), String::new());
+        t.connected_tx.send(true).unwrap();
+
+        let ack_body = realtime::Envelope {
+            cid: 1,
+            message: Some(realtime::envelope::Message::ChannelMessageAck(
+                realtime::ChannelMessageAck {
+                    message_id: 100,
+                    ..Default::default()
+                },
+            )),
+        }
+        .encode_to_vec();
+
+        answer_next_socket_request(&t, 0, ack_body.clone());
+        let res = t
+            .send_channel_message_with_flags(
+                1,
+                2,
+                "hi @here @bob",
+                true,
+                2,
+                vec![here_mention(3, 8), user_mention("42", 9, 13)],
+                OutgoingHashtags::default(),
+                Vec::new(),
+                None,
+                OutgoingMessageFlags {
+                    anonymous_message: true,
+                    message_code: 0,
+                },
+            )
+            .await
+            .expect("anonymous send");
+        assert!(res.content_tokens.mentions.is_empty());
+
+        answer_next_socket_request(&t, 0, ack_body);
+        t.send_channel_message_with_flags(
+            1,
+            2,
+            "hi @here @bob",
+            true,
+            2,
+            vec![here_mention(3, 8), user_mention("42", 9, 13)],
+            OutgoingHashtags::default(),
+            Vec::new(),
+            None,
+            OutgoingMessageFlags {
+                anonymous_message: false,
+                message_code: 0,
+            },
+        )
+        .await
+        .expect("named send");
+
+        let frames = sent.lock();
+        assert_eq!(frames.len(), 2);
+        let Some(realtime::envelope::Message::ChannelMessageSend(anon_msg)) =
+            realtime::Envelope::decode(frames[0].as_slice())
+                .unwrap()
+                .message
+        else {
+            panic!("expected ChannelMessageSend");
+        };
+        assert!(anon_msg.anonymous_message);
+        assert!(!anon_msg.mention_everyone);
+        assert!(anon_msg.mentions.is_empty());
+
+        let Some(realtime::envelope::Message::ChannelMessageSend(named_msg)) =
+            realtime::Envelope::decode(frames[1].as_slice())
+                .unwrap()
+                .message
+        else {
+            panic!("expected ChannelMessageSend");
+        };
+        assert!(!named_msg.anonymous_message);
+        assert!(named_msg.mention_everyone);
+        assert_eq!(named_msg.mentions.len(), 2);
     }
 }
