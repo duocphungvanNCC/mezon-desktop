@@ -349,7 +349,7 @@ pub(super) fn render_clan_row(
         .cursor_pointer()
         .when(!suppress_hover && !clan.name.is_empty(), {
             let name = clan.name.clone();
-            move |el| el.tooltip(Tooltip::text(name))
+            move |el| el.tooltip(Tooltip::prominent_text(name))
         })
         .child(render_pill(is_active, clan.group_name.clone(), pill_color))
         .when(show_nub, |el| {
