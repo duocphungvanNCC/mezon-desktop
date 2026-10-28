@@ -3205,7 +3205,7 @@ fn render_sidebar_item(
 }
 
 fn voice_member_avatar(member: &VoiceMemberSlot) -> Avatar {
-    let mut avatar = Avatar::new().name(member.display_name.clone());
+    let mut avatar = Avatar::new();
     if !member.avatar_url.is_empty() {
         avatar = avatar.src(SharedString::from(member.avatar_url.clone()));
         if !member.avatar_raw.is_empty() && member.avatar_raw != member.avatar_url {

@@ -812,12 +812,7 @@ fn recipient_row(
                 });
             }
         })
-        .child(
-            Avatar::new()
-                .name(candidate.username.clone())
-                .src(candidate.avatar.clone())
-                .size_px(px(28.)),
-        )
+        .child(Avatar::new().src(candidate.avatar.clone()).size_px(px(28.)))
         .child(
             div()
                 .text_sm()

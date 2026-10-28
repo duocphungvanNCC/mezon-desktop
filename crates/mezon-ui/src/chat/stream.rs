@@ -1594,7 +1594,7 @@ fn stream_member_avatar(display: &MemberDisplay) -> AnyElement {
 
 fn stream_member_avatar_sized(display: &MemberDisplay, size_px: f32) -> AnyElement {
     let size = px(size_px);
-    let mut avatar = Avatar::new().name(display.name.clone()).size_px(size);
+    let mut avatar = Avatar::new().size_px(size);
     if !display.avatar_src.is_empty() {
         avatar = avatar.src(display.avatar_src.clone());
         if !display.avatar_raw.is_empty() && display.avatar_raw != display.avatar_src {

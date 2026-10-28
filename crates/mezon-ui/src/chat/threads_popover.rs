@@ -729,7 +729,6 @@ fn thread_card(
     };
 
     let mut avatar = Avatar::new()
-        .name(&sender_label)
         .size_px(px(THREAD_AVATAR_SIZE))
         .image_cache(avatar_cache.clone());
     if !avatar_url.is_empty() {
@@ -854,13 +853,12 @@ fn thread_member_avatars(
 
     let mut group = h_flex().items_center().justify_end();
     for (ix, user_id) in member_ids.iter().enumerate() {
-        let (name, avatar_url) = clan_id
+        let avatar_url = clan_id
             .and_then(|cid| resolve_user_profile(*user_id, ProfileContext::Clan(cid), cx))
-            .map(|profile| (profile.display_name, profile.avatar_url))
+            .map(|profile| profile.avatar_url)
             .unwrap_or_default();
 
         let mut avatar = Avatar::new()
-            .name(&name)
             .size_px(px(MEMBER_AVATAR_SIZE))
             .border_color(tokens.bg_active_member_channel)
             .image_cache(avatar_cache.clone());

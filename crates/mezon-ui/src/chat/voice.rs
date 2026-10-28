@@ -369,7 +369,7 @@ fn render_meeting_pre_join(
     cx: &App,
 ) -> AnyElement {
     let (name, avatar_url, avatar_raw) = local_voice_identity(cx);
-    let mut avatar = Avatar::new().name(name.clone()).size_px(px(80.));
+    let mut avatar = Avatar::new().size_px(px(80.));
     if !avatar_url.is_empty() {
         avatar = avatar.src(avatar_url);
     }
@@ -1212,8 +1212,8 @@ fn render_pre_join(
             .justify_center()
             .gap_2()
             .children(members.iter().take(max_members).map(|m| {
-                let (name, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
-                let mut avatar = Avatar::new().name(name).size_px(px(56.));
+                let (_, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
+                let mut avatar = Avatar::new().size_px(px(56.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
                 }
@@ -1817,7 +1817,7 @@ fn raised_hands_overlay(
                 let (name, avatar_url, avatar_raw) =
                     resolve_voice_identity(cx, clan_id, voice_members, user_id, "");
                 let name = SharedString::from(name);
-                let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
+                let mut avatar = Avatar::new().size_px(px(32.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
                 }
@@ -3334,7 +3334,7 @@ fn tile_inner(
             .into_any_element();
     }
 
-    let mut avatar = Avatar::new().name(cell.name.clone()).size_px(avatar_size);
+    let mut avatar = Avatar::new().size_px(avatar_size);
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
