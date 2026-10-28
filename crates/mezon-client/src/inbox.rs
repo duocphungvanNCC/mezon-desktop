@@ -180,9 +180,7 @@ pub fn notification_ids_from_content(content: &[u8]) -> (i64, i64, i64) {
         return (0, 0, 0);
     }
     if !matches!(content.first().copied(), Some(b'{') | Some(b'[')) {
-        if let Ok(fcm) = api::DirectFcmProto::decode(content)
-            && fcm.message_id > 0
-        {
+        if let Ok(fcm) = api::DirectFcmProto::decode(content) {
             let topic_id = if fcm.topic_id > 0 {
                 fcm.topic_id
             } else {
@@ -395,33 +393,6 @@ fn mention_spans_from_json_content(content: &str) -> Vec<InboxMentionSpan> {
         .unwrap_or_default()
 }
 
-fn json_string_or_number(value: &serde_json::Value, key: &str) -> String {
-    match value.get(key) {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn apply_sender_from_content(preview: &mut InboxMessagePreview) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&preview.raw_content) else {
-        return;
-    };
-    let content_display = json_string_or_number(&value, "display_name");
-    let content_username = json_string_or_number(&value, "username");
-    let content_sender = json_string_or_number(&value, "sender_id");
-    let named = !content_display.is_empty() || !content_username.is_empty();
-    if preview.display_name.is_empty() && !content_display.is_empty() {
-        preview.display_name = content_display;
-    }
-    if preview.username.is_empty() && !content_username.is_empty() {
-        preview.username = content_username;
-    }
-    if named && is_valid_inbox_message_id(&content_sender) {
-        preview.sender_id = content_sender;
-    }
-}
-
 fn preview_from_fcm(fcm: api::DirectFcmProto) -> InboxMessagePreview {
     let mention_spans = mention_spans_from_fcm(&fcm);
     let mut preview = InboxMessagePreview {
@@ -445,7 +416,6 @@ fn preview_from_fcm(fcm: api::DirectFcmProto) -> InboxMessagePreview {
         topic_id: optional_id_str(fcm.topic_id),
     };
     apply_preview_attachments(&mut preview);
-    apply_sender_from_content(&mut preview);
     preview
 }
 
@@ -475,7 +445,6 @@ fn preview_from_channel_message(message: api::ChannelMessage) -> InboxMessagePre
     if preview.attachment_link.is_empty() && !message.attachments.is_empty() {
         apply_preview_attachments_from_bytes(&mut preview, &message.attachments);
     }
-    apply_sender_from_content(&mut preview);
     preview
 }
 
@@ -735,9 +704,7 @@ fn parse_notification_content(bytes: &[u8]) -> Option<InboxMessagePreview> {
         }
         return parse_message_preview_json(bytes);
     }
-    if let Ok(fcm) = api::DirectFcmProto::decode(bytes)
-        && fcm.message_id > 0
-    {
+    if let Ok(fcm) = api::DirectFcmProto::decode(bytes) {
         return Some(preview_from_fcm(fcm));
     }
     if let Ok(message) = api::ChannelMessage::decode(bytes)
@@ -816,7 +783,6 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
         &serde_json::json!({ "attachments": raw.attachments }),
     );
     apply_preview_attachments(&mut preview);
-    apply_sender_from_content(&mut preview);
     Some(preview)
 }
 
@@ -1125,7 +1091,6 @@ pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotifica
         }
         enrich_message_preview_from_raw(message, &n.content);
         apply_preview_attachments(message);
-        apply_sender_from_content(message);
     }
     Ok(InboxNotification {
         id: id_str(n.id),
@@ -1695,13 +1660,15 @@ mod tests {
     }
 
     #[test]
-    fn marked_message_fcm_keeps_original_sender_from_content() {
+    fn marked_message_fcm_uses_author_from_server() {
         let fcm = api::DirectFcmProto {
             message_id: 42,
             channel_id: 7,
             clan_id: 1,
-            sender_id: 99,
-            content: r#"{"t":"cái này là phải làm realtime ạ","sender_id":"7","display_name":"huy.buidoanquang","username":"huy.buidoanquang"}"#.into(),
+            sender_id: 5,
+            username: "huy.buidoanquang".into(),
+            display_name: "Huy".into(),
+            content: r#"{"t":"hello"}"#.into(),
             ..Default::default()
         };
         let notification = inbox_notification_from_api(api::Notification {
@@ -1709,17 +1676,38 @@ mod tests {
             category: InboxCategory::Messages as i32,
             code: INBOX_MESSAGE_MARK_CODE,
             content: fcm.encode_to_vec(),
-            sender_id: 99,
+            sender_id: 5,
             channel_id: 7,
             clan_id: 1,
             ..Default::default()
         })
         .expect("notification");
         let message = notification.message.expect("preview");
-        assert_eq!(message.display_name, "huy.buidoanquang");
+        assert_eq!(message.sender_id, "5");
         assert_eq!(message.username, "huy.buidoanquang");
-        assert_eq!(message.sender_id, "7");
-        assert_eq!(message.content, "cái này là phải làm realtime ạ");
+        assert_eq!(message.display_name, "Huy");
+    }
+
+    #[test]
+    fn webhook_message_without_message_id_keeps_content() {
+        let fcm = api::DirectFcmProto {
+            sender_id: 9,
+            display_name: "Hook".into(),
+            content: r#"{"t":"deploy done"}"#.into(),
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Messages as i32,
+            code: INBOX_MESSAGE_MARK_CODE,
+            content: fcm.encode_to_vec(),
+            sender_id: 9,
+            ..Default::default()
+        })
+        .expect("notification");
+        let message = notification.message.expect("preview");
+        assert_eq!(message.content, "deploy done");
+        assert_eq!(message.display_name, "Hook");
     }
 
     #[test]
