@@ -2092,7 +2092,6 @@ impl ChannelList {
         let channel = channel_from_desc(desc, 0, Vec::new(), false);
         if channel.id != channel_id
             || channel.clan_id.is_zero()
-            || !channel.visible_in_sidebar()
             || self.is_locally_archived(channel_id)
             || self.is_locally_deleted(channel_id)
         {
@@ -16416,13 +16415,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn linked_channel_rejects_archived_or_mismatched_detail(cx: &mut gpui::TestAppContext) {
+    fn linked_channel_keeps_inactive_threads_and_rejects_mismatched_detail(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                let mut archived_thread = linked_channel_desc(901, 5, CHANNEL_ACTIVE_ARCHIVED);
-                archived_thread.parent_id = 800;
-                channels.apply_linked_channel(ChannelId(901), archived_thread, cx);
+                let mut inactive_thread = linked_channel_desc(901, 5, CHANNEL_ACTIVE_ARCHIVED);
+                inactive_thread.parent_id = 800;
+                inactive_thread.channel_type = 7;
+                channels.apply_linked_channel(ChannelId(901), inactive_thread, cx);
+                let thread = channels
+                    .linked_channel(ChannelId(901))
+                    .expect("inactive thread");
+                assert_eq!(thread.channel_type, ChannelType::Thread);
+                assert_eq!(thread.parent_id, Some(ChannelId(800)));
                 channels.apply_linked_channel(
                     ChannelId(902),
                     linked_channel_desc(903, 5, CHANNEL_ACTIVE_JOINED),
@@ -16434,7 +16441,7 @@ mod tests {
                     cx,
                 );
 
-                for id in [901, 902, 904] {
+                for id in [902, 904] {
                     assert!(channels.linked_channel(ChannelId(id)).is_none());
                     assert!(!channels.can_resolve_linked_channel(ChannelId(id)));
                 }

@@ -10,10 +10,10 @@ use gpui::{
     relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, HashtagMeta, LinkKind, Message,
-    MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout,
-    RichRunKind, RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url,
-    is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanList, Embed, HashtagMeta, LinkKind,
+    Message, MessageCode, MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick,
+    RichLayout, RichRunKind, RichToken, UserId, invite_id_from_url, is_age_restricted,
+    is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -2416,6 +2416,26 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
+fn hashtag_meta_visible(meta: &HashtagMeta, clan_loaded: bool, parent_visible: bool) -> bool {
+    if meta.channel_type == ChannelType::Thread {
+        parent_visible && !meta.private
+    } else {
+        !clan_loaded
+    }
+}
+
+fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta) -> bool {
+    let clan_loaded = store.is_clan_cache_loaded(meta.clan_id);
+    let parent_visible = meta
+        .parent_id
+        .is_some_and(|parent| store.linkable_channel(parent).is_some());
+    hashtag_meta_visible(meta, clan_loaded, parent_visible)
+}
+
+fn thread_link_wants_detail(meta: &HashtagMeta, in_clan: bool, meta_visible: bool) -> bool {
+    meta.channel_type == ChannelType::Thread && in_clan && !meta_visible
+}
+
 pub(super) fn hashtag_chip(
     display: &str,
     channel_id: Option<&str>,
@@ -2427,7 +2447,9 @@ pub(super) fn hashtag_chip(
     let resolved = parsed_channel
         .and_then(|cid| hashtag_channel(cid, cx))
         .or_else(|| {
-            meta.map(|meta| ResolvedHashtag {
+            let meta = meta?;
+            let store = ChannelList::global(cx).read(cx);
+            hashtag_meta_visible_in(store, meta).then(|| ResolvedHashtag {
                 name: Some(meta.label.clone()),
                 icon: mention_channel_icon(meta.channel_type, meta.private, 0),
             })
@@ -2741,11 +2763,35 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
     })
 }
 
-pub(super) fn channel_links_needing_detail(_spans: &[MessageSpan], _cx: &App) -> Vec<ChannelId> {
-    Vec::new()
+pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
+    let store = ChannelList::global(cx).read(cx);
+    let clans = ClanList::global(cx).read(cx);
+    let mut channel_ids = Vec::new();
+    for span in spans {
+        let MessageSpan::Hashtag {
+            channel_id: Some(raw),
+            meta: Some(meta),
+            ..
+        } = span
+        else {
+            continue;
+        };
+        let Some(channel_id) = parse_channel_id(raw) else {
+            continue;
+        };
+        let in_clan = clans.clan(meta.clan_id).is_some();
+        if thread_link_wants_detail(meta, in_clan, hashtag_meta_visible_in(store, meta))
+            && store.can_resolve_linked_channel(channel_id)
+            && store.linkable_channel(channel_id).is_none()
+            && !channel_ids.contains(&channel_id)
+        {
+            channel_ids.push(channel_id);
+        }
+    }
+    channel_ids
 }
 
-// linked-channel-api: re-add ClanList and channel_url_clan_id to the imports above when restoring.
+// linked-channel-api: re-add channel_url_clan_id to the imports above when restoring.
 // linked-channel-api: pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
 // linked-channel-api:     let mut channel_ids = Vec::new();
 // linked-channel-api:     for span in spans {
@@ -3400,7 +3446,10 @@ mod tests {
 
 #[cfg(test)]
 mod hashtag_label_tests {
-    use super::{ChannelId, HashtagChip, IconName, ResolvedHashtag, hashtag_chip_for};
+    use super::{
+        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
+        hashtag_chip_for, hashtag_meta_visible, thread_link_wants_detail,
+    };
     use gpui::SharedString;
 
     const LINK: &str = "https://mezon.ai/chat/clans/1/channels/2";
@@ -3468,6 +3517,61 @@ mod hashtag_label_tests {
             chip("#g", Some(2), resolved(Some("g"))).channel_id,
             Some(ChannelId(2))
         );
+    }
+
+    fn meta(channel_type: ChannelType, parent_id: Option<i64>, private: bool) -> HashtagMeta {
+        HashtagMeta {
+            label: SharedString::from("general"),
+            clan_id: ClanId(1),
+            parent_id: parent_id.map(ChannelId),
+            channel_type,
+            private,
+        }
+    }
+
+    #[test]
+    fn thread_meta_with_visible_parent_is_visible() {
+        let meta = meta(ChannelType::Thread, Some(10), false);
+        assert!(hashtag_meta_visible(&meta, true, true));
+    }
+
+    #[test]
+    fn thread_meta_without_parent_is_hidden() {
+        let meta = meta(ChannelType::Thread, None, false);
+        assert!(!hashtag_meta_visible(&meta, true, false));
+    }
+
+    #[test]
+    fn private_thread_meta_with_visible_parent_is_hidden() {
+        let meta = meta(ChannelType::Thread, Some(10), true);
+        assert!(!hashtag_meta_visible(&meta, true, true));
+    }
+
+    #[test]
+    fn channel_meta_in_loaded_clan_is_hidden() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(!hashtag_meta_visible(&meta, true, false));
+    }
+
+    #[test]
+    fn channel_meta_in_unloaded_clan_is_visible() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(hashtag_meta_visible(&meta, false, false));
+    }
+
+    #[test]
+    fn hidden_thread_in_a_joined_clan_asks_the_server() {
+        let meta = meta(ChannelType::Thread, None, false);
+        assert!(thread_link_wants_detail(&meta, true, false));
+    }
+
+    #[test]
+    fn visible_thread_or_foreign_clan_or_channel_does_not_ask_the_server() {
+        let thread = meta(ChannelType::Thread, Some(10), false);
+        assert!(!thread_link_wants_detail(&thread, true, true));
+        assert!(!thread_link_wants_detail(&thread, false, false));
+        let channel = meta(ChannelType::Text, None, false);
+        assert!(!thread_link_wants_detail(&channel, true, false));
     }
 }
 
