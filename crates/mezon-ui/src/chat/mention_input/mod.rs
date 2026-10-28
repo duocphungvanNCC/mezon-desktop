@@ -1442,6 +1442,16 @@ impl MentionInput {
         }
     }
 
+    fn composer_sends_anonymously(&self, cx: &App) -> bool {
+        self.composer_anonymous(cx)
+            && mention_role_clan(cx).is_some_and(|clan_id| {
+                !ClanList::global(cx)
+                    .read(cx)
+                    .clan(clan_id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            })
+    }
+
     fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_menu_open = false;
         if self.composer_anonymous(cx) {
@@ -2442,6 +2452,11 @@ impl MentionInput {
         };
 
         if sigil == Sigil::Slash && at != 0 {
+            self.end_mention(cx);
+            return;
+        }
+
+        if sigil == Sigil::At && self.composer_sends_anonymously(cx) {
             self.end_mention(cx);
             return;
         }
