@@ -72,7 +72,6 @@ struct ApiSession {
     refresh_token: String,
     #[serde(default)]
     id_token: String,
-    #[allow(dead_code)]
     #[serde(default)]
     created: bool,
     #[serde(default)]
@@ -520,6 +519,7 @@ impl MezonClient {
             ws_secure,
             user_id,
             username,
+            username_pending: false,
         }
     }
 
@@ -594,7 +594,65 @@ impl MezonClient {
         let api: ApiSession = self
             .post_json("/v2/account/authenticate/confirmotp", &body)
             .await?;
-        Ok(self.parse_session(api))
+        let created = api.created;
+        let mut session = self.parse_session(api);
+        session.username_pending = created;
+        Ok(session)
+    }
+
+    pub async fn update_username(&self, previous: &Session, username: &str) -> Result<Session> {
+        use prost::Message;
+
+        let api_base = previous
+            .api_url
+            .as_deref()
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.base_url());
+        let url = format!(
+            "{}/mezon.api.Mezon/UpdateUsername",
+            api_base.trim_end_matches('/')
+        );
+        let body = mezon_proto::api::UpdateUsernameRequest {
+            username: username.to_owned(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(&url)
+            .header("Authorization", format!("Bearer {}", previous.token))
+            .header("Content-Type", PROTO_CONTENT_TYPE)
+            .header("Accept", PROTO_CONTENT_TYPE)
+            .body(AsyncBody::from(body))
+            .context("Failed to build update username request")?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .context("Network error updating username")?;
+        observe_date_header(response.headers());
+        let status = response.status();
+
+        const MAX_UPDATE_USERNAME_RESPONSE_BYTES: u64 = 64 * 1024;
+        let mut bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_UPDATE_USERNAME_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("Failed to read update username response")?;
+        if bytes.len() as u64 > MAX_UPDATE_USERNAME_RESPONSE_BYTES {
+            bail!("update username response exceeds {MAX_UPDATE_USERNAME_RESPONSE_BYTES} bytes");
+        }
+        if !status.is_success() {
+            bail!("HTTP {} updating username", status.as_u16());
+        }
+
+        let updated = mezon_proto::api::Session::decode(bytes.as_slice())
+            .context("Failed to decode update username response")?;
+        session_after_username_update(previous, updated, username)
     }
 
     pub async fn create_qr_login(&self) -> Result<QrLoginId> {
@@ -615,6 +673,39 @@ impl MezonClient {
             .await?;
         Ok(self.parse_session(api))
     }
+}
+
+fn session_after_username_update(
+    previous: &Session,
+    updated: mezon_proto::api::Session,
+    chosen_username: &str,
+) -> Result<Session> {
+    if updated.token.is_empty() {
+        bail!("update username response carried no token");
+    }
+    let (claim_user_id, claim_username, expires_at) = decode_jwt_claims(&updated.token);
+    let user_id = if !claim_user_id.is_empty() {
+        claim_user_id
+    } else if updated.user_id != 0 {
+        updated.user_id.to_string()
+    } else {
+        previous.user_id.clone()
+    };
+    let username = if claim_username.is_empty() {
+        chosen_username.to_owned()
+    } else {
+        claim_username
+    };
+    Ok(Session {
+        token: updated.token,
+        refresh_token: updated.refresh_token,
+        is_remember: updated.is_remember,
+        expires_at: expires_at.unwrap_or(0),
+        user_id,
+        username,
+        username_pending: false,
+        ..previous.clone()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -900,5 +991,52 @@ mod tests {
             .expect("a node");
         assert_eq!(endpoint.host, "127.0.0.1");
         assert_eq!(endpoint.port, 4433);
+    }
+
+    fn pending_session() -> Session {
+        Session {
+            token: "old-token".into(),
+            refresh_token: "old-refresh".into(),
+            session_id: "sid".into(),
+            api_url: Some("https://api.example.com".into()),
+            tcp_url: Some("sock.example.com:4433".into()),
+            endpoint_id: 3,
+            user_id: "7".into(),
+            username: "0912345678".into(),
+            username_pending: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn username_update_keeps_endpoint_credentials_and_clears_pending() {
+        let updated = mezon_proto::api::Session {
+            token: "new-token".into(),
+            refresh_token: "new-refresh".into(),
+            is_remember: true,
+            ..Default::default()
+        };
+        let session =
+            session_after_username_update(&pending_session(), updated, "ngoc").expect("session");
+
+        assert_eq!(session.token, "new-token");
+        assert_eq!(session.refresh_token, "new-refresh");
+        assert!(session.is_remember);
+        assert_eq!(session.username, "ngoc");
+        assert_eq!(session.user_id, "7");
+        assert_eq!(session.session_id, "sid");
+        assert_eq!(session.api_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(session.endpoint_id, 3);
+        assert!(!session.username_pending);
+    }
+
+    #[test]
+    fn username_update_without_a_token_is_rejected() {
+        let result = session_after_username_update(
+            &pending_session(),
+            mezon_proto::api::Session::default(),
+            "ngoc",
+        );
+        assert!(result.is_err());
     }
 }

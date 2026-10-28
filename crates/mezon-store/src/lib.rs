@@ -717,8 +717,10 @@ impl gpui::Global for GlobalSettings {}
 /// Which login method is currently shown in the `LoginView`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoginMethod {
-    /// Email OTP — two-step flow (default).
+    /// Phone SMS OTP — two-step flow (default).
     #[default]
+    Sms,
+    /// Email OTP — two-step flow.
     Otp,
     /// Email + password — single-step form.
     Password,
@@ -758,13 +760,14 @@ pub enum AuthState {
     /// No session — show login form.
     #[default]
     NotAuthenticated,
-    /// OTP email was sent; waiting for the user to enter the code.
+    /// OTP was sent; waiting for the user to enter the code.
     OtpRequested {
-        /// Server-issued request ID — required for the confirm-OTP call.
         req_id: String,
-        /// The email address the OTP was sent to.
-        email: String,
+        email: Option<String>,
+        phone: Option<String>,
     },
+    /// A new account signed in by phone must choose a username before the transport connects.
+    UsernameRequired(Session),
     /// OAuth2 browser was opened; waiting for the `mezonapp://callback` deep link.
     /// Kept for future OAuth integration.
     AwaitingCallback,
