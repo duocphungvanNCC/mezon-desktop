@@ -2546,8 +2546,10 @@ impl ChatLayout {
             _ => None,
         };
         if self.voice_session_key != key {
-            self.voice_session_key = key;
-            self.voice_show_chat = false;
+            let previous = std::mem::replace(&mut self.voice_session_key, key);
+            if previous.is_some() {
+                self.voice_show_chat = false;
+            }
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
             self.voice_visual = Default::default();
