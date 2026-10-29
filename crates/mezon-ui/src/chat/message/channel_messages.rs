@@ -1726,6 +1726,7 @@ impl ChannelMessages {
                 | MessagesEvent::AnonymousModeChanged
                 | MessagesEvent::SendFailedWithoutRow
                 | MessagesEvent::SendPermissionDenied
+                | MessagesEvent::AttachmentUploadFailed { .. }
                 | MessagesEvent::OgpRemoveFailed => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
