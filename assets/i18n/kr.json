@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "우리는 멀리 검색했습니다. 불행히도 결과가 없습니다",
   "media.pdf.loadFailed": "PDF 문서를 불러오지 못했습니다",
   "media.pdf.openExternally": "기본 앱에서 열기",
-  "media.pdf.shortcutHint": "단축키 사용: ← → 로 이동",
+  "media.pdf.shortcutHint": "← → 페이지 이동 · ↑ ↓ PgUp PgDn Space 스크롤 · Home End 첫/마지막 페이지",
   "media.pdf.unsupported": "이 시스템에서는 PDF 미리보기를 사용할 수 없습니다",
   "media.video.error.browserNotSupported": "브라우저가 비디오 태그를 지원합니다.",
   "media.video.error.cannotPlay": "비디오 재생 실패",

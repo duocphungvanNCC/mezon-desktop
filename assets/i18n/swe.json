@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "Vi har letat långt. Tyvärr, inga resultat hittades",
   "media.pdf.loadFailed": "Det gick inte att läsa in PDF-dokumentet",
   "media.pdf.openExternally": "Öppna i standardappen",
-  "media.pdf.shortcutHint": "Använd kortkommandon: ← → för att navigera",
+  "media.pdf.shortcutHint": "← → byt sida · ↑ ↓ PgUp PgDn Mellanslag rulla · Home End första/sista sidan",
   "media.pdf.unsupported": "Förhandsgranskning av PDF är inte tillgänglig på det här systemet",
   "media.video.error.browserNotSupported": "Din webbläsare stöder inte video-tagg.",
   "media.video.error.cannotPlay": "Kunde inte spela video",

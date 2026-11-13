@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "Przeszukaliśmy daleko. Niestety, nie znaleziono wyników",
   "media.pdf.loadFailed": "Nie udało się wczytać dokumentu PDF",
   "media.pdf.openExternally": "Otwórz w domyślnej aplikacji",
-  "media.pdf.shortcutHint": "Używaj skrótów klawiszowych: ← → do nawigacji",
+  "media.pdf.shortcutHint": "← → zmiana strony · ↑ ↓ PgUp PgDn Spacja przewijanie · Home End pierwsza/ostatnia strona",
   "media.pdf.unsupported": "Podgląd PDF nie jest dostępny w tym systemie",
   "media.video.error.browserNotSupported": "Twoja przeglądarka nie obsługuje tagu wideo.",
   "media.video.error.cannotPlay": "Nie można odtworzyć wideo",

@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "We hebben ver gezocht. Helaas zijn er geen resultaten gevonden",
   "media.pdf.loadFailed": "PDF-document kon niet worden geladen",
   "media.pdf.openExternally": "Openen in standaardapp",
-  "media.pdf.shortcutHint": "Gebruik sneltoetsen: ← → om te navigeren",
+  "media.pdf.shortcutHint": "← → pagina wisselen · ↑ ↓ PgUp PgDn Spatie scrollen · Home End eerste/laatste pagina",
   "media.pdf.unsupported": "PDF-voorbeeld is niet beschikbaar op dit systeem",
   "media.video.error.browserNotSupported": "Je browser ondersteunt het videobegrip.",
   "media.video.error.cannotPlay": "Video kan niet worden afgespeeld",

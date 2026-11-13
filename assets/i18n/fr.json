@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "Nous avons cherché très loin. Malheureusement, aucun résultat n'a été trouvé",
   "media.pdf.loadFailed": "Impossible de charger le document PDF",
   "media.pdf.openExternally": "Ouvrir dans l'app par défaut",
-  "media.pdf.shortcutHint": "Utilisez les raccourcis clavier : ← → pour naviguer",
+  "media.pdf.shortcutHint": "← → changer de page · ↑ ↓ PgUp PgDn Espace défiler · Début Fin première/dernière page",
   "media.pdf.unsupported": "L'aperçu PDF n'est pas disponible sur ce système",
   "media.video.error.browserNotSupported": "Votre navigateur ne prend pas en charge la balise vidéo.",
   "media.video.error.cannotPlay": "Impossible de lire la vidéo",

@@ -3271,7 +3271,7 @@
   "media.emptyDescription": "We searched far and wide. Unfortunately, no results were found",
   "media.pdf.loadFailed": "Failed to load PDF document",
   "media.pdf.openExternally": "Open in default app",
-  "media.pdf.shortcutHint": "Use keyboard shortcuts: ← → for navigation",
+  "media.pdf.shortcutHint": "← → change page · ↑ ↓ PgUp PgDn Space scroll · Home End first/last page",
   "media.pdf.unsupported": "PDF preview is not available on this system",
   "media.video.error.browserNotSupported": "Your browser does not support the video tag.",
   "media.video.error.cannotPlay": "Video cannot be played",

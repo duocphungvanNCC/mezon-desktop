@@ -3304,7 +3304,7 @@
   "media.emptyDescription": "Hemos buscado a fondo, pero no se encontraron resultados.",
   "media.pdf.loadFailed": "No se pudo cargar el documento PDF",
   "media.pdf.openExternally": "Abrir en la app predeterminada",
-  "media.pdf.shortcutHint": "Usa los atajos de teclado: ← → para navegar",
+  "media.pdf.shortcutHint": "← → cambiar de página · ↑ ↓ RePág AvPág Espacio desplazar · Inicio Fin primera/última página",
   "media.pdf.unsupported": "La vista previa de PDF no está disponible en este sistema",
   "media.video.error.browserNotSupported": "Tu navegador no soporta el reproductor de video",
   "media.video.error.cannotPlay": "El video no se puede reproducir",

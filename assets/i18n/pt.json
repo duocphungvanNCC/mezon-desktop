@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "Procuramos por toda parte. Infelizmente, nenhum resultado foi encontrado",
   "media.pdf.loadFailed": "Não foi possível carregar o documento PDF",
   "media.pdf.openExternally": "Abrir na app predefinida",
-  "media.pdf.shortcutHint": "Usa os atalhos de teclado: ← → para navegar",
+  "media.pdf.shortcutHint": "← → mudar de página · ↑ ↓ PgUp PgDn Espaço rolar · Home End primeira/última página",
   "media.pdf.unsupported": "A pré-visualização de PDF não está disponível neste sistema",
   "media.video.error.browserNotSupported": "Seu navegador não suporta a tag de vídeo.",
   "media.video.error.cannotPlay": "Não foi possível reproduzir o vídeo",

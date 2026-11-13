@@ -3282,7 +3282,7 @@
   "media.emptyDescription": "Без һәр яктан эзләдек. Кызганычка каршы, бернәрсә дә табылмады.",
   "media.pdf.loadFailed": "PDF документын йөкләп булмады",
   "media.pdf.openExternally": "Килешү буенча кушымтада ачу",
-  "media.pdf.shortcutHint": "Кыска юллар: күчү өчен ← →",
+  "media.pdf.shortcutHint": "← → бит алмашу · ↑ ↓ PgUp PgDn Space әйләндерү · Home End беренче/соңгы бит",
   "media.pdf.unsupported": "Бу системада PDF алдан карау мөмкин түгел",
   "media.video.error.browserNotSupported": "Сезнең браузерыгыз video тегын тотымый.",
   "media.video.error.cannotPlay": "Видеоны уйнатып булмый.",

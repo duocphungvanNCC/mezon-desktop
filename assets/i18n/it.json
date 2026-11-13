@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "Abbiamo cercato ovunque, ma purtroppo non sono stati trovati risultati.",
   "media.pdf.loadFailed": "Impossibile caricare il documento PDF",
   "media.pdf.openExternally": "Apri nell'app predefinita",
-  "media.pdf.shortcutHint": "Usa le scorciatoie da tastiera: ← → per navigare",
+  "media.pdf.shortcutHint": "← → cambia pagina · ↑ ↓ PgSu PgGiù Spazio scorri · Home Fine prima/ultima pagina",
   "media.pdf.unsupported": "L'anteprima PDF non è disponibile su questo sistema",
   "media.video.error.browserNotSupported": "Il tuo browser non supporta il tag video.",
   "media.video.error.cannotPlay": "Impossibile riprodurre il video",

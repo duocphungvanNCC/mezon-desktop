@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "Chúng tôi đã tìm kiếm rất xa. Thật không may, không có kết quả được tìm thấy",
   "media.pdf.loadFailed": "Không tải được tài liệu PDF",
   "media.pdf.openExternally": "Mở bằng ứng dụng mặc định",
-  "media.pdf.shortcutHint": "Phím tắt: ← → để chuyển trang",
+  "media.pdf.shortcutHint": "← → chuyển trang · ↑ ↓ PgUp PgDn Space cuộn · Home End trang đầu/cuối",
   "media.pdf.unsupported": "Máy này chưa hỗ trợ xem trước PDF",
   "media.video.error.browserNotSupported": "Trình duyệt của bạn không hỗ trợ thẻ video.",
   "media.video.error.cannotPlay": "Không thể phát video",

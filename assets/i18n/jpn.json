@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "私たちは遠くまで検索しました。残念ながら、結果は見つかりませんでした",
   "media.pdf.loadFailed": "PDF ドキュメントを読み込めませんでした",
   "media.pdf.openExternally": "既定のアプリで開く",
-  "media.pdf.shortcutHint": "キーボードショートカット: ← → で移動できます",
+  "media.pdf.shortcutHint": "← → ページ移動 · ↑ ↓ PgUp PgDn Space スクロール · Home End 最初/最後のページ",
   "media.pdf.unsupported": "このシステムでは PDF プレビューを利用できません",
   "media.video.error.browserNotSupported": "ブラウザはビデオタグをサポートしていません。",
   "media.video.error.cannotPlay": "ビデオを再生できません",

@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "Мы шукалі вельмі далёка. На жаль, вынікаў не знойдзена",
   "media.pdf.loadFailed": "Не ўдалося загрузіць PDF-дакумент",
   "media.pdf.openExternally": "Адкрыць у праграме па змаўчанні",
-  "media.pdf.shortcutHint": "Выкарыстоўвайце гарачыя клавішы: ← → для навігацыі",
+  "media.pdf.shortcutHint": "← → змена старонкі · ↑ ↓ PgUp PgDn Space пракрутка · Home End першая/апошняя старонка",
   "media.pdf.unsupported": "Папярэдні прагляд PDF недаступны ў гэтай сістэме",
   "media.video.error.browserNotSupported": "Ваш браўзер не падтрымлівае тэг відэа.",
   "media.video.error.cannotPlay": "Немагчыма прайграць відэа",

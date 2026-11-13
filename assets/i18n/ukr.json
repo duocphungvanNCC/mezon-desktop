@@ -3273,7 +3273,7 @@
   "media.emptyDescription": "Ми шукали дуже далеко. На жаль, результатів не знайдено",
   "media.pdf.loadFailed": "Не вдалося завантажити PDF-документ",
   "media.pdf.openExternally": "Відкрити у застосунку за умовчанням",
-  "media.pdf.shortcutHint": "Використовуйте гарячі клавіші: ← → для навігації",
+  "media.pdf.shortcutHint": "← → зміна сторінки · ↑ ↓ PgUp PgDn Пробіл прокручування · Home End перша/остання сторінка",
   "media.pdf.unsupported": "Попередній перегляд PDF недоступний у цій системі",
   "media.video.error.browserNotSupported": "Ваш браузер не підтримує тег відео.",
   "media.video.error.cannotPlay": "Неможливо відтворити відео",

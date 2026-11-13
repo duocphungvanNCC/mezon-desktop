@@ -3512,7 +3512,7 @@
   "media.emptyDescription": "Мы искали повсюду. К сожалению, ничего не найдено.",
   "media.pdf.loadFailed": "Не удалось загрузить PDF-документ",
   "media.pdf.openExternally": "Открыть в приложении по умолчанию",
-  "media.pdf.shortcutHint": "Используйте горячие клавиши: ← → для навигации",
+  "media.pdf.shortcutHint": "← → смена страницы · ↑ ↓ PgUp PgDn Пробел прокрутка · Home End первая/последняя страница",
   "media.pdf.unsupported": "Предпросмотр PDF недоступен в этой системе",
   "media.video.error.browserNotSupported": "Ваш браузер не поддерживает тег video.",
   "media.video.error.cannotPlay": "Видео не может быть воспроизведено.",

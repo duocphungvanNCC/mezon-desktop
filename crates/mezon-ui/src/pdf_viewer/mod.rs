@@ -1,10 +1,15 @@
+mod layout;
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::http_client::HttpClient;
 use gpui::{
     App, AppContext, Context, DisplayId, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Render, RenderImage, ScrollHandle, SharedString, Subscription, Task,
-    Window, WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, size,
+    MouseDownEvent, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString,
+    Subscription, Task, Window, WindowBounds, WindowHandle, WindowOptions, div, img, point,
+    prelude::*, px, size,
 };
 use mezon_pdf::{PdfDocument, fit_page_pixels};
 use mezon_store::{Settings, open_media_url_external};
@@ -17,11 +22,16 @@ use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName, Spinner};
 use crate::theme::{ActiveTheme, Theme};
+use layout::{PageLayout, page_aspect};
 
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 3.0;
 const ZOOM_STEP: f32 = 0.2;
 const BASE_PAGE_WIDTH: f32 = 800.0;
+const PAGE_PADDING: f32 = 16.0;
+const PAGE_GAP: f32 = 16.0;
+const PREFETCH_PAGES: usize = 1;
+const KEY_SCROLL_LINES: f32 = 3.0;
 const PDF_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct OpenPdfRequest {
@@ -141,6 +151,60 @@ enum LoadState {
     },
 }
 
+struct RenderedPage {
+    image: Arc<RenderImage>,
+    device_width: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyCommand {
+    Close,
+    PreviousPage,
+    NextPage,
+    FirstPage,
+    LastPage,
+    LineUp,
+    LineDown,
+    ScreenUp,
+    ScreenDown,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+}
+
+fn key_command(key: &str, shift: bool) -> Option<KeyCommand> {
+    let command = match key {
+        "escape" => KeyCommand::Close,
+        "left" => KeyCommand::PreviousPage,
+        "right" => KeyCommand::NextPage,
+        "home" => KeyCommand::FirstPage,
+        "end" => KeyCommand::LastPage,
+        "up" => KeyCommand::LineUp,
+        "down" => KeyCommand::LineDown,
+        "pageup" => KeyCommand::ScreenUp,
+        "pagedown" => KeyCommand::ScreenDown,
+        "space" if shift => KeyCommand::ScreenUp,
+        "space" => KeyCommand::ScreenDown,
+        "+" | "=" => KeyCommand::ZoomIn,
+        "-" => KeyCommand::ZoomOut,
+        "0" => KeyCommand::ZoomReset,
+        _ => return None,
+    };
+    Some(command)
+}
+
+fn retain_range(visible: &Range<usize>, page_count: usize) -> Range<usize> {
+    let end = visible.end.saturating_add(PREFETCH_PAGES).min(page_count);
+    visible.start.saturating_sub(PREFETCH_PAGES).min(end)..end
+}
+
+fn render_order(visible: &Range<usize>, retain: &Range<usize>) -> impl Iterator<Item = usize> {
+    visible
+        .clone()
+        .chain(visible.end..retain.end)
+        .chain((retain.start..visible.start).rev())
+}
+
 pub struct PdfViewer {
     focus_handle: FocusHandle,
     title_bar: Entity<TitleBar>,
@@ -148,19 +212,21 @@ pub struct PdfViewer {
     url: SharedString,
     filename: SharedString,
     document: Option<Arc<PdfDocument>>,
-    page_count: usize,
-    page_index: usize,
+    layout: Option<PageLayout>,
+    current_page: usize,
     zoom: f32,
     state: LoadState,
-    page_image: Option<Arc<RenderImage>>,
-    page_display: gpui::Size<Pixels>,
-    rendered_key: Option<(usize, u32)>,
-    render_in_flight: bool,
+    pages: HashMap<usize, RenderedPage>,
+    failed_pages: HashSet<usize>,
+    render_in_flight: Option<usize>,
     scroll: ScrollHandle,
+    sync_scheduled: bool,
+    follow_scroll_pending: bool,
     closing: bool,
     _load_task: Option<Task<()>>,
     _render_task: Option<Task<()>>,
     _release: Subscription,
+    _window_bounds: Subscription,
 }
 
 impl PdfViewer {
@@ -177,7 +243,10 @@ impl PdfViewer {
             true
         });
         let release = cx.on_release(|viewer, cx| {
-            viewer.clear_page_image(None, cx);
+            viewer.clear_pages(None, cx);
+        });
+        let window_bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.schedule_sync(false, window, cx);
         });
         let title_bar = cx.new(|cx| TitleBar::new(request.settings.clone(), cx));
         let mut this = Self {
@@ -187,19 +256,21 @@ impl PdfViewer {
             url: request.url.clone(),
             filename: request.filename.clone(),
             document: None,
-            page_count: 0,
-            page_index: 0,
+            layout: None,
+            current_page: 0,
             zoom: 1.0,
             state: LoadState::Loading,
-            page_image: None,
-            page_display: size(px(0.), px(0.)),
-            rendered_key: None,
-            render_in_flight: false,
+            pages: HashMap::new(),
+            failed_pages: HashSet::new(),
+            render_in_flight: None,
             scroll: ScrollHandle::new(),
+            sync_scheduled: false,
+            follow_scroll_pending: false,
             closing: false,
             _load_task: None,
             _render_task: None,
             _release: release,
+            _window_bounds: window_bounds,
         };
         this.start_load(window, cx);
         this
@@ -218,13 +289,15 @@ impl PdfViewer {
         self.filename = request.filename;
         self.settings = request.settings;
         self.document = None;
-        self.page_count = 0;
-        self.page_index = 0;
+        self.layout = None;
+        self.current_page = 0;
         self.zoom = 1.0;
-        self.rendered_key = None;
-        self.render_in_flight = false;
+        self.render_in_flight = None;
         self._render_task = None;
-        self.clear_page_image(Some(window), cx);
+        self.failed_pages.clear();
+        self.follow_scroll_pending = false;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.clear_pages(Some(window), cx);
         self.start_load(window, cx);
     }
 
@@ -248,10 +321,16 @@ impl PdfViewer {
             };
             let opened = cx
                 .background_executor()
-                .spawn(async move { PdfDocument::from_bytes(bytes) })
+                .spawn(async move {
+                    let document = PdfDocument::from_bytes(bytes)?;
+                    let aspects = (0..document.page_count())
+                        .map(|index| document.page_size(index).map(|page| page_aspect(&page)))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    anyhow::Ok((document, aspects))
+                })
                 .await;
-            let document = match opened {
-                Ok(document) => Arc::new(document),
+            let (document, aspects) = match opened {
+                Ok((document, aspects)) => (Arc::new(document), aspects),
                 Err(error) => {
                     let reason = error.to_string();
                     tracing::warn!("pdf open failed: {reason}");
@@ -260,10 +339,16 @@ impl PdfViewer {
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.page_count = document.page_count();
+                this.layout = Some(PageLayout::new(
+                    aspects,
+                    BASE_PAGE_WIDTH * this.zoom,
+                    PAGE_PADDING,
+                    PAGE_GAP,
+                ));
                 this.document = Some(document);
                 this.state = LoadState::Ready;
-                this.request_page_render(window, cx);
+                this.sync_pages(window, cx);
+                this.schedule_sync(false, window, cx);
                 cx.notify();
             });
         }));
@@ -281,73 +366,176 @@ impl PdfViewer {
         cx.notify();
     }
 
-    fn request_page_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(document) = self.document.clone() else {
-            return;
-        };
+    fn viewport_height(&self, window: &Window) -> f32 {
+        let height = f32::from(self.scroll.bounds().size.height);
+        if height > 0.0 {
+            height
+        } else {
+            f32::from(window.viewport_size().height)
+        }
+    }
+
+    fn viewport_width(&self, window: &Window) -> f32 {
+        let width = f32::from(self.scroll.bounds().size.width);
+        if width > 0.0 {
+            width
+        } else {
+            f32::from(window.viewport_size().width)
+        }
+    }
+
+    fn scroll_top(&self) -> f32 {
+        (-f32::from(self.scroll.offset().y)).max(0.0)
+    }
+
+    fn scroll_left(&self) -> f32 {
+        (-f32::from(self.scroll.offset().x)).max(0.0)
+    }
+
+    fn set_scroll(&self, left: f32, top: f32) {
+        self.scroll.set_offset(point(px(-left), px(-top)));
+    }
+
+    fn device_page_width(&self, window: &Window) -> u32 {
         let scale_factor = window.scale_factor().max(1.0);
         let logical_width = (BASE_PAGE_WIDTH * self.zoom).max(1.0);
-        let device_width = (logical_width * scale_factor).round().max(1.0) as u32;
-        let key = (self.page_index, device_width);
-        if self.rendered_key == Some(key) || self.render_in_flight {
+        (logical_width * scale_factor).round().max(1.0) as u32
+    }
+
+    fn schedule_sync(&mut self, follow_scroll: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_scroll_pending |= follow_scroll;
+        if self.sync_scheduled {
             return;
         }
-        self.render_in_flight = true;
-        let index = self.page_index;
+        self.sync_scheduled = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.sync_scheduled = false;
+            if std::mem::take(&mut this.follow_scroll_pending) {
+                this.follow_scroll(window, cx);
+            }
+            this.sync_pages(window, cx);
+        });
+    }
+
+    fn follow_scroll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let page = layout.current_page(self.scroll_top(), self.viewport_height(window));
+        if page != self.current_page {
+            self.current_page = page;
+            cx.notify();
+        }
+    }
+
+    fn sync_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        let (Some(document), Some(layout)) = (self.document.clone(), self.layout.as_ref()) else {
+            return;
+        };
+        let page_count = layout.page_count();
+        let visible = layout.visible_range(self.scroll_top(), self.viewport_height(window));
+        let retain = retain_range(&visible, page_count);
+        let evicted: Vec<usize> = self
+            .pages
+            .keys()
+            .copied()
+            .filter(|index| !retain.contains(index))
+            .collect();
+        for index in evicted {
+            if let Some(page) = self.pages.remove(&index) {
+                cx.drop_image(page.image, Some(window));
+            }
+        }
+        if self.render_in_flight.is_some() {
+            return;
+        }
+        let device_width = self.device_page_width(window);
+        let next = render_order(&visible, &retain).find(|index| {
+            !self.failed_pages.contains(index)
+                && self
+                    .pages
+                    .get(index)
+                    .is_none_or(|page| page.device_width != device_width)
+        });
+        if let Some(index) = next {
+            self.rasterize_page(document, index, device_width, window, cx);
+        }
+    }
+
+    fn rasterize_page(
+        &mut self,
+        document: Arc<PdfDocument>,
+        index: usize,
+        device_width: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.render_in_flight = Some(index);
         self._render_task = Some(cx.spawn_in(window, async move |this, cx| {
             let rendered = cx
                 .background_executor()
                 .spawn(async move {
                     let page = document.page_size(index)?;
                     let (width, height) = fit_page_pixels(&page, device_width as f32);
-                    document.render_page(index, width, height)
+                    let bitmap = document.render_page(index, width, height)?;
+                    let (width, height) = (bitmap.width, bitmap.height);
+                    image::RgbaImage::from_raw(width, height, bitmap.bgra).ok_or_else(|| {
+                        anyhow::anyhow!("page bitmap does not fill {width}x{height}")
+                    })
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.render_in_flight = false;
+                this.render_in_flight = None;
                 match rendered {
-                    Ok(bitmap) => {
-                        let Some(buffer) =
-                            image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra)
-                        else {
-                            this.fail(
-                                format!(
-                                    "page bitmap does not fill {}x{}",
-                                    bitmap.width, bitmap.height
-                                ),
-                                cx,
-                            );
-                            return;
-                        };
-                        this.clear_page_image(Some(window), cx);
-                        let aspect = bitmap.height as f32 / bitmap.width.max(1) as f32;
-                        this.page_display =
-                            size(px(logical_width), px((logical_width * aspect).max(1.0)));
-                        this.page_image =
-                            Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
-                        this.rendered_key = Some(key);
-                        cx.notify();
-                        cx.defer_in(window, |this, window, cx| {
-                            this.request_page_render(window, cx);
-                        });
+                    Ok(buffer) => {
+                        let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+                        this.store_page(index, device_width, image, window, cx);
                     }
                     Err(error) => {
-                        tracing::warn!("pdf page render failed: {error}");
-                        this.fail(error.to_string(), cx);
+                        tracing::warn!("pdf page {index} render failed: {error}");
+                        this.failed_pages.insert(index);
+                        cx.notify();
                     }
                 }
+                this.sync_pages(window, cx);
             });
         }));
     }
 
-    fn clear_page_image(&mut self, window: Option<&mut Window>, cx: &mut App) {
-        self.rendered_key = None;
-        let Some(image) = self.page_image.take() else {
+    fn store_page(
+        &mut self,
+        index: usize,
+        device_width: u32,
+        image: Arc<RenderImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
             return;
         };
-        match window {
-            Some(window) => cx.drop_image(image, Some(window)),
-            None => crate::image_cache::queue_atlas_drop(cx, image),
+        let visible = layout.visible_range(self.scroll_top(), self.viewport_height(window));
+        if !retain_range(&visible, layout.page_count()).contains(&index) {
+            return;
+        }
+        let page = RenderedPage {
+            image,
+            device_width,
+        };
+        if let Some(previous) = self.pages.insert(index, page) {
+            cx.drop_image(previous.image, Some(window));
+        }
+        cx.notify();
+    }
+
+    fn clear_pages(&mut self, mut window: Option<&mut Window>, cx: &mut App) {
+        for (_, page) in self.pages.drain() {
+            match window.as_deref_mut() {
+                Some(window) => cx.drop_image(page.image, Some(window)),
+                None => crate::image_cache::queue_atlas_drop(cx, page.image),
+            }
         }
     }
 
@@ -356,11 +544,11 @@ impl PdfViewer {
             return;
         }
         self.closing = true;
-        self.render_in_flight = false;
+        self.render_in_flight = None;
         self._load_task = None;
         self._render_task = None;
         self.document = None;
-        self.clear_page_image(window, cx);
+        self.clear_pages(window, cx);
         crate::image_cache::release_freed_memory_to_os(cx);
     }
 
@@ -371,28 +559,59 @@ impl PdfViewer {
         window.remove_window();
     }
 
+    fn page_count(&self) -> usize {
+        self.layout.as_ref().map_or(0, PageLayout::page_count)
+    }
+
     fn go_to_page(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page_count == 0 {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        if layout.page_count() == 0 {
             return;
         }
-        let index = index.min(self.page_count - 1);
-        if index == self.page_index {
-            return;
-        }
-        self.page_index = index;
-        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
-        self.request_page_render(window, cx);
+        let index = index.min(layout.page_count() - 1);
+        let top = layout.clamp_scroll_top(
+            layout.scroll_top_for_page(index),
+            self.viewport_height(window),
+        );
+        self.current_page = index;
+        self.set_scroll(self.scroll_left(), top);
+        self.sync_pages(window, cx);
         cx.notify();
     }
 
     fn prev_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page_index > 0 {
-            self.go_to_page(self.page_index - 1, window, cx);
+        if self.current_page > 0 {
+            self.go_to_page(self.current_page - 1, window, cx);
         }
     }
 
     fn next_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_to_page(self.page_index + 1, window, cx);
+        if self.current_page + 1 < self.page_count() {
+            self.go_to_page(self.current_page + 1, window, cx);
+        }
+    }
+
+    fn scroll_by(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let viewport_height = self.viewport_height(window);
+        let top = layout.clamp_scroll_top(self.scroll_top() + delta, viewport_height);
+        self.current_page = layout.current_page(top, viewport_height);
+        self.set_scroll(self.scroll_left(), top);
+        self.sync_pages(window, cx);
+        cx.notify();
+    }
+
+    fn line_scroll_step(window: &Window) -> f32 {
+        f32::from(window.line_height()) * KEY_SCROLL_LINES
+    }
+
+    fn screen_scroll_step(&self, window: &Window) -> f32 {
+        let line = f32::from(window.line_height());
+        (self.viewport_height(window) - line).max(line)
     }
 
     fn set_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
@@ -401,7 +620,22 @@ impl PdfViewer {
             return;
         }
         self.zoom = zoom;
-        self.request_page_render(window, cx);
+        let viewport_width = self.viewport_width(window);
+        let viewport_height = self.viewport_height(window);
+        let (scroll_left, scroll_top) = (self.scroll_left(), self.scroll_top());
+        if let Some(layout) = self.layout.as_mut() {
+            let anchor = layout.anchor_at(scroll_top);
+            let previous_width = layout.content_width();
+            layout.set_page_width(BASE_PAGE_WIDTH * zoom);
+            let top =
+                layout.clamp_scroll_top(layout.scroll_top_for_anchor(anchor), viewport_height);
+            let center = (scroll_left + viewport_width / 2.0) * layout.content_width()
+                / previous_width.max(1.0);
+            let max_left = (layout.content_width() - viewport_width).max(0.0);
+            let left = (center - viewport_width / 2.0).clamp(0.0, max_left);
+            self.set_scroll(left, top);
+        }
+        self.sync_pages(window, cx);
         cx.notify();
     }
 
@@ -418,14 +652,25 @@ impl PdfViewer {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_window(window, cx),
-            "left" => self.prev_page(window, cx),
-            "right" => self.next_page(window, cx),
-            "+" | "=" => self.set_zoom(self.zoom + ZOOM_STEP, window, cx),
-            "-" => self.set_zoom(self.zoom - ZOOM_STEP, window, cx),
-            "0" => self.set_zoom(1.0, window, cx),
-            _ => {}
+        let keystroke = &event.keystroke;
+        let Some(command) = key_command(keystroke.key.as_str(), keystroke.modifiers.shift) else {
+            return;
+        };
+        match command {
+            KeyCommand::Close => self.close_window(window, cx),
+            KeyCommand::PreviousPage => self.prev_page(window, cx),
+            KeyCommand::NextPage => self.next_page(window, cx),
+            KeyCommand::FirstPage => self.go_to_page(0, window, cx),
+            KeyCommand::LastPage => {
+                self.go_to_page(self.page_count().saturating_sub(1), window, cx)
+            }
+            KeyCommand::LineUp => self.scroll_by(-Self::line_scroll_step(window), window, cx),
+            KeyCommand::LineDown => self.scroll_by(Self::line_scroll_step(window), window, cx),
+            KeyCommand::ScreenUp => self.scroll_by(-self.screen_scroll_step(window), window, cx),
+            KeyCommand::ScreenDown => self.scroll_by(self.screen_scroll_step(window), window, cx),
+            KeyCommand::ZoomIn => self.set_zoom(self.zoom + ZOOM_STEP, window, cx),
+            KeyCommand::ZoomOut => self.set_zoom(self.zoom - ZOOM_STEP, window, cx),
+            KeyCommand::ZoomReset => self.set_zoom(1.0, window, cx),
         }
     }
 }
@@ -485,7 +730,7 @@ impl Render for PdfViewer {
             })
             .child(self.render_header(&theme, cx))
             .child(self.render_controls(&theme, cx))
-            .child(self.render_page(&theme, &locale, cx))
+            .child(self.render_page(&theme, &locale, window, cx))
             .child(self.render_footer(&theme, &locale))
             .child(window_controls::render_app_drag_header())
             .when(window_controls::is_edge_resizable(), |el| {
@@ -526,14 +771,11 @@ impl PdfViewer {
     }
 
     fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let counter = SharedString::from(format!(
-            "{} / {}",
-            self.page_index + 1,
-            self.page_count.max(1)
-        ));
+        let page_count = self.page_count().max(1);
+        let counter = SharedString::from(format!("{} / {}", self.current_page + 1, page_count));
         let zoom_label = SharedString::from(format!("{}%", (self.zoom * 100.0).round() as i32));
-        let at_first = self.page_index == 0;
-        let at_last = self.page_index + 1 >= self.page_count.max(1);
+        let at_first = self.current_page == 0;
+        let at_last = self.current_page + 1 >= page_count;
 
         div()
             .flex_shrink_0()
@@ -622,7 +864,13 @@ impl PdfViewer {
             )
     }
 
-    fn render_page(&self, theme: &Theme, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_page(
+        &self,
+        theme: &Theme,
+        locale: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let body = match &self.state {
             LoadState::Failed { message, detail } => div()
                 .size_full()
@@ -670,18 +918,8 @@ impl PdfViewer {
                         ),
                 )
                 .into_any_element(),
-            _ => match self.page_image.clone() {
-                Some(image) => div()
-                    .min_w_full()
-                    .flex()
-                    .justify_center()
-                    .p_4()
-                    .child(
-                        img(image)
-                            .w(self.page_display.width)
-                            .h(self.page_display.height),
-                    )
-                    .into_any_element(),
+            _ => match self.layout.as_ref() {
+                Some(layout) => self.render_pages(layout, theme, window).into_any_element(),
                 None => div()
                     .size_full()
                     .flex()
@@ -699,8 +937,69 @@ impl PdfViewer {
             .w_full()
             .overflow_scroll()
             .track_scroll(&self.scroll)
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, window, cx| {
+                this.schedule_sync(true, window, cx);
+            }))
             .bg(theme.bg_tertiary)
             .child(body)
+    }
+
+    fn render_pages(
+        &self,
+        layout: &PageLayout,
+        theme: &Theme,
+        window: &Window,
+    ) -> impl IntoElement {
+        let page_count = layout.page_count();
+        let window_height = f32::from(window.viewport_size().height);
+        let visible = layout.visible_range(self.scroll_top(), window_height);
+        let drawn = retain_range(&visible, page_count);
+        let leading_space = layout.page_top(drawn.start) - layout.padding();
+        let trailing_space = if drawn.end < page_count {
+            layout.content_height() - layout.padding() - layout.page_top(drawn.end)
+        } else {
+            0.0
+        };
+
+        div()
+            .min_w_full()
+            .w(px(layout.content_width()))
+            .flex()
+            .flex_col()
+            .items_center()
+            .p(px(layout.padding()))
+            .when(leading_space > 0.0, |el| {
+                el.child(div().flex_shrink_0().h(px(leading_space)))
+            })
+            .children(drawn.map(|index| {
+                self.render_page_slot(index, layout, theme)
+                    .when(index + 1 < page_count, |el| el.mb(px(layout.gap())))
+            }))
+            .when(trailing_space > 0.0, |el| {
+                el.child(div().flex_shrink_0().h(px(trailing_space)))
+            })
+    }
+
+    fn render_page_slot(&self, index: usize, layout: &PageLayout, theme: &Theme) -> gpui::Div {
+        let width = px(layout.page_width());
+        let height = px(layout.page_height(index));
+        let slot = div()
+            .flex_shrink_0()
+            .w(width)
+            .h(height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.bg_secondary);
+        match self.pages.get(&index) {
+            Some(page) => slot.child(img(page.image.clone()).w(width).h(height)),
+            None if self.failed_pages.contains(&index) => slot.child(
+                Icon::new(IconName::Warning)
+                    .size(px(32.))
+                    .text_color(theme.danger_text),
+            ),
+            None => slot.child(Spinner::new()),
+        }
     }
 
     fn render_footer(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -716,10 +1015,16 @@ impl PdfViewer {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.text_muted)
-            .child(SharedString::from(mezon_i18n::t(
-                locale,
-                "media.pdf.shortcutHint",
-            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(mezon_i18n::t(
+                        locale,
+                        "media.pdf.shortcutHint",
+                    ))),
+            )
     }
 }
 
@@ -738,4 +1043,68 @@ fn tool_button(id: &'static str, icon: IconName, theme: &Theme) -> gpui::Statefu
                 .size(px(18.))
                 .text_color(theme.text_secondary),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_shortcuts_keep_their_meaning() {
+        assert_eq!(key_command("escape", false), Some(KeyCommand::Close));
+        assert_eq!(key_command("left", false), Some(KeyCommand::PreviousPage));
+        assert_eq!(key_command("right", false), Some(KeyCommand::NextPage));
+        assert_eq!(key_command("+", false), Some(KeyCommand::ZoomIn));
+        assert_eq!(key_command("=", false), Some(KeyCommand::ZoomIn));
+        assert_eq!(key_command("-", false), Some(KeyCommand::ZoomOut));
+        assert_eq!(key_command("0", false), Some(KeyCommand::ZoomReset));
+    }
+
+    #[test]
+    fn scroll_and_jump_shortcuts() {
+        assert_eq!(key_command("up", false), Some(KeyCommand::LineUp));
+        assert_eq!(key_command("down", false), Some(KeyCommand::LineDown));
+        assert_eq!(key_command("pageup", false), Some(KeyCommand::ScreenUp));
+        assert_eq!(key_command("pagedown", false), Some(KeyCommand::ScreenDown));
+        assert_eq!(key_command("space", false), Some(KeyCommand::ScreenDown));
+        assert_eq!(key_command("space", true), Some(KeyCommand::ScreenUp));
+        assert_eq!(key_command("home", false), Some(KeyCommand::FirstPage));
+        assert_eq!(key_command("end", false), Some(KeyCommand::LastPage));
+        assert_eq!(key_command("a", false), None);
+    }
+
+    #[test]
+    fn retain_range_adds_prefetch_within_bounds() {
+        assert_eq!(retain_range(&(0..1), 5), 0..1 + PREFETCH_PAGES);
+        assert_eq!(
+            retain_range(&(2..3), 5),
+            2 - PREFETCH_PAGES..3 + PREFETCH_PAGES
+        );
+        assert_eq!(retain_range(&(4..5), 5), 4 - PREFETCH_PAGES..5);
+        assert_eq!(retain_range(&(0..1), 1), 0..1);
+        assert_eq!(retain_range(&(0..0), 0), 0..0);
+    }
+
+    #[test]
+    fn render_order_puts_visible_pages_first() {
+        let visible = 3..5;
+        let retain = 2..6;
+        let order: Vec<usize> = render_order(&visible, &retain).collect();
+        assert_eq!(order, vec![3, 4, 5, 2]);
+    }
+
+    #[test]
+    fn rendered_pages_stay_bounded_while_scrolling_through_document() {
+        let layout = PageLayout::new(vec![1.25; 200], BASE_PAGE_WIDTH, PAGE_PADDING, PAGE_GAP);
+        let viewport = 900.0;
+        let max_top = layout.max_scroll_top(viewport);
+        let mut top = 0.0;
+        while top <= max_top {
+            let visible = layout.visible_range(top, viewport);
+            let retain = retain_range(&visible, layout.page_count());
+            assert!(retain.len() <= visible.len() + 2 * PREFETCH_PAGES);
+            assert!(retain.contains(&layout.current_page(top, viewport)));
+            top += viewport / 3.0;
+        }
+    }
 }

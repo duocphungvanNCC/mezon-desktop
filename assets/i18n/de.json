@@ -3274,7 +3274,7 @@
   "media.emptyDescription": "Wir haben weit und breit gesucht. Leider wurden keine Ergebnisse gefunden.",
   "media.pdf.loadFailed": "PDF-Dokument konnte nicht geladen werden",
   "media.pdf.openExternally": "In Standard-App öffnen",
-  "media.pdf.shortcutHint": "Tastenkürzel verwenden: ← → zum Navigieren",
+  "media.pdf.shortcutHint": "← → Seite wechseln · ↑ ↓ PgUp PgDn Leertaste scrollen · Pos1 Ende erste/letzte Seite",
   "media.pdf.unsupported": "Die PDF-Vorschau ist auf diesem System nicht verfügbar",
   "media.video.error.browserNotSupported": "Dein Browser unterstützt das Video-Tag nicht.",
   "media.video.error.cannotPlay": "Video kann nicht abgespielt werden",
