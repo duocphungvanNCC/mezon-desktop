@@ -1,20 +1,23 @@
 mod attachments;
 mod recorder;
+mod rich_paste;
 mod text_field;
 
 use std::any::Any;
 use std::cell::Cell;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Entity,
-    EventEmitter, Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement,
-    KeyBinding, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Rgba, ScrollStrategy,
-    SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle, Window,
-    actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, ClipboardEntry,
+    ClipboardItem, Context, DismissEvent, Div, Entity, EventEmitter, Focusable, FontWeight,
+    HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, MouseMoveEvent,
+    PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful, StyledText,
+    Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred, div,
+    ease_out_quint, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_grammar::client::{MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
@@ -48,7 +51,6 @@ use crate::chat::member_list::{
 };
 use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
-use crate::chat::message::ShareLocationModal;
 use crate::chat::role_style::role_fallback_color;
 use crate::components::compositions::channel_row::{channel_type_icon, voice_busy_tag};
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
@@ -72,6 +74,7 @@ const RECORDING_COLOR: Rgba = Rgba {
 const MAX_SUGGESTIONS: usize = 10;
 const SLOW_SEARCH_HINT: Duration = Duration::from_secs(1);
 const GRAMMAR_CORRECTION_DEBOUNCE: Duration = Duration::from_millis(200);
+const GRAMMAR_BAR_ENTER: Duration = Duration::from_millis(160);
 const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
@@ -90,6 +93,7 @@ actions!(
     [
         MentionAccept,
         MentionDismiss,
+        PastePlainText,
         ToggleAnonymous,
         OpenMessageBuzz
     ]
@@ -99,6 +103,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-v", PastePlainText, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-v", PastePlainText, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
@@ -123,49 +129,63 @@ pub fn init(cx: &mut App) {
 pub(crate) fn grammar_correction_bar(
     theme: &Theme,
     text: SharedString,
-    cap_top: bool,
     on_apply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id("grammar-correction-bar")
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .w_full()
-        .gap_2()
-        .p_2()
-        .when(cap_top, |bar| bar.rounded_tl_lg().rounded_tr_lg())
-        .bg(theme.tokens.theme_setting_nav)
-        .text_size(px(14.))
-        .child(
-            div()
-                .id("grammar-correction-apply")
-                .flex_1()
-                .min_w_0()
-                .cursor_pointer()
-                .text_color(theme.tokens.text_theme_primary)
-                .child(text)
-                .on_click(on_apply),
-        )
-        .child(
-            div()
-                .id("grammar-correction-close")
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_none()
-                .size_5()
-                .cursor_pointer()
-                .hover(|style| style.opacity(0.7))
-                .on_click(on_dismiss)
-                .child(
-                    Icon::new(IconName::Close)
-                        .size_4()
-                        .text_color(theme.tokens.text_theme_primary),
-                ),
-        )
+    deferred(
+        div()
+            .id("grammar-correction-bar")
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .right_0()
+            .mb_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.tokens.border_primary)
+            .bg(theme.tokens.theme_setting_nav)
+            .shadow_lg()
+            .occlude()
+            .text_size(px(14.))
+            .child(
+                div()
+                    .id("grammar-correction-apply")
+                    .flex_1()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(text)
+                    .on_click(on_apply),
+            )
+            .child(
+                div()
+                    .id("grammar-correction-close")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .size_5()
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.7))
+                    .on_click(on_dismiss)
+                    .child(
+                        Icon::new(IconName::Close)
+                            .size(px(16.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    ),
+            )
+            .with_animation(
+                "grammar-correction-bar-enter",
+                Animation::new(GRAMMAR_BAR_ENTER).with_easing(ease_out_quint()),
+                |bar, delta| bar.opacity(delta),
+            ),
+    )
 }
 
 pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
@@ -950,6 +970,12 @@ fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
     current_input.trim().is_empty() && exceeds_convert_threshold(pasted)
 }
 
+fn paste_file_text<'a>(pasted: &'a str, file_text: Option<&'a str>) -> &'a str {
+    file_text
+        .filter(|plain| !plain.is_empty())
+        .unwrap_or(pasted)
+}
+
 fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'a str {
     let current_len = current.encode_utf16().count();
     if current_len >= cap {
@@ -967,6 +993,179 @@ fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'
         end = i + ch.len_utf8();
     }
     &pasted[..end]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CopiedMention {
+    pub(crate) display: String,
+    pub(crate) user_id: String,
+    pub(crate) role_id: String,
+    pub(crate) at: usize,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CopiedMentions {
+    pub(crate) mezon_mentions: Vec<CopiedMention>,
+}
+
+pub(crate) fn clipboard_item_with_mentions(
+    text: String,
+    mentions: Vec<CopiedMention>,
+) -> ClipboardItem {
+    if mentions.is_empty() {
+        ClipboardItem::new_string(text)
+    } else {
+        ClipboardItem::new_string_with_json_metadata(
+            text,
+            CopiedMentions {
+                mezon_mentions: mentions,
+            },
+        )
+    }
+}
+
+pub(crate) fn copied_mentions(item: &ClipboardItem) -> Vec<CopiedMention> {
+    item.entries()
+        .iter()
+        .find_map(|entry| match entry {
+            ClipboardEntry::String(s) => Some(
+                s.metadata_json::<CopiedMentions>()
+                    .map(|m| m.mezon_mentions)
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn shift_committed_for_paste(
+    committed: &mut Vec<CommittedToken>,
+    replaced: &Range<usize>,
+    inserted_len: usize,
+) {
+    let delta = inserted_len as isize - replaced.len() as isize;
+    committed.retain_mut(|token| {
+        if token.end <= replaced.start {
+            return true;
+        }
+        if token.start < replaced.end {
+            return false;
+        }
+        token.start = token.start.saturating_add_signed(delta);
+        token.end = token.end.saturating_add_signed(delta);
+        true
+    });
+}
+
+fn trigger_is_committed(committed: &[CommittedToken], at: usize) -> bool {
+    committed.iter().any(|token| token.start == at)
+}
+
+fn copied_mention_start(pasted: &str, cursor: usize, mention: &CopiedMention) -> Option<usize> {
+    let at = mention.at;
+    let at_copied_offset = at >= cursor
+        && at
+            .checked_add(mention.display.len())
+            .and_then(|end| pasted.get(at..end))
+            == Some(mention.display.as_str());
+    if at_copied_offset {
+        return Some(at);
+    }
+    pasted
+        .get(cursor..)?
+        .find(&mention.display)
+        .map(|rel| cursor + rel)
+}
+
+fn match_copied_mention<'a>(
+    mention: &CopiedMention,
+    members: impl Iterator<Item = &'a MentionMemberRaw> + Clone,
+    roles: &[Rc<RoleSuggestRaw>],
+    roster_partial: bool,
+) -> Option<(String, TokenKind)> {
+    if mention.user_id == MENTION_HERE_USER_ID {
+        return Some((
+            "@here".to_string(),
+            TokenKind::Mention {
+                user_id: MENTION_HERE_USER_ID.into(),
+                role_id: String::new(),
+            },
+        ));
+    }
+    let name = mention.display.strip_prefix('@')?.to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let kind = if !mention.user_id.is_empty() {
+        let named = |member: &&MentionMemberRaw| {
+            member.username_lc == name || member.display_lc == name || member.alt_lc == name
+        };
+        let member = members
+            .clone()
+            .filter(named)
+            .find(|member| member.user_id == mention.user_id)
+            .or_else(|| members.clone().find(|member| member.username_lc == name))
+            .or_else(|| members.clone().find(named));
+        let user_id = match member {
+            Some(member) => member.user_id.clone(),
+            None if roster_partial
+                && !members
+                    .clone()
+                    .any(|member| member.user_id == mention.user_id) =>
+            {
+                mention.user_id.clone()
+            }
+            None => return None,
+        };
+        TokenKind::Mention {
+            user_id,
+            role_id: String::new(),
+        }
+    } else if !mention.role_id.is_empty() {
+        let role = roles
+            .iter()
+            .filter(|role| role.title_lc == name)
+            .find(|role| role.role_id == mention.role_id)
+            .or_else(|| roles.iter().find(|role| role.title_lc == name))?;
+        TokenKind::Mention {
+            user_id: String::new(),
+            role_id: role.role_id.clone(),
+        }
+    } else {
+        return None;
+    };
+    Some((mention.display.clone(), kind))
+}
+
+fn rebuild_pasted_mentions(
+    pasted: &str,
+    mentions: &[CopiedMention],
+    resolve: impl Fn(&CopiedMention) -> Option<(String, TokenKind)>,
+) -> (String, Vec<(Range<usize>, String, TokenKind)>) {
+    let mut out = String::with_capacity(pasted.len());
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    for mention in mentions {
+        if mention.display.is_empty() {
+            continue;
+        }
+        let Some(match_start) = copied_mention_start(pasted, cursor, mention) else {
+            continue;
+        };
+        let match_end = match_start + mention.display.len();
+        if let Some((resolved_display, kind)) = resolve(mention) {
+            out.push_str(&pasted[cursor..match_start]);
+            let token_start = out.len();
+            out.push_str(&resolved_display);
+            let token_end = out.len();
+            tokens.push((token_start..token_end, resolved_display, kind));
+        } else {
+            out.push_str(&pasted[cursor..match_end]);
+        }
+        cursor = match_end;
+    }
+    out.push_str(&pasted[cursor..]);
+    (out, tokens)
 }
 
 /// The recipient sees this name in chat, so keep it readable; the counter keeps two
@@ -1101,7 +1300,19 @@ impl MentionInput {
                 MentionFieldEvent::PressEnter => this.on_enter(window, cx),
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
-                MentionFieldEvent::Paste(text) => this.on_paste(text.clone(), window, cx),
+                MentionFieldEvent::Paste(text) => {
+                    this.on_paste(text.clone(), Vec::new(), None, window, cx)
+                }
+                MentionFieldEvent::PasteRich { markdown, plain } => this.on_paste(
+                    markdown.clone(),
+                    Vec::new(),
+                    Some(plain.clone()),
+                    window,
+                    cx,
+                ),
+                MentionFieldEvent::PasteWithMentions(text, mentions) => {
+                    this.on_paste(text.clone(), mentions.clone(), None, window, cx)
+                }
                 MentionFieldEvent::PasteImages(images) => {
                     this.on_paste_images(images.clone(), window, cx)
                 }
@@ -1129,10 +1340,17 @@ impl MentionInput {
                 }),
             );
         }
+        if settings.read(cx).grammar_correction_enabled {
+            mezon_grammar::set_download_enabled(true);
+            mezon_grammar::prefetch_all_assets();
+        }
         store_subs.push(cx.observe(&settings, |this, _, cx| {
-            if !this.settings.read(cx).grammar_correction_enabled {
+            let enabled = this.settings.read(cx).grammar_correction_enabled;
+            mezon_grammar::set_download_enabled(enabled);
+            if !enabled {
                 this.clear_grammar_correction(cx);
             } else {
+                mezon_grammar::prefetch_all_assets();
                 let content = this.input.read(cx).value_shared();
                 this.schedule_grammar_correction(content.as_ref(), cx);
             }
@@ -1452,32 +1670,11 @@ impl MentionInput {
             })
     }
 
-    fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.file_menu_open = false;
-        if self.composer_anonymous(cx) {
-            let locale = self.settings.read(cx).language.clone();
-            let message = SharedString::from(mezon_i18n::t(
-                &locale,
-                "common.cannotSendLocationWithAnonymous",
-            ));
-            Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
-            cx.notify();
-            return;
-        }
-        let locale = SharedString::from(self.settings.read(cx).language.clone());
-        let for_topic = self.for_topic;
-        window.defer(cx, move |window, cx| {
-            ShareLocationModal::open(locale, for_topic, window, cx);
-        });
-        cx.notify();
-    }
-
     fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let locale = SharedString::from(self.settings.read(cx).language.clone());
         let show_poll =
             !self.for_topic && MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
-        let show_location = !self.composer_anonymous(cx);
         let text_color = theme.text_muted;
         let text_hover = theme.text_primary;
         let bg_hover = theme.bg_hover;
@@ -1516,47 +1713,17 @@ impl MentionInput {
                         }),
                     )
                     .child(
-                        Icon::new(IconName::SelectFileIcon)
-                            .size_5()
+                        Icon::new(IconName::ImageAdd)
+                            .size(px(20.))
                             .flex_none()
                             .text_color(text_color)
                             .hover(|s| s.text_color(text_hover)),
                     )
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
-        if show_location {
-            menu =
-                menu.child(
-                    div()
-                        .id("file-menu-location")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .px_4()
-                        .py_3()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_color(text_color)
-                        .hover(|s| s.bg(bg_hover).text_color(text_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.open_share_location(window, cx)),
-                        )
-                        .child(
-                            Icon::new(IconName::Location)
-                                .size_5()
-                                .flex_none()
-                                .text_color(text_color)
-                                .hover(|s| s.text_color(text_hover)),
-                        )
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
-                            mezon_i18n::t(&locale, "message.attachments.location").to_string(),
-                        )),
-                );
-        }
         if show_poll {
             menu = menu.child(
                 div()
@@ -1575,10 +1742,11 @@ impl MentionInput {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
                     )
-                    .child(img("icons/check-list-icon.svg").size(px(20.)).flex_none())
+                    .child(Icon::new(IconName::ListCheck).size(px(20.)).flex_none())
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
         }
         menu.into_any_element()
@@ -1643,8 +1811,9 @@ impl MentionInput {
                 (Ok(pending), Some(clipboard))
                     if pending.is_empty() && this.bind_generation == generation =>
                 {
-                    this.input
-                        .update(cx, |input, cx| input.paste_images_or_text(clipboard, cx));
+                    this.input.update(cx, |input, cx| {
+                        input.paste_images_or_text(clipboard, false, cx)
+                    });
                 }
                 (staged, _) => {
                     this.add_staged(generation, staged, window, cx);
@@ -1674,12 +1843,33 @@ impl MentionInput {
         }
     }
 
-    fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn resolve_copied_mention(
+        &self,
+        mention: &CopiedMention,
+        roster_partial: bool,
+    ) -> Option<(String, TokenKind)> {
+        let members = self
+            .session_members
+            .iter()
+            .chain(self.remote_members.iter())
+            .map(Rc::as_ref);
+        match_copied_mention(mention, members, &self.session_roles, roster_partial)
+    }
+
+    fn on_paste(
+        &mut self,
+        text: String,
+        mentions: Vec<CopiedMention>,
+        file_text: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if text.is_empty() {
             return;
         }
         let current = self.input.read(cx).value().to_string();
-        if self.overflow_to_file && should_convert_paste_to_file(&current, &text) {
+        let gate_text = paste_file_text(&text, file_text.as_deref());
+        if self.overflow_to_file && should_convert_paste_to_file(&current, gate_text) {
             if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
                 self.show_anonymous_convert_blocked(cx);
             } else {
@@ -1691,7 +1881,8 @@ impl MentionInput {
                         input.set_value("", window, cx);
                     });
                 }
-                self.convert_text_to_file(text, false, window, cx);
+                let to_write = file_text.filter(|plain| !plain.is_empty()).unwrap_or(text);
+                self.convert_text_to_file(to_write, false, window, cx);
                 return;
             }
         }
@@ -1700,6 +1891,37 @@ impl MentionInput {
             Self::show_paste_truncated(cx);
         }
         if pasted.is_empty() {
+            return;
+        }
+        if !mentions.is_empty() && !self.composer_anonymous(cx) {
+            let scope = mention_scope(cx);
+            if self.pooled[Sigil::At.slot()] != Some(scope) {
+                self.refresh_pool(Sigil::At, cx);
+                self.pooled[Sigil::At.slot()] = (!self.pool_is_empty(Sigil::At)).then_some(scope);
+            }
+            let roster_partial =
+                mention_remote_search_scope(cx).is_some() || self.pool_is_empty(Sigil::At);
+            let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |mention| {
+                self.resolve_copied_mention(mention, roster_partial)
+            });
+            let replaced = self.input.read(cx).insert_range();
+            shift_committed_for_paste(&mut self.committed, &replaced, rebuilt.len());
+            let start = replaced.start;
+            self.input
+                .update(cx, |input, cx| input.insert_text(&rebuilt, window, cx));
+            for (range, display, kind) in tokens {
+                self.committed.push(CommittedToken {
+                    kind,
+                    display,
+                    start: start + range.start,
+                    end: start + range.end,
+                });
+            }
+            self.committed.sort_by_key(|token| (token.start, token.end));
+            self.hide(cx);
+            self.sync_ranges(cx);
+            self.sync_history_payload(cx);
+            cx.notify();
             return;
         }
         self.input
@@ -1974,9 +2196,9 @@ impl MentionInput {
                     .into_any_element()
             } else {
                 let icon = if att.is_video {
-                    IconName::PlayButton
+                    IconName::Play
                 } else {
-                    IconName::FileIcon
+                    IconName::File
                 };
                 div()
                     .size(px(64.))
@@ -2004,7 +2226,7 @@ impl MentionInput {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(Icon::new(IconName::Close).size_3().text_color(muted))
+                        .child(Icon::new(IconName::Close).size(px(16.)).text_color(muted))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.remove_attachment(index, cx)
                         })),
@@ -2094,12 +2316,9 @@ impl MentionInput {
 
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.enter_pending = false;
-        if self.grammar_correction_open && self.grammar_suggestion.is_some() {
-            self.apply_grammar_correction(window, cx);
-            return;
-        }
         let waiting = self.active_at.is_some() && self.remote_searching();
         if self.popup_visible() || waiting {
+            self.clear_grammar_correction(cx);
             if self.active_sigil == Sigil::At && self.active_query.contains(' ') {
                 if self.accept_spaced(window, cx) {
                     return;
@@ -2114,6 +2333,10 @@ impl MentionInput {
                     return;
                 }
             }
+        }
+        if self.grammar_correction_open && self.grammar_suggestion.is_some() {
+            self.apply_grammar_correction(window, cx);
+            return;
         }
         cx.emit(MentionInputEvent::Submit);
     }
@@ -2450,6 +2673,11 @@ impl MentionInput {
             self.end_mention(cx);
             return;
         };
+
+        if trigger_is_committed(&self.committed, at) {
+            self.end_mention(cx);
+            return;
+        }
 
         if sigil == Sigil::Slash && at != 0 {
             self.end_mention(cx);
@@ -3453,6 +3681,10 @@ impl MentionInput {
     }
 
     fn schedule_grammar_correction(&mut self, content: &str, cx: &mut Context<Self>) {
+        if self.active_at.is_some() {
+            self.clear_grammar_correction(cx);
+            return;
+        }
         if !self.settings.read(cx).grammar_correction_enabled {
             self.clear_grammar_correction(cx);
             return;
@@ -3508,7 +3740,9 @@ impl MentionInput {
                 }
                 this._grammar_task = None;
                 this.grammar_suggestion = suggestion.map(SharedString::from);
-                if this.grammar_suggestion.is_none() {
+                if this.grammar_suggestion.is_some() {
+                    this.grammar_correction_open = true;
+                } else {
                     this.grammar_correction_open = false;
                 }
                 cx.notify();
@@ -3589,7 +3823,6 @@ impl MentionInput {
         grammar_correction_bar(
             &theme,
             text,
-            true,
             cx.listener(|this, _, window, cx| {
                 this.apply_grammar_correction(window, cx);
             }),
@@ -3611,14 +3844,32 @@ impl MentionInput {
             cx.propagate();
             return;
         }
-        if self.grammar_correction_open {
+        if self.grammar_correction_open || self.grammar_suggestion.is_some() {
             self.apply_grammar_correction(window, cx);
             return;
         }
-        if self.grammar_suggestion.is_some() {
-            self.grammar_correction_open = true;
-            cx.notify();
-            return;
+        if self.settings.read(cx).grammar_correction_enabled {
+            let content = self.input.read(cx).value_shared();
+            let text = content.as_ref().trim();
+            if !text.is_empty() && text.chars().count() <= MAX_CORRECTION_CHAR_COUNT {
+                let (masked_draft, committed_masks) =
+                    mask_committed_for_grammar(content.as_ref(), &self.committed);
+                let client = MezonGrammarClient::shared();
+                let restored = client.restore_sentence(&masked_draft);
+                let unmasked = unmask_committed_for_grammar(&restored, &committed_masks);
+                if unmasked != content.as_ref().trim() && !unmasked.contains('\u{E010}') {
+                    self.clear_grammar_correction(cx);
+                    let end = self.input.read(cx).value_shared().len();
+                    self.retarget_committed(&unmasked);
+                    self.input.update(cx, |input, cx| {
+                        input.replace_range(0..end, &unmasked, window, cx);
+                    });
+                    self.sync_ranges(cx);
+                    self.sync_history_payload(cx);
+                    cx.notify();
+                    return;
+                }
+            }
         }
         cx.propagate();
     }
@@ -3690,7 +3941,7 @@ impl MentionInput {
                 Suggestion::Role(role) => {
                     display_color = role.color;
                     let leading = if role.icon_src.is_empty() {
-                        Icon::new(IconName::RoleIcon)
+                        Icon::new(IconName::Role)
                             .size(px(20.))
                             .flex_shrink_0()
                             .text_color(role.color)
@@ -4307,9 +4558,9 @@ impl Render for MentionInput {
                             .cursor_pointer()
                             .hover(|s| s.bg(icon_bg_hover))
                             .child(
-                                Icon::new(IconName::AddCircle)
-                                    .size_5()
-                                    .text_color(theme.text_muted)
+                                Icon::new(IconName::PlusCircle)
+                                    .size(px(20.))
+                                    .selected(false)
                                     .hover(|s| s.text_color(icon_hover)),
                             )
                             .on_click(
@@ -4348,13 +4599,13 @@ impl Render for MentionInput {
                         cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
                     )
                     .child(if self.recording.is_some() {
-                        Icon::new(IconName::MicEnable)
-                            .size_5()
+                        Icon::new(IconName::Mic)
+                            .size(px(20.))
                             .text_color(RECORDING_COLOR)
                     } else {
-                        Icon::new(IconName::MicEnable)
-                            .size_5()
-                            .text_color(theme.text_muted)
+                        Icon::new(IconName::Mic)
+                            .size(px(20.))
+                            .selected(false)
                             .hover(|s| s.text_color(icon_hover))
                     }),
             )
@@ -4406,7 +4657,7 @@ impl Render for MentionInput {
                     .child(
                         self.picker_toggle(
                             "emoji-toggle",
-                            IconName::Smile,
+                            IconName::Emoji,
                             toggle_color,
                             icon_bg_hover,
                             icon_hover,
@@ -4556,14 +4807,14 @@ mod channel_suggest_tests {
     #[test]
     fn pool_entry_keeps_the_type_that_picks_the_row_icon() {
         for (channel_type, private, age_restricted, icon) in [
-            (ChannelType::Text, false, 0, IconName::Hashtag),
-            (ChannelType::Text, true, 0, IconName::HashtagLocked),
-            (ChannelType::Text, false, 1, IconName::HashtagWarning),
+            (ChannelType::Text, false, 0, IconName::Channel),
+            (ChannelType::Text, true, 0, IconName::ChannelPrivate),
+            (ChannelType::Text, false, 1, IconName::ChannelWarning),
             (ChannelType::Voice, false, 0, IconName::Speaker),
-            (ChannelType::Voice, true, 0, IconName::SpeakerLocked),
-            (ChannelType::Stream, false, 0, IconName::Stream),
-            (ChannelType::Thread, false, 0, IconName::ThreadIcon),
-            (ChannelType::App, false, 0, IconName::AppChannelIcon),
+            (ChannelType::Voice, true, 0, IconName::SpeakerLock),
+            (ChannelType::Stream, false, 0, IconName::Live),
+            (ChannelType::Thread, false, 0, IconName::Thread),
+            (ChannelType::App, false, 0, IconName::ChannelApp),
         ] {
             let mut ch = channel(channel_type, private);
             ch.age_restricted = age_restricted;
@@ -4591,8 +4842,8 @@ mod channel_suggest_tests {
 mod convert_tests {
     use super::{
         CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
-        content_payload_utf8_len, exceeds_convert_threshold, should_convert_paste_to_file,
-        trim_paste_to_utf16_cap, write_text_as_pending_attachment,
+        content_payload_utf8_len, exceeds_convert_threshold, paste_file_text,
+        should_convert_paste_to_file, trim_paste_to_utf16_cap, write_text_as_pending_attachment,
     };
 
     #[test]
@@ -4677,6 +4928,26 @@ mod convert_tests {
             pasted
         );
     }
+
+    #[test]
+    fn rich_paste_overflow_gate_and_file_text_use_plain_text() {
+        let plain = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
+        let markdown = format!("**{plain}** (https://mezon.vn/docs)");
+        assert!(should_convert_paste_to_file("", &markdown));
+        assert!(!should_convert_paste_to_file(
+            "",
+            paste_file_text(&markdown, Some(&plain))
+        ));
+        assert_eq!(paste_file_text(&markdown, Some(&plain)), plain);
+        assert_eq!(paste_file_text(&markdown, None), markdown);
+
+        let over_plain = format!("{plain}x");
+        assert!(should_convert_paste_to_file(
+            "",
+            paste_file_text(&markdown, Some(&over_plain))
+        ));
+        assert_eq!(paste_file_text(&markdown, Some(&over_plain)), over_plain);
+    }
 }
 
 #[cfg(test)]
@@ -4721,6 +4992,7 @@ mod suggestion_order_tests {
                 display_norm: display.to_uppercase(),
                 username_norm: display.to_uppercase(),
                 alt_norm: String::new(),
+                alt_lc: String::new(),
             }),
             SharedString::default(),
         )
@@ -4760,6 +5032,7 @@ mod suggestion_order_tests {
             display_norm: display.to_lowercase(),
             username_norm: username.to_lowercase(),
             alt_norm: String::new(),
+            alt_lc: String::new(),
         })
     }
 
@@ -4922,6 +5195,505 @@ mod draft_tests {
         assert!(matches!(restored[1].kind, TokenKind::Hashtag { .. }));
         assert!(matches!(restored[2].kind, TokenKind::Emoji { .. }));
     }
+
+    #[test]
+    fn copied_mentions_round_trips_and_returns_empty_for_plain_string() {
+        use super::{CopiedMention, clipboard_item_with_mentions, copied_mentions};
+        use gpui::ClipboardItem;
+
+        let plain = ClipboardItem::new_string("hello".to_string());
+        assert!(copied_mentions(&plain).is_empty());
+
+        let empty_item = clipboard_item_with_mentions("hello".to_string(), Vec::new());
+        assert!(copied_mentions(&empty_item).is_empty());
+
+        let expected = vec![
+            CopiedMention {
+                display: "@alice".to_string(),
+                user_id: "42".to_string(),
+                role_id: String::new(),
+                at: 3,
+            },
+            CopiedMention {
+                display: "@mod".to_string(),
+                user_id: String::new(),
+                role_id: "99".to_string(),
+                at: 14,
+            },
+        ];
+        let item = clipboard_item_with_mentions("hi @alice and @mod".to_string(), expected.clone());
+        assert_eq!(copied_mentions(&item), expected);
+    }
+
+    #[test]
+    fn a_trigger_that_is_already_a_committed_token_opens_no_popup() {
+        use super::{CommittedToken, TokenKind, trigger_is_committed};
+
+        let committed = [CommittedToken {
+            kind: TokenKind::Mention {
+                user_id: "42".to_string(),
+                role_id: String::new(),
+            },
+            display: "@alice".to_string(),
+            start: 3,
+            end: 9,
+        }];
+        assert!(trigger_is_committed(&committed, 3));
+        assert!(!trigger_is_committed(&committed, 10));
+        assert!(!trigger_is_committed(&[], 3));
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_rewrites_display_and_shifts_following_ranges() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@Alice".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+                at: 3,
+            },
+            CopiedMention {
+                display: "@Bob".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+                at: 14,
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("hi @Alice and @Bob!", &mentions, |m| {
+            match m.user_id.as_str() {
+                "1" => Some((
+                    "@Alice (Clan B)".to_string(),
+                    TokenKind::Mention {
+                        user_id: "1".to_string(),
+                        role_id: String::new(),
+                    },
+                )),
+                "2" => Some((
+                    "@Bob".to_string(),
+                    TokenKind::Mention {
+                        user_id: "2".to_string(),
+                        role_id: String::new(),
+                    },
+                )),
+                _ => None,
+            }
+        });
+        assert_eq!(rebuilt, "hi @Alice (Clan B) and @Bob!");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Alice (Clan B)");
+        assert_eq!(&rebuilt[tokens[1].0.clone()], "@Bob");
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_keeps_copied_display_when_user_not_in_pool() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [CopiedMention {
+            display: "@Stranger".to_string(),
+            user_id: "77".to_string(),
+            role_id: String::new(),
+            at: 5,
+        }];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("ping @Stranger", &mentions, |m| {
+            Some((
+                m.display.clone(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "ping @Stranger");
+        assert_eq!(
+            tokens,
+            vec![(
+                5..14,
+                "@Stranger".to_string(),
+                TokenKind::Mention {
+                    user_id: "77".to_string(),
+                    role_id: String::new(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_handles_known_and_unknown_roles() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@OldRole".to_string(),
+                user_id: String::new(),
+                role_id: "missing".to_string(),
+                at: 3,
+            },
+            CopiedMention {
+                display: "@Staff".to_string(),
+                user_id: String::new(),
+                role_id: "r1".to_string(),
+                at: 16,
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("cc @OldRole and @Staff", &mentions, |m| {
+            (m.role_id == "r1").then(|| {
+                (
+                    "@Staff".to_string(),
+                    TokenKind::Mention {
+                        user_id: String::new(),
+                        role_id: "r1".to_string(),
+                    },
+                )
+            })
+        });
+        assert_eq!(rebuilt, "cc @OldRole and @Staff");
+        assert_eq!(
+            tokens,
+            vec![(
+                16..22,
+                "@Staff".to_string(),
+                TokenKind::Mention {
+                    user_id: String::new(),
+                    role_id: "r1".to_string(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_skips_missing_display_and_matches_later_mentions() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@TrimmedOff".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+                at: 99,
+            },
+            CopiedMention {
+                display: "@Kept".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+                at: 6,
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("hello @Kept", &mentions, |m| {
+            Some((
+                m.display.clone(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "hello @Kept");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Kept");
+        assert_eq!(
+            tokens[0].2,
+            TokenKind::Mention {
+                user_id: "2".to_string(),
+                role_id: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_non_ascii_displays_produce_char_boundary_safe_ranges() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@Phạm Quang Trường".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+                at: 6,
+            },
+            CopiedMention {
+                display: "@Nguyễn Văn Ánh".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+                at: 34,
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions(
+            "chào @Phạm Quang Trường và @Nguyễn Văn Ánh nhé",
+            &mentions,
+            |mention| {
+                Some((
+                    if mention.user_id == "1" {
+                        "@Trường PQ".to_string()
+                    } else {
+                        mention.display.clone()
+                    },
+                    TokenKind::Mention {
+                        user_id: mention.user_id.clone(),
+                        role_id: String::new(),
+                    },
+                ))
+            },
+        );
+        assert_eq!(rebuilt, "chào @Trường PQ và @Nguyễn Văn Ánh nhé");
+        assert_eq!(tokens.len(), 2);
+        assert!(rebuilt.is_char_boundary(tokens[0].0.start));
+        assert!(rebuilt.is_char_boundary(tokens[0].0.end));
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Trường PQ");
+        assert!(rebuilt.is_char_boundary(tokens[1].0.start));
+        assert!(rebuilt.is_char_boundary(tokens[1].0.end));
+        assert_eq!(&rebuilt[tokens[1].0.clone()], "@Nguyễn Văn Ánh");
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_binds_at_the_copied_offset_not_an_earlier_match() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let pasted = "see youtube.com/@AnTV, @Anh and @An";
+        let mentions = [CopiedMention {
+            display: "@An".to_string(),
+            user_id: "1".to_string(),
+            role_id: String::new(),
+            at: pasted.rfind("@An").unwrap(),
+        }];
+        let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |m| {
+            Some((
+                "@An Tran".to_string(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "see youtube.com/@AnTV, @Anh and @An Tran");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@An Tran");
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_falls_back_to_search_when_the_offset_moved() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [CopiedMention {
+            display: "@Bob".to_string(),
+            user_id: "2".to_string(),
+            role_id: String::new(),
+            at: 5,
+        }];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("a\nb @Bob", &mentions, |m| {
+            Some((
+                m.display.clone(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "a\nb @Bob");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].0, 4..8);
+    }
+
+    fn pool_member(
+        user_id: &str,
+        display: &str,
+        username: &str,
+        alt: &str,
+    ) -> super::MentionMemberRaw {
+        super::MentionMemberRaw {
+            user_id: user_id.to_string(),
+            display: display.to_string(),
+            username: username.to_string(),
+            avatar_raw: String::new(),
+            display_lc: display.to_lowercase(),
+            username_lc: username.to_lowercase(),
+            display_norm: String::new(),
+            username_norm: String::new(),
+            alt_norm: String::new(),
+            alt_lc: alt.to_lowercase(),
+        }
+    }
+
+    fn pool_role(role_id: &str, title: &str) -> std::rc::Rc<super::RoleSuggestRaw> {
+        std::rc::Rc::new(super::RoleSuggestRaw {
+            role_id: role_id.to_string(),
+            title: title.to_string(),
+            title_lc: title.to_lowercase(),
+            title_norm: String::new(),
+            icon_src: gpui::SharedString::default(),
+            color: super::role_fallback_color(),
+        })
+    }
+
+    fn copied(display: &str, user_id: &str, role_id: &str) -> super::CopiedMention {
+        super::CopiedMention {
+            display: display.to_string(),
+            user_id: user_id.to_string(),
+            role_id: role_id.to_string(),
+            at: 0,
+        }
+    }
+
+    fn matched(
+        mention: &super::CopiedMention,
+        members: &[super::MentionMemberRaw],
+        roles: &[std::rc::Rc<super::RoleSuggestRaw>],
+    ) -> Option<(String, String, String)> {
+        super::match_copied_mention(mention, members.iter(), roles, false).map(|(display, kind)| {
+            match kind {
+                TokenKind::Mention { user_id, role_id } => (display, user_id, role_id),
+                _ => panic!("pasted mentions resolve to mention tokens"),
+            }
+        })
+    }
+
+    #[test]
+    fn a_pasted_user_mention_stays_a_mention_when_its_name_matches_a_member_field() {
+        let members = [pool_member("1", "Alice Nick", "alice", "Alice Nguyen")];
+        for name in ["@Alice Nick", "@alice", "@Alice Nguyen", "@ALICE"] {
+            assert_eq!(
+                matched(&copied(name, "1", ""), &members, &[]),
+                Some((name.to_string(), "1".to_string(), String::new())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_user_mention_becomes_plain_text_when_no_member_has_that_name() {
+        let members = [pool_member("1", "New Nick", "alice", "Alice Nguyen")];
+        assert_eq!(matched(&copied("@Old Nick", "1", ""), &members, &[]), None);
+        assert_eq!(matched(&copied("@Old Nick", "9", ""), &[], &[]), None);
+    }
+
+    #[test]
+    fn a_pasted_user_mention_of_a_non_member_binds_to_the_member_with_that_name() {
+        let members = [
+            pool_member("2", "Bob Builder", "bob", ""),
+            pool_member("3", "bob", "bobby", ""),
+        ];
+        assert_eq!(
+            matched(&copied("@bob", "9", ""), &members, &[]),
+            Some(("@bob".to_string(), "2".to_string(), String::new()))
+        );
+        assert_eq!(
+            matched(&copied("@Bob Builder", "9", ""), &members, &[]),
+            Some(("@Bob Builder".to_string(), "2".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_cut_roster_still_drops_a_loaded_member_whose_name_no_longer_matches() {
+        let members = [pool_member("9", "New Nick", "newnick", "")];
+        assert_eq!(
+            super::match_copied_mention(&copied("@Old Nick", "9", ""), members.iter(), &[], true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clan_whose_roster_is_cut_by_the_server_keeps_an_unknown_user_mention_by_id() {
+        let members = [pool_member("2", "Bob", "bob", "")];
+        assert_eq!(
+            super::match_copied_mention(
+                &copied("@Early Joiner", "9", ""),
+                members.iter(),
+                &[],
+                true
+            ),
+            Some((
+                "@Early Joiner".to_string(),
+                TokenKind::Mention {
+                    user_id: "9".to_string(),
+                    role_id: String::new(),
+                }
+            ))
+        );
+        assert!(
+            super::match_copied_mention(&copied("@Mod", "", "7"), members.iter(), &[], true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_shared_display_name_prefers_the_copied_user() {
+        let members = [
+            pool_member("2", "Minh", "minh.a", ""),
+            pool_member("3", "Minh", "minh.b", ""),
+        ];
+        assert_eq!(
+            matched(&copied("@Minh", "3", ""), &members, &[]),
+            Some(("@Minh".to_string(), "3".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_pasted_role_mention_needs_a_role_with_that_name_here() {
+        let clan_a = [pool_role("7", "Mod")];
+        let clan_b = [pool_role("8", "Dev")];
+        let clan_c = [pool_role("5", "mod"), pool_role("6", "Mod")];
+        assert_eq!(
+            matched(&copied("@Mod", "", "7"), &[], &clan_a),
+            Some(("@Mod".to_string(), String::new(), "7".to_string()))
+        );
+        assert_eq!(matched(&copied("@Mod", "", "7"), &[], &clan_b), None);
+        assert_eq!(
+            matched(&copied("@Mod", "", "7"), &[], &clan_c),
+            Some(("@Mod".to_string(), String::new(), "5".to_string()))
+        );
+        assert_eq!(matched(&copied("@Mod", "", "7"), &[], &[]), None);
+    }
+
+    #[test]
+    fn a_pasted_here_mention_is_kept() {
+        assert_eq!(
+            matched(&copied("@here", super::MENTION_HERE_USER_ID, ""), &[], &[]),
+            Some((
+                "@here".to_string(),
+                super::MENTION_HERE_USER_ID.to_string(),
+                String::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn paste_drops_tokens_it_replaces_and_shifts_the_ones_after() {
+        use super::{CommittedToken, TokenKind, shift_committed_for_paste};
+
+        let token = |display: &str, start: usize| CommittedToken {
+            kind: TokenKind::Mention {
+                user_id: "1".to_string(),
+                role_id: String::new(),
+            },
+            display: display.to_string(),
+            start,
+            end: start + display.len(),
+        };
+        let mut committed = vec![token("@A", 0), token("@B", 5), token("@C", 10)];
+        shift_committed_for_paste(&mut committed, &(5..7), 12);
+        assert_eq!(
+            committed
+                .iter()
+                .map(|t| (t.display.as_str(), t.start, t.end))
+                .collect::<Vec<_>>(),
+            vec![("@A", 0, 2), ("@C", 20, 22)]
+        );
+
+        let mut committed = vec![token("@A", 0), token("@B", 5)];
+        shift_committed_for_paste(&mut committed, &(5..5), 30);
+        assert_eq!(
+            committed
+                .iter()
+                .map(|t| (t.display.as_str(), t.start, t.end))
+                .collect::<Vec<_>>(),
+            vec![("@A", 0, 2), ("@B", 35, 37)]
+        );
+
+        let mut committed = vec![token("@Alice", 0)];
+        shift_committed_for_paste(&mut committed, &(3..3), 4);
+        assert!(committed.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -4981,6 +5753,7 @@ mod mention_trigger_tests {
             display_norm: normalize_search_string(display),
             username_norm: normalize_search_string(username),
             alt_norm: String::new(),
+            alt_lc: String::new(),
         })
     }
 
@@ -5130,6 +5903,76 @@ mod mention_trigger_tests {
     #[test]
     fn a_trailing_separator_is_not_highlighted_as_a_space() {
         assert_eq!(highlight_word_ranges("Timeriel", "timer_"), vec![0..5]);
+    }
+}
+
+#[cfg(test)]
+mod autocomplete_enter_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[gpui::test]
+    fn navigating_emoji_then_enter_beats_a_ready_grammar_correction(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let composer = cx.update(|window, cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            let auth = cx.new(|_| AuthState::NotAuthenticated);
+            BadgeService::init(auth, cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api.clone(), cx);
+            DirectMessageStore::init(api.clone(), cx);
+            ClanMembersStore::init(api.clone(), cx);
+            ChannelMembersStore::init(api.clone(), cx);
+            GroupMembersStore::init(api, cx);
+            let settings = cx.new(|_| Settings::default());
+            cx.new(|cx| MentionInput::new("", settings, window, cx))
+        });
+        composer.update_in(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value(":h", window, cx));
+            composer.active_at = Some(0);
+            composer.active_sigil = Sigil::Colon;
+            composer.active_query = "h".into();
+            composer.query_len = 2;
+            composer.suggestions = [":laugh:", ":ahaha:", ":laughing:"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    Suggestion::Emoji(
+                        Rc::new(EmojiSuggestRaw {
+                            emoji_id: index.to_string(),
+                            shortname: name.into(),
+                            shortname_lc: name.into(),
+                        }),
+                        SharedString::default(),
+                    )
+                })
+                .collect();
+            composer.grammar_suggestion = Some(": h".into());
+            composer.grammar_correction_open = true;
+            composer.on_nav_down(cx);
+            composer.on_nav_down(cx);
+            composer.on_nav_up(cx);
+            assert_eq!(composer.selected, 1);
+            assert_eq!(composer.input.read(cx).value(), ":h");
+            composer.on_enter(window, cx);
+            assert_eq!(composer.input.read(cx).value(), ":ahaha: ");
+            assert_eq!(composer.committed.len(), 1);
+            assert!(!composer.popup_visible());
+            assert!(composer.grammar_suggestion.is_none());
+
+            composer.active_at = Some(0);
+            composer.schedule_grammar_correction(":h", cx);
+            assert!(composer.grammar_suggestion.is_none());
+            assert!(!composer.grammar_correction_open);
+            assert!(composer._grammar_task.is_none());
+        });
     }
 }
 

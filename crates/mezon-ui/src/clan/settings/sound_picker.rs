@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use mezon_audio::{
     AudioPlayer, DecodedPcm, estimated_mono_wav_bytes, process_pcm, process_pcm_to_wav,
 };
 use mezon_store::{
-    ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, Settings, StickerStore, VoiceStore,
-    is_valid_emoticon_shortname, validate_sound_file,
+    BadgeService, ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, PermissionStore, Settings,
+    StickerStore, UserId, VoiceStore, is_valid_emoticon_shortname, validate_sound_file,
 };
 
 use crate::app::shell::Shell;
@@ -194,10 +194,8 @@ impl RenderOnce for WaveformTrimSlider {
                     .w(gpui::relative(1.0 - end))
                     .bg(Hsla::from(cx.theme().bg_primary).opacity(0.62)),
             )
-            .when(!self.disabled, |this| {
-                this.child(self.thumb(start, true, window, cx))
-                    .child(self.thumb(end, false, window, cx))
-            })
+            .child(self.thumb(start, true, window, cx))
+            .child(self.thumb(end, false, window, cx))
             .child({
                 let state = self.state.clone();
                 canvas(
@@ -243,6 +241,47 @@ pub struct SoundEditTarget {
     pub source: String,
 }
 
+pub(super) struct SoundManagementPermissions {
+    current_user_id: Option<UserId>,
+    has_manage_clan: bool,
+}
+
+impl SoundManagementPermissions {
+    pub(super) fn for_clan(clan_id: ClanId, cx: &App) -> Self {
+        Self {
+            current_user_id: BadgeService::global(cx).read(cx).current_user_id(cx),
+            has_manage_clan: PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(clan_id, cx)
+                .has_manage_clan,
+        }
+    }
+
+    pub(super) fn can_manage(&self, creator_id: &str) -> bool {
+        self.has_manage_clan
+            || self.current_user_id.is_some_and(|user_id| {
+                user_id.get() > 0 && creator_id.parse::<UserId>().ok() == Some(user_id)
+            })
+    }
+}
+
+impl SoundEditTarget {
+    pub(super) fn can_manage(&self, clan_id: ClanId, cx: &App) -> bool {
+        let permissions = SoundManagementPermissions::for_clan(clan_id, cx);
+        StickerStore::global(cx)
+            .read(cx)
+            .get_sound(&self.id)
+            .is_some_and(|sound| {
+                sound.clan_id.parse::<ClanId>().ok() == Some(clan_id)
+                    && permissions.can_manage(&sound.creator_id)
+            })
+    }
+
+    fn can_rename(&self, name: &str, can_manage: bool) -> bool {
+        can_manage && is_valid_emoticon_shortname(name) && self.shortname != name
+    }
+}
+
 pub enum SoundPickerEvent {
     Saved,
     Cancelled,
@@ -255,6 +294,7 @@ pub struct SoundPicker {
     focus_handle: FocusHandle,
     name_input: Entity<InputState>,
     picked_path: Option<PathBuf>,
+    convert_to_wav: bool,
     file_label: SharedString,
     preview_url: Option<SharedString>,
     local_pcm: Option<DecodedPcm>,
@@ -269,6 +309,7 @@ pub struct SoundPicker {
     _trim_sub: Subscription,
     _volume_sub: Subscription,
     _voice_observe: Subscription,
+    _permission_observe: Subscription,
     _pick_task: Option<Task<()>>,
     _submit_task: Option<Task<()>>,
     _decode_task: Option<Task<()>>,
@@ -324,6 +365,7 @@ impl SoundPicker {
             .as_ref()
             .map(|e| SharedString::from(e.source.clone()));
         let voice_observe = cx.observe(&VoiceStore::global(cx), |_, _, cx| cx.notify());
+        let permission_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
         let trim_slider = cx.new(|_| TrimRangeState::new());
         let trim_sub = cx.subscribe(&trim_slider, |this, _, _: &TrimRangeEvent, cx| {
             this.stop_local_preview(cx);
@@ -342,13 +384,14 @@ impl SoundPicker {
             }
             cx.notify();
         });
-        Self {
+        let mut picker = Self {
             clan_id,
             editing,
             settings,
             focus_handle: cx.focus_handle(),
             name_input,
             picked_path: None,
+            convert_to_wav: false,
             file_label,
             preview_url,
             local_pcm: None,
@@ -363,14 +406,64 @@ impl SoundPicker {
             _trim_sub: trim_sub,
             _volume_sub: volume_sub,
             _voice_observe: voice_observe,
+            _permission_observe: permission_observe,
             _pick_task: None,
             _submit_task: None,
             _decode_task: None,
             _preview_tick: None,
+        };
+        if picker.editing.is_some() {
+            picker.load_edit_preview(cx);
         }
+        picker
+    }
+
+    fn load_edit_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.preview_url.clone() else {
+            return;
+        };
+        let client = cx.http_client();
+        self.decode_pending = true;
+        self._decode_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let mut response = client.get(url.as_ref(), ().into(), true).await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("sound preview fetch failed: {}", response.status());
+                }
+                let bytes =
+                    crate::image_cache::read_body_limited(&mut response, MAX_SOUND_BYTES as usize)
+                        .await?;
+                cx.background_spawn(async move {
+                    let pcm = mezon_audio::decode_audio(bytes)?;
+                    let peaks = waveform_amplitudes(&pcm);
+                    anyhow::Ok((pcm, peaks))
+                })
+                .await
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.decode_pending = false;
+                match result {
+                    Ok((pcm, peaks)) => {
+                        this.local_pcm = Some(pcm);
+                        this.waveform_peaks = peaks;
+                    }
+                    Err(_) => {
+                        this.decode_failed = true;
+                        tracing::warn!(
+                            "sound edit preview unavailable; renaming remains available"
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn can_preview(&self) -> bool {
+        if self.editing.is_some() {
+            return self.local_pcm.is_some();
+        }
         self.picked_path.is_some() && self.local_pcm.is_some()
             || self
                 .preview_url
@@ -379,7 +472,7 @@ impl SoundPicker {
     }
 
     fn is_previewing(&self, cx: &App) -> bool {
-        if self.picked_path.is_some() {
+        if self.picked_path.is_some() || self.editing.is_some() {
             return self
                 .local_player
                 .as_ref()
@@ -392,7 +485,7 @@ impl SoundPicker {
     }
 
     fn preview_timeline(&self, cx: &App) -> (f64, f64) {
-        if self.picked_path.is_some() {
+        if self.picked_path.is_some() || self.editing.is_some() {
             if let Some(player) = &self.local_player {
                 return (player.position_secs(), player.duration_secs());
             }
@@ -408,9 +501,13 @@ impl SoundPicker {
             .filter(|url| !url.starts_with("file://"))
         {
             let voice = VoiceStore::global(cx).read(cx);
-            return voice
-                .sound_preview_timeline(url)
-                .unwrap_or((0.0, voice.cached_sound_duration(url).unwrap_or(0.0)));
+            return voice.sound_preview_timeline(url).unwrap_or((
+                0.0,
+                self.local_pcm.as_ref().map_or_else(
+                    || voice.cached_sound_duration(url).unwrap_or(0.0),
+                    DecodedPcm::duration_secs,
+                ),
+            ));
         }
         (0.0, 0.0)
     }
@@ -641,11 +738,11 @@ impl SoundPicker {
             return false;
         }
         let name = self.name_input.read(cx).value().trim().to_string();
+        if let Some(editing) = &self.editing {
+            return editing.can_rename(&name, editing.can_manage(self.clan_id, cx));
+        }
         if !is_valid_emoticon_shortname(&name) {
             return false;
-        }
-        if let Some(editing) = &self.editing {
-            return editing.shortname != name;
         }
         if self.picked_path.is_none() || self.decode_pending {
             return false;
@@ -684,10 +781,13 @@ impl SoundPicker {
             let validated = cx
                 .background_spawn(async move { validate_sound_file(&path_buf, MAX_SOUND_BYTES) })
                 .await;
-            if let Err(code) = validated {
-                show_error(cx, sound_error_message(&locale, &code));
-                return;
-            }
+            let convert = match picked_sound_needs_wav(&path, validated) {
+                Ok(convert) => convert,
+                Err(code) => {
+                    show_error(cx, sound_error_message(&locale, &code));
+                    return;
+                }
+            };
             let label = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -697,6 +797,7 @@ impl SoundPicker {
             let default_name = default_voice_shortname();
             let _ = this.update_in(cx, |this, window, cx| {
                 this.picked_path = Some(path.clone());
+                this.convert_to_wav = convert;
                 this.file_label = label.into();
                 this.preview_url = Some(preview.into());
                 this.local_pcm = None;
@@ -724,7 +825,7 @@ impl SoundPicker {
             return;
         }
         VoiceStore::global(cx).update(cx, |store, cx| store.stop_sound_preview(cx));
-        if self.picked_path.is_some() {
+        if self.picked_path.is_some() || self.editing.is_some() {
             self.toggle_local_preview(cx);
             return;
         }
@@ -750,7 +851,8 @@ impl SoundPicker {
             return;
         }
 
-        let needs_processing = self.needs_processing(cx);
+        let needs_processing =
+            self.editing.is_none() && (self.needs_processing(cx) || self.convert_to_wav);
         if needs_processing
             && estimated_mono_wav_bytes(self.selected_duration(cx))
                 .is_none_or(|size| size > MAX_SOUND_BYTES)
@@ -893,6 +995,25 @@ fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
             peak.clamp(0.08, 1.0)
         })
         .collect()
+}
+
+fn picked_sound_needs_wav(path: &Path, validated: Result<(), String>) -> Result<bool, String> {
+    match validated {
+        Ok(()) => Ok(false),
+        Err(code) if code == "unsupported_type" => {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if mezon_store::SOUND_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+                Ok(true)
+            } else {
+                Err(code)
+            }
+        }
+        Err(code) => Err(code),
+    }
 }
 
 fn sound_error_message(locale: &str, code: &str) -> String {
@@ -1048,69 +1169,79 @@ impl Render for SoundPicker {
                                         .when(!can_preview, |el| el.opacity(0.5))
                                         .child(
                                             Icon::new(if previewing {
-                                                IconName::AudioPause
+                                                IconName::Pause
                                             } else {
-                                                IconName::AudioPlay
+                                                IconName::Play
                                             })
                                             .size(px(16.0))
                                             .text_color(gpui::white()),
                                         ),
                                 )
-                                .when(is_edit, |row| {
-                                    row.child(self.render_preview_playbar(previewing, &theme, cx))
-                                })
-                                .when(!is_edit, |row| {
-                                    row.child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .relative()
-                                                    .w_full()
-                                                    .h(px(64.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .child(self.render_waveform(&theme))
-                                                    .child(
-                                                        div()
-                                                            .absolute()
-                                                            .top_0()
-                                                            .right_0()
-                                                            .bottom_0()
-                                                            .left_0()
-                                                            .child(
-                                                                WaveformTrimSlider::new(
-                                                                    &self.trim_slider,
-                                                                )
-                                                                .disabled(!can_preview),
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .w_full()
+                                                .h(px(64.0))
+                                                .flex()
+                                                .items_center()
+                                                .when(
+                                                    is_edit && self.waveform_peaks.is_empty(),
+                                                    |el| {
+                                                        el.child(self.render_preview_playbar(
+                                                            previewing, &theme, cx,
+                                                        ))
+                                                    },
+                                                )
+                                                .when(
+                                                    !is_edit || !self.waveform_peaks.is_empty(),
+                                                    |el| el.child(self.render_waveform(&theme)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_0()
+                                                        .right_0()
+                                                        .bottom_0()
+                                                        .left_0()
+                                                        .child(
+                                                            WaveformTrimSlider::new(
+                                                                &self.trim_slider,
+                                                            )
+                                                            .disabled(
+                                                                is_edit
+                                                                    || self.submitting
+                                                                    || !can_preview,
                                                             ),
-                                                    ),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .w_full()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .text_color(if trim_too_long {
-                                                        theme.danger_text
-                                                    } else {
-                                                        theme.tokens.text_theme_primary
-                                                    })
-                                                    .child(format_mmss(trim_start))
-                                                    .child(if previewing {
-                                                        format!(
-                                                            "{} / {}",
-                                                            format_mmss(preview_position),
-                                                            format_mmss(preview_duration)
-                                                        )
-                                                    } else {
-                                                        format_mmss(trim_end)
-                                                    }),
-                                            ),
-                                    )
-                                }),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .justify_between()
+                                                .text_xs()
+                                                .text_color(if trim_too_long {
+                                                    theme.danger_text
+                                                } else {
+                                                    theme.tokens.text_theme_primary
+                                                })
+                                                .child(format_mmss(trim_start))
+                                                .child(if previewing {
+                                                    format!(
+                                                        "{} / {}",
+                                                        format_mmss(preview_position),
+                                                        format_mmss(preview_duration)
+                                                    )
+                                                } else {
+                                                    format_mmss(trim_end)
+                                                }),
+                                        ),
+                                ),
                         )
                     })
                     .when(!can_preview, |section| {
@@ -1126,14 +1257,14 @@ impl Render for SoundPicker {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::UploadSoundIcon)
+                                    Icon::new(IconName::FileAudio)
                                         .size(px(48.0))
                                         .text_color(theme.tokens.text_theme_primary),
                                 ),
                         )
                     }),
             )
-            .when(can_preview && !is_edit, |root| {
+            .when(can_preview || is_edit, |root| {
                 root.child(
                     v_flex()
                         .gap_1()
@@ -1155,7 +1286,11 @@ impl Render for SoundPicker {
                                         .child(format!("{volume_percent}%")),
                                 ),
                         )
-                        .child(Slider::new(&self.volume_slider).percentage_positioning()),
+                        .child(
+                            Slider::new(&self.volume_slider)
+                                .percentage_positioning()
+                                .disabled(self.submitting),
+                        ),
                 )
             })
             .child(
@@ -1272,6 +1407,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_requires_management_access_and_a_changed_valid_name() {
+        let target = SoundEditTarget {
+            id: "sound-id".into(),
+            shortname: "original".into(),
+            source: "https://example.com/sound.mp3".into(),
+        };
+        assert!(!target.can_rename("renamed", false));
+        assert!(target.can_rename("renamed", true));
+        assert!(!target.can_rename("renamed", false));
+        assert!(!target.can_rename("original", true));
+        for invalid in ["", "a", "   "] {
+            assert!(!target.can_rename(invalid, true));
+        }
+        assert!(!target.can_rename(&"a".repeat(EMOTICON_SHORTNAME_MAX + 1), true));
+        assert!(target.can_rename(&"a".repeat(EMOTICON_SHORTNAME_MAX), true));
+    }
+
+    #[test]
+    fn sound_creator_and_clan_manager_can_manage_sounds() {
+        let mut permissions = SoundManagementPermissions {
+            current_user_id: Some(UserId::new(42)),
+            has_manage_clan: false,
+        };
+        assert!(permissions.can_manage("42"));
+        assert!(!permissions.can_manage("43"));
+        for invalid in ["", "0", "invalid"] {
+            assert!(!permissions.can_manage(invalid));
+        }
+
+        permissions.has_manage_clan = true;
+        assert!(permissions.can_manage("43"));
+        permissions.has_manage_clan = false;
+        assert!(!permissions.can_manage("43"));
+        assert!(permissions.can_manage("42"));
+
+        permissions.current_user_id = Some(UserId::new(43));
+        assert!(!permissions.can_manage("42"));
+        permissions.current_user_id = None;
+        assert!(!permissions.can_manage("43"));
+        permissions.current_user_id = Some(UserId::new(0));
+        assert!(!permissions.can_manage("0"));
+    }
+
+    #[gpui::test]
+    fn forbidden_edit_preview_does_not_require_an_error_modal(cx: &mut gpui::TestAppContext) {
+        let settings = cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            cx.set_http_client(gpui::http_client::FakeHttpClient::create(|_| async {
+                Ok(gpui::http_client::Response::builder()
+                    .status(403)
+                    .body(gpui::http_client::AsyncBody::empty())
+                    .unwrap())
+            }));
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            mezon_store::ClanList::init(api.clone(), cx);
+            mezon_store::ChannelPermissionsStore::init(api.clone(), cx);
+            let auth = cx.new(|_| mezon_store::AuthState::NotAuthenticated);
+            BadgeService::init(auth.clone(), cx);
+            PermissionStore::init(api.clone(), auth, cx);
+            StickerStore::init(api.clone(), cx);
+            VoiceStore::init(api, cx);
+            cx.new(|_| Settings::default())
+        });
+        let target = SoundEditTarget {
+            id: "1".into(),
+            shortname: "original".into(),
+            source: "https://test.example/sound.mp3".into(),
+        };
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            SoundPicker::new(ClanId::new(1), Some(target), settings, window, cx)
+        });
+        cx.run_until_parked();
+        picker.read_with(cx, |picker, _| {
+            assert!(!picker.decode_pending);
+            assert!(picker.decode_failed);
+            assert!(!picker.can_preview());
+            let target = picker.editing.as_ref().unwrap();
+            assert!(target.can_rename("renamed", true));
+            assert_eq!(target.source, "https://test.example/sound.mp3");
+        });
+    }
+
+    #[test]
     fn waveform_peaks_are_cached_at_a_bounded_height() {
         let pcm = DecodedPcm {
             samples: vec![2.0, -3.0, 0.0, 0.5].into(),
@@ -1297,5 +1519,43 @@ mod tests {
         assert_eq!(DEFAULT_VOLUME_PERCENT, 80.0);
         assert_eq!(DEFAULT_VOLUME_PERCENT / UNITY_VOLUME_PERCENT, 0.8);
         assert_eq!(MAX_VOLUME_PERCENT, 100.0);
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_keeps_valid_file_as_is() {
+        assert_eq!(
+            picked_sound_needs_wav(Path::new("a.mp3"), Ok(())),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_converts_allowed_extension_with_unsupported_content() {
+        for name in ["a.mp3", "a.MP3", "a.wav"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new(name), Err("unsupported_type".into())),
+                Ok(true)
+            );
+        }
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_rejects_disallowed_or_missing_extension() {
+        for name in ["a.ogg", "a.m4a", "noext"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new(name), Err("unsupported_type".into())),
+                Err("unsupported_type".into())
+            );
+        }
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_preserves_other_validation_errors() {
+        for code in ["size_limit", "empty"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new("a.mp3"), Err(code.into())),
+                Err(code.into())
+            );
+        }
     }
 }

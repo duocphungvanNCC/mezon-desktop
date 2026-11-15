@@ -4,10 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontWeight, HighlightStyle,
-    Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource, SharedString, Size,
-    StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point, prelude::*, px,
-    relative, rems, rgb, rgba, size,
+    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontStyle, FontWeight,
+    HighlightStyle, Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource,
+    SharedString, Size, StrikethroughStyle, StyledText, TextLayout, UnderlineStyle, canvas, div,
+    fill, img, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanList, Embed, HashtagMeta, LinkKind,
@@ -24,6 +24,7 @@ use super::selection::{
     SelectableRegion, SharedSelection, TextSegment, merge_selection_background,
 };
 use crate::app::shell::Shell;
+use crate::chat::mention_input::CopiedMention;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
 use crate::components::primitives::{CopyButton, Icon, IconName};
 use crate::image_cache::LruImageCache;
@@ -163,7 +164,17 @@ fn render_message_content_with_options(
 
     let has_tokens = msg.spans.iter().any(|s| !matches!(s, MessageSpan::Text(_)));
 
-    if !has_tokens && !msg.is_edited {
+    if !has_tokens {
+        if msg.is_edited {
+            return render_selectable_segmented_content(
+                msg,
+                ctx,
+                body_color,
+                px(EMOJI_SIZE),
+                selection_context,
+                false,
+            );
+        }
         return render_plain_text_spans(msg, ctx, body_color);
     }
 
@@ -207,6 +218,7 @@ fn render_message_content_with_options(
             body_color,
             emoji_size,
             selection_context,
+            false,
         );
     }
     let mut row = rich_content_row(body_color, options.inline);
@@ -338,6 +350,15 @@ pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) ->
             font_weight: Some(FontWeight::BOLD),
             ..Default::default()
         },
+        RichRunKind::Styled(style) => HighlightStyle {
+            font_weight: style.bold.then_some(FontWeight::BOLD),
+            font_style: style.italic.then_some(FontStyle::Italic),
+            strikethrough: style.strike.then_some(StrikethroughStyle {
+                thickness: px(1.),
+                color: None,
+            }),
+            ..Default::default()
+        },
         RichRunKind::Code => HighlightStyle {
             background_color: Some(palette.code_bg),
             ..Default::default()
@@ -400,6 +421,16 @@ fn rich_highlights_with_link_hover(
 }
 
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
+    if msg.is_edited {
+        return render_selectable_segmented_content(
+            msg,
+            ctx,
+            body_color,
+            px(EMOJI_SIZE),
+            None,
+            true,
+        );
+    }
     let Some(layout) = msg.rich_layout.as_ref() else {
         return div().into_any_element();
     };
@@ -413,7 +444,8 @@ pub(crate) fn render_rich_layout(
     body_color: gpui::Rgba,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let palette = RichRunPalette::from_theme(theme);
+    let mut palette = RichRunPalette::from_theme(theme);
+    palette.link = link_color(body_color, theme).into();
     let colors = palette.memo_key(theme.text_muted.into());
     let cached = ctx.row_memo.borrow().rich_text.get(&msg.id).cloned();
     let plan = match cached {
@@ -499,10 +531,25 @@ pub(crate) fn render_rich_layout(
         let clear_message_id = message_id;
         let hover_epoch = row_memo.borrow().rich_link_hover_epoch;
         let itext_id = (msg.row_anchor_id.0 as u64) << 32 | u64::from(hover_epoch);
+        let menu_layout = styled.layout().clone();
+        let menu_ranges = plan.click_ranges.clone();
+        let menu_actions = plan.actions.clone();
+        let menu_host = ctx.video_host.clone();
         div()
             .id(("msg-link-hover", msg.row_anchor_id.0 as usize))
             .max_w_full()
             .min_w_0()
+            .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {
+                let Some(Ok(index)) = menu_layout.try_index_for_position(event.position) else {
+                    return;
+                };
+                let Some(url) = rich_link_at(&menu_ranges, &menu_actions, index) else {
+                    return;
+                };
+                let _ = menu_host.update(cx, |this, _| {
+                    this.note_context_link(message_id, event.position, url.to_string());
+                });
+            })
             .on_hover(move |hovered, _, cx| {
                 if *hovered {
                     return;
@@ -624,6 +671,7 @@ fn render_selectable_segmented_content(
     body_color: gpui::Rgba,
     emoji_size: Pixels,
     selection_context: Option<&SelectableTextContext>,
+    rich_style: bool,
 ) -> AnyElement {
     let selection_layout = selection_context
         .is_none()
@@ -644,6 +692,7 @@ fn render_selectable_segmented_content(
         msg.is_edited,
         selection_context,
         false,
+        rich_style,
     )
 }
 
@@ -659,6 +708,7 @@ fn render_selectable_segmented_spans(
     show_edited: bool,
     selection_context: Option<&SelectableTextContext>,
     block_layout: bool,
+    rich_style: bool,
 ) -> AnyElement {
     let selected = selection_context.map_or_else(
         || ctx.selection.borrow().range_for_message(msg.id, canonical),
@@ -787,20 +837,62 @@ fn render_selectable_segmented_spans(
                     role_id.as_deref(),
                     ctx,
                     styled,
+                    rich_style,
                 ));
                 base = end;
             }
             MessageSpan::Bold(text) => {
                 let end = base + text.len();
-                let styled = selectable_segment(text, base, selected.as_ref());
-                segments.push(TextSegment::text(styled.layout().clone(), base..end));
-                row = row.child(
-                    div()
-                        .max_w_full()
-                        .min_w_0()
-                        .font_weight(FontWeight::BOLD)
-                        .child(styled),
-                );
+                for piece in memoized_selectable_text_pieces(text, ctx).iter() {
+                    match piece {
+                        CachedSelectableTextPiece::LineBreak => {
+                            row = row.child(div().w_full().h_0())
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            row = row.child(div().w_full().child(SharedString::default()))
+                        }
+                        CachedSelectableTextPiece::Text { text, range } => {
+                            let start = base + range.start;
+                            let styled =
+                                selectable_segment_shared(text.clone(), start, selected.as_ref());
+                            segments.push(TextSegment::text(
+                                styled.layout().clone(),
+                                start..start + text.len(),
+                            ));
+                            row = row.child(div().font_weight(FontWeight::BOLD).child(styled));
+                        }
+                    }
+                }
+                base = end;
+            }
+            MessageSpan::Styled { text, style } => {
+                let end = base + text.len();
+                for piece in memoized_selectable_text_pieces(text, ctx).iter() {
+                    match piece {
+                        CachedSelectableTextPiece::LineBreak => {
+                            row = row.child(div().w_full().h_0())
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            row = row.child(div().w_full().child(SharedString::default()))
+                        }
+                        CachedSelectableTextPiece::Text { text, range } => {
+                            let start = base + range.start;
+                            let styled =
+                                selectable_segment_shared(text.clone(), start, selected.as_ref());
+                            segments.push(TextSegment::text(
+                                styled.layout().clone(),
+                                start..start + text.len(),
+                            ));
+                            row = row.child(
+                                div()
+                                    .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                                    .when(style.italic, |d| d.italic())
+                                    .when(style.strike, |d| d.line_through())
+                                    .child(styled),
+                            );
+                        }
+                    }
+                }
                 base = end;
             }
             MessageSpan::Code(text) => {
@@ -841,7 +933,18 @@ fn render_selectable_segmented_spans(
                 base = end;
             }
             MessageSpan::Link { text, url, kind } if *kind == LinkKind::Plain => {
-                let resolved = resolve_link_url(url, text);
+                let resolved = SharedString::from(resolve_link_url(url, text));
+                let link_range = base..base + text.len();
+                let link_hovered = ctx
+                    .row_memo
+                    .borrow()
+                    .hovered_rich_link
+                    .as_ref()
+                    .is_some_and(|(id, range)| {
+                        *id == msg.id
+                            && range.start >= link_range.start
+                            && range.end <= link_range.end
+                    });
                 let mut line_base = 0usize;
                 for (line_index, line) in text.split('\n').enumerate() {
                     if line_index > 0 {
@@ -857,14 +960,40 @@ fn render_selectable_segmented_spans(
                         let target = resolved.clone();
                         let link_key = link_part_index;
                         link_part_index += 1;
+                        let row_memo = ctx.row_memo.clone();
+                        let hover_host = ctx.video_host.clone();
+                        let message_id = msg.id;
                         row = row.child(
                             div()
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
-                                .text_color(ctx.theme.tokens.mention_color)
+                                .text_color(link_color(body_color, ctx.theme))
+                                .when(rich_style && link_hovered, |link| link.underline())
+                                .when(rich_style, |link| {
+                                    link.on_hover(move |hovered, _, cx| {
+                                        let part = (message_id, start..end);
+                                        let mut memo = row_memo.borrow_mut();
+                                        if *hovered {
+                                            if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                                return;
+                                            }
+                                            memo.hovered_rich_link = Some(part);
+                                        } else if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                            memo.hovered_rich_link = None;
+                                        } else {
+                                            return;
+                                        }
+                                        drop(memo);
+                                        let _ = hover_host.update(cx, |_, cx| cx.notify());
+                                    })
+                                })
+                                .on_mouse_down(
+                                    gpui::MouseButton::Right,
+                                    note_context_link(ctx, msg.id, resolved.clone()),
+                                )
                                 .on_click(move |_, _, cx| {
                                     if !selection.borrow().has_selection() {
-                                        open_message_link(target.clone(), cx);
+                                        open_message_link(target.to_string(), cx);
                                     }
                                 })
                                 .child(styled),
@@ -883,7 +1012,7 @@ fn render_selectable_segmented_spans(
                     .min_w_0()
                     .w_full()
                     .text_size(px(14.))
-                    .text_color(ctx.theme.tokens.mention_color)
+                    .text_color(link_color(body_color, ctx.theme))
                     .cursor(gpui::CursorStyle::IBeam);
                 let mut line_base = 0usize;
                 for line in text.split('\n') {
@@ -922,7 +1051,8 @@ fn render_selectable_segmented_spans(
                     .map(|poster| (poster, ctx.social_cache.clone()));
                 row = row.child(render_social_link_card(
                     *kind,
-                    &ctx.selection,
+                    ctx,
+                    Some(msg.id),
                     resolved,
                     card_key,
                     url_col,
@@ -990,7 +1120,7 @@ fn render_selectable_segmented_spans(
         }
     }
     if show_edited {
-        row = row.child(edited_marker(ctx.theme, ctx.locale));
+        row = row.child(div().ml(px(4.)).child(edited_marker(ctx.theme, ctx.locale)));
     }
     drop(context_segments);
     if let Some(segments) = owned_segments {
@@ -1022,6 +1152,7 @@ pub(crate) fn render_selectable_embed_description(
         false,
         Some(selection_context),
         true,
+        false,
     )
 }
 
@@ -1148,18 +1279,42 @@ impl SelectableSectionCursor {
     }
 }
 
-pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &App) -> String {
+fn selectable_spans_walk(
+    spans: &[MessageSpan],
+    locale: &str,
+    cx: &App,
+    mut mentions: Option<&mut Vec<(Range<usize>, CopiedMention)>>,
+) -> String {
     let mut text = String::new();
     for span in spans {
         match span {
-            MessageSpan::Text(value) | MessageSpan::Bold(value) | MessageSpan::Code(value) => {
-                text.push_str(value)
-            }
+            MessageSpan::Text(value)
+            | MessageSpan::Bold(value)
+            | MessageSpan::Styled { text: value, .. }
+            | MessageSpan::Code(value) => text.push_str(value),
             MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
-            | MessageSpan::Mention { display: value, .. }
             | MessageSpan::Emoji { name: value, .. }
             | MessageSpan::Heading { text: value, .. } => text.push_str(value),
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => {
+                let start = text.len();
+                text.push_str(display);
+                if let Some(out) = mentions.as_deref_mut() {
+                    out.push((
+                        start..text.len(),
+                        CopiedMention {
+                            display: display.to_string(),
+                            user_id: user_id.clone().unwrap_or_default(),
+                            role_id: role_id.clone().unwrap_or_default(),
+                            at: start,
+                        },
+                    ));
+                }
+            }
             MessageSpan::Hashtag {
                 display,
                 channel_id,
@@ -1175,6 +1330,20 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &App) -> String {
+    selectable_spans_walk(spans, locale, cx, None)
+}
+
+pub(crate) fn selectable_spans_mentions(
+    spans: &[MessageSpan],
+    locale: &str,
+    cx: &App,
+) -> Vec<(Range<usize>, CopiedMention)> {
+    let mut mentions = Vec::new();
+    let _ = selectable_spans_walk(spans, locale, cx, Some(&mut mentions));
+    mentions
 }
 
 pub(crate) fn code_block_copy_overlay(
@@ -1422,6 +1591,12 @@ pub(crate) fn selectable_message_layout(
         super::token_transaction_card::selectable_token_transaction_text(msg)
     } else if let Some(poll) = msg.poll.as_ref() {
         super::poll_card::selectable_poll_text(poll)
+    } else if msg.shows_location_card() {
+        super::location_card::selectable_location_text(
+            msg,
+            msg.sender_id.as_str() == current_user_id,
+            locale,
+        )
     } else if matches!(
         msg.code,
         MessageCode::CreatePin | MessageCode::CreateThread | MessageCode::DeleteThread
@@ -1437,17 +1612,20 @@ pub(crate) fn selectable_message_layout(
 
     let mut text = String::new();
     let primary = append_layout_section(&mut text, &primary_text);
-    let invite =
-        if msg.call_log.is_none() && msg.code != MessageCode::SendToken && msg.poll.is_none() {
-            msg.invite.as_deref().and_then(|invite| {
-                append_layout_section(
-                    &mut text,
-                    &super::invite_card::selectable_invite_text(invite, locale),
-                )
-            })
-        } else {
-            None
-        };
+    let invite = if msg.call_log.is_none()
+        && !msg.shows_location_card()
+        && msg.code != MessageCode::SendToken
+        && msg.poll.is_none()
+    {
+        msg.invite.as_deref().and_then(|invite| {
+            append_layout_section(
+                &mut text,
+                &super::invite_card::selectable_invite_text(invite, locale),
+            )
+        })
+    } else {
+        None
+    };
     let ogp = msg.ogp.as_deref().and_then(|ogp| {
         append_layout_section(&mut text, &super::ogp_embed::selectable_ogp_text(ogp))
     });
@@ -1719,6 +1897,14 @@ fn is_inline_span(span: &MessageSpan) -> bool {
     }
 }
 
+fn link_color(body_color: gpui::Rgba, theme: &Theme) -> gpui::Rgba {
+    if body_color == rgb(BUZZ_RED) {
+        body_color
+    } else {
+        theme.tokens.mention_color
+    }
+}
+
 fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1773,6 +1959,7 @@ pub fn append_selectable_system_mention_spans(
                 role_id.as_deref(),
                 ctx,
                 selection_context.text_node(display, range),
+                false,
             ));
         }
     }
@@ -1812,6 +1999,16 @@ fn append_span(
                 .text_color(body_color)
                 .child(text.clone()),
         ),
+        MessageSpan::Styled { text, style } => row.child(
+            div()
+                .max_w_full()
+                .min_w_0()
+                .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                .when(style.italic, |d| d.italic())
+                .when(style.strike, |d| d.line_through())
+                .text_color(body_color)
+                .child(text.clone()),
+        ),
         MessageSpan::Code(text) => row.child(inline_code_chip(theme).child(text.clone())),
         MessageSpan::CodeBlock { text, .. } => row.child(
             div()
@@ -1833,7 +2030,8 @@ fn append_span(
             *span_key += 1;
             row.child(render_social_link_card(
                 *kind,
-                &ctx.selection,
+                ctx,
+                None,
                 SharedString::from(resolve_link_url(url, text)),
                 key,
                 render_social_link_url_row(text, theme),
@@ -1846,7 +2044,7 @@ fn append_span(
             row.child(message_link_element(
                 text,
                 &resolve_link_url(url, text),
-                theme.tokens.mention_color,
+                link_color(body_color, theme),
                 ctx.selection.clone(),
                 key,
             ))
@@ -1967,8 +2165,8 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
                 .text_color(rgb(CANVAS_HOVER_TEXT))
         })
         .child(
-            Icon::new(IconName::CanvasIcon)
-                .size_4()
+            Icon::new(IconName::Canvas)
+                .size(px(16.))
                 .text_color(rgb(CANVAS_TEXT)),
         )
         .child(div().min_w_0().child(title))
@@ -2065,7 +2263,7 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
                             a: 0.5,
                         })
                         .child(
-                            Icon::new(IconName::PlayButton)
+                            Icon::new(IconName::Play)
                                 .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
@@ -2087,7 +2285,8 @@ fn social_card_launch_url(url: &str, cx: &gpui::App) -> String {
 
 fn render_social_link_card(
     kind: LinkKind,
-    selection: &SharedSelection,
+    ctx: &RowCtx,
+    message_id: Option<MessageId>,
     resolved: SharedString,
     // Keyed by position, not by url: the same social link twice in one message would otherwise
     // hash to one id and the two cards would share their interactive state.
@@ -2102,7 +2301,7 @@ fn render_social_link_card(
         LinkKind::Plain => return gpui::Empty.into_any_element(),
     };
     let id = ("msg-social", key);
-    let selection = selection.clone();
+    let selection = ctx.selection.clone();
     let card_width = poster.as_ref().map_or(SOCIAL_CARD_WIDTH, |(poster, _)| {
         (poster.width + SOCIAL_CARD_PADDING * 2.).max(SOCIAL_CARD_WIDTH)
     });
@@ -2129,6 +2328,12 @@ fn render_social_link_card(
                 .bg(rgb(SOCIAL_CARD_BG))
                 .overflow_hidden()
                 .cursor_pointer()
+                .when_some(message_id, |card, message_id| {
+                    card.on_mouse_down(
+                        gpui::MouseButton::Right,
+                        note_context_link(ctx, message_id, resolved.clone()),
+                    )
+                })
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
                         PlatformStore::open_app_window(social_card_launch_url(&resolved, cx), cx);
@@ -2249,7 +2454,7 @@ fn render_mention_chip(
     role_id: Option<&str>,
     ctx: &RowCtx,
 ) -> AnyElement {
-    render_mention_chip_with_child(user_id, role_id, ctx, display.into())
+    render_mention_chip_with_child(user_id, role_id, ctx, display.into(), false)
 }
 
 fn render_mention_chip_with_child(
@@ -2257,6 +2462,7 @@ fn render_mention_chip_with_child(
     role_id: Option<&str>,
     ctx: &RowCtx,
     child: impl IntoElement,
+    rich_style: bool,
 ) -> AnyElement {
     let theme = ctx.theme;
     let is_role = role_id.is_some_and(|r| !r.is_empty());
@@ -2279,12 +2485,14 @@ fn render_mention_chip_with_child(
     let chip = div()
         .max_w_full()
         .min_w_0()
-        .px(px(1.))
-        .rounded_sm()
-        .font_weight(FontWeight::MEDIUM)
         .bg(bg)
         .text_color(color)
-        .hover(move |s| s.bg(hover_bg).text_color(hover_color))
+        .when(!rich_style, |chip| {
+            chip.px(px(1.))
+                .rounded_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .hover(move |s| s.bg(hover_bg).text_color(hover_color))
+        })
         .child(child);
 
     if is_role {
@@ -2416,20 +2624,25 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_meta_visible(meta: &HashtagMeta, clan_loaded: bool, parent_visible: bool) -> bool {
+fn hashtag_meta_visible(
+    meta: &HashtagMeta,
+    in_clan: bool,
+    clan_loaded: bool,
+    parent_visible: bool,
+) -> bool {
     if meta.channel_type == ChannelType::Thread {
-        parent_visible && !meta.private
+        in_clan && parent_visible && !meta.private
     } else {
-        !clan_loaded
+        in_clan && !clan_loaded
     }
 }
 
-fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta) -> bool {
+fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta, in_clan: bool) -> bool {
     let clan_loaded = store.is_clan_cache_loaded(meta.clan_id);
     let parent_visible = meta
         .parent_id
         .is_some_and(|parent| store.linkable_channel(parent).is_some());
-    hashtag_meta_visible(meta, clan_loaded, parent_visible)
+    hashtag_meta_visible(meta, in_clan, clan_loaded, parent_visible)
 }
 
 fn thread_link_wants_detail(meta: &HashtagMeta, in_clan: bool, meta_visible: bool) -> bool {
@@ -2444,19 +2657,76 @@ pub(super) fn hashtag_chip(
     cx: &App,
 ) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let resolved = parsed_channel
-        .and_then(|cid| hashtag_channel(cid, cx))
-        .or_else(|| {
-            let meta = meta?;
+    let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
+    let (in_clan, meta_visible) = match meta {
+        Some(meta) if resolved.is_none() => {
             let store = ChannelList::global(cx).read(cx);
-            hashtag_meta_visible_in(store, meta).then(|| ResolvedHashtag {
-                name: Some(meta.label.clone()),
-                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
-            })
-        });
+            let in_clan = ClanList::global(cx).read(cx).clan(meta.clan_id).is_some();
+            (in_clan, hashtag_meta_visible_in(store, meta, in_clan))
+        }
+        _ => (false, false),
+    };
+    hashtag_chip_from_meta(
+        display,
+        parsed_channel,
+        resolved,
+        meta,
+        in_clan,
+        meta_visible,
+        locale,
+    )
+}
+
+fn hashtag_chip_from_meta(
+    display: &str,
+    parsed_channel: Option<ChannelId>,
+    resolved: Option<ResolvedHashtag>,
+    meta: Option<&HashtagMeta>,
+    in_clan: bool,
+    meta_visible: bool,
+    locale: &str,
+) -> HashtagChip {
+    let resolved = resolved.or_else(|| {
+        let meta = meta?;
+        meta_visible.then(|| ResolvedHashtag {
+            name: Some(meta.label.clone()),
+            icon: mention_channel_icon(meta.channel_type, meta.private, 0),
+        })
+    });
+    if resolved.is_none()
+        && let (Some(parsed), Some(meta)) = (parsed_channel, meta)
+        && thread_link_wants_detail(meta, in_clan, meta_visible)
+    {
+        return private_channel_chip(Some(parsed), Some(meta.clan_id), locale);
+    }
     let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);
     chip.clan_hint = meta.map(|meta| meta.clan_id);
     chip
+}
+
+pub(crate) fn hidden_hashtag_label(
+    display: &str,
+    channel_id: Option<&str>,
+    meta: Option<&HashtagMeta>,
+    locale: &str,
+    cx: &App,
+) -> Option<SharedString> {
+    let chip = hashtag_chip(display, channel_id, meta, locale, cx);
+    matches!(chip.icon, IconName::Lock).then_some(chip.label)
+}
+
+fn private_channel_chip(
+    channel_id: Option<ChannelId>,
+    clan_hint: Option<ClanId>,
+    locale: &str,
+) -> HashtagChip {
+    HashtagChip {
+        label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
+        icon: IconName::Lock,
+        italic: false,
+        channel_id,
+        clan_hint,
+    }
 }
 
 fn hashtag_chip_for(
@@ -2479,24 +2749,18 @@ fn hashtag_chip_for(
     if display.starts_with("http://") || display.starts_with("https://") {
         return HashtagChip {
             label: SharedString::new_static(mezon_i18n::t(locale, "message.unknown")),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
             italic: true,
             channel_id: None,
             clan_hint: None,
         };
     }
     if parsed_channel.is_some() {
-        return HashtagChip {
-            label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
-            icon: IconName::LockedPrivate,
-            italic: false,
-            channel_id: None,
-            clan_hint: None,
-        };
+        return private_channel_chip(None, None, locale);
     }
     HashtagChip {
         label: hashtag_display_label(display),
-        icon: IconName::Hashtag,
+        icon: IconName::Channel,
         italic: false,
         channel_id: None,
         clan_hint: None,
@@ -2691,34 +2955,34 @@ fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
 
 fn mention_channel_icon(kind: ChannelType, private: bool, age_restricted: i32) -> IconName {
     match kind {
-        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::ChannelWarning,
         ChannelType::Voice => {
             if private {
-                IconName::SpeakerLocked
+                IconName::SpeakerLock
             } else {
                 IconName::Speaker
             }
         }
-        ChannelType::Stream => IconName::Stream,
+        ChannelType::Stream => IconName::Live,
         ChannelType::App => {
             if private {
-                IconName::PrivateAppChannelIcon
+                IconName::ChannelAppPrivate
             } else {
-                IconName::AppChannelIcon
+                IconName::ChannelApp
             }
         }
         ChannelType::Thread => {
             if private {
-                IconName::ThreadIconLocker
+                IconName::ThreadPrivate
             } else {
-                IconName::ThreadIcon
+                IconName::Thread
             }
         }
         _ => {
             if private {
-                IconName::HashtagLocked
+                IconName::ChannelPrivate
             } else {
-                IconName::Hashtag
+                IconName::Channel
             }
         }
     }
@@ -2731,25 +2995,72 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
         .filter(|id| !id.is_zero())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkClick {
+    Navigate(ClanId),
+    AskServer,
+    NoAccess,
+    Nothing,
+}
+
+fn link_click(known: Option<ClanId>, hint: Option<ClanId>, member: bool) -> LinkClick {
+    if let Some(clan_id) = known {
+        return LinkClick::Navigate(clan_id);
+    }
+    match hint {
+        Some(_) if member => LinkClick::AskServer,
+        Some(_) => LinkClick::Nothing,
+        None => LinkClick::NoAccess,
+    }
+}
+
 fn navigate_to_channel(
     channel_id: ChannelId,
     clan_hint: Option<ClanId>,
     locale: &str,
     cx: &mut App,
 ) {
-    let Some(clan_id) = clan_for_channel(channel_id, cx).or(clan_hint) else {
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.info(mezon_i18n::t(locale, "message.noAccess"), cx);
-        });
-        return;
-    };
-    navigate(
-        cx,
-        Route::Channel {
-            clan_id,
-            channel_id,
-        },
-    );
+    let known = clan_for_channel(channel_id, cx);
+    let member = known.is_none()
+        && clan_hint.is_some_and(|clan_id| ClanList::global(cx).read(cx).clan(clan_id).is_some());
+    let no_access = mezon_i18n::t(locale, "message.noAccess");
+    match link_click(known, clan_hint, member) {
+        LinkClick::Navigate(clan_id) => navigate(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        ),
+        LinkClick::Nothing => {}
+        LinkClick::NoAccess => {
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.info(no_access, cx);
+            });
+        }
+        LinkClick::AskServer => {
+            let task =
+                ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
+            cx.spawn(async move |cx| {
+                let resolved = task.await;
+                cx.update(|cx| match resolved {
+                    Some(clan_id) => navigate(
+                        cx,
+                        Route::Channel {
+                            clan_id,
+                            channel_id,
+                        },
+                    ),
+                    None => {
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.info(no_access, cx);
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
+    }
 }
 
 fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
@@ -2761,34 +3072,6 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
             .or_else(|| store.linked_channel(channel_id))
             .map(|channel| channel.clan_id)
     })
-}
-
-pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
-    let store = ChannelList::global(cx).read(cx);
-    let clans = ClanList::global(cx).read(cx);
-    let mut channel_ids = Vec::new();
-    for span in spans {
-        let MessageSpan::Hashtag {
-            channel_id: Some(raw),
-            meta: Some(meta),
-            ..
-        } = span
-        else {
-            continue;
-        };
-        let Some(channel_id) = parse_channel_id(raw) else {
-            continue;
-        };
-        let in_clan = clans.clan(meta.clan_id).is_some();
-        if thread_link_wants_detail(meta, in_clan, hashtag_meta_visible_in(store, meta))
-            && store.can_resolve_linked_channel(channel_id)
-            && store.linkable_channel(channel_id).is_none()
-            && !channel_ids.contains(&channel_id)
-        {
-            channel_ids.push(channel_id);
-        }
-    }
-    channel_ids
 }
 
 // linked-channel-api: re-add channel_url_clan_id to the imports above when restoring.
@@ -2826,17 +3109,6 @@ pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> V
 // linked-channel-api:     let clans = ClanList::global(cx).read(cx);
 // linked-channel-api:     clans.has_listed() && clans.clan(clan_id).is_some()
 // linked-channel-api: }
-
-pub(super) fn defer_linked_channel_resolve(channel_ids: Vec<ChannelId>, cx: &mut App) {
-    if channel_ids.is_empty() {
-        return;
-    }
-    cx.defer(move |cx| {
-        ChannelList::global(cx).update(cx, |channels, cx| {
-            channels.resolve_linked_channels(channel_ids, cx);
-        });
-    });
-}
 
 fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> AnyElement {
     let text: SharedString = match msg.spans.as_slice() {
@@ -2880,10 +3152,11 @@ fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> An
 }
 
 fn resolve_link_url(url: &str, text: &str) -> String {
-    if !url.is_empty() {
-        return url.to_string();
-    }
-    text.to_string()
+    link_target(url, text).to_string()
+}
+
+fn link_target<'a>(url: &'a str, text: &'a str) -> &'a str {
+    if url.is_empty() { text } else { url }
 }
 
 /// The first detected link in a message's rich-text spans, if any (for the
@@ -2893,6 +3166,43 @@ pub(crate) fn first_link(msg: &Message) -> Option<String> {
         MessageSpan::Link { text, url, .. } => Some(resolve_link_url(url, text)),
         _ => None,
     })
+}
+
+pub(crate) fn clicked_menu_link(msg: &Message, clicked_link: Option<&str>) -> Option<String> {
+    let clicked = clicked_link?;
+    msg.spans.iter().find_map(|span| match span {
+        MessageSpan::Link { text, url, .. } if link_target(url, text) == clicked => {
+            Some(clicked.to_string())
+        }
+        _ => None,
+    })
+}
+
+fn rich_link_at(
+    ranges: &[Range<usize>],
+    actions: &[RichClick],
+    index: usize,
+) -> Option<SharedString> {
+    ranges
+        .iter()
+        .zip(actions)
+        .find_map(|(range, action)| match action {
+            RichClick::Link(url) if range.contains(&index) => Some(url.clone()),
+            _ => None,
+        })
+}
+
+fn note_context_link(
+    ctx: &RowCtx,
+    message_id: MessageId,
+    url: SharedString,
+) -> impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut App) + 'static {
+    let host = ctx.video_host.clone();
+    move |event, _, cx| {
+        let _ = host.update(cx, |this, _| {
+            this.note_context_link(message_id, event.position, url.to_string());
+        });
+    }
 }
 
 pub(crate) fn open_message_link(url: String, cx: &mut App) {
@@ -2914,21 +3224,96 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
 
 pub(crate) fn interactive_link_text(
     id: impl Into<gpui::ElementId>,
-    styled: StyledText,
+    text: impl Into<SharedString>,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, String)>,
 ) -> AnyElement {
+    let text = text.into();
     if links.is_empty() {
-        return styled.into_any_element();
+        return StyledText::new(text)
+            .with_highlights(highlights)
+            .into_any_element();
     }
-    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
-    InteractiveText::new(id, styled)
-        .on_click(ranges, move |index, _, cx| {
-            if let Some(url) = urls.get(index) {
-                cx.stop_propagation();
-                open_message_link(url.clone(), cx);
-            }
-        })
-        .into_any_element()
+    HoverLinkText {
+        id: id.into(),
+        text,
+        highlights,
+        links,
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct HoverLinkText {
+    id: gpui::ElementId,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
+}
+
+impl RenderOnce for HoverLinkText {
+    fn render(self, window: &mut gpui::Window, cx: &mut App) -> impl IntoElement {
+        let hovered = window.use_keyed_state(self.id.clone(), cx, |_, _| None::<usize>);
+        let hovered_ix = *hovered.read(cx);
+        let (ranges, urls): (Vec<_>, Vec<_>) = self.links.into_iter().unzip();
+        let hovered_range = hovered_ix.and_then(|ix| ranges.get(ix));
+        let highlights: Vec<_> = self
+            .highlights
+            .into_iter()
+            .map(|(range, mut style)| {
+                let overlaps =
+                    |link: &Range<usize>| range.start < link.end && link.start < range.end;
+                if ranges.iter().any(|link| overlaps(link)) {
+                    let color = style.color;
+                    style.underline =
+                        hovered_range
+                            .filter(|link| overlaps(link))
+                            .map(|_| UnderlineStyle {
+                                thickness: px(1.),
+                                color,
+                                wavy: false,
+                            });
+                }
+                (range, style)
+            })
+            .collect();
+        let hover_ranges = ranges.clone();
+        let set_hover = hovered.clone();
+        div()
+            .id(self.id.clone())
+            .on_hover(move |is_hovered, _, cx| {
+                if !*is_hovered {
+                    hovered.update(cx, |ix, cx| {
+                        if ix.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                InteractiveText::new(
+                    self.id,
+                    StyledText::new(self.text).with_highlights(highlights),
+                )
+                .on_click(ranges, move |index, _, cx| {
+                    if let Some(url) = urls.get(index) {
+                        cx.stop_propagation();
+                        open_message_link(url.clone(), cx);
+                    }
+                })
+                .on_hover(move |offset, _, _, cx| {
+                    let next = offset
+                        .and_then(|offset| hover_ranges.iter().position(|r| r.contains(&offset)));
+                    set_hover.update(cx, |ix, cx| {
+                        if *ix != next {
+                            *ix = next;
+                            cx.notify();
+                        }
+                    });
+                }),
+            )
+            .into_any_element()
+    }
 }
 
 pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
@@ -3447,8 +3832,9 @@ mod tests {
 #[cfg(test)]
 mod hashtag_label_tests {
     use super::{
-        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
-        hashtag_chip_for, hashtag_meta_visible, thread_link_wants_detail,
+        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, LinkClick,
+        ResolvedHashtag, hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible,
+        link_click, thread_link_wants_detail,
     };
     use gpui::SharedString;
 
@@ -3457,7 +3843,7 @@ mod hashtag_label_tests {
     fn resolved(name: Option<&str>) -> Option<ResolvedHashtag> {
         Some(ResolvedHashtag {
             name: name.map(SharedString::from),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
         })
     }
 
@@ -3483,7 +3869,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "unknown");
         assert!(chip.italic);
-        assert_eq!(chip.icon.path(), IconName::Hashtag.path());
+        assert_eq!(chip.icon.path(), IconName::Channel.path());
     }
 
     #[test]
@@ -3502,7 +3888,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
     }
 
     #[test]
@@ -3532,31 +3918,46 @@ mod hashtag_label_tests {
     #[test]
     fn thread_meta_with_visible_parent_is_visible() {
         let meta = meta(ChannelType::Thread, Some(10), false);
-        assert!(hashtag_meta_visible(&meta, true, true));
+        assert!(hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn thread_meta_without_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn private_thread_meta_with_visible_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, Some(10), true);
-        assert!(!hashtag_meta_visible(&meta, true, true));
+        assert!(!hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn channel_meta_in_loaded_clan_is_hidden() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn channel_meta_in_unloaded_clan_is_visible() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(hashtag_meta_visible(&meta, false, false));
+        assert!(hashtag_meta_visible(&meta, true, false, false));
+    }
+
+    #[test]
+    fn channel_meta_in_foreign_unloaded_clan_is_hidden() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(!hashtag_meta_visible(&meta, false, false, false));
+    }
+
+    #[test]
+    fn thread_meta_in_foreign_clan_is_hidden() {
+        let with_parent = meta(ChannelType::Thread, Some(10), false);
+        let without_parent = meta(ChannelType::Thread, None, false);
+        assert!(!hashtag_meta_visible(&with_parent, false, false, true));
+        assert!(!hashtag_meta_visible(&with_parent, false, true, true));
+        assert!(!hashtag_meta_visible(&without_parent, false, false, false));
     }
 
     #[test]
@@ -3572,6 +3973,97 @@ mod hashtag_label_tests {
         assert!(!thread_link_wants_detail(&thread, false, false));
         let channel = meta(ChannelType::Text, None, false);
         assert!(!thread_link_wants_detail(&channel, true, false));
+    }
+
+    #[test]
+    fn unresolved_thread_link_wanting_detail_builds_clickable_private_chip() {
+        let thread = meta(ChannelType::Thread, None, false);
+        let chip = hashtag_chip_from_meta(
+            LINK,
+            Some(ChannelId(2)),
+            None,
+            Some(&thread),
+            true,
+            hashtag_meta_visible(&thread, true, true, false),
+            "en",
+        );
+
+        assert_eq!(chip.label, "private-channel");
+        assert!(!chip.italic);
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
+        assert_eq!(chip.channel_id, Some(ChannelId(2)));
+        assert_eq!(chip.clan_hint, Some(ClanId(1)));
+    }
+
+    #[test]
+    fn unresolved_non_thread_link_in_loaded_clan_stays_non_clickable() {
+        let channel = meta(ChannelType::Text, None, false);
+        let chip = hashtag_chip_from_meta(
+            "#secret",
+            Some(ChannelId(2)),
+            None,
+            Some(&channel),
+            true,
+            hashtag_meta_visible(&channel, true, true, false),
+            "en",
+        );
+
+        assert_eq!(chip.label, "private-channel");
+        assert!(!chip.italic);
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
+        assert_eq!(chip.channel_id, None);
+    }
+
+    #[test]
+    fn foreign_clan_channel_and_thread_links_build_non_clickable_private_chips() {
+        let channel = meta(ChannelType::Text, None, false);
+        let channel_chip = hashtag_chip_from_meta(
+            "#general",
+            Some(ChannelId(2)),
+            None,
+            Some(&channel),
+            false,
+            hashtag_meta_visible(&channel, false, false, false),
+            "en",
+        );
+        assert_eq!(channel_chip.label, "private-channel");
+        assert!(!channel_chip.italic);
+        assert_eq!(channel_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(channel_chip.channel_id, None);
+
+        let thread = meta(ChannelType::Thread, Some(10), false);
+        let thread_chip = hashtag_chip_from_meta(
+            "#zz-1091-anon",
+            Some(ChannelId(3)),
+            None,
+            Some(&thread),
+            false,
+            hashtag_meta_visible(&thread, false, false, true),
+            "en",
+        );
+        assert_eq!(thread_chip.label, "private-channel");
+        assert!(!thread_chip.italic);
+        assert_eq!(thread_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(thread_chip.channel_id, None);
+    }
+
+    #[test]
+    fn link_click_routes_by_known_clan_and_membership() {
+        assert_eq!(
+            link_click(Some(ClanId(1)), None, false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(Some(ClanId(1)), Some(ClanId(2)), false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(None, Some(ClanId(1)), true),
+            LinkClick::AskServer
+        );
+        assert_eq!(link_click(None, Some(ClanId(1)), false), LinkClick::Nothing);
+        assert_eq!(link_click(None, None, false), LinkClick::NoAccess);
+        assert_eq!(link_click(None, None, true), LinkClick::NoAccess);
     }
 }
 
@@ -3621,7 +4113,7 @@ mod emoji_layout_tests {
         EMOJI_JUMBO_TOP_PADDING, GG_SANS_SPACE_ADVANCE, emoji_box, emoji_image, emoji_image_in_box,
         emoji_image_size, emoji_width, empty_message_content, follows_emoji_that_takes_it,
         gap_after, gap_width, inline_gap, message_content_row, rich_content_row,
-        separates_inline_spans,
+        selectable_spans_mentions, selectable_spans_text, separates_inline_spans,
     };
 
     const EMOJI: Pixels = px(48.);
@@ -3986,5 +4478,42 @@ mod emoji_layout_tests {
         };
 
         assert!(!separates(&[code_block, text(" "), emoji()], 1));
+    }
+
+    #[gpui::test]
+    fn selectable_spans_mentions_ranges_slice_selectable_spans_text(cx: &mut TestAppContext) {
+        let spans = [
+            MessageSpan::Text(SharedString::from("see ")),
+            MessageSpan::Hashtag {
+                display: SharedString::from("#general"),
+                channel_id: None,
+                meta: None,
+            },
+            MessageSpan::Text(SharedString::from(" cc ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Phạm Quang Trường"),
+                user_id: Some("100".to_string()),
+                role_id: None,
+            },
+            MessageSpan::Text(SharedString::from(" and ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Dev"),
+                user_id: None,
+                role_id: Some("200".to_string()),
+            },
+        ];
+        cx.read(|cx| {
+            let full = selectable_spans_text(&spans, "en", cx);
+            let mentions = selectable_spans_mentions(&spans, "en", cx);
+            assert_eq!(mentions.len(), 2);
+            for (range, mention) in &mentions {
+                assert_eq!(&full[range.clone()], mention.display);
+                assert_eq!(range.start, mention.at);
+            }
+            assert_eq!(mentions[0].1.user_id, "100");
+            assert_eq!(mentions[0].1.role_id, "");
+            assert_eq!(mentions[1].1.user_id, "");
+            assert_eq!(mentions[1].1.role_id, "200");
+        });
     }
 }

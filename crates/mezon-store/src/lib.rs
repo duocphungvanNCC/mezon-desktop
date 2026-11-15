@@ -28,6 +28,7 @@ pub mod ctrlk_search;
 pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
+pub mod dm_setting;
 pub mod emoji;
 pub mod events;
 pub mod files;
@@ -89,6 +90,7 @@ pub use mezon_client::{
     write_bytes_to_downloads,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
@@ -105,7 +107,7 @@ pub use audit_log::{
     AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
     audit_action_index_for_api_log,
 };
-pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore, take_start_hidden_marker};
 pub use badge::BadgeService;
 pub use banned_users::{
     BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC, BAN_FOR_15_MINUTES_SEC,
@@ -152,6 +154,7 @@ pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
 };
+pub use dm_setting::{DmSettingStore, is_new_dm_denied};
 pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
@@ -245,10 +248,11 @@ pub use permissions::{
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
-    DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
-    McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
-    PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
-    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
+    DesktopNotification, DownloadEvent, GrowingPlaylist, HlsSnapshot, McpServerHooks,
+    McpServerStatus, McpSetPortFn, McpStartFn, McpStatusFn, McpStopFn, NotificationTopicReply,
+    NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
+    copy_media_url_to_clipboard, download_url_with_dialog, growing_playlist, may_be_transcoded,
+    may_have_hls_stream, open_media_url_external, playable_hls_stream,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -285,7 +289,7 @@ pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
-    resolve_avatar_url, resolve_user_profile,
+    resolve_avatar_url, resolve_profile_banner, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]
@@ -483,6 +487,8 @@ pub struct ActivityStripDismissal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default = "icon_motion_default")]
+    pub icon_motion: bool,
     /// Launch app on system login
     pub auto_start: bool,
     /// Enable GPU hardware acceleration
@@ -553,11 +559,16 @@ pub struct Settings {
     pub grammar_correction_enabled: bool,
     #[serde(default)]
     pub stream_default_quality: StreamQuality,
+    #[serde(default)]
+    pub voice_user_volumes: HashMap<String, u16>,
+    #[serde(default)]
+    pub last_download_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            icon_motion: true,
             auto_start: false,
             hardware_acceleration: true,
             zoom_factor: 1.0,
@@ -590,8 +601,14 @@ impl Default for Settings {
             quick_replies_enabled: false,
             grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
+            voice_user_volumes: HashMap::new(),
+            last_download_dir: None,
         }
     }
+}
+
+fn icon_motion_default() -> bool {
+    true
 }
 
 impl Settings {
@@ -829,6 +846,17 @@ pub(crate) mod cdn_test_signer {
 
 #[cfg(test)]
 mod settings_tests {
+    #[test]
+    fn settings_without_icon_motion_defaults_to_true() {
+        let settings: super::Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.icon_motion);
+        let settings: super::Settings = serde_json::from_str(r#"{"icon_motion":false}"#).unwrap();
+        assert!(!settings.icon_motion);
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.icon_motion);
+    }
+
     use super::{ActivityStripDismissal, Settings};
 
     #[test]

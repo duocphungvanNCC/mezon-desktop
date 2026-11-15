@@ -670,7 +670,7 @@ impl ClanMembersPage {
             .child(label)
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(px(14.))
+                    .size(px(16.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -759,32 +759,6 @@ impl ClanMembersPage {
                     )
                     .on_mouse_down_out(|_, window, _| window.blur()),
             )
-            .child(
-                div()
-                    .id("sort-members")
-                    .cursor_pointer()
-                    .px_3()
-                    .h(px(32.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(5.))
-                    .bg(theme.brand)
-                    .text_color(gpui::white())
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::ConvertAccount)
-                            .size(px(18.))
-                            .text_color(gpui::white())
-                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                std::f32::consts::FRAC_PI_2,
-                            ))),
-                    )
-                    .child(tr(locale, "memberTable.topBar.sort"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_sort(MemberSortField::MemberSince);
-                        cx.notify();
-                    })),
-            )
             .into_any_element();
         section_toolbar(
             tr(locale, "memberTable.topBar.recentMembers"),
@@ -848,7 +822,7 @@ impl ClanMembersPage {
                 .child(self.page_size.to_string())
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                        .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,

@@ -13,13 +13,13 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
-    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
-    OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, MESSAGE_BUZZ_CODE,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag, OutgoingHashtags,
+    OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
+    PresignMarkers, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
     build_share_contact_content_json, detect_markdown, emoji_content_tokens,
     hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
-    with_create_time_seconds,
+    strip_markdown, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -51,9 +51,10 @@ use crate::message::{
     MessageAttachment, MessageButton, MessageCode, MessageComponent, MessageComponentRow,
     MessageReference, MessageSelect, MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView,
     PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions,
-    apply_reaction_event, compute_show_forwarded_label, message_combined_with_prev,
-    message_sort_key, parse_spans, reaction_key, recompute_message_grouping, rollback_reaction,
-    sort_messages, spans_only_emoji, viewer_highlight_direct,
+    apply_reaction_event, build_message_location, compute_show_forwarded_label,
+    message_combined_with_prev, message_sort_key, parse_spans, reaction_key,
+    recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
+    viewer_highlight_direct,
 };
 use crate::message_time::{unix_now_millis, unix_now_seconds};
 use crate::ogp::is_clan_invite_url;
@@ -311,7 +312,7 @@ pub struct OutgoingAttachment {
 }
 
 impl OutgoingAttachment {
-    pub fn into_upload(self, channel_id: i64) -> UploadFile {
+    pub fn into_upload(self, channel_id: i64, stream_while_uploading: bool) -> UploadFile {
         let thumbnail = self.poster_jpeg.map(|jpeg| UploadThumbnail {
             filename: format!("{}.jpg", self.filename),
             data: jpeg,
@@ -325,6 +326,7 @@ impl OutgoingAttachment {
             duration: self.duration,
             thumbnail,
             channel_id,
+            stream_while_uploading,
         }
     }
 }
@@ -705,6 +707,11 @@ pub struct MessagesStore {
     presign_probe: HashMap<String, PresignProbe>,
     presign_probe_task: Option<Task<()>>,
     presign_probe_running: bool,
+    stream_probe: HashMap<String, std::time::Instant>,
+    unplayable_streams: HashSet<String>,
+    stream_probe_task: Option<Task<()>>,
+    stream_probe_running: bool,
+    stream_probe_wake: Option<std::time::Instant>,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     pending_commands: Vec<PendingCommand>,
     commands_in_flight: HashMap<(ChannelId, i64), usize>,
@@ -1111,6 +1118,10 @@ impl MessagesStore {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
     }
 
+    pub fn has_running_uploads(&self) -> bool {
+        !self.running_upload_jobs.is_empty()
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.close(cx);
         self.cache.clear();
@@ -1170,6 +1181,11 @@ impl MessagesStore {
         self.presign_probe.clear();
         self.presign_probe_task = None;
         self.presign_probe_running = false;
+        self.stream_probe.clear();
+        self.unplayable_streams.clear();
+        self.stream_probe_task = None;
+        self.stream_probe_running = false;
+        self.stream_probe_wake = None;
         self.presign_expiry_task = None;
         self.upload_jobs_restored = false;
         presign::clear_failed();
@@ -1256,6 +1272,11 @@ impl MessagesStore {
             presign_probe: HashMap::new(),
             presign_probe_task: None,
             presign_probe_running: false,
+            stream_probe: HashMap::new(),
+            unplayable_streams: HashSet::new(),
+            stream_probe_task: None,
+            stream_probe_running: false,
+            stream_probe_wake: None,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             pending_commands: Vec::new(),
@@ -1642,8 +1663,9 @@ impl MessagesStore {
                 store.clear_topic(&topic_key, cx);
             });
         }
+        let parent_hint = self.active_topic_parent;
         ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.apply_topic_read(topic_id, cx);
+            cl.apply_topic_read_in(clan_id, topic_id, parent_hint, cx);
         });
         if !should_write_last_seen(
             self.known_last_seen_id(topic_id, cx),
@@ -3247,41 +3269,6 @@ impl MessagesStore {
         );
     }
 
-    pub fn send_location_message(&mut self, latitude: f64, longitude: f64, cx: &mut Context<Self>) {
-        if self.is_anonymous_mode() {
-            return;
-        }
-        let Some(user_id) = viewer_user_id(cx) else {
-            return;
-        };
-        let sender_id = user_id.0.to_string();
-        let sender_name = AccountStore::global(cx)
-            .read(cx)
-            .account
-            .as_ref()
-            .map(|acct| {
-                if !acct.display_name.is_empty() {
-                    acct.display_name.clone()
-                } else {
-                    acct.username.clone()
-                }
-            })
-            .unwrap_or_else(|| sender_id.clone());
-        let link = mezon_client::transport::build_location_maps_link(latitude, longitude);
-        self.send_message_with_payload(
-            link,
-            sender_id,
-            sender_name,
-            OutgoingContent::default(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            LOCATION_CODE,
-            cx,
-        );
-    }
-
     pub fn send_buzz_message(&mut self, content: String, cx: &mut Context<Self>) {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -3380,7 +3367,8 @@ impl MessagesStore {
         };
         let sender = sender_user.0.to_string();
         let (receiver, receiver_username) = {
-            let Some(message) = self.viewport_message_by_id(message_id) else {
+            let bucket = self.bucket_of(target);
+            let Some(message) = self.message_in_channel(bucket, message_id) else {
                 return;
             };
             (message.sender_id.clone(), message.sender_name.to_string())
@@ -3468,7 +3456,12 @@ impl MessagesStore {
                                 cx,
                             )
                         });
-                        card.detach();
+                        cx.spawn(async move |_, _| {
+                            if let Err(err) = card.await {
+                                tracing::warn!("send coffee token card dm failed: {err}");
+                            }
+                        })
+                        .detach();
                     }
                 })
                 .ok();
@@ -4681,9 +4674,14 @@ impl MessagesStore {
                 // and the sweep skipped all of them — leaving an attachment whose
                 // upload died pending forever, and the CDN probe polling it every
                 // 30s for as long as the channel stayed open.
-                if message.create_time <= 0
-                    || now - message.create_time < presign::PRESIGN_PENDING_MAX_AGE_SEC
-                {
+                if message.create_time <= 0 {
+                    continue;
+                }
+                let age = now - message.create_time;
+                let expired = |a: &MessageAttachment| {
+                    a.presign_pending && age >= presign::pending_max_age_sec(a.presign_ingest)
+                };
+                if !message.attachments.iter().any(expired) {
                     continue;
                 }
                 let mut changed = false;
@@ -4693,7 +4691,7 @@ impl MessagesStore {
                 let before = message.attachments.len();
                 message
                     .attachments
-                    .retain(|a| !a.presign_pending || a.uploading || a.upload_failed);
+                    .retain(|a| !expired(a) || a.uploading || a.upload_failed);
                 if message.attachments.len() != before {
                     // The album layout and the viewer list are built from the
                     // attachments, so dropping one leaves them describing tiles
@@ -4779,7 +4777,7 @@ impl MessagesStore {
     /// long until the next attachment is due. `None` means nothing to probe.
     fn refresh_presign_probes(&mut self) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
-        let mut pending: HashSet<String> = HashSet::new();
+        let mut pending: HashMap<String, bool> = HashMap::new();
         for bucket in self.probe_buckets() {
             let Some(channel) = self.cache.get(&bucket) else {
                 continue;
@@ -4796,16 +4794,18 @@ impl MessagesStore {
                         && !att.upload_failed
                         && !att.url.is_empty()
                     {
-                        pending.insert(att.url.clone());
+                        pending.insert(att.url.clone(), att.presign_ingest);
                     }
                 }
             }
         }
-        self.presign_probe.retain(|url, _| pending.contains(url));
-        for url in pending {
+        self.presign_probe
+            .retain(|url, _| pending.contains_key(url));
+        for (url, ingest) in pending {
             self.presign_probe.entry(url).or_insert(PresignProbe {
                 attempts: 0,
-                next_at: now + presign_probe_delay(0),
+                ingest,
+                next_at: now + presign_probe_delay(0, ingest),
             });
         }
         self.presign_probe
@@ -4830,7 +4830,7 @@ impl MessagesStore {
             }
             if probe.next_at <= now {
                 probe.attempts = probe.attempts.saturating_add(1);
-                probe.next_at = now + presign_probe_delay(probe.attempts);
+                probe.next_at = now + presign_probe_delay(probe.attempts, probe.ingest);
                 due.push(url.clone());
             }
         }
@@ -4883,6 +4883,7 @@ impl MessagesStore {
     /// on a presign_finish that may never arrive. Runs only while something is
     /// pending in the open channel or topic.
     fn schedule_presign_probe(&mut self, cx: &mut Context<Self>) {
+        self.schedule_stream_probe(cx);
         if self.presign_probe_running {
             // A probe is in flight; it re-schedules itself when it lands. Restarting
             // here would cancel it, and the busy callers below fire on every message.
@@ -4931,6 +4932,148 @@ impl MessagesStore {
                 this.presign_probe_running = false;
                 this.settle_presign_probes(&found, cx);
                 this.schedule_presign_probe(cx);
+            });
+        }));
+    }
+
+    fn refresh_stream_probes(&mut self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let mut waiting: HashSet<String> = HashSet::new();
+        for bucket in self.probe_buckets() {
+            let Some(channel) = self.cache.get(&bucket) else {
+                continue;
+            };
+            for message in channel.messages.items.iter() {
+                for att in message.attachments.iter() {
+                    if awaits_stream(att) {
+                        waiting.insert(att.url.clone());
+                    }
+                }
+            }
+        }
+        self.unplayable_streams.retain(|url| waiting.contains(url));
+        waiting.retain(|url| !self.unplayable_streams.contains(url));
+        self.stream_probe.retain(|url, _| waiting.contains(url));
+        for url in waiting {
+            self.stream_probe.entry(url).or_insert(now);
+        }
+        self.stream_probe
+            .values()
+            .map(|next_at| next_at.saturating_duration_since(now))
+            .min()
+    }
+
+    fn take_due_stream_probes(&mut self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let now_seconds = now_unix_seconds();
+        let created: HashMap<&str, i64> = self
+            .probe_buckets()
+            .into_iter()
+            .filter_map(|bucket| self.cache.get(&bucket))
+            .flat_map(|channel| channel.messages.items.iter())
+            .flat_map(|message| {
+                message
+                    .attachments
+                    .iter()
+                    .map(move |att| (att.url.as_str(), message.create_time))
+            })
+            .collect();
+        let mut due = Vec::new();
+        for (url, next_at) in self.stream_probe.iter_mut() {
+            if due.len() >= PRESIGN_PROBE_BATCH {
+                break;
+            }
+            if *next_at <= now {
+                let create_time = created.get(url.as_str()).copied().unwrap_or_default();
+                *next_at = now + stream_probe_interval(create_time, now_seconds);
+                due.push(url.clone());
+            }
+        }
+        due
+    }
+
+    fn settle_stream_probes(
+        &mut self,
+        results: Vec<(String, mezon_client::video_source::IngestStream)>,
+        cx: &mut Context<Self>,
+    ) {
+        use mezon_client::video_source::IngestStream;
+        let mut playable: HashSet<String> = HashSet::new();
+        for (url, state) in results {
+            match state {
+                IngestStream::Waiting => {}
+                IngestStream::Playable => {
+                    self.stream_probe.remove(&url);
+                    playable.insert(url);
+                }
+                IngestStream::Unplayable => {
+                    self.stream_probe.remove(&url);
+                    self.unplayable_streams.insert(url);
+                }
+            }
+        }
+        if playable.is_empty() {
+            return;
+        }
+        let mut touched: Vec<MessageId> = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                let mut hit = false;
+                for att in message.attachments.iter_mut() {
+                    if !att.stream_ready && playable.contains(&att.url) {
+                        att.stream_ready = true;
+                        hit = true;
+                    }
+                }
+                if hit {
+                    touched.push(message.id);
+                }
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
+    }
+
+    fn schedule_stream_probe(&mut self, cx: &mut Context<Self>) {
+        if self.stream_probe_running {
+            return;
+        }
+        let Some(delay) = self.refresh_stream_probes() else {
+            self.stream_probe_task = None;
+            self.stream_probe_wake = None;
+            return;
+        };
+        let wake = std::time::Instant::now() + delay;
+        if self.stream_probe_wake.is_some_and(|at| at <= wake) {
+            return;
+        }
+        self.stream_probe_wake = Some(wake);
+        self.stream_probe_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let due = this
+                .update(cx, |this, _| {
+                    this.stream_probe_wake = None;
+                    this.stream_probe_running = true;
+                    this.take_due_stream_probes()
+                })
+                .unwrap_or_default();
+            let probes = due.into_iter().map(|url| async move {
+                let state = mezon_client::video_source::ingest_stream(&url).await;
+                tracing::debug!(url = %url, ?state, "ingest stream probe");
+                (url, state)
+            });
+            let results = futures::future::join_all(probes).await;
+            let _ = this.update(cx, |this, cx| {
+                this.stream_probe_running = false;
+                this.settle_stream_probes(results, cx);
+                this.schedule_stream_probe(cx);
             });
         }));
     }
@@ -6181,8 +6324,6 @@ impl MessagesStore {
         }
         if message_code == MESSAGE_BUZZ_CODE {
             optimistic.code = MessageCode::MessageBuzz;
-        } else if message_code == LOCATION_CODE {
-            optimistic.code = MessageCode::Location;
         }
         let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
@@ -6217,8 +6358,7 @@ impl MessagesStore {
             }
         });
         cx.spawn(async move |this, cx| {
-            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
-                .await;
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             ensure_thread_membership_for_send(
                 &api,
                 &this,
@@ -6231,7 +6371,7 @@ impl MessagesStore {
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(|attachment| attachment.into_upload(channel_id.get()))
+                    .map(|attachment| attachment.into_upload(channel_id.get(), !anonymous))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -6280,6 +6420,7 @@ impl MessagesStore {
                     .await;
                     return;
                 }
+                let ingest = PresignedAttachment::ingest_keys(&presigned, &keys);
                 let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
@@ -6295,7 +6436,10 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Some(Vec::new()),
+                        Some(PresignMarkers {
+                            finish: Vec::new(),
+                            ingest,
+                        }),
                         send_flags,
                     )
                     .await
@@ -6675,8 +6819,7 @@ impl MessagesStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
-                .await;
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
                 .send_message_with_attachment_urls_reply(
                     clan_id.get(),
@@ -6962,6 +7105,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::Reset { count });
             cx.notify();
             self.try_consume_pending_jump(cx);
+            self.schedule_presign_probe(cx);
             return;
         }
 
@@ -7145,7 +7289,17 @@ impl MessagesStore {
                     viewer_id,
                 );
                 let presign_keys = presign::parse_presign_finish_keys(&m.content);
-                self.apply_message_update(target_id, message_id, incoming, presign_keys, cx);
+                let ingest_keys = presign::parse_presign_ingest_keys(&m.content);
+                self.apply_message_update(
+                    target_id,
+                    message_id,
+                    incoming,
+                    PresignUpdate {
+                        finish_keys: presign_keys,
+                        ingest_keys,
+                    },
+                    cx,
+                );
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
                 let target_id = self.mutation_storage_channel(m, message_id);
@@ -7317,7 +7471,7 @@ impl MessagesStore {
         storage_id: ChannelId,
         message_id: MessageId,
         incoming: Message,
-        presign_keys: Option<Vec<String>>,
+        presign: PresignUpdate,
         cx: &mut Context<Self>,
     ) {
         let base_img = AppConfig::try_global(cx)
@@ -7334,7 +7488,8 @@ impl MessagesStore {
         };
         let attachments_in_update = !incoming.attachments.is_empty();
         merge_message_update(existing, &incoming);
-        if let Some(keys) = &presign_keys {
+        mark_ingest_attachments(&mut existing.attachments, &presign.ingest_keys);
+        if let Some(keys) = &presign.finish_keys {
             apply_presign_gate(
                 &mut existing.attachments,
                 keys,
@@ -7939,7 +8094,7 @@ impl MessagesStore {
     }
 }
 
-async fn ensure_public_archived_thread_reactivated(
+async fn ensure_archived_thread_reactivated(
     api: &AppApi,
     this: &WeakEntity<MessagesStore>,
     channel_id: ChannelId,
@@ -7950,7 +8105,7 @@ async fn ensure_public_archived_thread_reactivated(
     let needs = this
         .update(cx, |_this, cx| {
             ChannelList::global(cx).update(cx, |list, cx| {
-                list.begin_public_pre_send_reactivate(channel_id, clan_id, mode, cx)
+                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
             })
         })
         .ok()
@@ -8013,12 +8168,12 @@ fn note_own_send_and_maybe_reactivate(
     message_id: MessageId,
     cx: &mut AsyncApp,
 ) {
+    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
     let _ = this.update(cx, |_this, cx| {
         ChannelList::global(cx).update(cx, |list, cx| {
             list.note_own_send_confirmed(clan_id, channel_id, create_time.max(0), message_id, cx);
         });
     });
-    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
 }
 
 pub(crate) fn plan_thread_membership(
@@ -8409,9 +8564,11 @@ impl MessagesStore {
         outcome: &AttachmentUploadOutcome,
     ) -> bool {
         let (key, failed) = match outcome {
+            AttachmentUploadOutcome::Storing(key) => (key.as_str(), false),
             AttachmentUploadOutcome::Uploaded(key) => (key.as_str(), false),
             AttachmentUploadOutcome::Failed(key) => (key.as_str(), true),
         };
+        let storing = matches!(outcome, AttachmentUploadOutcome::Storing(_));
         let Some(channel) = self.cache.get_mut(&bucket) else {
             return false;
         };
@@ -8423,7 +8580,13 @@ impl MessagesStore {
             if (att.uploading || att.presign_pending)
                 && presign::normalize_presign_key(&att.url) == key
             {
+                if storing {
+                    changed |= !att.upload_storing;
+                    att.upload_storing = true;
+                    continue;
+                }
                 att.uploading = false;
+                att.upload_storing = false;
                 att.upload_failed = failed;
                 if !failed {
                     att.presign_pending = false;
@@ -8481,6 +8644,21 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let (key, uploaded) = match &outcome {
+            AttachmentUploadOutcome::Storing(key) => {
+                presign::note_storing(key);
+                let (bucket, message_id) = job_id;
+                if is_topic {
+                    self.apply_topic_attachment_outcome(bucket, MessageId(message_id), outcome, cx);
+                } else {
+                    self.mark_channel_attachment_outcome(
+                        ChannelId(bucket),
+                        MessageId(message_id),
+                        outcome,
+                        cx,
+                    );
+                }
+                return;
+            }
             AttachmentUploadOutcome::Uploaded(key) => (key, true),
             AttachmentUploadOutcome::Failed(key) => (key, false),
         };
@@ -9101,7 +9279,12 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
                     att.local_source = prior_att.local_source.clone();
                 }
                 att.uploading = prior_att.uploading;
+                att.upload_storing = prior_att.upload_storing;
                 att.upload_failed = prior_att.upload_failed;
+                if att.url == prior_att.url {
+                    att.presign_ingest |= prior_att.presign_ingest;
+                    att.stream_ready |= prior_att.stream_ready;
+                }
             }
         }
         if existing.is_forwarded {
@@ -9120,6 +9303,7 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.embeds = incoming.embeds.clone();
     existing.components = incoming.components.clone();
     existing.call_log = incoming.call_log;
+    existing.location = incoming.location.clone();
     existing.invite = incoming.invite.clone();
     existing.is_card = incoming.is_card;
     existing.is_only_emoji = incoming.is_only_emoji;
@@ -9135,6 +9319,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     }
     if existing.poll.is_some() {
         existing.code = MessageCode::Poll;
+    } else if incoming.code == MessageCode::Location {
+        existing.code = MessageCode::Location;
     } else if !existing.code.is_user_timeline() {
         existing.code = MessageCode::Chat;
     }
@@ -9678,7 +9864,7 @@ pub(crate) async fn upload_attachments_now(
     }
     let files: Vec<UploadFile> = attachments
         .into_iter()
-        .map(|attachment| attachment.into_upload(channel_id))
+        .map(|attachment| attachment.into_upload(channel_id, false))
         .collect();
     let presigned = api.presign_files(files).await?;
     let uploaded: Vec<mezon_proto::api::MessageAttachment> =
@@ -9791,6 +9977,14 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
         incoming.references = prior.references.clone();
     }
     carry_local_previews(prior, &mut incoming);
+    if incoming.location.is_none() {
+        incoming.location = prior.location.clone();
+    }
+    if incoming.code == MessageCode::Chat
+        && (prior.code == MessageCode::Location || prior.location.is_some())
+    {
+        incoming.code = MessageCode::Location;
+    }
     incoming
 }
 
@@ -9812,6 +10006,12 @@ fn apply_presign_gate(
 /// second or two after the message — costs no requests at all.
 const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
 
+const INGEST_PROBE_BACKOFF_SECS: [u64; 7] = [8, 15, 30, 60, 120, 240, 300];
+
+const STREAM_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+const STREAM_PROBE_LATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How many objects one probe round asks about at once.
 const PRESIGN_PROBE_BATCH: usize = 6;
 
@@ -9819,13 +10019,26 @@ const PRESIGN_PROBE_BATCH: usize = 6;
 #[derive(Debug, Clone, Copy)]
 struct PresignProbe {
     attempts: u32,
+    ingest: bool,
     next_at: std::time::Instant,
 }
 
-fn presign_probe_delay(attempts: u32) -> std::time::Duration {
-    let last = PRESIGN_PROBE_BACKOFF_SECS.len() - 1;
-    let idx = (attempts as usize).min(last);
-    std::time::Duration::from_secs(PRESIGN_PROBE_BACKOFF_SECS[idx])
+fn presign_probe_delay(attempts: u32, ingest: bool) -> std::time::Duration {
+    let backoff: &[u64] = if ingest {
+        &INGEST_PROBE_BACKOFF_SECS
+    } else {
+        &PRESIGN_PROBE_BACKOFF_SECS
+    };
+    let idx = (attempts as usize).min(backoff.len() - 1);
+    std::time::Duration::from_secs(backoff[idx])
+}
+
+fn stream_probe_interval(create_time: i64, now: i64) -> std::time::Duration {
+    if create_time > 0 && now - create_time >= presign::PRESIGN_PENDING_MAX_AGE_SEC {
+        STREAM_PROBE_LATE_INTERVAL
+    } else {
+        STREAM_PROBE_INTERVAL
+    }
 }
 
 /// The probe URL carries a nonce so that a not-found answer is cached under a
@@ -9841,10 +10054,15 @@ fn presign_probe_url(url: &str, nonce: u64) -> String {
 /// row's `content` is display text, so a parse here answers None for every
 /// message and the timer is never armed at all.
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
-    if message.create_time <= 0 || !message.attachments.iter().any(awaits_presign_expiry) {
+    if message.create_time <= 0 {
         return None;
     }
-    Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
+    message
+        .attachments
+        .iter()
+        .filter(|a| awaits_presign_expiry(a))
+        .map(|a| message.create_time + presign::pending_max_age_sec(a.presign_ingest))
+        .min()
 }
 
 /// How long until the earliest deadline, relative to `now`. `None` when nothing
@@ -9856,6 +10074,16 @@ fn next_presign_expiry_in(
     deadlines
         .min()
         .map(|deadline| std::time::Duration::from_secs((deadline - now).max(0) as u64))
+}
+
+fn awaits_stream(att: &MessageAttachment) -> bool {
+    att.presign_pending
+        && att.presign_ingest
+        && !att.stream_ready
+        && !att.uploading
+        && !att.upload_failed
+        && att.is_video()
+        && !att.url.is_empty()
 }
 
 fn awaits_presign_expiry(att: &MessageAttachment) -> bool {
@@ -9870,24 +10098,38 @@ fn apply_upload_registry(att: &mut MessageAttachment) -> bool {
         return false;
     }
     let key = presign::normalize_presign_key(&att.url);
-    let before = (att.presign_pending, att.uploading, att.upload_failed);
+    let before = (
+        att.presign_pending,
+        att.uploading,
+        att.upload_storing,
+        att.upload_failed,
+    );
     match presign::upload_state(&key) {
         Some(presign::UploadState::Uploaded) => {
             att.presign_pending = false;
             att.uploading = false;
+            att.upload_storing = false;
             att.upload_failed = false;
         }
-        Some(presign::UploadState::Uploading) => {
+        Some(state @ (presign::UploadState::Uploading | presign::UploadState::Storing)) => {
             att.uploading = true;
+            att.upload_storing = state == presign::UploadState::Storing;
             att.upload_failed = false;
         }
         Some(presign::UploadState::Failed) => {
             att.uploading = false;
+            att.upload_storing = false;
             att.upload_failed = true;
         }
         None => {}
     }
-    let mut changed = before != (att.presign_pending, att.uploading, att.upload_failed);
+    let mut changed = before
+        != (
+            att.presign_pending,
+            att.uploading,
+            att.upload_storing,
+            att.upload_failed,
+        );
     if att.presign_pending
         && att.local_source.is_none()
         && att.is_image()
@@ -9897,6 +10139,18 @@ fn apply_upload_registry(att: &mut MessageAttachment) -> bool {
         changed = true;
     }
     changed
+}
+
+#[derive(Default)]
+struct PresignUpdate {
+    finish_keys: Option<Vec<String>>,
+    ingest_keys: Vec<String>,
+}
+
+fn mark_ingest_attachments(attachments: &mut [MessageAttachment], ingest_keys: &[String]) {
+    for a in attachments.iter_mut() {
+        a.presign_ingest |= presign::is_ingest_attachment(&a.url, ingest_keys);
+    }
 }
 
 fn apply_presign_gate_at(
@@ -9934,6 +10188,7 @@ fn apply_presign_gate_at(
                     base_img,
                     create_time,
                     now,
+                    a.presign_ingest,
                 )
         });
     }
@@ -10128,6 +10383,13 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
             .map(|k| presign::normalize_presign_key(k))
             .collect()
     });
+    if let Some(ingest_keys) = &m.content_tokens.presign_ingest {
+        let ingest_keys: Vec<String> = ingest_keys
+            .iter()
+            .map(|k| presign::normalize_presign_key(k))
+            .collect();
+        mark_ingest_attachments(&mut attachments, &ingest_keys);
+    }
     if let Some(keys) = presign_keys {
         let base_img = cfg.map(|c| c.base_img_url.as_str()).unwrap_or_default();
         apply_presign_gate(&mut attachments, &keys, base_img, m.create_time);
@@ -10141,6 +10403,8 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     let call_log = build_call_log(&m.content_tokens);
+    let location = build_message_location(code, &m.content)
+        .or_else(|| build_message_location(code, &m.content_raw));
     let token_transaction = (code == MessageCode::SendToken)
         .then(|| Box::new(crate::message::split_token_transaction(&m.content)));
     let embeds = build_embeds(&m.content_tokens, cfg);
@@ -10183,6 +10447,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     .with_ogp(ogp)
     .with_poll(poll)
     .with_call_log(call_log)
+    .with_location(location)
     .with_embeds(embeds)
     .with_components(components)
     .with_is_card(m.content_tokens.is_card)
@@ -10424,11 +10689,11 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
     if text.is_empty() {
         return Vec::new();
     }
-    let markdowns = detect_markdown(text);
+    let stripped = strip_markdown(text);
     // Embed bodies stay inline. React only runs its social-link classifier over message content,
     // so a YouTube URL in a description is a link there, not the block-level card the classified
     // kinds would render inside the embed's column.
-    let mk = markdown_content_tokens(&markdowns)
+    let mk = markdown_content_tokens(&stripped.markdowns)
         .into_iter()
         .map(|mut tok| {
             if tok
@@ -10442,7 +10707,7 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         })
         .collect();
     parse_spans(&ApiMessageContent {
-        t: text.to_string(),
+        t: stripped.text,
         mk,
         ..Default::default()
     })
@@ -11325,6 +11590,8 @@ impl MessageAttachment {
             size,
             size_label: crate::message::format_file_size(size).into(),
             presign_pending: false,
+            presign_ingest: false,
+            stream_ready: false,
             proxied_src: proxied_src.into(),
             thumbnail_proxied,
             display_width,
@@ -11332,6 +11599,7 @@ impl MessageAttachment {
             tenor_mp4,
             local_source: None,
             uploading: false,
+            upload_storing: false,
             upload_failed: false,
             source_denied: false,
         }
@@ -11358,6 +11626,8 @@ impl MessageAttachment {
             size: 0,
             size_label: SharedString::default(),
             presign_pending: false,
+            presign_ingest: false,
+            stream_ready: false,
             proxied_src: SharedString::default(),
             thumbnail_proxied: SharedString::default(),
             display_width,
@@ -11365,6 +11635,7 @@ impl MessageAttachment {
             tenor_mp4: None,
             local_source: is_image.then(|| att.path.clone()),
             uploading: true,
+            upload_storing: false,
             upload_failed: false,
             source_denied: false,
         }
@@ -11798,7 +12069,10 @@ mod tests {
                     channel,
                     MessageId(1),
                     incoming,
-                    Some(vec!["a".into(), "b".into()]),
+                    PresignUpdate {
+                        finish_keys: Some(vec!["a".into(), "b".into()]),
+                        ..PresignUpdate::default()
+                    },
                     cx,
                 );
                 let updated = store
@@ -12271,6 +12545,8 @@ mod tests {
                 })
                 .collect(),
             last_seen_message_id: 0,
+            last_sent_message_id: 0,
+            last_sent_sender_id: 0,
         }
     }
 
@@ -13388,6 +13664,39 @@ mod tests {
     }
 
     #[test]
+    fn text_to_spans_strips_inline_style_markers() {
+        let nested = text_to_spans("**a ~~b~~ c**");
+        assert_eq!(
+            nested,
+            vec![
+                MessageSpan::Bold("a ".into()),
+                MessageSpan::Styled {
+                    text: "b".into(),
+                    style: crate::message::InlineStyle {
+                        bold: true,
+                        italic: false,
+                        strike: true,
+                    },
+                },
+                MessageSpan::Bold(" c".into()),
+            ]
+        );
+
+        let italic = text_to_spans("*x*");
+        assert_eq!(
+            italic,
+            vec![MessageSpan::Styled {
+                text: "x".into(),
+                style: crate::message::InlineStyle {
+                    bold: false,
+                    italic: true,
+                    strike: false,
+                },
+            }]
+        );
+    }
+
+    #[test]
     fn first_content_link_url_falls_back_to_a_detected_social_link() {
         let content = ApiMessageContent {
             t: "https://www.tiktok.com/@user/video/123".into(),
@@ -14410,6 +14719,62 @@ mod tests {
 
         let no_field = message_from_api(msg(None), Some(&cfg), None);
         assert!(!no_field.attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn message_from_api_marks_the_videos_the_sender_streams() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.example".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let video = |name: &str| mezon_client::transport::ApiAttachment {
+            url: format!("https://cdn.example/1cf9/{name}"),
+            filename: name.into(),
+            filetype: "video/mp4".into(),
+            width: 1280,
+            height: 720,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 0,
+        };
+        let msg = |ingest: Option<Vec<String>>| ApiMessage {
+            message_id: 5,
+            content: "hi".into(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                presign_finish: Some(vec![]),
+                presign_ingest: ingest,
+                ..Default::default()
+            },
+            code: 0,
+            sender_id: 1,
+            sender_name: "Alice".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![
+                video("2080000000000000001_clip.mp4"),
+                video("2080000000000000002_other.mp4"),
+            ],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        };
+
+        let marked = message_from_api(
+            msg(Some(vec!["2080000000000000001_clip".into()])),
+            Some(&cfg),
+            None,
+        );
+        assert!(marked.attachments[0].presign_ingest);
+        assert!(marked.attachments[0].presign_pending);
+        assert!(!marked.attachments[1].presign_ingest);
+
+        let unmarked = message_from_api(msg(None), Some(&cfg), None);
+        assert!(!unmarked.attachments.iter().any(|a| a.presign_ingest));
     }
 
     #[test]
@@ -16521,6 +16886,136 @@ mod tests {
     }
 
     #[test]
+    fn an_ingest_upload_outlives_the_ten_minute_expiry() {
+        let mut attachments = vec![
+            MessageAttachment {
+                presign_ingest: true,
+                ..cdn_attachment("https://cdn.example/uploads/clip.mp4")
+            },
+            cdn_attachment("https://cdn.example/uploads/photo.png"),
+        ];
+        apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000 + 601);
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].presign_ingest);
+        assert!(attachments[0].presign_pending);
+        apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000 + 86_400);
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn an_ingest_upload_arms_its_expiry_a_day_out() {
+        let mut pending = Message::new(MessageId(1), "hi".to_string(), "5".to_string(), "me", 1000);
+        pending.create_time = 1000;
+        pending.attachments = vec![MessageAttachment {
+            presign_pending: true,
+            presign_ingest: true,
+            ..cdn_attachment("https://cdn.example/uploads/clip.mp4")
+        }];
+        assert_eq!(
+            presign_expiry_deadline(&pending),
+            Some(1000 + presign::PRESIGN_INGEST_PENDING_MAX_AGE_SEC)
+        );
+        let mut photo = cdn_attachment("https://cdn.example/uploads/photo.png");
+        photo.presign_pending = true;
+        pending.attachments.push(photo);
+        assert_eq!(
+            presign_expiry_deadline(&pending),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC)
+        );
+    }
+
+    #[test]
+    fn ingest_keys_mark_only_the_attachments_they_name() {
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.example/1cf9/2080000000000000001_clip.mp4"),
+            cdn_attachment("https://cdn.example/1cf9/2080000000000000002_other.mp4"),
+        ];
+        mark_ingest_attachments(
+            &mut attachments,
+            &presign::parse_presign_ingest_keys(
+                r#"{"t":"","presign_finish":[],"presign_ingest":["2080000000000000001_clip"]}"#,
+            ),
+        );
+        assert!(attachments[0].presign_ingest);
+        assert!(!attachments[1].presign_ingest);
+        mark_ingest_attachments(&mut attachments, &[]);
+        assert!(
+            attachments[0].presign_ingest,
+            "an edit that carries no marker must not forget it"
+        );
+    }
+
+    #[test]
+    fn an_update_keeps_what_the_ingest_probe_learned() {
+        let url = "https://cdn.example/1cf9/2080000000000000001_clip.mp4";
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        existing.attachments = vec![MessageAttachment {
+            presign_pending: true,
+            presign_ingest: true,
+            stream_ready: true,
+            ..cdn_attachment(url)
+        }];
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_attachments(vec![cdn_attachment(url)]);
+        merge_message_update(&mut existing, &incoming);
+        assert!(existing.attachments[0].presign_ingest);
+        assert!(existing.attachments[0].stream_ready);
+    }
+
+    #[test]
+    fn only_a_pending_marked_video_waits_for_its_stream() {
+        let video = MessageAttachment {
+            filetype: "video/mp4".into(),
+            filename: "clip.mp4".into(),
+            presign_pending: true,
+            presign_ingest: true,
+            ..cdn_attachment("https://cdn.example/1cf9/2080000000000000001_clip.mp4")
+        };
+        assert!(awaits_stream(&video));
+        for done in [
+            MessageAttachment {
+                presign_pending: false,
+                ..video.clone()
+            },
+            MessageAttachment {
+                presign_ingest: false,
+                ..video.clone()
+            },
+            MessageAttachment {
+                stream_ready: true,
+                ..video.clone()
+            },
+            MessageAttachment {
+                uploading: true,
+                ..video.clone()
+            },
+            MessageAttachment {
+                filetype: "image/png".into(),
+                filename: "photo.png".into(),
+                ..video.clone()
+            },
+        ] {
+            assert!(!awaits_stream(&done));
+        }
+    }
+
+    #[test]
+    fn the_stream_probe_slows_down_after_ten_minutes() {
+        assert_eq!(stream_probe_interval(1000, 1000 + 599).as_secs(), 3);
+        assert_eq!(stream_probe_interval(1000, 1000 + 600).as_secs(), 30);
+        assert_eq!(stream_probe_interval(0, 1_000_000).as_secs(), 3);
+    }
+
+    #[test]
+    fn an_ingest_upload_probes_its_original_less_and_less_often() {
+        let secs = |attempts| presign_probe_delay(attempts, true).as_secs();
+        assert_eq!(secs(0), 8);
+        assert_eq!(secs(3), 60);
+        assert_eq!(secs(6), 300);
+        assert_eq!(secs(u32::MAX), 300);
+    }
+
+    #[test]
     fn an_ordinary_message_does_not_arm_the_expiry_timer() {
         // Arming walks every cached message, and this runs on every socket
         // arrival, so a message with nothing pending must not trigger it.
@@ -16594,7 +17089,7 @@ mod tests {
 
     #[test]
     fn presign_probe_backoff_stretches_then_holds_at_thirty_seconds() {
-        let secs = |attempts| presign_probe_delay(attempts).as_secs();
+        let secs = |attempts| presign_probe_delay(attempts, false).as_secs();
         // The first wait outlasts a healthy presign_finish, so the normal path
         // never spends a request.
         assert_eq!(secs(0), 8);
@@ -17324,6 +17819,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_clip_the_ingest_holds_shows_it_is_being_stored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let (channel, id, key) = (ChannelId(603), MessageId(64), "storing-clip");
+                channel_with_pending_clip(store, channel, id, key);
+                store.register_upload_job(resumed_job(channel, id, key), cx);
+                presign::begin_uploading(&[key.to_string()]);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Storing(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(att.upload_storing);
+                assert!(!att.upload_failed);
+                assert_eq!(
+                    presign::upload_state(key),
+                    Some(presign::UploadState::Storing)
+                );
+                assert_eq!(store.upload_jobs[0].pending_keys(), vec![key.to_string()]);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Uploaded(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(!att.upload_storing);
+                assert!(!att.presign_pending);
+                presign::settle(key);
+            });
+        });
+    }
+
+    #[gpui::test]
     fn jobs_for_the_same_message_id_in_two_buckets_do_not_evict_each_other(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -17587,7 +18119,13 @@ mod tests {
                     .with_raw_content(
                         r#"{"t":"**hi** https://x.com","mk":[{"type":"b","s":0,"e":2}]}"#,
                     );
-                store.apply_message_update(channel, MessageId(5), echo, None, cx);
+                store.apply_message_update(
+                    channel,
+                    MessageId(5),
+                    echo,
+                    PresignUpdate::default(),
+                    cx,
+                );
 
                 store.finish_ogp_removal(
                     channel,

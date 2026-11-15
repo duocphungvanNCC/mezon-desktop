@@ -13,9 +13,18 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
+use tokio::task::AbortHandle;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Arc<ReqwestClient>> = OnceLock::new();
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// A probe must never hold a slot the way a transfer does; it is a liveness
 /// check, not a download.
@@ -351,6 +360,104 @@ pub async fn read_file_range(path: std::path::PathBuf, offset: u64, len: usize) 
         .map_err(Into::into)
 }
 
+pub(crate) async fn put_range(
+    url: &str,
+    data: Vec<u8>,
+    (first, last): (u64, u64),
+    size: u64,
+) -> Result<(u16, Vec<u8>)> {
+    let request = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri(url)
+        .header("Content-Range", format!("bytes {first}-{last}/{size}"))
+        .header(http::header::CONTENT_LENGTH, data.len())
+        .body(AsyncBody::from(data))?;
+    send_for_body(request).await
+}
+
+pub(crate) async fn get_body(url: &str) -> Result<(u16, Vec<u8>)> {
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(url)
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .body(AsyncBody::empty())?;
+    send_for_body(request).await
+}
+
+async fn send_for_body(request: http::Request<AsyncBody>) -> Result<(u16, Vec<u8>)> {
+    runtime()
+        .spawn(async move {
+            let exchange = async move {
+                let mut response = http_client().send(request).await?;
+                let status = response.status().as_u16();
+                let mut body = Vec::new();
+                response
+                    .body_mut()
+                    .take(MAX_STATUS_BODY_BYTES)
+                    .read_to_end(&mut body)
+                    .await?;
+                anyhow::Ok((status, body))
+            };
+            match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, exchange).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!(
+                    "HTTP request timed out after {}s",
+                    HTTP_TRANSFER_TIMEOUT.as_secs()
+                ),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP task failed: {e}"))?
+}
+
+pub(crate) async fn put_file(
+    url: &str,
+    path: std::path::PathBuf,
+    size: u64,
+    content_type: &str,
+) -> Result<()> {
+    const PIECE: u64 = 1024 * 1024;
+    const SLOWEST_BYTES_PER_SEC: u64 = 128 * 1024;
+    let pieces = futures::stream::try_unfold(0u64, move |offset| {
+        let path = path.clone();
+        async move {
+            if offset >= size {
+                return Ok(None);
+            }
+            let len = PIECE.min(size - offset);
+            let data = read_file_range(path, offset, len as usize)
+                .await
+                .map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(Some((data, offset + len)))
+        }
+    });
+    let body = AsyncBody::from_reader(futures::TryStreamExt::into_async_read(Box::pin(pieces)));
+    let request = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri(url)
+        .header("Content-Type", content_type)
+        .header(http::header::CONTENT_LENGTH, size)
+        .body(body)?;
+    let limit =
+        HTTP_TRANSFER_TIMEOUT.max(std::time::Duration::from_secs(size / SLOWEST_BYTES_PER_SEC));
+    runtime()
+        .spawn(async move {
+            let response = match tokio::time::timeout(limit, http_client().send(request)).await {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!("HTTP PUT timed out after {}s", limit.as_secs()),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                anyhow::bail!("HTTP PUT failed with status {status}");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("upload task failed: {e}"))?
+}
+
+const MAX_STATUS_BODY_BYTES: u64 = 64 * 1024;
+
 pub async fn put_bytes_return_etag(url: &str, data: Vec<u8>, content_type: &str) -> Result<String> {
     let url = url.to_string();
     let content_type = content_type.to_string();
@@ -431,6 +538,14 @@ async fn stream_to_file(
     };
     let status = response.status();
     if !status.is_success() {
+        if matches!(
+            status,
+            http::StatusCode::FORBIDDEN | http::StatusCode::NOT_FOUND
+        ) && crate::video_source::may_have_hls_stream(url)
+        {
+            drop(response);
+            return save_hls_copy(url, dest, on_progress, status).await;
+        }
         anyhow::bail!("HTTP GET failed with status {status}");
     }
     let total = response
@@ -471,6 +586,52 @@ async fn stream_to_file(
     }
     file.flush().await?;
     on_progress(written, total.or(Some(written)));
+    Ok(())
+}
+
+const HLS_PARTS_IN_FLIGHT: usize = 4;
+
+async fn save_hls_copy(
+    url: &str,
+    dest: &std::path::Path,
+    on_progress: impl Fn(u64, Option<u64>),
+    status: http::StatusCode,
+) -> Result<()> {
+    let Some(parts) = crate::video_source::finished_hls_parts(url).await else {
+        anyhow::bail!("HTTP GET failed with status {status}");
+    };
+    write_hls_parts(parts, dest, on_progress).await
+}
+
+async fn write_hls_parts(
+    parts: Vec<String>,
+    dest: &std::path::Path,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<()> {
+    use futures::StreamExt as _;
+    use tokio::io::AsyncSeekExt as _;
+    let mut file = tokio::fs::File::create(dest).await?;
+    let mut index = crate::fmp4_index::Fmp4Index::default();
+    let total = parts.len() as u64;
+    let mut done: u64 = 0;
+    on_progress(0, Some(total));
+    let mut fetches = futures::stream::iter(parts)
+        .map(|part| async move { fetch_bytes(&part).await })
+        .buffered(HLS_PARTS_IN_FLIGHT);
+    while let Some(result) = fetches.next().await {
+        let (bytes, _) = result?;
+        file.write_all(&bytes).await?;
+        index.push(&bytes);
+        done += 1;
+        on_progress(done, Some(total));
+    }
+    if let Some(fin) = index.finish() {
+        file.seek(std::io::SeekFrom::Start(fin.head_offset)).await?;
+        file.write_all(&fin.head).await?;
+        file.seek(std::io::SeekFrom::End(0)).await?;
+        file.write_all(&fin.tail).await?;
+    }
+    file.flush().await?;
     Ok(())
 }
 
@@ -1074,21 +1235,23 @@ impl TransportClient {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
-    ) -> Result<()> {
+        call_setup: bool,
+    ) -> Result<bool> {
         let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .forward_webrtc_signaling(
-                        receiver_id,
-                        data_type,
-                        json_data,
-                        channel_id,
-                        caller_id,
-                    )
-                    .await
-            })
-            .await
+        let task = runtime().spawn(async move {
+            transport
+                .forward_webrtc_signaling(
+                    receiver_id,
+                    data_type,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                    call_setup,
+                )
+                .await
+        });
+        let _abort = call_setup.then(|| AbortOnDrop(task.abort_handle()));
+        task.await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
@@ -1098,15 +1261,16 @@ impl TransportClient {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
+        call_setup: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .make_call_push(receiver_id, json_data, channel_id, caller_id)
-                    .await
-            })
-            .await
+        let task = runtime().spawn(async move {
+            transport
+                .make_call_push(receiver_id, json_data, channel_id, caller_id, call_setup)
+                .await
+        });
+        let _abort = call_setup.then(|| AbortOnDrop(task.abort_handle()));
+        task.await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
@@ -3019,7 +3183,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
@@ -3040,7 +3204,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         reply,
                         flags,
                     )
@@ -3093,7 +3257,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
@@ -3113,7 +3277,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         flags,
                     )
                     .await
@@ -3132,7 +3296,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign: crate::transport::PresignMarkers,
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
@@ -3153,7 +3317,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         create_time_seconds,
                         mode,
                         is_public,
@@ -3204,6 +3368,22 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.create_direct_channel(&user_ids).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_dm_setting().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_dm_setting(only_friends_dm).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -3535,6 +3715,7 @@ impl TransportClient {
         about_me: Option<&str>,
         logo: Option<&str>,
         dob_seconds: Option<u32>,
+        banner: Option<&str>,
     ) -> Result<()> {
         tracing::debug!("TransportClient::update_account() called");
 
@@ -3543,6 +3724,7 @@ impl TransportClient {
         let avatar_url = avatar_url.map(str::to_string);
         let about_me = about_me.map(str::to_string);
         let logo = logo.map(str::to_string);
+        let banner = banner.map(str::to_string);
 
         runtime()
             .spawn(async move {
@@ -3553,6 +3735,7 @@ impl TransportClient {
                         about_me.as_deref(),
                         logo.as_deref(),
                         dob_seconds,
+                        banner.as_deref(),
                     )
                     .await
             })
@@ -3605,6 +3788,17 @@ impl TransportClient {
                     .upload_attachment_file(&filename, &filetype, size, width, height, channel_id)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn upload_attachment(
+        &self,
+        request: mezon_proto::api::UploadAttachmentRequest,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.upload_attachment(request).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -4212,5 +4406,227 @@ mod tests {
     #[test]
     fn garbage_bytes_do_not_panic() {
         assert!(shrink_icon_to_png(b"not an image at all").is_err());
+    }
+
+    async fn fake_binary_server(objects: Vec<(&'static str, Vec<u8>)>) -> String {
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let objects: Arc<HashMap<&'static str, Vec<u8>>> = Arc::new(objects.into_iter().collect());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let objects = objects.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let target = head.split_whitespace().nth(1).unwrap_or("");
+                    let key = target.split('?').next().unwrap_or("");
+                    if let Some(body) = objects.get(key) {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    } else {
+                        let body = b"not found";
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    }
+                });
+            }
+        });
+        origin
+    }
+
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + body.len());
+        out.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+        let vf = (u32::from(version) << 24) | (flags & 0x00ff_ffff);
+        let mut body = Vec::with_capacity(4 + payload.len());
+        body.extend_from_slice(&vf.to_be_bytes());
+        body.extend_from_slice(payload);
+        mp4_box(kind, &body)
+    }
+
+    fn synthetic_hls_init_and_segments() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut ftyp_body = Vec::new();
+        ftyp_body.extend_from_slice(b"iso5");
+        ftyp_body.extend_from_slice(&512u32.to_be_bytes());
+        ftyp_body.extend_from_slice(b"iso5iso6mp41");
+        let ftyp = mp4_box(b"ftyp", &ftyp_body);
+
+        let mut mvhd_payload = Vec::new();
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&1000u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&[0u8; 80]);
+        let mvhd = full_box(b"mvhd", 0, 0, &mvhd_payload);
+
+        let mut tkhd_payload = Vec::new();
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&1u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&[0u8; 60]);
+        let tkhd = full_box(b"tkhd", 0, 3, &tkhd_payload);
+
+        let mut mdhd_payload = Vec::new();
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&1000u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        let mdhd = full_box(b"mdhd", 0, 0, &mdhd_payload);
+
+        let stbl = mp4_box(b"stbl", &[]);
+        let minf = mp4_box(b"minf", &stbl);
+        let mut mdia_body = Vec::new();
+        mdia_body.extend_from_slice(&mdhd);
+        mdia_body.extend_from_slice(&minf);
+        let mdia = mp4_box(b"mdia", &mdia_body);
+
+        let mut trak_body = Vec::new();
+        trak_body.extend_from_slice(&tkhd);
+        trak_body.extend_from_slice(&mdia);
+        let trak = mp4_box(b"trak", &trak_body);
+
+        let mut trex_payload = Vec::new();
+        trex_payload.extend_from_slice(&1u32.to_be_bytes());
+        trex_payload.extend_from_slice(&1u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        let trex = full_box(b"trex", 0, 0, &trex_payload);
+        let mvex = mp4_box(b"mvex", &trex);
+
+        let mut moov_body = Vec::new();
+        moov_body.extend_from_slice(&mvhd);
+        moov_body.extend_from_slice(&trak);
+        moov_body.extend_from_slice(&mvex);
+        let moov = mp4_box(b"moov", &moov_body);
+
+        let mut init = ftyp;
+        init.extend_from_slice(&moov);
+
+        let build_seg = |seq: u32, base: u64, dur: u32| -> Vec<u8> {
+            let mfhd = full_box(b"mfhd", 0, 0, &seq.to_be_bytes());
+            let tfhd = full_box(b"tfhd", 0, 0x020000, &1u32.to_be_bytes());
+            let tfdt = full_box(b"tfdt", 1, 0, &base.to_be_bytes());
+            let mut trun_payload = Vec::new();
+            trun_payload.extend_from_slice(&1u32.to_be_bytes());
+            trun_payload.extend_from_slice(&0u32.to_be_bytes());
+            trun_payload.extend_from_slice(&dur.to_be_bytes());
+            trun_payload.extend_from_slice(&4u32.to_be_bytes());
+            trun_payload.extend_from_slice(&0x0101_0000u32.to_be_bytes());
+            let trun = full_box(b"trun", 0, 0x000701, &trun_payload);
+            let mut traf_body = Vec::new();
+            traf_body.extend_from_slice(&tfhd);
+            traf_body.extend_from_slice(&tfdt);
+            traf_body.extend_from_slice(&trun);
+            let traf = mp4_box(b"traf", &traf_body);
+            let mut moof_body = Vec::new();
+            moof_body.extend_from_slice(&mfhd);
+            moof_body.extend_from_slice(&traf);
+            let moof = mp4_box(b"moof", &moof_body);
+            let mdat = mp4_box(b"mdat", &[seq as u8; 4]);
+            let mut seg = moof;
+            seg.extend_from_slice(&mdat);
+            seg
+        };
+
+        (init, build_seg(1, 0, 2000), build_seg(2, 2000, 1500))
+    }
+
+    #[tokio::test]
+    async fn write_hls_parts_concatenates_segments_patches_mvhd_and_appends_mfra() {
+        let (init, seg0, seg1) = synthetic_hls_init_and_segments();
+        let origin = fake_binary_server(vec![
+            ("/init.mp4", init.clone()),
+            ("/seg0.m4s", seg0.clone()),
+            ("/seg1.m4s", seg1.clone()),
+        ])
+        .await;
+
+        let dest = std::env::temp_dir().join(format!(
+            "mezon-hls-dl-ok-{}-{}.mp4",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_clone = progress.clone();
+        let parts = vec![
+            format!("{origin}/init.mp4"),
+            format!("{origin}/seg0.m4s"),
+            format!("{origin}/seg1.m4s"),
+        ];
+
+        write_hls_parts(parts, &dest, move |done, total| {
+            progress_clone.lock().unwrap().push((done, total));
+        })
+        .await
+        .expect("write_hls_parts");
+
+        let written = tokio::fs::read(&dest).await.expect("read output");
+        let _ = tokio::fs::remove_file(&dest).await;
+
+        let recorded = progress.lock().unwrap().clone();
+        assert_eq!(recorded.first().copied(), Some((0, Some(3))));
+        assert_eq!(recorded.last().copied(), Some((3, Some(3))));
+
+        let mut expected_index = crate::fmp4_index::Fmp4Index::default();
+        expected_index.push(&init);
+        expected_index.push(&seg0);
+        expected_index.push(&seg1);
+        let fin = expected_index.finish().expect("expected finalization");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&init[..fin.head_offset as usize]);
+        expected.extend_from_slice(&fin.head);
+        expected.extend_from_slice(&seg0);
+        expected.extend_from_slice(&seg1);
+        expected.extend_from_slice(&fin.tail);
+        assert_eq!(written, expected);
+        assert_eq!(&written[written.len() - 12..written.len() - 8], b"mfro");
+    }
+
+    #[tokio::test]
+    async fn write_hls_parts_fails_when_any_segment_returns_404() {
+        let (init, seg0, _) = synthetic_hls_init_and_segments();
+        let origin = fake_binary_server(vec![("/init.mp4", init), ("/seg0.m4s", seg0)]).await;
+        let dest = std::env::temp_dir().join(format!(
+            "mezon-hls-dl-err-{}-{}.mp4",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let parts = vec![
+            format!("{origin}/init.mp4"),
+            format!("{origin}/seg0.m4s"),
+            format!("{origin}/seg1.m4s"),
+        ];
+
+        let result = write_hls_parts(parts, &dest, |_, _| {}).await;
+        let _ = tokio::fs::remove_file(&dest).await;
+        assert!(result.is_err());
     }
 }

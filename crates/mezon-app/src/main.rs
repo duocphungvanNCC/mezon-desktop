@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[cfg(any(target_os = "linux", test))]
+mod exit_record;
+#[cfg(any(windows, test))]
+mod hang_dump;
+#[cfg(any(target_os = "linux", test))]
 mod hang_probe;
 mod mcp;
 
@@ -329,7 +333,11 @@ fn main() -> Result<()> {
             tracing::info!("Another instance is already running — exiting");
             return Ok(());
         }
-        Some(lock) => run_app(lock, deep_link_url),
+        Some(lock) => {
+            #[cfg(target_os = "linux")]
+            exit_record::report_previous_and_arm(&log_dir());
+            run_app(lock, deep_link_url)
+        }
     }
 
     Ok(())
@@ -399,6 +407,8 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
     static START: OnceLock<Instant> = OnceLock::new();
     static HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
     let start = *START.get_or_init(Instant::now);
+    #[cfg(windows)]
+    hang_dump::remember_main_thread();
 
     const WATCHDOG_HEARTBEAT_SECS: u64 = 5;
 
@@ -502,7 +512,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn capture_hang_sample(stalled_secs: u64) {
+    hang_dump::capture(stalled_secs, &log_dir(), |line| {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
@@ -526,6 +544,7 @@ fn install_panic_hook() {
 
 fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let settings = Settings::load_sync();
+    let start_hidden = mezon_store::take_start_hidden_marker();
 
     tracing::debug!(
         "Settings: theme={}, zoom={}, auto_start={}",
@@ -559,6 +578,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         cloudflare: app_config.cloudflare_cdn_url.clone(),
         profile: app_config.profile_img_url.clone(),
     });
+    mezon_client::file_ingest::configure_file_ingest(&app_config.file_ingest);
     let transport = Arc::new(TransportClient::new(String::new()));
     let api = Arc::new(AppApi::new(
         transport.clone(),
@@ -642,6 +662,13 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
+        cx.on_app_quit(|_| {
+            tracing::info!("Quitting normally");
+            #[cfg(target_os = "linux")]
+            exit_record::mark_clean_exit();
+            async {}
+        })
+        .detach();
 
         #[cfg(target_os = "linux")]
         cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
@@ -667,6 +694,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             (
                 include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
                 "ExtraBold",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic-as-ggsans.ttf"
+                ),
+                "Italic",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic-as-ggsans.ttf"
+                ),
+                "SemiBoldItalic",
             ),
         ];
         let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
@@ -752,7 +791,11 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             api.clone(),
             transport.clone(),
             initial_auth_state,
+            start_hidden,
         );
+        if start_hidden {
+            let _ = cx.update_window(window_handle, |_, window, _| window.hide_window());
+        }
 
         let _mcp_runtime = if let Some((runtime, mcp_cmd_rx)) = mcp_runtime {
             mcp::McpRuntime::spawn_ui_bridge(
@@ -912,7 +955,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             deep_link_task.detach();
         }
 
-        cx.activate(true);
+        if !start_hidden {
+            cx.activate(true);
+        }
     });
 }
 
@@ -943,6 +988,7 @@ fn open_dev_gallery_window(cx: &mut App) {
     cx.activate(true);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_main_window(
     cx: &mut App,
     settings: &Settings,
@@ -951,6 +997,7 @@ fn open_main_window(
     api: Arc<AppApi>,
     transport: Arc<TransportClient>,
     initial_auth: AuthState,
+    start_hidden: bool,
 ) -> (Entity<AuthState>, gpui::AnyWindowHandle) {
     let window_bounds = if let Some([x, y, w, h]) = settings.window_bounds {
         WindowBounds::Windowed(Bounds {
@@ -976,15 +1023,21 @@ fn open_main_window(
             px(mezon_ui::MAIN_WINDOW_MIN_HEIGHT),
         )),
         kind: gpui::WindowKind::Normal,
-        focus: true,
-        show: true,
+        focus: !start_hidden,
+        show: !start_hidden,
         window_decorations: main_window_decorations(),
         app_id: linux_app_id(),
         ..Default::default()
     };
 
     let auth_state = cx.new(|_| initial_auth);
-    mezon_store::AutoUpdateStore::init(mezon_store::AppConfig::global(cx).update_url.clone(), cx);
+    let auto_update = mezon_store::AutoUpdateStore::init(
+        mezon_store::AppConfig::global(cx).update_url.clone(),
+        cx,
+    );
+    if start_hidden {
+        auto_update.update(cx, |store, cx| store.set_main_window_hidden(true, cx));
+    }
     mezon_store::WinstoreUpdateStore::init(cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
@@ -993,6 +1046,7 @@ fn open_main_window(
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api.clone(), cx);
+    mezon_store::DmSettingStore::init(api.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
@@ -1115,11 +1169,6 @@ fn open_main_window(
     mezon_store::PlatformStore::set_notification_permit(
         &platform_store,
         std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
-        cx,
-    );
-    mezon_store::PlatformStore::set_current_location(
-        &platform_store,
-        std::sync::Arc::new(mezon_native::location::current_location),
         cx,
     );
 

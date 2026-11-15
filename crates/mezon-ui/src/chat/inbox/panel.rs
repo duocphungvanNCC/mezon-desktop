@@ -592,11 +592,7 @@ fn render_header(theme: &Theme, locale: &SharedString) -> impl IntoElement {
         .items_center()
         .gap_2()
         .pb_2()
-        .child(
-            Icon::new(IconName::Inbox)
-                .size(px(20.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::Inbox).size(px(20.)).selected(false))
         .child(
             div()
                 .text_base()
@@ -690,7 +686,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
                 .to_uppercase()
                 .into(),
             mezon_i18n::t(locale, "notifications.empty.messages.description").into(),
-            IconName::EmptyUnread,
+            IconName::Inbox,
         )
         .into_any_element(),
         InboxTab::Mentions => render_empty_with_protip(
@@ -700,7 +696,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
                 .to_uppercase()
                 .into(),
             mezon_i18n::t(locale, "notifications.empty.mentions.description").into(),
-            IconName::EmptyMention,
+            IconName::Mention,
         )
         .into_any_element(),
         InboxTab::ForYou => render_empty_simple(
@@ -714,7 +710,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
             theme,
             mezon_i18n::t(locale, "notifications.empty.topics.title").into(),
             mezon_i18n::t(locale, "notifications.empty.topics.description").into(),
-            IconName::EmptyMention,
+            IconName::Mention,
         )
         .into_any_element(),
     }
@@ -949,7 +945,7 @@ fn schedule_topic_jump(
         store.clear_topic(&topic.id, cx);
     });
     ChannelList::global(cx).update(cx, |store, cx| {
-        store.apply_topic_read(ChannelId(topic_id), cx);
+        store.apply_topic_read_in(clan, ChannelId(topic_id), Some(channel), cx);
     });
     TopicsStore::global(cx).update(cx, |store, cx| {
         store.begin_inbox_topic_jump_to_origin(
@@ -1055,11 +1051,7 @@ fn render_notification_item(
                         .cursor_pointer()
                         .bg(theme.bg_hover)
                         .hover(|s| s.bg(theme.bg_primary))
-                        .child(
-                            Icon::new(IconName::Close)
-                                .size(px(12.))
-                                .text_color(theme.text_muted),
-                        )
+                        .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
                         .on_mouse_down(MouseButton::Left, {
                             let id = id.clone();
                             move |_, _, cx| {
@@ -1089,11 +1081,7 @@ fn render_notification_item(
                             .opacity(0.)
                             .group_hover("inbox-item", |s| s.opacity(1.))
                             .hover(|s| s.bg(theme.bg_primary))
-                            .child(
-                                Icon::new(IconName::CopyIcon)
-                                    .size(px(12.))
-                                    .text_color(theme.text_muted),
-                            )
+                            .child(Icon::new(IconName::Copy).size(px(16.)).selected(false))
                             .on_mouse_down(MouseButton::Left, {
                                 let copy_text = copy_text.clone();
                                 move |_, _, cx| {

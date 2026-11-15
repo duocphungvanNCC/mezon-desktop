@@ -21,6 +21,7 @@ pub struct User {
     pub id: UserId,
     pub username: String,
     pub display_name: String,
+    pub banner: Option<String>,
     pub avatar_url: String,
     pub about_me: String,
     pub create_time_seconds: u32,
@@ -32,10 +33,17 @@ impl User {
         if self.id != profile.id {
             return false;
         }
-        let changed = self.username != profile.username
+        let changed = profile
+            .banner
+            .as_ref()
+            .is_some_and(|banner| self.banner.as_ref() != Some(banner))
+            || self.username != profile.username
             || self.display_name != profile.display_name
             || self.avatar_url != profile.avatar_url
             || self.about_me != profile.about_me;
+        if profile.banner.is_some() {
+            self.banner.clone_from(&profile.banner);
+        }
         self.username.clone_from(&profile.username);
         self.display_name.clone_from(&profile.display_name);
         self.avatar_url.clone_from(&profile.avatar_url);
@@ -99,6 +107,10 @@ struct ClanBucket {
 }
 
 impl ClanBucket {
+    fn is_known_non_member(&self, user_id: UserId) -> bool {
+        !self.cut_by_server && !self.by_id.contains_key(&user_id)
+    }
+
     fn upsert(&mut self, member: ClanMember) {
         let id = member.user.id;
         if self.by_id.insert(id, member).is_none() {
@@ -215,6 +227,12 @@ impl ClanMembersStore {
 
     pub fn member(&self, clan_id: ClanId, user_id: UserId) -> Option<&ClanMember> {
         self.cache.get(&clan_id)?.by_id.get(&user_id)
+    }
+
+    pub fn is_known_non_member(&self, clan_id: ClanId, user_id: UserId) -> bool {
+        self.cache
+            .get(&clan_id)
+            .is_some_and(|bucket| bucket.is_known_non_member(user_id))
     }
 
     pub fn find_user(&self, user_id: UserId) -> Option<&User> {
@@ -605,6 +623,7 @@ pub(crate) fn user_from_api(user: api::User) -> Option<User> {
         id: UserId(user.id),
         username: user.username,
         display_name: user.display_name,
+        banner: Some(user.banner),
         avatar_url: user.avatar_url,
         about_me: user.about_me,
         create_time_seconds: user.create_time_seconds,
@@ -633,6 +652,7 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
             id: UserId(user.user_id),
             username: user.username.clone(),
             display_name: user.display_name.clone(),
+            banner: None,
             avatar_url: user.avatar.clone(),
             about_me: String::new(),
             create_time_seconds: user.create_time_second,
@@ -723,6 +743,36 @@ pub fn split_members_by_status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_banner_preserves_partial_snapshots_and_accepts_removal() {
+        let mut user = super::user_from_api(mezon_proto::api::User {
+            id: 7,
+            banner: "cover.png".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut partial = user.clone();
+        partial.banner = None;
+        partial.display_name = "New name".into();
+        assert!(user.update_profile(&partial));
+        assert_eq!(user.banner.as_deref(), Some("cover.png"));
+        let removed = super::user_from_api(mezon_proto::api::User {
+            id: 7,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(user.update_profile(&removed));
+        assert_eq!(user.banner.as_deref(), Some(""));
+        assert!(!user.update_profile(&removed));
+        let other = super::User {
+            id: super::UserId(8),
+            banner: Some("other.png".into()),
+            ..Default::default()
+        };
+        assert!(!user.update_profile(&other));
+        assert_eq!(user.banner.as_deref(), Some(""));
+    }
+
     #[gpui::test]
     fn roster_waiters_share_the_existing_request(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1079,6 +1129,27 @@ mod tests {
     fn roster_is_cut_only_when_the_server_returned_its_full_page() {
         assert!(!roster_cut_by_server(999));
         assert!(roster_cut_by_server(LIST_CLAN_USERS_CAP));
+    }
+
+    #[gpui::test]
+    fn only_complete_rosters_establish_non_membership(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = ClanMembersStore::init(api, cx);
+            store.update(cx, |store, _| {
+                assert!(!store.is_known_non_member(ClanId(1), UserId(2)));
+                store.cache = bucket_with(vec![member(1, "a")]);
+                assert!(!store.is_known_non_member(ClanId(1), UserId(1)));
+                assert!(store.is_known_non_member(ClanId(1), UserId(2)));
+                store.cache.get_mut(&ClanId(1)).unwrap().cut_by_server = true;
+                assert!(!store.is_known_non_member(ClanId(1), UserId(1)));
+                assert!(!store.is_known_non_member(ClanId(1), UserId(2)));
+            });
+        });
     }
 
     #[test]

@@ -599,6 +599,14 @@ fn breakout_invitees(
         .collect()
 }
 
+fn agent_request_channel_id(channel_key: &str, external_meeting: bool) -> Option<i64> {
+    if external_meeting {
+        Some(0)
+    } else {
+        channel_key.parse::<i64>().ok()
+    }
+}
+
 fn participant_rosters_differ(old: &[VoiceParticipant], new: &[VoiceParticipant]) -> bool {
     old.len() != new.len()
         || old.iter().zip(new).any(|(before, after)| {
@@ -4000,6 +4008,48 @@ impl VoiceStore {
         }
     }
 
+    pub const USER_VOLUME_MAX: u16 = 150;
+    pub const USER_VOLUME_DEFAULT: u16 = 100;
+
+    pub fn user_volume(identity: &str, cx: &App) -> u16 {
+        Settings::try_global(cx)
+            .and_then(|settings| settings.read(cx).voice_user_volumes.get(identity).copied())
+            .unwrap_or(Self::USER_VOLUME_DEFAULT)
+    }
+
+    pub fn set_user_volume(&mut self, identity: String, percent: u16, cx: &mut Context<Self>) {
+        let percent = percent.min(Self::USER_VOLUME_MAX);
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        let changed = settings.update(cx, |s, _| {
+            if percent == Self::USER_VOLUME_DEFAULT {
+                s.voice_user_volumes.remove(&identity).is_some()
+            } else {
+                s.voice_user_volumes.insert(identity, percent) != Some(percent)
+            }
+        });
+        if !changed {
+            return;
+        }
+        crate::schedule_settings_save(&settings, cx);
+        if let Some(session) = &self.session {
+            session.set_user_volumes(Self::user_volume_gains(cx));
+        }
+    }
+
+    fn user_volume_gains(cx: &App) -> HashMap<String, f32> {
+        let Some(settings) = Settings::try_global(cx) else {
+            return HashMap::new();
+        };
+        settings
+            .read(cx)
+            .voice_user_volumes
+            .iter()
+            .map(|(id, &percent)| (id.clone(), percent as f32 / 100.0))
+            .collect()
+    }
+
     pub fn take_moderation_error(&mut self) -> Option<VoiceModerationError> {
         self.moderation_error.take()
     }
@@ -4168,7 +4218,12 @@ impl VoiceStore {
                             cx,
                         )
                     });
-                    card.detach();
+                    cx.spawn(async move |_, _| {
+                        if let Err(err) = card.await {
+                            tracing::warn!("send flower token card dm failed: {err}");
+                        }
+                    })
+                    .detach();
                     let still_in_room = this
                         .connection
                         .connected_channel()
@@ -4240,7 +4295,9 @@ impl VoiceStore {
         let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let Ok(channel_id) = channel_key.parse::<i64>() else {
+        let Some(channel_id) =
+            agent_request_channel_id(channel_key, self.external_meeting.is_some())
+        else {
             return;
         };
         if self.room_name.is_empty() {
@@ -4620,6 +4677,10 @@ impl VoiceStore {
                 }
             })),
         });
+        let stored_volumes = Self::user_volume_gains(cx);
+        if !stored_volumes.is_empty() {
+            session.set_user_volumes(stored_volumes);
+        }
         self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
         self.noise_suppression_status = None;
         self.noise_suppression_started = None;
@@ -6349,8 +6410,8 @@ mod tests {
     use super::{
         BREAKOUT_AUTO_CLOSE_RETRY_SECS, BREAKOUT_EMPTY_CLOSE_DELAY_SECS,
         BREAKOUT_INVITE_RESPONSE_SECS, BreakoutInvite, BreakoutSignal, HostedBreakout,
-        HostedBreakoutPlan, HostedRoomsObservation, breakout_invitees, breakout_signal_from_event,
-        plan_hosted_breakout, retain_hosted_breakouts_for_user,
+        HostedBreakoutPlan, HostedRoomsObservation, agent_request_channel_id, breakout_invitees,
+        breakout_signal_from_event, plan_hosted_breakout, retain_hosted_breakouts_for_user,
     };
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
@@ -6640,6 +6701,13 @@ mod tests {
             vec![2, 3]
         );
         assert_eq!(breakout_invitees(&[], &participants, Some(1)), vec![2, 3]);
+    }
+
+    #[test]
+    fn agent_request_channel_id_uses_zero_for_external_meetings() {
+        assert_eq!(agent_request_channel_id("123", false), Some(123));
+        assert_eq!(agent_request_channel_id("meeting-room-key", false), None);
+        assert_eq!(agent_request_channel_id("anything", true), Some(0));
     }
 
     #[test]

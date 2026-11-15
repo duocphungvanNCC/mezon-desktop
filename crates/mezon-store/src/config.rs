@@ -65,6 +65,7 @@ pub struct AppConfig {
     pub imgproxy_key: String,
     pub mezon_cdn_url: String,
     pub cloudflare_cdn_url: String,
+    pub file_ingest: String,
 
     // ── Klipy (GIF search) ────────────────────────────────────────────────────
     pub klipy_key: String,
@@ -147,11 +148,12 @@ impl AppConfig {
             logo_mezon: "https://cdn.komu.vn/images/mezon_logo.png".into(),
             base_img_url: "https://cdn.komu.vn".into(),
             upload_img_url: "https://cdn-api.mezon.ai".into(),
-            profile_img_url: "https://profile.mezon.ai".into(),
-            imgproxy_base_url: "https://imgproxy.komu.vn".into(),
+            profile_img_url: "https://cdn-dev-profile.nccsoft.vn".into(),
+            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
-            mezon_cdn_url: "https://cdn.mezon.ai".into(),
-            cloudflare_cdn_url: "https://cdn.komu.vn".into(),
+            mezon_cdn_url: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare_cdn_url: "https://cdn-dev.tx8.vn".into(),
+            file_ingest: String::new(),
 
             klipy_key: String::new(),
             klipy_base_url: "https://api.klipy.com/api/v1".into(),
@@ -275,6 +277,7 @@ impl AppConfig {
                 baked_env::NX_CLOUDFLARE_CDN_URL,
                 &defaults.cloudflare_cdn_url,
             ),
+            file_ingest: opt_str(baked_env::NX_CHAT_APP_FILE_INGEST, &defaults.file_ingest),
 
             klipy_key: opt_str(baked_env::NX_CHAT_APP_API_KLIPY_KEY, &defaults.klipy_key),
             klipy_base_url: opt_str(
@@ -488,7 +491,8 @@ impl AppConfig {
         if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
-        let path = format!("/{processing_options}/mb:2097152/plain/{source_image_url}@webp");
+        let source = mezon_client::cdn_signature::escape_imgproxy_source(&source_image_url);
+        let path = format!("/{processing_options}/mb:2097152/plain/{source}@webp");
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
@@ -1047,6 +1051,10 @@ mod tests {
         let cfg = AppConfig::dev_defaults();
         assert_eq!(cfg.tcp_port, Some(7349));
         assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
+        assert_eq!(cfg.profile_img_url, "https://cdn-dev-profile.nccsoft.vn");
+        assert_eq!(cfg.imgproxy_base_url, "https://dev-imgproxy.nccsoft.vn");
+        assert_eq!(cfg.mezon_cdn_url, "https://cdn-dev.nccsoft.vn");
+        assert_eq!(cfg.cloudflare_cdn_url, "https://cdn-dev.tx8.vn");
     }
 
     #[test]
@@ -1077,6 +1085,31 @@ mod tests {
         assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.ends_with("@webp"));
         assert!(out.contains(src));
+    }
+
+    #[test]
+    fn imgproxy_url_escapes_a_source_that_carries_its_signature() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let file = format!(
+            "{}/1cfe6f3d95401000/2120028030431662080_bot.png",
+            cfg.base_img_url
+        );
+        let signed = format!("{file}?1791000000-botsig%2Babc%3D");
+        let out = cfg.imgproxy_url(&signed, 800, 600, "fit");
+        assert_eq!(
+            out,
+            format!(
+                "https://imgproxy.example/sig/rs:fit:800:600:1/mb:2097152/plain/{file}%3F1791000000-botsig%252Babc%253D@webp"
+            )
+        );
+        assert!(
+            cfg.imgproxy_url(&file, 800, 600, "fit")
+                .contains(&format!("/plain/{file}@webp"))
+        );
     }
 
     #[test]

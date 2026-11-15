@@ -15,6 +15,7 @@ mod forward_modal;
 mod gif_video;
 pub mod inline_content;
 pub(crate) mod invite_card;
+mod location_card;
 mod message_actions_panel;
 mod message_buzz_modal;
 mod message_context_menu;
@@ -30,7 +31,6 @@ mod report_modal;
 pub(crate) mod selection;
 mod send_token_modal;
 mod share_contact_card;
-mod share_location_modal;
 mod skeleton;
 mod system_row;
 mod time;
@@ -43,8 +43,8 @@ mod video_player;
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::{RichRunPalette, rich_run_highlight_with_link_underline};
 pub(crate) use content::{
-    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size, inline_code_chip,
-    interactive_link_text, meeting_code, open_message_link, pin_link_element,
+    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size, hidden_hashtag_label,
+    inline_code_chip, interactive_link_text, meeting_code, open_message_link, pin_link_element,
     render_pin_rich_layout_element, resolve_message_link_url,
 };
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
@@ -57,7 +57,6 @@ pub(crate) use ogp_embed::render_ogp_preview;
 pub(crate) use poll_card::render_poll_card_readonly;
 pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use send_token_modal::SendTokenModal;
-pub(crate) use share_location_modal::ShareLocationModal;
 pub(crate) use time::format_channel_setting_relative_time_from_seconds;
 pub(crate) use time::format_i18n_full_date_from_seconds;
 pub(crate) use time::format_message_time;

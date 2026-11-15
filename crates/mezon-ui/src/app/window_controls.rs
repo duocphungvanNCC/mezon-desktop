@@ -71,12 +71,27 @@ fn runs_in_background(cx: &App) -> bool {
         .map_or(cfg!(target_os = "macos"), |global| global.0)
 }
 
-pub fn hide_main_window(window: &mut Window, cx: &App) -> bool {
+pub fn hide_main_window(window: &mut Window, cx: &mut App) -> bool {
     if !runs_in_background(cx) {
         return false;
     }
+    if hides_app_instead_of_window(window) {
+        cx.hide();
+        return true;
+    }
     window.hide_window();
+    note_main_window_hidden(cx);
     true
+}
+
+pub(crate) fn hides_app_instead_of_window(window: &Window) -> bool {
+    cfg!(target_os = "macos") && window.is_fullscreen()
+}
+
+pub(crate) fn note_main_window_hidden(cx: &mut App) {
+    if let Some(store) = mezon_store::AutoUpdateStore::try_global(cx) {
+        store.update(cx, |s, cx| s.set_main_window_hidden(true, cx));
+    }
 }
 
 pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
@@ -89,9 +104,6 @@ pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
 
         #[cfg(not(target_os = "linux"))]
         window.on_window_should_close(cx, |window, cx| !hide_main_window(window, cx));
-
-        #[cfg(target_os = "macos")]
-        platform::disable_window_fullscreen(window);
     }) {
         tracing::warn!("Failed to configure main window: {error}");
     }

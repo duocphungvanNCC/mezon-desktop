@@ -10,8 +10,8 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, Switch,
-    UnsavedChangesBar, h_flex, v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, Spinner,
+    Switch, UnsavedChangesBar, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -501,6 +501,13 @@ impl OverviewSettingPage {
         apply_url: fn(&mut Self, String),
         cx: &mut Context<Self>,
     ) {
+        let already_uploading = match kind {
+            ImageUploadKind::Logo => self.logo_uploading,
+            ImageUploadKind::Banner => self.banner_uploading,
+        };
+        if already_uploading {
+            return;
+        }
         match kind {
             ImageUploadKind::Logo => self.logo_uploading = true,
             ImageUploadKind::Banner => self.banner_uploading = true,
@@ -582,8 +589,13 @@ impl OverviewSettingPage {
                 }
             };
             if file_size > max_size {
-                let message =
-                    mezon_i18n::t(&locale, "clanSoundSetting.toast.errorSizeLimit").to_string();
+                let message = match kind {
+                    ImageUploadKind::Logo => {
+                        mezon_i18n::t(&locale, "clanSoundSetting.toast.errorSizeLimit").to_string()
+                    }
+                    ImageUploadKind::Banner => mezon_i18n::t(&locale, "common.maxFileSize")
+                        .replace("{{sizeLimit}}", "10 MB"),
+                };
                 let _ = this.update(cx, |this, cx| {
                     finish(this);
                     cx.notify();
@@ -614,8 +626,15 @@ impl OverviewSettingPage {
                 }
                 Err(err) => {
                     tracing::error!("clan image upload failed: {err}");
-                    let message =
-                        mezon_i18n::t(&locale, "streamThumbnail.errors.uploadFailed").to_string();
+                    let message_key = if err == "Unsupported image file type" {
+                        match kind {
+                            ImageUploadKind::Logo => "clanSettings.clanLogo.modal.content",
+                            ImageUploadKind::Banner => "clanSettings.clanBanner.modal.content",
+                        }
+                    } else {
+                        "streamThumbnail.errors.uploadFailed"
+                    };
+                    let message = mezon_i18n::t(&locale, message_key).to_string();
                     let _ = this.update(cx, |this, cx| {
                         finish(this);
                         cx.notify();
@@ -709,11 +728,7 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_logo, |el| {
-                el.child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .text_color(theme.text_secondary),
-                )
+                el.child(Icon::new(IconName::Camera).size(px(32.0)).selected(false))
             })
             .child(
                 div()
@@ -756,7 +771,7 @@ impl OverviewSettingPage {
                         Icon::new(if has_logo {
                             IconName::Close
                         } else {
-                            IconName::SelectFileIcon
+                            IconName::ImageAdd
                         })
                         .size(px(16.0))
                         .text_color(if has_logo {
@@ -808,6 +823,8 @@ impl OverviewSettingPage {
     ) -> impl IntoElement {
         let banner = self.draft.banner.clone();
         let has_banner = !banner.is_empty();
+        let uploading = self.banner_uploading;
+        let preview = crate::util::imgproxy::proxied(cx, &banner, 960, 540, "fill");
 
         div()
             .relative()
@@ -815,22 +832,33 @@ impl OverviewSettingPage {
             .aspect_ratio(16.0 / 9.0)
             .rounded_lg()
             .overflow_hidden()
-            .when(has_banner, |el| {
+            .when(has_banner && !uploading, |el| {
                 el.child(
                     div().absolute().inset_0().child(
-                        img(banner)
+                        img(preview)
                             .id("clan-banner-preview-image")
                             .size_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     ),
                 )
             })
-            .when(!has_banner, |el| {
-                el.flex().items_center().justify_center().child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .text_color(theme.text_secondary),
+            .when(uploading, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::black().alpha(0.45))
+                        .child(Spinner::new().with_size(Size::Small)),
                 )
+            })
+            .when(!has_banner, |el| {
+                el.flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Camera).size(px(32.0)).selected(false))
             })
             .child(
                 div()
@@ -858,7 +886,7 @@ impl OverviewSettingPage {
                         Icon::new(if has_banner {
                             IconName::Close
                         } else {
-                            IconName::SelectFileIcon
+                            IconName::ImageAdd
                         })
                         .size(px(16.0))
                         .text_color(if has_banner {
@@ -876,10 +904,10 @@ impl OverviewSettingPage {
             .gap_1()
             .overflow_hidden()
             .child(
-                Icon::new(IconName::Hashtag)
+                Icon::new(IconName::Channel)
                     .size(px(16.0))
                     .flex_shrink_0()
-                    .text_color(theme.text_secondary),
+                    .selected(false),
             )
             .child(
                 div()
@@ -933,10 +961,10 @@ impl OverviewSettingPage {
                     }),
             )
             .child(
-                Icon::new(IconName::ArrowDownFill)
+                Icon::new(IconName::CaretDown)
                     .size(px(16.0))
                     .flex_shrink_0()
-                    .text_color(theme.text_muted),
+                    .selected(false),
             );
         trigger
             .interactivity()

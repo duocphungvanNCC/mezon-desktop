@@ -88,17 +88,12 @@ fn dm_message_type(channel_id: i64, cx: &App) -> String {
 
 pub struct CallOverlay {
     call: Entity<CallStore>,
-    last_phase: CallPhase,
 }
 
 impl CallOverlay {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let call = CallStore::global(cx);
-        let last_phase = call.read(cx).phase();
-        cx.observe(&call, |this, call, cx| {
-            let phase = call.read(cx).phase();
-            let was = this.last_phase;
-            this.last_phase = phase;
+        cx.observe(&call, |_, call, cx| {
             if call.update(cx, |store, _| store.take_mic_unavailable()) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
@@ -107,20 +102,12 @@ impl CallOverlay {
                     .to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
-            if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
-                let locale = Settings::try_global(cx)
-                    .map(|s| s.read(cx).language.clone())
-                    .unwrap_or_else(|| "en".to_string());
-                let msg =
-                    mezon_i18n::t(&locale, "channelVoice.toast.connectionConnected").to_string();
-                Shell::global(cx).update(cx, |shell, cx| shell.success(msg, cx));
-            }
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
-        Self { call, last_phase }
+        Self { call }
     }
 }
 
@@ -182,7 +169,7 @@ impl Render for CallOverlay {
                             .mt_2()
                             .child(circle_button(
                                 "call-decline",
-                                IconName::EndCall,
+                                IconName::CallEnd,
                                 CALL_RED,
                                 px(56.),
                                 {
@@ -194,7 +181,7 @@ impl Render for CallOverlay {
                             ))
                             .child(circle_button(
                                 "call-accept-audio",
-                                IconName::IconPhoneDM,
+                                IconName::Call,
                                 CALL_GREEN,
                                 px(56.),
                                 {
@@ -412,7 +399,7 @@ impl CallPanelView {
                                 .flex()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::VoiceMicDisabledIcon)
+                                    Icon::new(IconName::MicOff)
                                         .size(px(20.))
                                         .text_color(rgb(0xffffff)),
                                 ),
@@ -465,7 +452,7 @@ impl CallPanelView {
         if matches!(phase, CallPhase::Incoming) {
             row.child(circle_button(
                 "call-panel-accept-video",
-                IconName::VoiceCameraIcon,
+                IconName::Video,
                 CALL_GREEN,
                 px(52.),
                 {
@@ -477,7 +464,7 @@ impl CallPanelView {
             ))
             .child(circle_button(
                 "call-panel-accept-audio",
-                IconName::IconPhoneDM,
+                IconName::Call,
                 CALL_GREEN,
                 px(52.),
                 {
@@ -489,7 +476,7 @@ impl CallPanelView {
             ))
             .child(circle_button(
                 "call-panel-decline",
-                IconName::EndCall,
+                IconName::CallEnd,
                 CALL_RED,
                 px(52.),
                 {
@@ -505,9 +492,9 @@ impl CallPanelView {
                 circle_button(
                     "call-panel-camera",
                     if local.cam_on {
-                        IconName::VoiceCameraIcon
+                        IconName::Video
                     } else {
-                        IconName::VoiceCameraDisabledIcon
+                        IconName::VideoOff
                     },
                     if local.cam_on { CALL_GREEN } else { 0x4e5058 },
                     px(52.),
@@ -526,9 +513,9 @@ impl CallPanelView {
                 circle_button(
                     "call-panel-mic",
                     if local.mic_on {
-                        IconName::VoiceMicIcon
+                        IconName::Mic
                     } else {
-                        IconName::VoiceMicDisabledIcon
+                        IconName::MicOff
                     },
                     if local.mic_on { 0x4e5058 } else { CALL_RED },
                     px(52.),
@@ -546,7 +533,7 @@ impl CallPanelView {
             .child(self.render_settings_button(cx))
             .child(circle_button(
                 "call-panel-hangup",
-                IconName::EndCall,
+                IconName::CallEnd,
                 CALL_RED,
                 px(52.),
                 {
@@ -566,7 +553,7 @@ impl CallPanelView {
             .relative()
             .child(circle_button(
                 "call-panel-settings",
-                IconName::CallSetting,
+                IconName::Settings,
                 if self.device_menu_open {
                     0x6d6f78
                 } else {
@@ -779,7 +766,7 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                                     .items_center()
                                     .gap_1()
                                     .child(
-                                        Icon::new(IconName::NetworkStatus)
+                                        Icon::new(IconName::Wifi)
                                             .size(px(16.))
                                             .text_color(rgb(CALL_GREEN)),
                                     )
@@ -817,11 +804,7 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                             .p_1()
                             .rounded_md()
                             .hover(|s| s.bg(rgba(0x5e5e5e66)))
-                            .child(
-                                Icon::new(IconName::EndCall)
-                                    .size(px(20.))
-                                    .text_color(theme.text_secondary),
-                            )
+                            .child(Icon::new(IconName::CallEnd).size(px(20.)).selected(false))
                             .on_click(move |_, _, cx| {
                                 call_hangup.update(cx, |store, cx| store.hangup(cx));
                             }),
@@ -887,9 +870,9 @@ fn video_tile(
         TileLayout::Pip => (px(40.), ObjectFit::Cover, px(PIP_TILE_WIDTH - 32.)),
     };
     let hint_icon = if layout == TileLayout::Main {
-        IconName::ExitFullScreen
+        IconName::FullscreenExit
     } else {
-        IconName::FullScreen
+        IconName::Fullscreen
     };
     let tile_box = div()
         .id(id)
@@ -947,8 +930,8 @@ fn video_tile(
                 .text_color(rgb(0xffffff))
                 .when(!mic_on, |el| {
                     el.child(
-                        Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(px(14.))
+                        Icon::new(IconName::MicOff)
+                            .size(px(16.))
                             .text_color(rgb(0xffffff)),
                     )
                 })

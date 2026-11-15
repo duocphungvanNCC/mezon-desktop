@@ -78,6 +78,19 @@ unsafe impl objc::Encode for CmTime {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CmTimeRange {
+    start: CmTime,
+    duration: CmTime,
+}
+
+unsafe impl objc::Encode for CmTimeRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{?={?=qiIq}{?=qiIq}}") }
+    }
+}
+
 const CM_TIME_FLAG_VALID: u32 = 1;
 const CM_TIME_FLAG_INDEFINITE: u32 = 1 << 4;
 const SEEK_TIMESCALE: i32 = 600;
@@ -211,6 +224,13 @@ impl PlayerImpl {
         match &self.inner {
             PlayerBackend::AvFoundation(player) => player.duration(),
             PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn live_end(&self) -> Option<f64> {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.live_end(),
+            PlayerBackend::Webm(_) => None,
         }
     }
 
@@ -445,6 +465,29 @@ impl AvFoundationPlayer {
         unsafe { msg_send![*self.player, currentItem] }
     }
 
+    fn live_end(&self) -> Option<f64> {
+        let item = self.current_item();
+        if item.is_null() {
+            return None;
+        }
+        unsafe {
+            let duration: CmTime = msg_send![item, duration];
+            if duration.flags & CM_TIME_FLAG_INDEFINITE == 0 {
+                return None;
+            }
+            let ranges: *mut Object = msg_send![item, seekableTimeRanges];
+            if ranges.is_null() {
+                return Some(0.0);
+            }
+            let last: *mut Object = msg_send![ranges, lastObject];
+            if last.is_null() {
+                return Some(0.0);
+            }
+            let range: CmTimeRange = msg_send![last, CMTimeRangeValue];
+            Some(cm_time_to_seconds(range.start) + cm_time_to_seconds(range.duration))
+        }
+    }
+
     fn is_stale_pre_composition_frame(&self, frame: &VideoFrame) -> bool {
         let Some(portrait) = self.upright_is_portrait.get() else {
             return false;
@@ -564,13 +607,6 @@ impl AvFoundationPlayer {
             if has_offset != NO {
                 let offset = seconds_to_cm_time(seconds);
                 let _: () = msg_send![item, setConfiguredTimeOffsetFromLive: offset];
-            }
-            let has_preserve: BOOL = msg_send![
-                item,
-                respondsToSelector: sel!(setAutomaticallyPreservesTimeOffsetFromLive:)
-            ];
-            if has_preserve != NO {
-                let _: () = msg_send![item, setAutomaticallyPreservesTimeOffsetFromLive: YES];
             }
         }
     }

@@ -1801,7 +1801,7 @@ impl Render for ChatLayout {
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(
-                        Icon::new(IconName::ReloadIcon)
+                        Icon::new(IconName::Refresh)
                             .size(px(16.0))
                             .text_color(gpui::white()),
                     )
@@ -2161,19 +2161,36 @@ impl ChatLayout {
         let parent = parent_id.parse::<ChannelId>().ok();
         let channel_key = channel_id.to_string();
         let threads = ThreadsStore::global(cx).read(cx);
-        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
-            Some(status) => (
-                if status == THREAD_STATUS_ARCHIVED {
-                    CHANNEL_ACTIVE_ARCHIVED
+        let known_active = threads.thread_active(&channel_key);
+        let supplied_private = private;
+        let private = supplied_private
+            .or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+        if known_active.is_none() && supplied_private.is_none() {
+            self.channel_list.update(cx, |list, cx| {
+                if list.channel_in_clan(clan_id, channel_id) {
+                    list.refresh_thread_active_from_server(clan_id, channel_id, cx);
                 } else {
-                    CHANNEL_ACTIVE_JOINED
+                    list.allow_archived_thread(channel_id);
+                    list.ensure_channel_in_clan(clan_id, channel_id, cx);
+                }
+            });
+            crate::router::navigate(
+                cx,
+                Route::Channel {
+                    clan_id,
+                    channel_id,
                 },
-                true,
-            ),
-            None => (CHANNEL_ACTIVE_JOINED, false),
-        };
-        let private =
-            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+            );
+            return;
+        }
+        let (active, active_confirmed) = (
+            if known_active == Some(THREAD_STATUS_ARCHIVED) {
+                CHANNEL_ACTIVE_ARCHIVED
+            } else {
+                CHANNEL_ACTIVE_JOINED
+            },
+            true,
+        );
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2649,11 +2666,11 @@ impl ChatLayout {
         let enabled = store.noise_suppression_enabled();
         let loading = store.noise_suppression_loading();
         let icon = if enabled {
-            Icon::new(IconName::NoiseSupressionIcon)
+            Icon::new(IconName::NoiseSuppression)
                 .size(px(20.))
                 .text_color(theme.text_primary)
         } else {
-            Icon::new(IconName::NoiseSupressionDisabledIcon)
+            Icon::new(IconName::NoiseSuppressionOff)
                 .size(px(20.))
                 .text_color(theme.danger_text)
         };
@@ -3167,9 +3184,9 @@ impl ChatLayout {
                             div()
                                 .flex()
                                 .flex_col()
-                                .w(px(420.))
+                                .w(px(500.))
                                 .min_w(px(360.))
-                                .max_w(px(420.))
+                                .max_w(px(500.))
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
@@ -3278,7 +3295,7 @@ impl ChatLayout {
             ),
             Route::Direct => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::People,
+                crate::components::primitives::IconName::User,
                 mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
             ),
@@ -3287,7 +3304,7 @@ impl ChatLayout {
                 message_type: _,
             } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::People,
+                crate::components::primitives::IconName::User,
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
@@ -3297,19 +3314,19 @@ impl ChatLayout {
             | Route::ClanGuide { .. } => div().into_any_element(),
             Route::Friends => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::IconFriends,
+                crate::components::primitives::IconName::Friends,
                 mezon_i18n::t(&locale, "directMessage.friends"),
                 &current_path,
             ),
             Route::Thread { channel_id, .. } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::Hashtag,
+                crate::components::primitives::IconName::Channel,
                 &format!("Thread #{channel_id}"),
                 &current_path,
             ),
             Route::Canvas { channel_id, .. } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::Hashtag,
+                crate::components::primitives::IconName::Channel,
                 &format!("Canvas #{channel_id}"),
                 &current_path,
             ),
@@ -3323,7 +3340,6 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
-            | Route::SettingsStreaming
             | Route::SettingsServer
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }

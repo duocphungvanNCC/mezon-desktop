@@ -155,7 +155,7 @@ impl ClanEventsModal {
             .channel_voice_id
             .and_then(|id| channels.channel_display_name(self.clan_id, id));
         let is_location = !event.address.is_empty();
-        let location = if event.is_private {
+        let location = if event.is_external {
             tr("eventCreator.eventDetail.privateRoom").to_string()
         } else if is_location {
             event.address.clone()
@@ -234,8 +234,8 @@ impl ClanEventsModal {
                     .items_center()
                     .gap_2()
                     .child(
-                        Icon::new(IconName::IconEvents)
-                            .size(px(25.))
+                        Icon::new(IconName::Event)
+                            .size(px(24.))
                             .text_color(status_color),
                     )
                     .child(
@@ -250,7 +250,7 @@ impl ClanEventsModal {
                             .px_1()
                             .py(px(2.))
                             .rounded(px(2.))
-                            .bg(if event.is_private {
+                            .bg(if event.is_external {
                                 gpui::rgb(0xef4444)
                             } else if is_channel_event {
                                 gpui::rgb(0xf97316)
@@ -259,7 +259,7 @@ impl ClanEventsModal {
                             })
                             .text_color(gpui::white())
                             .text_size(px(14.))
-                            .child(if event.is_private {
+                            .child(if event.is_external {
                                 tr("eventCreator.eventDetail.privateEvent")
                             } else if is_channel_event {
                                 tr("eventCreator.eventDetail.channelEvent")
@@ -285,8 +285,8 @@ impl ClanEventsModal {
                             .bg(theme.surfaces.secondary)
                             .child(interested.to_string())
                             .child(
-                                Icon::new(IconName::MemberList)
-                                    .size_4()
+                                Icon::new(IconName::Members)
+                                    .size(px(16.))
                                     .text_color(theme.text_primary),
                             ),
                     ),
@@ -357,7 +357,7 @@ impl ClanEventsModal {
         let interest_action = action(
             "event-interest-action",
             if user_is_interested {
-                IconName::MuteBell
+                IconName::BellOff
             } else {
                 IconName::Bell
             },
@@ -426,14 +426,15 @@ impl ClanEventsModal {
                                     .gap_2()
                                     .min_w_0()
                                     .text_color(theme.text_secondary)
-                                    .child(if is_location && !event.is_private {
-                                        img(IconName::Location.path())
+                                    .child(if is_location && !event.is_external {
+                                        Icon::new(IconName::Location)
                                             .size(px(20.))
+                                            .selected(false)
                                             .into_any_element()
                                     } else {
                                         Icon::new(IconName::Speaker)
                                             .size(px(20.))
-                                            .text_color(theme.text_secondary)
+                                            .selected(false)
                                             .into_any_element()
                                     })
                                     .child(
@@ -472,9 +473,9 @@ impl ClanEventsModal {
                                                     },
                                                 ))
                                                 .child(
-                                                    Icon::new(IconName::ThreeDot)
+                                                    Icon::new(IconName::More)
                                                         .size(px(20.))
-                                                        .text_color(theme.text_secondary)
+                                                        .selected(false)
                                                         .group_hover("event-three-dot", |style| {
                                                             style.text_color(theme.text_primary)
                                                         }),
@@ -485,7 +486,7 @@ impl ClanEventsModal {
                                         actions.child(
                                             action(
                                                 "event-share-action",
-                                                IconName::IconShareEventVoice,
+                                                IconName::Link,
                                                 tr("eventCreator.eventDetail.share"),
                                             )
                                             .id(("share-event", event_id as usize))
@@ -566,7 +567,7 @@ impl ClanEventsModal {
                                     }),
                             ),
                     )
-                    .child(if event.is_private {
+                    .child(if event.is_external {
                         div()
                             .mt_3()
                             .flex()
@@ -696,9 +697,9 @@ impl ClanEventsModal {
                                                 .child(tr("eventCreator.eventDetail.copyLink"))
                                                 .child(
                                                     Icon::new(if external_link_copied {
-                                                        IconName::Tick
+                                                        IconName::Check
                                                     } else {
-                                                        IconName::CopyIcon
+                                                        IconName::Copy
                                                     })
                                                     .size(px(17.))
                                                     .text_color(theme.text_link),
@@ -738,7 +739,7 @@ impl ClanEventsModal {
     }
 
     fn event_link(&self, event: &ClanEventItem, cx: &App) -> String {
-        if event.is_private && !event.external_link.is_empty() {
+        if event.is_external && !event.external_link.is_empty() {
             format!(
                 "{}{}",
                 AppConfig::global(cx).redirect_uri.trim_end_matches('/'),
@@ -842,6 +843,9 @@ impl ClanEventsModal {
 
     fn can_modify_event(&self, event: &ClanEventItem, cx: &App) -> bool {
         let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+        if event.is_external {
+            return current_user == Some(event.creator_id) || current_user == event.co_host;
+        }
         current_user == Some(event.creator_id)
             || PermissionStore::try_global(cx).is_some_and(|store| {
                 let permissions = store.read(cx).clan_settings_permissions(self.clan_id, cx);
@@ -894,7 +898,7 @@ impl ClanEventsModal {
             .and_then(|id| channels.channel_display_name(self.clan_id, id));
         let location = if !event.address.is_empty() {
             event.address.clone()
-        } else if event.is_private {
+        } else if event.is_external {
             tr("eventCreator.eventDetail.privateRoom").to_string()
         } else {
             voice_name.unwrap_or_else(|| tr("eventCreator.tabs.location").to_string())
@@ -940,11 +944,7 @@ impl ClanEventsModal {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(
-                            Icon::new(IconName::IconEvents)
-                                .size(px(22.))
-                                .text_color(theme.text_secondary),
-                        )
+                        .child(Icon::new(IconName::Event).size(px(24.)).selected(false))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(date)),
                 )
                 .child(
@@ -968,13 +968,14 @@ impl ClanEventsModal {
                         .items_center()
                         .gap_3()
                         .child(if !event.address.is_empty() {
-                            img(IconName::Location.path())
+                            Icon::new(IconName::Location)
                                 .size(px(20.))
+                                .selected(false)
                                 .into_any_element()
                         } else {
                             Icon::new(IconName::Speaker)
                                 .size(px(20.))
-                                .text_color(theme.text_secondary)
+                                .selected(false)
                                 .into_any_element()
                         })
                         .child(location),
@@ -984,11 +985,7 @@ impl ClanEventsModal {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(
-                            Icon::new(IconName::MemberList)
-                                .size(px(20.))
-                                .text_color(theme.text_secondary),
-                        )
+                        .child(Icon::new(IconName::Members).size(px(20.)).selected(false))
                         .child(if interested_count == 1 {
                             tr("eventCreator.eventDetail.personInterested")
                                 .replace("{{count}}", "1")
@@ -1012,6 +1009,31 @@ impl ClanEventsModal {
                                 .replace("{{username}}", creator_name),
                         ),
                 )
+                .when_some(event.co_host, |body, co_host| {
+                    let host = ClanMembersStore::global(cx)
+                        .read(cx)
+                        .member(self.clan_id, co_host)
+                        .cloned();
+                    let host_name = host
+                        .as_ref()
+                        .map(|member| member.name())
+                        .unwrap_or_default();
+                    let host_avatar = host
+                        .as_ref()
+                        .map(|member| member.avatar())
+                        .unwrap_or_default();
+                    body.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(Avatar::new().src(host_avatar.to_string()).size_px(px(22.)))
+                            .child(
+                                tr("eventCreator.eventDetail.coHost")
+                                    .replace("{{username}}", host_name),
+                            ),
+                    )
+                })
                 .when(!event.description.is_empty(), |body| {
                     body.child(div().whitespace_normal().child(event.description.clone()))
                 })
@@ -1123,8 +1145,8 @@ impl ClanEventsModal {
                                 cx.notify();
                             }))
                             .child(
-                                Icon::new(IconName::CloseButton)
-                                    .size(px(18.))
+                                Icon::new(IconName::Close)
+                                    .size(px(20.))
                                     .text_color(theme.text_primary),
                             ),
                     ),
@@ -1188,9 +1210,10 @@ impl Render for ClanEventsModal {
                             .text_color(theme.text_muted)
                             .child(
                                 div().absolute().left(px(10.)).top(px(10.)).child(
-                                    Icon::new(IconName::IconEvents)
+                                    Icon::new(IconName::Event)
+                                        .size(px(48.))
                                         .size(px(64.))
-                                        .text_color(theme.text_muted),
+                                        .selected(false),
                                 ),
                             )
                             .child(
@@ -1300,11 +1323,7 @@ impl Render for ClanEventsModal {
                             .items_center()
                             .gap_3()
                             .text_size(px(15.))
-                            .child(
-                                Icon::new(IconName::IconEvents)
-                                    .size(px(25.))
-                                    .text_color(theme.text_secondary),
-                            )
+                            .child(Icon::new(IconName::Event).size(px(24.)).selected(false))
                             .child(div().font_weight(FontWeight::BOLD).child(event_count_label))
                             .child(div().h(px(28.)).w(px(2.)).bg(theme.border))
                             .child(
@@ -1331,9 +1350,9 @@ impl Render for ClanEventsModal {
                             .hover(|style| style.text_color(theme.text_primary))
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
                             .child(
-                                Icon::new(IconName::CloseButton)
+                                Icon::new(IconName::Close)
                                     .size(px(20.))
-                                    .text_color(theme.text_secondary)
+                                    .selected(false)
                                     .group_hover("close-events-modal", |style| {
                                         style.text_color(theme.text_primary)
                                     }),
@@ -1549,11 +1568,7 @@ impl Render for ShareEventModal {
                             .cursor_pointer()
                             .p_1()
                             .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx)))
-                            .child(
-                                Icon::new(IconName::CloseButton)
-                                    .size(px(18.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::Close).size(px(20.)).selected(false)),
                     ),
             )
             .child(
@@ -1563,11 +1578,7 @@ impl Render for ShareEventModal {
                     .items_center()
                     .gap_2()
                     .text_color(theme.text_primary)
-                    .child(
-                        Icon::new(IconName::Speaker)
-                            .size(px(20.))
-                            .text_color(theme.text_secondary),
-                    )
+                    .child(Icon::new(IconName::Speaker).size(px(20.)).selected(false))
                     .child(self.channel_name.clone()),
             )
             .child(
@@ -1622,9 +1633,9 @@ impl Render for ShareEventModal {
                             }))
                             .child(
                                 Icon::new(if self.copied {
-                                    IconName::Tick
+                                    IconName::Check
                                 } else {
-                                    IconName::CopyIcon
+                                    IconName::Copy
                                 })
                                 .size(px(18.))
                                 .text_color(theme.text_secondary)

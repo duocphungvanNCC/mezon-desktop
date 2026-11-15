@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgb, uniform_list,
+    UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
@@ -747,7 +747,8 @@ pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &
         Err(err) => {
             tracing::warn!("create DM from friends page failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, move |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
             });
         }
     })
@@ -768,6 +769,23 @@ pub(crate) fn open_created_dm_if_route_unchanged(
                 message_type: channel_type.to_string(),
             },
         );
+    }
+}
+
+pub(crate) fn dm_open_failure_message(
+    err: &anyhow::Error,
+    fallback: impl Into<SharedString>,
+    cx: &App,
+) -> SharedString {
+    if mezon_store::is_new_dm_denied(err) {
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_else(|| "en".to_string());
+        mezon_i18n::t(&locale, "setting.chat.onlyFriendsDm.denied")
+            .to_string()
+            .into()
+    } else {
+        fallback.into()
     }
 }
 
@@ -924,7 +942,7 @@ impl FriendsPage {
                             .items_center()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.tokens.text_secondary)
-                            .child(img("icons/icon-friends.svg").size(px(20.)).flex_none())
+                            .child(Icon::new(IconName::Friends).size(px(20.)).flex_none())
                             .child(mezon_i18n::t(locale, "friendsPage.friends")),
                     )
                     .child(
@@ -1014,7 +1032,7 @@ impl FriendsPage {
                     .items_center()
                     .child(
                         Icon::new(IconName::Search)
-                            .size_4()
+                            .size(px(16.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );
@@ -1342,8 +1360,8 @@ fn render_friend_row(
                 .right(px(-1.))
                 .size(px(10.))
                 .child(
-                    Icon::new(IconName::DarkModeIcon)
-                        .size(px(10.))
+                    Icon::new(IconName::Moon)
+                        .size(px(16.))
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2,
                         )))
@@ -1559,7 +1577,7 @@ fn render_row_actions(
             .child(
                 round_button(
                     ("friend-more", id.get() as usize),
-                    IconName::IconEditThreeDot,
+                    IconName::MoreVertical,
                     theme,
                 )
                 .on_click({

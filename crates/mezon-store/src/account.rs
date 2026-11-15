@@ -17,6 +17,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
 pub struct UserAccount {
+    pub banner: Option<String>,
     pub user_id: i64,
     pub username: String,
     pub display_name: String,
@@ -31,6 +32,22 @@ pub struct UserAccount {
     pub dob_seconds: u32,
     /// Epoch seconds the account was created. Zero when the server did not send one.
     pub create_time_seconds: u32,
+}
+
+impl UserAccount {
+    fn reconcile_banner_snapshot(&mut self, current: Option<&Self>, banner_at_start: Option<&str>) {
+        let current_banner = current.and_then(|account| account.banner.as_deref());
+        if current_banner != banner_at_start {
+            self.banner = current_banner.map(str::to_owned);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomStatusClear {
+    pub status: String,
+    pub minutes: i32,
+    pub no_clear: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +137,7 @@ pub struct AccountStore {
     profile_refresh_pending: bool,
     realtime_display_name: Option<String>,
     last_profile_update: Option<crate::users_by_user::ProfileUpdate>,
+    custom_status_clear: Option<CustomStatusClear>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -156,6 +174,7 @@ impl AccountStore {
             profile_refresh_pending: false,
             realtime_display_name: None,
             last_profile_update: None,
+            custom_status_clear: None,
             api,
             _conn_watch: conn_watch,
         }
@@ -274,6 +293,7 @@ impl AccountStore {
         self.profile_refresh_pending = false;
         self.realtime_display_name = None;
         self.last_profile_update = None;
+        self.custom_status_clear = None;
         self.account = None;
         self.account_loading = false;
         self.account_error = false;
@@ -327,6 +347,10 @@ impl AccountStore {
 
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let banner_at_start = self
+            .account
+            .as_ref()
+            .and_then(|account| account.banner.clone());
 
         cx.spawn(async move |this, cx| match api.get_account().await {
             Ok(acct) => {
@@ -340,22 +364,13 @@ impl AccountStore {
                         this.fetch_account(cx);
                         return;
                     }
+                    account.reconcile_banner_snapshot(
+                        this.account.as_ref(),
+                        banner_at_start.as_deref(),
+                    );
                     this.reconcile_realtime_display_name(&mut account);
                     this.last_profile_update = None;
-                    let profile = crate::clan_members::User {
-                        id: crate::ids::UserId(account.user_id),
-                        username: account.username.clone(),
-                        display_name: account.display_name.clone(),
-                        avatar_url: account.avatar_url.clone().unwrap_or_default(),
-                        about_me: account.about_me.clone().unwrap_or_default(),
-                        create_time_seconds: account.create_time_seconds,
-                        ..Default::default()
-                    };
-                    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
-                        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
-                    } else {
-                        crate::user_profile::apply_user_profile(&profile, cx);
-                    }
+                    sync_account_profile(&account, cx);
                     Self::spawn_persist_cache(&account, cx);
                     this.account = Some(account);
                     this.account_freshness.mark_fetched();
@@ -435,6 +450,22 @@ impl AccountStore {
         logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let banner = self
+            .account
+            .as_ref()
+            .and_then(|account| account.banner.clone());
+        self.save_account_with_banner(display_name, avatar_url, about_me, logo_url, banner, cx);
+    }
+
+    pub fn save_account_with_banner(
+        &mut self,
+        display_name: Option<String>,
+        avatar_url: Option<String>,
+        about_me: String,
+        logo_url: Option<String>,
+        banner: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let display_name_update = match display_name {
             None => None,
             Some(raw) => match prepare_display_name_for_update(&raw) {
@@ -445,29 +476,44 @@ impl AccountStore {
                 }
             },
         };
+        let request = account_profile_request(
+            self.account.as_ref(),
+            display_name_update.clone(),
+            avatar_url.as_deref(),
+            &about_me,
+            logo_url.as_deref(),
+            banner.as_deref(),
+        );
+        let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_account(
-                    display_name_update.as_deref(),
-                    Some(avatar_url.as_deref().unwrap_or_default()),
-                    Some(&about_me),
-                    logo_url.as_deref(),
+                    request.display_name.as_deref(),
+                    request.avatar_url.as_deref(),
+                    request.about_me.as_deref(),
+                    request.logo.as_deref(),
                     None,
+                    request.banner.as_deref(),
                 )
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
+                        if this.reset_generation != generation {
+                            return;
+                        }
                         if let Some(account) = &mut this.account {
                             if let Some(display_name) = display_name_update {
                                 account.display_name = display_name;
                             }
+                            account.banner = banner;
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
                             account.logo = logo_url.filter(|url| !url.is_empty());
                         }
                         if let Some(account) = &this.account {
+                            sync_account_profile(account, cx);
                             Self::spawn_persist_cache(account, cx);
                         }
                         cx.emit(AccountEvent::AccountSaved);
@@ -475,7 +521,10 @@ impl AccountStore {
                     });
                 }
                 Err(e) => {
-                    let _ = this.update(cx, |_, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.reset_generation != generation {
+                            return;
+                        }
                         cx.emit(AccountEvent::AccountSaveFailed(e.to_string()));
                         cx.notify();
                     });
@@ -489,7 +538,7 @@ impl AccountStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api
-                .update_account(None, None, None, None, Some(dob_seconds))
+                .update_account(None, None, None, None, Some(dob_seconds), None)
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
@@ -750,6 +799,25 @@ impl AccountStore {
         .detach();
     }
 
+    pub fn note_custom_status_clear(&mut self, status: &str, minutes: i32, no_clear: bool) {
+        self.custom_status_clear = if status.trim().is_empty() {
+            None
+        } else {
+            Some(CustomStatusClear {
+                status: status.to_string(),
+                minutes,
+                no_clear,
+            })
+        };
+    }
+
+    pub fn custom_status_clear(&self) -> Option<&CustomStatusClear> {
+        let account = self.account.as_ref()?;
+        self.custom_status_clear
+            .as_ref()
+            .filter(|clear| account.user_status == clear.status)
+    }
+
     pub fn set_custom_status(
         &mut self,
         text: String,
@@ -762,6 +830,7 @@ impl AccountStore {
         } else {
             return;
         }
+        self.note_custom_status_clear(&text, minutes, until_turn_on);
         if let Some(account) = &self.account {
             Self::spawn_persist_cache(account, cx);
         }
@@ -804,6 +873,14 @@ impl AccountStore {
             }
         })
         .detach();
+    }
+
+    pub fn upload_user_cover(
+        &self,
+        path: PathBuf,
+    ) -> impl std::future::Future<Output = anyhow::Result<String>> + Send + use<> {
+        let api = self.api.clone();
+        async move { api.upload_avatar(&path).await }
     }
 
     pub fn upload_clan_avatar(&mut self, clan_id: ClanId, path: &Path, cx: &mut Context<Self>) {
@@ -1038,6 +1115,8 @@ fn map_clan_profile_save_error(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedAccount {
     #[serde(default)]
+    banner: Option<String>,
+    #[serde(default)]
     user_id: i64,
     username: String,
     display_name: String,
@@ -1061,6 +1140,7 @@ impl PersistedAccount {
             user_id: account.user_id,
             username: account.username.clone(),
             display_name: account.display_name.clone(),
+            banner: account.banner.clone(),
             avatar_url: account.avatar_url.clone(),
             logo: account.logo.clone(),
             status: account.status.clone(),
@@ -1076,6 +1156,7 @@ impl PersistedAccount {
             username: self.username,
             display_name: self.display_name,
             email: None,
+            banner: self.banner,
             avatar_url: self.avatar_url,
             phone_number: None,
             about_me: None,
@@ -1119,13 +1200,44 @@ fn save_cached_account(account: &UserAccount) {
         tracing::warn!("Failed to write account cache: {e}");
         return;
     }
-    if std::fs::rename(&tmp, &path).is_err() {
+    if let Err(error) = std::fs::rename(&tmp, &path) {
+        tracing::warn!("Failed to commit account cache: {error}");
         let _ = std::fs::remove_file(&tmp);
     }
 }
 
 pub(crate) fn clear_cached_account() {
     let _ = std::fs::remove_file(account_cache_path());
+}
+
+fn account_profile_request(
+    current: Option<&UserAccount>,
+    display_name: Option<String>,
+    avatar_url: Option<&str>,
+    about_me: &str,
+    logo: Option<&str>,
+    banner: Option<&str>,
+) -> mezon_proto::api::UpdateAccountRequest {
+    mezon_proto::api::UpdateAccountRequest {
+        display_name,
+        avatar_url: current
+            .is_none_or(|account| {
+                account.avatar_url.as_deref().unwrap_or_default() != avatar_url.unwrap_or_default()
+            })
+            .then(|| avatar_url.unwrap_or_default().to_owned()),
+        about_me: Some(about_me.to_owned()),
+        logo: current
+            .is_none_or(|account| {
+                account.logo.as_deref().unwrap_or_default() != logo.unwrap_or_default()
+            })
+            .then(|| logo.unwrap_or_default().to_owned()),
+        banner: current
+            .is_none_or(|account| {
+                account.banner.as_deref().unwrap_or_default() != banner.unwrap_or_default()
+            })
+            .then(|| banner.unwrap_or_default().to_owned()),
+        ..Default::default()
+    }
 }
 
 fn user_account_from_api(acct: ApiAccount) -> UserAccount {
@@ -1139,6 +1251,7 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         username: acct.username,
         display_name: display,
         email: acct.email,
+        banner: acct.banner,
         avatar_url: acct.avatar_url,
         phone_number: acct.phone_number,
         about_me: acct.about_me,
@@ -1185,6 +1298,24 @@ fn adult_date(born: NaiveDate) -> Option<NaiveDate> {
     let year = born.year() + ADULT_AGE_YEARS;
     born.with_year(year)
         .or_else(|| NaiveDate::from_ymd_opt(year, 3, 1))
+}
+
+fn sync_account_profile(account: &UserAccount, cx: &mut App) {
+    let profile = crate::clan_members::User {
+        id: crate::ids::UserId(account.user_id),
+        username: account.username.clone(),
+        display_name: account.display_name.clone(),
+        banner: Some(account.banner.clone().unwrap_or_default()),
+        avatar_url: account.avatar_url.clone().unwrap_or_default(),
+        about_me: account.about_me.clone().unwrap_or_default(),
+        create_time_seconds: account.create_time_seconds,
+        ..Default::default()
+    };
+    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
+    } else {
+        crate::user_profile::apply_user_profile(&profile, cx);
+    }
 }
 
 fn logged_device_from_proto(d: mezon_proto::api::LogedDevice) -> LoggedDevice {
@@ -1349,8 +1480,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cover_only_request_preserves_bio_and_explicit_bio_removal() {
+        use prost::Message;
+        let current = user_account_from_api(
+            serde_json::from_value(serde_json::json!({
+                "user_id": 7, "username": "user", "about_me": "Bio", "password_setted": false,
+                "banner": "old.png", "avatar_url": "avatar.png", "logo": "logo.png"
+            }))
+            .unwrap(),
+        );
+        for bio in ["Bio", ""] {
+            let request = account_profile_request(
+                Some(&current),
+                None,
+                Some("avatar.png"),
+                bio,
+                Some("logo.png"),
+                Some("new.png"),
+            );
+            let decoded =
+                mezon_proto::api::UpdateAccountRequest::decode(request.encode_to_vec().as_slice())
+                    .unwrap();
+            assert_eq!(decoded.about_me.as_deref(), Some(bio));
+            assert_eq!(decoded.banner.as_deref(), Some("new.png"));
+            assert_eq!(decoded.avatar_url, None);
+            assert_eq!(decoded.logo, None);
+            assert_eq!(decoded.display_name, None);
+        }
+        let removed = account_profile_request(
+            Some(&current),
+            None,
+            Some("avatar.png"),
+            "Bio",
+            Some("logo.png"),
+            None,
+        );
+        assert_eq!(removed.banner.as_deref(), Some(""));
+        assert_eq!(removed.about_me.as_deref(), Some("Bio"));
+    }
+
+    #[test]
+    fn account_fetch_keeps_cover_saved_after_request_started() {
+        for (at_start, confirmed, fetched, expected) in [
+            (
+                Some("old.png"),
+                Some("saved.png"),
+                Some("old.png"),
+                Some("saved.png"),
+            ),
+            (Some("old.png"), None, Some("old.png"), None),
+            (Some("old.png"), Some("old.png"), None, None),
+            (None, None, Some("server.png"), Some("server.png")),
+        ] {
+            let make_account = |banner: Option<&str>| {
+                user_account_from_api(
+                    serde_json::from_value(serde_json::json!({
+                        "user_id": 7, "username": "user", "password_setted": false, "banner": banner
+                    }))
+                    .unwrap(),
+                )
+            };
+            let current = make_account(confirmed);
+            let mut response = make_account(fetched);
+            response.reconcile_banner_snapshot(Some(&current), at_start);
+            assert_eq!(response.banner.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn account_cache_before_cover_support_still_loads() {
+        let json = r#"{"user_id":42,"username":"alice","display_name":"Alice"}"#;
+        let account = serde_json::from_str::<PersistedAccount>(json)
+            .unwrap()
+            .into_account();
+        assert_eq!(account.user_id, 42);
+        assert_eq!(account.banner, None);
+    }
+
+    #[test]
     fn persisted_account_roundtrip_drops_sensitive_fields() {
         let account = UserAccount {
+            banner: Some("https://cdn/cover.webp".into()),
             user_id: 42,
             username: "alice".into(),
             display_name: "Alice".into(),
@@ -1370,6 +1580,7 @@ mod tests {
             .unwrap()
             .into_account();
 
+        assert_eq!(restored.banner.as_deref(), Some("https://cdn/cover.webp"));
         assert_eq!(restored.user_id, 42);
         assert_eq!(restored.username, "alice");
         assert_eq!(restored.display_name, "Alice");
@@ -1425,6 +1636,7 @@ mod tests {
     #[test]
     fn user_account_from_api_keeps_dob_seconds() {
         let acct = user_account_from_api(ApiAccount {
+            banner: None,
             user_id: 1,
             username: "alice".into(),
             email: None,
@@ -1447,6 +1659,7 @@ mod tests {
     #[test]
     fn user_account_from_api_uses_username_when_display_empty() {
         let acct = user_account_from_api(ApiAccount {
+            banner: None,
             user_id: 1,
             username: "alice".into(),
             email: Some("a@b.c".into()),
@@ -1490,5 +1703,56 @@ mod tests {
             map_clan_profile_save_error(err, true, false),
             ClanProfileSaveError::Api(13)
         );
+    }
+
+    #[gpui::test]
+    fn custom_status_clear_tracks_matching_account_status_and_resets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| AccountStore::new(api, cx));
+            store.update(cx, |store, cx| {
+                let account: ApiAccount = serde_json::from_value(serde_json::json!({
+                    "user_id": 7,
+                    "username": "user",
+                    "display_name": "User",
+                    "user_status": "busy",
+                    "password_setted": false
+                }))
+                .unwrap();
+                store.account = Some(user_account_from_api(account));
+
+                store.note_custom_status_clear("busy", 0, true);
+                assert_eq!(
+                    store.custom_status_clear(),
+                    Some(&CustomStatusClear {
+                        status: "busy".to_string(),
+                        minutes: 0,
+                        no_clear: true,
+                    })
+                );
+
+                store.account.as_mut().unwrap().user_status = "away".to_string();
+                assert_eq!(store.custom_status_clear(), None);
+
+                store.account.as_mut().unwrap().user_status = "busy".to_string();
+                assert!(store.custom_status_clear().is_some());
+
+                store.note_custom_status_clear("", 0, false);
+                assert_eq!(store.custom_status_clear(), None);
+
+                store.note_custom_status_clear("busy", 240, false);
+                assert!(store.custom_status_clear().is_some());
+
+                store.reset(cx);
+                assert_eq!(store.custom_status_clear(), None);
+                assert_eq!(store.custom_status_clear, None);
+            });
+        });
     }
 }

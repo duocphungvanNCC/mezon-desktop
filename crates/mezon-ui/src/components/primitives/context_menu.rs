@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window,
-    anchored, deferred, div, img, prelude::*, px, relative, svg,
+    Anchor, AnyElement, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    Window, anchored, deferred, div, img, prelude::*, px, relative,
 };
 
 use super::icon::{Icon, IconName};
@@ -52,6 +52,7 @@ enum Item {
         checked: bool,
         on_click: MenuHandler,
     },
+    Element(AnyElement),
     Separator,
 }
 
@@ -204,6 +205,11 @@ impl ContextMenu {
 
     pub fn separator(mut self) -> Self {
         self.items.push(Item::Separator);
+        self
+    }
+
+    pub fn element(mut self, element: impl IntoElement) -> Self {
+        self.items.push(Item::Element(element.into_any_element()));
         self
     }
 
@@ -437,6 +443,12 @@ impl ContextMenu {
                     disabled: false,
                     options: Vec::new(),
                 },
+                Item::Element(_) => ContextMenuProbeItem {
+                    kind: "element",
+                    label: String::new(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
             })
             .collect()
     }
@@ -504,6 +516,7 @@ impl ContextMenu {
                 Ok(())
             }
             Item::Separator => anyhow::bail!("menu item at index {index} is a separator"),
+            Item::Element(_) => anyhow::bail!("menu item at index {index} is a custom element"),
             Item::ReactionSubmenu { .. } => {
                 anyhow::bail!("menu item at index {index} is the reaction submenu")
             }
@@ -606,7 +619,7 @@ impl RenderOnce for ContextMenu {
                                     .items_center()
                                     .justify_center()
                                     .child(
-                                        Icon::new(IconName::ImageThumbnail)
+                                        Icon::new(IconName::FileImage)
                                             .size(px(16.))
                                             .text_color(fallback_color),
                                     )
@@ -625,6 +638,9 @@ impl RenderOnce for ContextMenu {
             match item {
                 Item::Separator => {
                     panel = panel.child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
+                }
+                Item::Element(element) => {
+                    panel = panel.child(element);
                 }
                 Item::Entry {
                     label,
@@ -678,15 +694,10 @@ impl RenderOnce for ContextMenu {
                             })
                             .when(leading_icon.is_some(), |row| row.gap_2())
                             .when_some(leading_icon, |row, icon| {
-                                let icon_el = if icon == IconName::Flower {
-                                    svg()
-                                        .path(icon.path())
-                                        .size(px(24.))
-                                        .flex_none()
-                                        .text_color(icon_color)
-                                } else {
-                                    Icon::new(icon).size_4().text_color(icon_color)
-                                };
+                                let icon_el = Icon::new(icon)
+                                    .size_4()
+                                    .when(icon == IconName::Gift, |icon| icon.size(px(24.)))
+                                    .text_color(icon_color);
                                 row.child(icon_el)
                             })
                             .child(div().flex_1().child(label))
@@ -700,7 +711,8 @@ impl RenderOnce for ContextMenu {
                                         dismiss(window, cx);
                                     }
                                 })
-                            }),
+                            })
+                            .map(|row| Icon::motion_scope(row, !disabled)),
                     );
                 }
                 Item::Submenu {
@@ -753,7 +765,9 @@ impl RenderOnce for ContextMenu {
                                     )
                                     .when(option.selected, |el| {
                                         el.child(
-                                            Icon::new(IconName::Check).size_4().text_color(text),
+                                            Icon::new(IconName::Check)
+                                                .size(px(16.))
+                                                .text_color(text),
                                         )
                                     })
                                     .when(!disabled, |el| {
@@ -790,14 +804,8 @@ impl RenderOnce for ContextMenu {
                     };
                     let mut label_col = v_flex().flex_1().child(div().child(label));
                     if let Some(sub_text) = sub_text {
-                        label_col = label_col.child(
-                            div()
-                                .ml(px(8.))
-                                .mb(px(4.))
-                                .text_xs()
-                                .text_color(text)
-                                .child(sub_text),
-                        );
+                        label_col = label_col
+                            .child(div().mb(px(4.)).text_xs().text_color(text).child(sub_text));
                     }
                     let parent_dismiss = dismiss.clone();
                     panel = panel.child(
@@ -839,7 +847,11 @@ impl RenderOnce for ContextMenu {
                                 })
                             })
                             .child(label_col)
-                            .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
+                            .child(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(px(16.))
+                                    .text_color(muted),
+                            )
                             .children(submenu),
                     );
                 }
@@ -869,8 +881,10 @@ impl RenderOnce for ContextMenu {
                                     }
                                 })
                             })
+                            .child(div().flex_1().child(label))
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .w(px(16.))
                                     .h(px(16.))
                                     .rounded(px(4.))
@@ -883,12 +897,11 @@ impl RenderOnce for ContextMenu {
                                     .when(checked, |d| {
                                         d.child(
                                             Icon::new(IconName::Check)
-                                                .size(px(11.))
+                                                .size(px(16.))
                                                 .text_color(gpui::white()),
                                         )
                                     }),
                             )
-                            .child(div().flex_1().child(label))
                             .on_click(move |_: &ClickEvent, window, cx| {
                                 on_click(window, cx);
                                 if let Some(dismiss) = &dismiss {
@@ -964,7 +977,7 @@ impl RenderOnce for ContextMenu {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Icon::new(IconName::ImageThumbnail)
+                                                    Icon::new(IconName::FileImage)
                                                         .size(px(16.))
                                                         .text_color(muted),
                                                 )
@@ -1030,7 +1043,11 @@ impl RenderOnce for ContextMenu {
                                 }
                             })
                             .child(div().flex_1().child(label))
-                            .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
+                            .child(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(px(16.))
+                                    .text_color(muted),
+                            )
                             .children(submenu),
                     );
                 }

@@ -39,8 +39,11 @@ env:
   NX_BASE_IMG_URL: ${{ secrets.NX_BASE_IMG_URL || 'https://cdn.komu.vn' }}
   NX_UPLOAD_IMG_URL: https://cdn-api.mezon.ai
   NX_PROFILE_IMG_URL: https://profile.mezon.ai
+  NX_MEZON_CDN_URL: ${{ secrets.NX_MEZON_CDN_URL || 'https://cdn.mezon.ai' }}
+  NX_CLOUDFLARE_CDN_URL: ${{ secrets.NX_CLOUDFLARE_CDN_URL || 'https://cdn.komu.vn' }}
   NX_IMGPROXY_BASE_URL: ${{ secrets.NX_IMGPROXY_BASE_URL || 'https://imgproxy.komu.vn' }}
   NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
+  NX_CHAT_APP_FILE_INGEST: ${{ secrets.NX_CHAT_APP_FILE_INGEST || 'cdn-api.mezon.ai=https://streaming.mezon.vn' }}
   NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
   NX_CHAT_APP_API_KLIPY_URL: ${{ secrets.NX_CHAT_APP_API_KLIPY_URL || 'https://api.klipy.com/api/v1' }}
   NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn
@@ -72,7 +75,9 @@ jobs:
   linux:
     name: Linux artifacts (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    container: ubuntu:22.04
+    container:
+      image: ubuntu:22.04
+      options: --dns 1.1.1.1 --dns 8.8.8.8
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +146,9 @@ jobs:
 #
 #       - name: Cache Cargo
 #         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+#
+#       - name: Set up ONNX Runtime
+#         uses: ./.github/actions/setup-onnx-windows
 #
 #       - name: Build release binary
 #         shell: bash

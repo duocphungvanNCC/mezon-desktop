@@ -5,6 +5,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
+use crate::chat::friends_page::dm_open_failure_message;
 use crate::router::{Route, Router, navigate};
 
 pub(crate) struct CallTarget {
@@ -45,7 +46,7 @@ pub(crate) fn call_current_dm(video: bool, cx: &mut App) {
         info_toast("common.comingSoon", cx);
         return;
     };
-    if is_blocked_by_me(UserId(peer.user_id), cx) {
+    if is_blocked_with(UserId(peer.user_id), cx) {
         return;
     }
     CallStore::global(cx).update(cx, |store, cx| store.start_call(peer, video, cx));
@@ -57,7 +58,7 @@ pub(crate) fn call_user(
     error_message: SharedString,
     cx: &mut App,
 ) {
-    if is_blocked_by_me(target.user, cx) {
+    if is_blocked_with(target.user, cx) {
         return;
     }
     if warn_already_in_call(cx) {
@@ -91,7 +92,8 @@ pub(crate) fn call_user(
         Err(err) => {
             tracing::warn!("create DM before call failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, move |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
             });
         }
     })
@@ -108,9 +110,8 @@ fn start_call_in(target: &CallTarget, channel: ChannelId, video: bool, cx: &mut 
     CallStore::global(cx).update(cx, |store, cx| store.start_call(peer, video, cx));
 }
 
-fn is_blocked_by_me(user_id: UserId, cx: &App) -> bool {
-    FriendStore::try_global(cx)
-        .is_some_and(|store| store.read(cx).is_user_blocked_by_me(user_id, cx))
+fn is_blocked_with(user_id: UserId, cx: &App) -> bool {
+    FriendStore::try_global(cx).is_some_and(|store| store.read(cx).is_blocked_with(user_id))
 }
 
 fn warn_already_in_call(cx: &mut App) -> bool {

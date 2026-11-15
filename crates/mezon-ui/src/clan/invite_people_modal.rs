@@ -410,12 +410,14 @@ impl InvitePeopleModal {
             }
             Err(err) => {
                 tracing::warn!("send clan invite failed: {err}");
-                let message = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
+                let fallback = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
                 let _ = this.update(cx, |this, cx| {
                     this.sending.remove(&key);
                     cx.notify();
                 });
                 cx.update(|cx| {
+                    let message =
+                        crate::chat::friends_page::dm_open_failure_message(&err, fallback, cx);
                     Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 });
             }
@@ -633,11 +635,7 @@ impl Render for InvitePeopleModal {
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.close(window, cx)
                             }))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(24.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::Close).size(px(24.)).selected(false)),
                     ),
             )
             .child(

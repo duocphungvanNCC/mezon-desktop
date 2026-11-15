@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px,
-    radians, rems, rgba,
+    MouseDownEvent, ObjectFit, SharedString, Window, div, img, prelude::*, px, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
@@ -474,7 +473,7 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
     };
     if shows_anonymous_hat(msg, ctx.app) {
         name = name.flex().flex_row().items_center().child(
-            Icon::new(IconName::HatIcon)
+            Icon::new(IconName::Anonymous)
                 .size(px(16.))
                 .ml(px(4.))
                 .flex_none()
@@ -564,11 +563,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                     .justify_center()
                     .rounded_full()
                     .bg(theme.tokens.bg_active_member_channel)
-                    .child(
-                        Icon::new(IconName::IconReplyMessDeletedWeb)
-                            .size_4()
-                            .text_color(theme.tokens.text_secondary),
-                    ),
+                    .child(Icon::new(IconName::Reply).size(px(16.)).selected(false)),
             )
             .child(
                 div()
@@ -660,8 +655,8 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                         .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment")),
                 )
                 .child(
-                    Icon::new(IconName::ImageThumbnail)
-                        .size_4()
+                    Icon::new(IconName::FileImage)
+                        .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .into_any_element()
@@ -980,7 +975,7 @@ pub(crate) fn render_private_media_tile(theme: &Theme, width: f32, height: f32) 
         .rounded_md()
         .bg(theme.tokens.bg_secondary)
         .child(
-            Icon::new(IconName::LockIcon)
+            Icon::new(IconName::Lock)
                 .size(px((width.min(height) * 0.3).clamp(12., 24.)))
                 .text_color(theme.tokens.text_secondary),
         )
@@ -1004,11 +999,7 @@ fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
                 .h(px(160.))
                 .rounded_md()
                 .bg(theme.tokens.bg_secondary)
-                .child(
-                    Icon::new(IconName::LockIcon)
-                        .size(px(24.))
-                        .text_color(theme.tokens.text_secondary),
-                )
+                .child(Icon::new(IconName::Lock).size(px(24.)).selected(false))
                 .child(
                     div()
                         .px_3()
@@ -1044,6 +1035,22 @@ fn attachment_sending_overlay(
     box_width: f32,
     box_height: f32,
 ) -> impl IntoElement {
+    attachment_progress_overlay(
+        theme,
+        locale,
+        "message.attachment.uploading",
+        box_width,
+        box_height,
+    )
+}
+
+fn attachment_progress_overlay(
+    theme: &Theme,
+    locale: &str,
+    label_key: &'static str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -1065,7 +1072,7 @@ fn attachment_sending_overlay(
                     div()
                         .text_size(px(12.))
                         .text_color(theme.text_secondary)
-                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                        .child(mezon_i18n::t(locale, label_key)),
                 )
             },
         )
@@ -1078,7 +1085,7 @@ fn attachment_failed_overlay(
     box_height: f32,
 ) -> impl IntoElement {
     let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
-    let icon = Icon::new(IconName::TriangleAlert)
+    let icon = Icon::new(IconName::Warning)
         .size(px(16.))
         .text_color(theme.danger_text);
     let badge = if fits_label {
@@ -1201,7 +1208,7 @@ fn render_audio(
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
-        IconName::AudioPlay,
+        IconName::Play,
         audio_time_label(0.0, duration),
         seek,
         move |_, _, cx| {
@@ -1485,6 +1492,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden();
         el = el.when(
@@ -1519,7 +1527,7 @@ fn render_photo(
                         .justify_center()
                         .bg(fallback_bg)
                         .child(
-                            Icon::new(IconName::ImageThumbnail)
+                            Icon::new(IconName::FileImage)
                                 .size(px(32.))
                                 .text_color(fallback_fg),
                         )
@@ -1549,6 +1557,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden()
             .flex()
@@ -1647,7 +1656,7 @@ fn render_photo(
                     .justify_center()
                     .bg(fallback_bg)
                     .child(
-                        Icon::new(IconName::ImageThumbnail)
+                        Icon::new(IconName::FileImage)
                             .size(px(32.))
                             .text_color(fallback_fg),
                     )
@@ -1707,6 +1716,7 @@ fn render_video_poster(
     };
     let width = att.display_width;
     let height = att.display_height;
+    let ingest = att.presign_ingest;
     let host = ctx.video_host.clone();
     let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
@@ -1739,11 +1749,17 @@ fn render_video_poster(
             ))
             .into_any_element();
     }
-    if sending || att.presign_pending {
+    if sending || (att.presign_pending && !att.stream_ready) {
+        let label_key = if att.upload_storing {
+            "message.attachment.finishing"
+        } else {
+            "message.attachment.uploading"
+        };
         return container
-            .child(attachment_sending_overlay(
+            .child(attachment_progress_overlay(
                 theme,
                 ctx.locale,
+                label_key,
                 att.display_width,
                 att.display_height,
             ))
@@ -1776,7 +1792,7 @@ fn render_video_poster(
                     a: 0.5,
                 })
                 .child(
-                    Icon::new(IconName::PlayButton)
+                    Icon::new(IconName::Play)
                         .size(px(20.))
                         .text_color(gpui::white()),
                 ),
@@ -1797,6 +1813,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                ingest,
                 locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {
@@ -1808,9 +1825,9 @@ fn render_video_poster(
 
 fn file_icon_for(filetype: &str) -> IconName {
     if filetype.starts_with("image/") {
-        IconName::ImageThumbnail
+        IconName::FileImage
     } else {
-        IconName::FileIcon
+        IconName::File
     }
 }
 
@@ -1931,8 +1948,8 @@ fn render_file_box(
                 })
                 .when(failed, |d| {
                     d.child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size(px(28.))
+                        Icon::new(IconName::Warning)
+                            .size(px(32.))
                             .text_color(theme.danger_text),
                     )
                 }),
@@ -2018,7 +2035,7 @@ fn render_file_box(
                     .when(is_pdf, |d| {
                         d.child(file_box_action(
                             ("file-pdf", index),
-                            IconName::FileIcon,
+                            IconName::File,
                             theme,
                             move |_, window, cx| {
                                 if pdf_selection.borrow().has_selection() {
@@ -2111,7 +2128,7 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
                 .bg(bg)
                 .hover(move |s| s.bg(bg_hover))
                 .child(
-                    Icon::new(IconName::Smile)
+                    Icon::new(IconName::Emoji)
                         .size(px(20.))
                         .text_color(icon_color),
                 )
@@ -2278,18 +2295,16 @@ pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
 pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
-    let action = move |id: &'static str, icon: IconName, size: f32| {
-        let mut svg_icon = Icon::new(icon)
-            .size(px(size))
-            .text_color(theme.text_secondary);
-        if matches!(icon, IconName::Reply) {
-            // Mirrors React's `rotate-180` on the toolbar's reply icon (the same
-            // asset is used un-rotated for the "···" menu's reply item).
-            svg_icon =
-                svg_icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)));
-        }
+    let action = move |id: &'static str, icon: IconName| {
+        let svg_icon = Icon::new(icon)
+            .size(px(20.))
+            .color(theme.tokens.icon_normal())
+            .group_hover("message-hover-action", |style| {
+                style.text_color(theme.tokens.icon_selected())
+            });
         div()
             .id(id)
+            .group("message-hover-action")
             .p_1()
             .rounded_md()
             .cursor_pointer()
@@ -2412,16 +2427,14 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         .children(recent_emoji)
         .when(show_topic, |d| {
             let message_id = msg.id;
-            d.child(
-                action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
-                    TopicsStore::global(cx).update(cx, |store, cx| {
-                        store.start_create_for_message(message_id, cx);
-                    });
-                }),
-            )
+            d.child(action("topic", IconName::Topic).on_click(move |_, _, cx| {
+                TopicsStore::global(cx).update(cx, |store, cx| {
+                    store.start_create_for_message(message_id, cx);
+                });
+            }))
         })
         .child(
-            action("react", IconName::Smile, 20.).on_click(move |_, window, cx| {
+            action("react", IconName::Emoji).on_click(move |_, window, cx| {
                 let position = window.mouse_position();
                 let _ = react_host.update(cx, |this, cx| {
                     this.open_reaction_picker(react_id, position, window, cx);
@@ -2430,21 +2443,19 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         )
         .when(!is_own_message, |d| {
             let is_topic = ctx.is_topic_box;
-            d.child(
-                action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
-                    if is_topic {
-                        TopicsStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
-                    } else {
-                        MessagesStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
-                    }
-                }),
-            )
+            d.child(action("reply", IconName::Reply).on_click(move |_, _, cx| {
+                if is_topic {
+                    TopicsStore::global(cx)
+                        .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
+                } else {
+                    MessagesStore::global(cx)
+                        .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
+                }
+            }))
         })
         .when(show_edit, |d| {
             d.child(
-                action("edit", IconName::PenEdit, 20.).on_click(move |_, window, cx| {
+                action("edit", IconName::Edit).on_click(move |_, window, cx| {
                     let _ = edit_host.update(cx, |this, cx| {
                         this.begin_edit(msg_id, window, cx);
                     });
@@ -2453,7 +2464,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         })
         .when(show_thread, |d| {
             d.child(
-                action("thread", IconName::ThreadIcon, 24.).on_click(move |_, _, cx| {
+                action("thread", IconName::Thread).on_click(move |_, _, cx| {
                     ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
                 }),
             )
@@ -2461,18 +2472,16 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         .when(show_coffee, |d| {
             let target = msg.message_ref();
             d.child(
-                action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
-                    move |_, _, cx| {
-                        MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.give_coffee_reaction(target, cx);
-                        });
-                    },
-                ),
+                action("give-coffee", IconName::Coin).on_click(move |_, _, cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        store.give_coffee_reaction(target, cx);
+                    });
+                }),
             )
         })
         .when(ctx.context_menu_enabled, |row| {
             row.child(
-                action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                action("option", IconName::More).on_click(move |_, window, cx| {
                     let position = window.mouse_position();
                     let _ = option_host.update(cx, |this, cx| {
                         this.open_context_menu(msg_id, position, cx);
