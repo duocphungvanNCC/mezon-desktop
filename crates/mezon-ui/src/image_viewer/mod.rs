@@ -41,6 +41,8 @@ const THUMB_W: f32 = 120.0;
 const THUMB_H: f32 = 90.0;
 const SIDEBAR_WIDTH: f32 = 140.0;
 const THUMB_LIST_OVERDRAW: f32 = 300.0;
+const THUMB_ROW_PAD: f32 = 2.0;
+const DATE_LABEL_H: f32 = 24.0;
 const THUMB_SCROLLBAR_GUTTER: f32 = 14.0;
 const VIEWER_FETCH_LIMIT: i32 = 100;
 const VIEWER_SEEK_MAX_PAGES: usize = 20;
@@ -65,6 +67,18 @@ fn thumb_date_label(create_time_seconds: u32) -> SharedString {
         })
         .unwrap_or_default()
         .into()
+}
+
+fn thumb_row_has_date(attachments: &[ChannelAttachment], ix: usize) -> bool {
+    let Some(att) = attachments.get(ix) else {
+        return false;
+    };
+    ix == 0 || attachments[ix - 1].day_index != att.day_index
+}
+
+fn thumb_row_height(dated: bool) -> f32 {
+    let base = THUMB_H + 4. + THUMB_ROW_PAD * 2.;
+    if dated { base + DATE_LABEL_H } else { base }
 }
 
 fn sort_attachments_desc(attachments: &mut [ChannelAttachment]) {
@@ -354,8 +368,7 @@ impl ImageViewer {
             rotation_loading: false,
             image_cache,
             thumb_image_cache,
-            list_state: ListState::new(0, ListAlignment::Top, px(THUMB_LIST_OVERDRAW))
-                .measure_all(),
+            list_state: ListState::new(0, ListAlignment::Top, px(THUMB_LIST_OVERDRAW)),
             list_urls: Vec::new(),
             thumb_scroll_armed: false,
             pending_thumb_scroll: false,
@@ -592,7 +605,21 @@ impl ImageViewer {
         } else {
             None
         };
-        self.list_state.reset(count);
+        self.list_state.reset(0);
+        let mut row = 0;
+        while row < count {
+            let dated = thumb_row_has_date(&self.attachments, count - 1 - row);
+            let mut end = row + 1;
+            while end < count && thumb_row_has_date(&self.attachments, count - 1 - end) == dated {
+                end += 1;
+            }
+            self.list_state.splice_with_size_hint(
+                row..row,
+                end - row,
+                size(px(0.), px(thumb_row_height(dated))),
+            );
+            row = end;
+        }
         self.list_urls = self.attachments.iter().map(|a| a.url.clone()).collect();
         if let Some((url, offset_in_item)) = anchor
             && let Some(i) = self.attachments.iter().position(|a| a.url == url)
@@ -1470,12 +1497,8 @@ impl ImageViewer {
             };
             let is_video = att.is_video;
             let src = SharedUri::from(att.viewer_thumb_src.as_ref());
-            let show_date = ix == 0
-                || this
-                    .attachments
-                    .get(ix - 1)
-                    .is_none_or(|newer| newer.day_index != att.day_index);
-            let date_label = show_date.then(|| thumb_date_label(att.create_time_seconds));
+            let date_label = thumb_row_has_date(&this.attachments, ix)
+                .then(|| thumb_date_label(att.create_time_seconds));
             let is_active = ix == this.index;
             let ph_bg = placeholder_bg;
             let ph_muted = placeholder_muted;
@@ -1535,7 +1558,8 @@ impl ImageViewer {
 
             div()
                 .w_full()
-                .py(px(2.))
+                .h(px(thumb_row_height(date_label.is_some())))
+                .py(px(THUMB_ROW_PAD))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -1543,8 +1567,9 @@ impl ImageViewer {
                 .when_some(date_label, |el, label| {
                     el.child(
                         div()
-                            .mt_1()
-                            .mb_1()
+                            .h(px(DATE_LABEL_H))
+                            .flex()
+                            .items_center()
                             .text_size(px(13.))
                             .text_color(date_color)
                             .child(label),
