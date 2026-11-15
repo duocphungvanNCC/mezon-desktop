@@ -934,6 +934,17 @@ fn render_selectable_segmented_spans(
             }
             MessageSpan::Link { text, url, kind } if *kind == LinkKind::Plain => {
                 let resolved = SharedString::from(resolve_link_url(url, text));
+                let link_range = base..base + text.len();
+                let link_hovered = ctx
+                    .row_memo
+                    .borrow()
+                    .hovered_rich_link
+                    .as_ref()
+                    .is_some_and(|(id, range)| {
+                        *id == msg.id
+                            && range.start >= link_range.start
+                            && range.end <= link_range.end
+                    });
                 let mut line_base = 0usize;
                 for (line_index, line) in text.split('\n').enumerate() {
                     if line_index > 0 {
@@ -949,12 +960,33 @@ fn render_selectable_segmented_spans(
                         let target = resolved.clone();
                         let link_key = link_part_index;
                         link_part_index += 1;
+                        let row_memo = ctx.row_memo.clone();
+                        let hover_host = ctx.video_host.clone();
+                        let message_id = msg.id;
                         row = row.child(
                             div()
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
                                 .text_color(link_color(body_color, ctx.theme))
-                                .when(rich_style, |link| link.hover(|style| style.underline()))
+                                .when(rich_style && link_hovered, |link| link.underline())
+                                .when(rich_style, |link| {
+                                    link.on_hover(move |hovered, _, cx| {
+                                        let part = (message_id, start..end);
+                                        let mut memo = row_memo.borrow_mut();
+                                        if *hovered {
+                                            if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                                return;
+                                            }
+                                            memo.hovered_rich_link = Some(part);
+                                        } else if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                            memo.hovered_rich_link = None;
+                                        } else {
+                                            return;
+                                        }
+                                        drop(memo);
+                                        let _ = hover_host.update(cx, |_, cx| cx.notify());
+                                    })
+                                })
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
                                     note_context_link(ctx, msg.id, resolved.clone()),
@@ -1559,6 +1591,12 @@ pub(crate) fn selectable_message_layout(
         super::token_transaction_card::selectable_token_transaction_text(msg)
     } else if let Some(poll) = msg.poll.as_ref() {
         super::poll_card::selectable_poll_text(poll)
+    } else if msg.shows_location_card() {
+        super::location_card::selectable_location_text(
+            msg,
+            msg.sender_id.as_str() == current_user_id,
+            locale,
+        )
     } else if matches!(
         msg.code,
         MessageCode::CreatePin | MessageCode::CreateThread | MessageCode::DeleteThread
@@ -1574,17 +1612,20 @@ pub(crate) fn selectable_message_layout(
 
     let mut text = String::new();
     let primary = append_layout_section(&mut text, &primary_text);
-    let invite =
-        if msg.call_log.is_none() && msg.code != MessageCode::SendToken && msg.poll.is_none() {
-            msg.invite.as_deref().and_then(|invite| {
-                append_layout_section(
-                    &mut text,
-                    &super::invite_card::selectable_invite_text(invite, locale),
-                )
-            })
-        } else {
-            None
-        };
+    let invite = if msg.call_log.is_none()
+        && !msg.shows_location_card()
+        && msg.code != MessageCode::SendToken
+        && msg.poll.is_none()
+    {
+        msg.invite.as_deref().and_then(|invite| {
+            append_layout_section(
+                &mut text,
+                &super::invite_card::selectable_invite_text(invite, locale),
+            )
+        })
+    } else {
+        None
+    };
     let ogp = msg.ogp.as_deref().and_then(|ogp| {
         append_layout_section(&mut text, &super::ogp_embed::selectable_ogp_text(ogp))
     });
@@ -3183,21 +3224,96 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
 
 pub(crate) fn interactive_link_text(
     id: impl Into<gpui::ElementId>,
-    styled: StyledText,
+    text: impl Into<SharedString>,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, String)>,
 ) -> AnyElement {
+    let text = text.into();
     if links.is_empty() {
-        return styled.into_any_element();
+        return StyledText::new(text)
+            .with_highlights(highlights)
+            .into_any_element();
     }
-    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
-    InteractiveText::new(id, styled)
-        .on_click(ranges, move |index, _, cx| {
-            if let Some(url) = urls.get(index) {
-                cx.stop_propagation();
-                open_message_link(url.clone(), cx);
-            }
-        })
-        .into_any_element()
+    HoverLinkText {
+        id: id.into(),
+        text,
+        highlights,
+        links,
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct HoverLinkText {
+    id: gpui::ElementId,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
+}
+
+impl RenderOnce for HoverLinkText {
+    fn render(self, window: &mut gpui::Window, cx: &mut App) -> impl IntoElement {
+        let hovered = window.use_keyed_state(self.id.clone(), cx, |_, _| None::<usize>);
+        let hovered_ix = *hovered.read(cx);
+        let (ranges, urls): (Vec<_>, Vec<_>) = self.links.into_iter().unzip();
+        let hovered_range = hovered_ix.and_then(|ix| ranges.get(ix));
+        let highlights: Vec<_> = self
+            .highlights
+            .into_iter()
+            .map(|(range, mut style)| {
+                let overlaps =
+                    |link: &Range<usize>| range.start < link.end && link.start < range.end;
+                if ranges.iter().any(|link| overlaps(link)) {
+                    let color = style.color;
+                    style.underline =
+                        hovered_range
+                            .filter(|link| overlaps(link))
+                            .map(|_| UnderlineStyle {
+                                thickness: px(1.),
+                                color,
+                                wavy: false,
+                            });
+                }
+                (range, style)
+            })
+            .collect();
+        let hover_ranges = ranges.clone();
+        let set_hover = hovered.clone();
+        div()
+            .id(self.id.clone())
+            .on_hover(move |is_hovered, _, cx| {
+                if !*is_hovered {
+                    hovered.update(cx, |ix, cx| {
+                        if ix.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                InteractiveText::new(
+                    self.id,
+                    StyledText::new(self.text).with_highlights(highlights),
+                )
+                .on_click(ranges, move |index, _, cx| {
+                    if let Some(url) = urls.get(index) {
+                        cx.stop_propagation();
+                        open_message_link(url.clone(), cx);
+                    }
+                })
+                .on_hover(move |offset, _, _, cx| {
+                    let next = offset
+                        .and_then(|offset| hover_ranges.iter().position(|r| r.contains(&offset)));
+                    set_hover.update(cx, |ix, cx| {
+                        if *ix != next {
+                            *ix = next;
+                            cx.notify();
+                        }
+                    });
+                }),
+            )
+            .into_any_element()
+    }
 }
 
 pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
