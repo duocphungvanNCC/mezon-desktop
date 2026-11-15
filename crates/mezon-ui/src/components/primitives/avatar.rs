@@ -258,9 +258,14 @@ fn loading_circle(d: Pixels, fill: Hsla, border: Hsla) -> AnyElement {
 }
 
 pub(crate) fn default_user_avatar(size: Pixels, corner_radius: Pixels) -> AnyElement {
-    Icon::new(IconName::UserCircle)
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
         .size(size)
         .rounded(corner_radius)
+        .child(Icon::new(IconName::User).size(size * 0.6))
         .into_any_element()
 }
 
