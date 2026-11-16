@@ -2296,8 +2296,13 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
     let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
     let action = move |id: &'static str, icon: IconName| {
+        let (icon_size, pad) = if icon == IconName::Edit {
+            (18., 5.)
+        } else {
+            (20., 4.)
+        };
         let svg_icon = Icon::new(icon)
-            .size(px(20.))
+            .size(px(icon_size))
             .color(theme.tokens.icon_normal())
             .group_hover("message-hover-action", |style| {
                 style.text_color(theme.tokens.icon_selected())
@@ -2305,7 +2310,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         div()
             .id(id)
             .group("message-hover-action")
-            .p_1()
+            .p(px(pad))
             .rounded_md()
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))

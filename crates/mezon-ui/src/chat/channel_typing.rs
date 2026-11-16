@@ -1,7 +1,8 @@
-use crate::components::primitives::{Icon, IconName};
+use std::time::Duration;
 
 use gpui::{
-    Context, Entity, FontWeight, Render, SharedString, Subscription, Window, div, prelude::*, px,
+    Animation, AnimationExt, Context, Entity, FontWeight, Hsla, Render, SharedString, Subscription,
+    Window, div, prelude::*, px,
 };
 use mezon_store::{ChannelId, ChannelTypingState, PresenceEvent, PresenceStore, Settings};
 
@@ -106,32 +107,75 @@ impl Render for ChannelTyping {
             .line_height(px(16.))
             .text_color(primary);
         match self.content(cx) {
-            Some(TypingContent::One { name, suffix }) => bar
-                .child(
-                    Icon::new(IconName::Typing)
-                        .size(px(16.))
-                        .flex_none()
-                        .text_color(primary),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .mr(px(2.))
-                                .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(active)
-                                .child(name),
-                        )
-                        .child(div().flex_none().text_color(primary).child(suffix)),
-                ),
+            Some(TypingContent::One { name, suffix }) => bar.child(typing_dots(primary)).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .mr(px(2.))
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(active)
+                            .child(name),
+                    )
+                    .child(div().flex_none().text_color(primary).child(suffix)),
+            ),
             Some(TypingContent::Several(text)) => bar.child(text),
             None => bar,
         }
     }
+}
+
+const TYPING_ICON_SIZE: f32 = 16.;
+const TYPING_DOT_SIZE: f32 = 3.5;
+const TYPING_DOT_GAP: f32 = 1.5;
+const TYPING_DOT_HOP: f32 = 2.;
+const TYPING_DOT_MIN_OPACITY: f32 = 0.35;
+const TYPING_CYCLE_MS: u64 = 1200;
+const TYPING_STAGGER_MS: u64 = 180;
+const TYPING_ACTIVE: f32 = 0.6;
+
+fn typing_dot_lift(phase: f32) -> f32 {
+    if phase < TYPING_ACTIVE {
+        (phase / TYPING_ACTIVE * std::f32::consts::PI).sin().powi(2)
+    } else {
+        0.
+    }
+}
+
+fn typing_dots(color: impl Into<Hsla>) -> impl IntoElement {
+    let color = color.into();
+    let dot = move |index: usize| {
+        let delay = (index as u64 * TYPING_STAGGER_MS) as f32 / TYPING_CYCLE_MS as f32;
+        div()
+            .relative()
+            .size(px(TYPING_DOT_SIZE))
+            .rounded_full()
+            .bg(color)
+            .with_animation(
+                ("channel-typing-dot", index),
+                Animation::new(Duration::from_millis(TYPING_CYCLE_MS)).repeat(),
+                move |el, delta| {
+                    let lift = typing_dot_lift((delta - delay).rem_euclid(1.));
+                    el.top(px(-TYPING_DOT_HOP * lift))
+                        .opacity(TYPING_DOT_MIN_OPACITY + (1. - TYPING_DOT_MIN_OPACITY) * lift)
+                },
+            )
+    };
+    div()
+        .flex_none()
+        .size(px(TYPING_ICON_SIZE))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(TYPING_DOT_GAP))
+        .pt(px(TYPING_DOT_HOP / 2.))
+        .child(dot(0))
+        .child(dot(1))
+        .child(dot(2))
 }

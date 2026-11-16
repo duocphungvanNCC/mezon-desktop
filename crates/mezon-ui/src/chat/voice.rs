@@ -1862,7 +1862,7 @@ fn raised_hands_overlay(
                     .child(
                         Icon::new(IconName::HandRaise)
                             .id(format!("raised-hand-{user_id}"))
-                            .size(px(32.))
+                            .size(px(24.))
                             .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                     )
             }))
