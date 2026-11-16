@@ -1540,6 +1540,7 @@ impl ProfilePage {
                             .children(self.cover_url.as_ref().map(|url| {
                                 gpui::img(url.clone())
                                     .image_cache(&self.cover_image_cache)
+                                    .id("profile-page-cover")
                                     .rounded_t_lg()
                                     .w_full()
                                     .h_full()

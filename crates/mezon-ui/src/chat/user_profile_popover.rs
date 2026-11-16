@@ -919,6 +919,7 @@ impl Render for UserProfilePopover {
                     .children(self.banner_url.clone().map(|url| {
                         img(url)
                             .image_cache(&self.cover_image_cache)
+                            .id("profile-popover-cover")
                             .absolute()
                             .inset_0()
                             .size_full()

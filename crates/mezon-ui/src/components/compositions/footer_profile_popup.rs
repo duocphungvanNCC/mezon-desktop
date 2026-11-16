@@ -466,6 +466,7 @@ impl Render for FooterProfilePopup {
             .children(self.banner_url.clone().map(|url| {
                 img(url)
                     .image_cache(&self.cover_image_cache)
+                    .id("footer-profile-cover")
                     .absolute()
                     .inset_0()
                     .size_full()

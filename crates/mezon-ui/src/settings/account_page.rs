@@ -234,7 +234,7 @@ impl Render for AccountPage {
                             .bg(banner_color)
                             .overflow_hidden()
                             .children(self.cover_url.clone().map(|url| {
-                                gpui::img(url).image_cache(&self.cover_image_cache).rounded_t_lg().w_full().h_full().object_fit(gpui::ObjectFit::Cover)
+                                gpui::img(url).image_cache(&self.cover_image_cache).id("account-page-cover").rounded_t_lg().w_full().h_full().object_fit(gpui::ObjectFit::Cover)
                             }))
                             .rounded_t_lg(),
                     )

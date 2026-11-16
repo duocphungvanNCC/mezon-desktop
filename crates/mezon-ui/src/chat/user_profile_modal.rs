@@ -413,6 +413,7 @@ impl Render for UserProfileModal {
                                 header.child(
                                     img(url)
                                         .image_cache(&self.cover_image_cache)
+                                        .id("profile-modal-cover")
                                         .absolute()
                                         .inset_0()
                                         .size_full()
