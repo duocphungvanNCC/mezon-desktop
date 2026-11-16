@@ -804,8 +804,7 @@ fn latest_activity_strip(
             .child(
                 Icon::new(file_icon)
                     .text_color(theme.tokens.text_secondary)
-                    .w(px(20.))
-                    .h(px(26.))
+                    .size(px(20.))
                     .flex_none(),
             )
             .child(
@@ -1031,8 +1030,7 @@ fn latest_activity_strip(
             .child(
                 Icon::new(file_icon)
                     .text_color(theme.tokens.text_secondary)
-                    .w(px(20.))
-                    .h(px(26.))
+                    .size(px(20.))
                     .flex_none(),
             )
             .child(

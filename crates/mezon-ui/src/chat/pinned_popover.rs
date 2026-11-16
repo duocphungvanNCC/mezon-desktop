@@ -2241,13 +2241,12 @@ fn render_pin_file_attachment(
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
-                .w(px(32.))
+                .w(px(34.))
                 .h(px(40.))
                 .child(
                     Icon::new(icon)
                         .text_color(theme.tokens.text_secondary)
-                        .w(px(32.))
-                        .h(px(40.))
+                        .size(px(34.))
                         .flex_none(),
                 ),
         )

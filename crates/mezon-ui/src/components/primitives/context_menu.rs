@@ -696,7 +696,7 @@ impl RenderOnce for ContextMenu {
                             .when_some(leading_icon, |row, icon| {
                                 let icon_el = Icon::new(icon)
                                     .size_4()
-                                    .when(icon == IconName::Gift, |icon| icon.size(px(24.)))
+                                    .when(icon == IconName::Gift, |icon| icon.size(px(16.)))
                                     .text_color(icon_color);
                                 row.child(icon_el)
                             })
