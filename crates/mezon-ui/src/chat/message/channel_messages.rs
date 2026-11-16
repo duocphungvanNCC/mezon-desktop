@@ -4376,12 +4376,18 @@ impl ChannelMessages {
             .size(px(FAB_SIZE))
             .rounded_full()
             .bg(theme.bg_tertiary)
-            .border_1()
-            .border_color(theme.border)
             .flex()
             .items_center()
             .justify_center()
             .opacity(if visible { 1.0 } else { 0.0 })
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border),
+            )
             .when(visible, |el| {
                 el.cursor_pointer()
                     .occlude()

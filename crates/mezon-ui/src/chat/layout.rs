@@ -2668,7 +2668,7 @@ impl ChatLayout {
         let icon = if enabled {
             Icon::new(IconName::NoiseSuppression)
                 .size(px(20.))
-                .text_color(theme.text_primary)
+                .text_color(theme.status_online)
         } else {
             Icon::new(IconName::NoiseSuppressionOff)
                 .size(px(20.))
